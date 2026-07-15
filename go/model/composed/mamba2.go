@@ -2,7 +2,11 @@
 
 package composed
 
-import "dappco.re/go/inference/model/arch/mamba2"
+import (
+	"slices"
+
+	"dappco.re/go/inference/model/arch/mamba2"
+)
 
 // ResidualNormMLPProjMamba2InputDevice folds a predecessor's projection-fused tail together with this
 // layer's input RMSNorm and single Mamba-2 InProj GEMM. A nil hook or error keeps the ordinary path.
@@ -38,6 +42,17 @@ func NewMamba2Mixer(w *mamba2.BlockWeights, cfg mamba2.BlockConfig) Mixer {
 }
 
 func (m *mamba2Mixer) Kind() string { return "mamba2" }
+
+// CloneState returns a deep copy of Mamba-2 state: fresh backing arrays for the causal-conv ring and the
+// SSM state, with the projection scratch sc nil'd — the same per-Forward-reusable-workspace rationale as
+// attnMixer/gatedDeltaMixer (mamba2.BlockScratch reallocates lazily on a nil prior already).
+func (m *mamba2Mixer) CloneState(prior any) any {
+	st, ok := prior.(mamba2State)
+	if !ok {
+		return nil
+	}
+	return mamba2State{conv: slices.Clone(st.conv), ssm: slices.Clone(st.ssm)}
+}
 
 func (m *mamba2Mixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
 	var pc, ps []float32

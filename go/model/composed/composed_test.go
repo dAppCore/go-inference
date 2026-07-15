@@ -32,6 +32,11 @@ type countingMixer struct {
 
 func (c *countingMixer) Kind() string { return c.inner.Kind() }
 
+// CloneState delegates transparently (like Kind) — the counting wrapper only instruments Forward/
+// forwardNoProj, so a Layer.Mixer holding a *countingMixer still satisfies the (now-larger) Mixer
+// interface without pretending to add its own state-cloning behaviour.
+func (c *countingMixer) CloneState(prior any) any { return c.inner.CloneState(prior) }
+
 func (c *countingMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
 	c.forwardCalls++
 	return c.inner.Forward(h, L, D, prior)
@@ -123,6 +128,82 @@ func TestComposedGenerate(t *testing.T) {
 		}
 	}
 	t.Logf("composed Generate: prefill→recurrent decode→head produced %v (deterministic)", g1)
+}
+
+// TestComposedSessionSnapshotRestoreByteIdentical proves the ComposedSession snapshot/rollback contract
+// that Qwen MTP speculative decode needs: Snapshot() taken mid-decode is independent of the live session
+// (a later mutation of the session's own state can never reach back and perturb an already-taken
+// snapshot), and Restore() rolls the session back exactly — replaying the SAME block of tokens after
+// Restore reproduces byte-identical hidden output to the first time that block ran. Exercises a REAL
+// recurrent mixer (mkComposedModel's layers are all gated-delta — the mixer family MTP speculative decode
+// cares about), not nil/empty state: block1 is run first specifically to make every layer's state non-nil
+// before Snapshot is ever called.
+func TestComposedSessionSnapshotRestoreByteIdentical(t *testing.T) {
+	const D, vocab, nLayers, FF = 8, 32, 3, 16
+	m := mkComposedModel(nLayers, D, vocab, FF)
+	sess := NewSession(m)
+
+	block1 := []int32{1, 5, 9, 2}
+	if _, err := sess.Forward(block1); err != nil {
+		t.Fatalf("block1 forward: %v", err)
+	}
+	for li, st := range sess.states {
+		if st == nil {
+			t.Fatalf("layer %d state is nil after block1 — precondition (real recurrent state) failed", li)
+		}
+	}
+
+	snap := sess.Snapshot()
+
+	// Independence: directly corrupt the LIVE session's state backing array (bypassing Forward entirely,
+	// so this holds regardless of whether any mixer's Forward ever mutates a prior state in place) and
+	// confirm the snapshot taken a moment ago is unaffected — proves CloneState copied into a fresh
+	// backing array rather than aliasing s.states. A snapshot that merely re-boxed the same slices would
+	// fail this even though it would still pass the coarser "advance and compare" check below.
+	live0, ok := sess.states[0].(gatedDeltaState)
+	if !ok || len(live0.conv) == 0 {
+		t.Fatalf("layer 0 state not a populated gatedDeltaState: %#v", sess.states[0])
+	}
+	sentinel := live0.conv[0]
+	live0.conv[0] = sentinel + 12345 // mutates the shared backing array — visible via sess.states[0] too
+	if snapConv := snap[0].(gatedDeltaState).conv[0]; snapConv == sentinel+12345 {
+		t.Fatalf("Snapshot aliased the live session's state — corrupting sess.states changed the snapshot")
+	}
+	live0.conv[0] = sentinel // undo the corruption so the block2 runs below start from the true state
+
+	block2 := []int32{7, 3, 4, 6}
+	out1, err := sess.Forward(block2)
+	if err != nil {
+		t.Fatalf("block2 run 1: %v", err)
+	}
+	out1 = append([]float32(nil), out1...) // defensive copy before the session advances further
+
+	sess.Restore(snap)
+
+	// Restore must not alias the caller's snap slice either: the restored per-layer state must be a
+	// distinct backing array from the one still reachable through snap.
+	restored0, ok := sess.states[0].(gatedDeltaState)
+	if !ok {
+		t.Fatalf("layer 0 state not gatedDeltaState after Restore: %#v", sess.states[0])
+	}
+	if len(restored0.conv) > 0 && len(snap[0].(gatedDeltaState).conv) > 0 &&
+		&restored0.conv[0] == &snap[0].(gatedDeltaState).conv[0] {
+		t.Fatalf("Restore aliased s.states with the caller's snap slice")
+	}
+
+	out2, err := sess.Forward(block2)
+	if err != nil {
+		t.Fatalf("block2 run 2 (post-restore): %v", err)
+	}
+	if len(out1) != len(out2) {
+		t.Fatalf("output length mismatch: %d vs %d", len(out1), len(out2))
+	}
+	for i := range out1 {
+		if out1[i] != out2[i] {
+			t.Fatalf("hidden[%d] = %v after restore, want %v (byte-identical to the pre-restore run) — snapshot/restore diverged", i, out2[i], out1[i])
+		}
+	}
+	t.Logf("Snapshot/Restore byte-identical over %d gated-delta layers, block2 replayed after rollback", nLayers)
 }
 
 // TestMatNTIntoDeviceHook pins the ProjMatMulInto seam: the hook fires only at

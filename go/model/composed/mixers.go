@@ -2,7 +2,11 @@
 
 package composed
 
-import "dappco.re/go/inference/model/arch/Qwen/qwen3"
+import (
+	"slices"
+
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+)
 
 // mixers.go adapts the concrete sequence mixers to the composed Mixer interface. Each wraps a family's
 // block forward and carries that family's state shape; the session threads the state opaquely. Cut 1 wires
@@ -45,6 +49,19 @@ func NewGatedDeltaMixer(w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig) 
 }
 
 func (m *gatedDeltaMixer) Kind() string { return "gated_deltanet" }
+
+// CloneState returns a deep copy of gated-delta state: fresh backing arrays for the causal-conv ring and
+// the delta matrix, with the projection scratch sc nil'd — sc (qwen3.GatedDeltaScratch) is per-Forward
+// reusable workspace, not logical state, and Forward/forwardNoProj/forwardFromInput already reallocate it
+// lazily whenever it is nil (the same path a fresh, nil-prior session already takes), so nil-ing it here
+// is byte-identical to that path and stops the clone aliasing the live session's scratch buffers.
+func (m *gatedDeltaMixer) CloneState(prior any) any {
+	st, ok := prior.(gatedDeltaState)
+	if !ok {
+		return nil
+	}
+	return gatedDeltaState{conv: slices.Clone(st.conv), delta: slices.Clone(st.delta)}
+}
 
 func (m *gatedDeltaMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
 	var pc, pd []float32

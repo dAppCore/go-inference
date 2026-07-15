@@ -2,7 +2,11 @@
 
 package composed
 
-import "dappco.re/go/inference/model/arch/rwkv7"
+import (
+	"slices"
+
+	"dappco.re/go/inference/model/arch/rwkv7"
+)
 
 // ResidualNormMLPProjRWKV7InputDevice folds a predecessor's projection-fused tail together with this
 // layer's input RMSNorm and six RWKV-7 projection GEMMs. A nil hook or error keeps the ordinary path.
@@ -39,6 +43,17 @@ func NewRWKV7Mixer(w *rwkv7.BlockWeights, cfg rwkv7.BlockConfig) Mixer {
 }
 
 func (m *rwkv7Mixer) Kind() string { return "rwkv7" }
+
+// CloneState returns a deep copy of RWKV-7 state: a fresh backing array for the [H,K,V] recurrence state,
+// with the projection scratch sc nil'd — the same per-Forward-reusable-workspace rationale as the other
+// three mixers (rwkv7.BlockScratch reallocates lazily on a nil prior already).
+func (m *rwkv7Mixer) CloneState(prior any) any {
+	st, ok := prior.(rwkv7State)
+	if !ok {
+		return nil
+	}
+	return rwkv7State{state: slices.Clone(st.state)}
+}
 
 func (m *rwkv7Mixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
 	var ps []float32

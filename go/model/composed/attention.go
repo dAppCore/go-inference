@@ -4,6 +4,7 @@ package composed
 
 import (
 	"math"
+	"slices"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
@@ -91,6 +92,19 @@ func (m *attnMixer) Kind() string {
 		return "sliding_attention"
 	}
 	return "full_attention"
+}
+
+// CloneState returns a deep copy of an attention KV cache: fresh backing arrays for the cached keys/
+// values and n copied by value, with the projection scratch sc nil'd — sc (attnScratch) is per-Forward
+// reusable workspace, not logical state, and forwardNoProj/forwardFromQKV already reallocate it lazily
+// whenever it is nil (the same path a fresh, nil-prior session already takes), so nil-ing it here is
+// byte-identical to that path and stops the clone aliasing the live session's projection buffers.
+func (m *attnMixer) CloneState(prior any) any {
+	st, ok := prior.(attnState)
+	if !ok {
+		return nil
+	}
+	return attnState{k: slices.Clone(st.k), v: slices.Clone(st.v), n: st.n}
 }
 
 // rmsNormHead RMS-normalises a single [HeadDim] vector in place by weight w.

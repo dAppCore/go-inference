@@ -29,6 +29,9 @@ type Mixer interface {
 	Forward(hidden []float32, L, D int, prior any) (out []float32, next any, err error)
 	// Kind reports the mixer family ("gated_deltanet", "full_attention") for diagnostics + cache typing.
 	Kind() string
+	// CloneState returns a deep copy of an opaque mixer state such that advancing the
+	// copy never mutates the original (and vice-versa). prior==nil ⇒ return nil.
+	CloneState(prior any) any
 }
 
 // FFN is a layer's feed-forward slot: a dense SwiGLU MLP or a Mixture-of-Experts (qwen3_6_moe). Both map
@@ -429,6 +432,36 @@ func (s *ComposedSession) PendingHeadLogits() []float32 { return s.pendingHeadLo
 // NewSession builds a fresh session (each layer's mixer state starts empty).
 func NewSession(m *ComposedModel) *ComposedSession {
 	return &ComposedSession{m: m, states: make([]any, len(m.Layers))}
+}
+
+// Snapshot returns a deep copy of the session's per-layer recurrent state — a rollback point. Each
+// non-nil layer state is cloned via that layer's own Mixer.CloneState, so a later advance of the live
+// session (forwardEmb always REPLACES s.states[li] with a freshly-produced next state rather than
+// mutating the old one) can never reach back and perturb an already-taken snapshot.
+func (s *ComposedSession) Snapshot() []any {
+	snap := make([]any, len(s.states))
+	for li, st := range s.states {
+		if st == nil {
+			continue
+		}
+		snap[li] = s.m.Layers[li].Mixer.CloneState(st)
+	}
+	return snap
+}
+
+// Restore rolls the session back to a prior Snapshot: s.states becomes an independent deep copy of snap
+// (via the same per-layer Mixer.CloneState Snapshot itself uses), so neither the caller's snap slice nor
+// its element states end up aliased by s.states — the caller may keep advancing the restored session,
+// take a fresh Snapshot, or Restore(snap) again, without any of those perturbing one another.
+func (s *ComposedSession) Restore(snap []any) {
+	states := make([]any, len(snap))
+	for li, st := range snap {
+		if st == nil {
+			continue
+		}
+		states[li] = s.m.Layers[li].Mixer.CloneState(st)
+	}
+	s.states = states
 }
 
 // pendingAttnQKV carries a NEXT layer's ALREADY-COMPUTED input RMSNorm + q/k/v projections, folded into
