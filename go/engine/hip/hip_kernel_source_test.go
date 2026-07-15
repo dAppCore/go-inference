@@ -511,6 +511,10 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(geluBatch, `batch >= args.batch`), "batch GELU multiply must guard partial token blocks")
 	core.AssertTrue(t, strings.Contains(geluBatch, `+ batch * args.cols`), "batch GELU multiply input must be row-offset by batch")
 	core.AssertTrue(t, strings.Contains(geluBatch, `+ batch * args.rows`), "batch GELU multiply output must be row-offset by batch")
+	core.AssertTrue(t, strings.Contains(geluBatch, `args.bits == 8u && args.group_size == 64u`), "batch GELU multiply must keep the q8 group64 packed-word fast path")
+	core.AssertTrue(t, strings.Contains(geluBatch, `for (uint32_t packed = col_lane; packed < packed_per_row; packed += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW)`), "batch GELU multiply q8 path must distribute packed words across row lanes")
+	core.AssertTrue(t, strings.Contains(geluBatch, `const uint32_t gate_word = gate_weights[static_cast<uint64_t>(row) * packed_per_row + packed]`), "batch GELU multiply q8 path must reuse one gate word across four columns")
+	core.AssertTrue(t, strings.Contains(geluBatch, `const uint32_t up_word = up_weights[static_cast<uint64_t>(row) * packed_per_row + packed]`), "batch GELU multiply q8 path must reuse one up word across four columns")
 	core.AssertTrue(t, strings.Contains(geluBatch, `args.bits == 6u && args.group_size == 64u`), "batch GELU multiply must keep the q6 group64 fast path")
 
 	geluProjBatch := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_batch`)

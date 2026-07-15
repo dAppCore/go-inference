@@ -9033,6 +9033,42 @@ extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch(const unsigned c
 				up_sums[token_lane] += up_scale * up_q_dot + up_bias * input_sum;
 			}
 		}
+	} else if (row < args.rows && args.bits == 8u && args.group_size == 64u) {
+		for (uint32_t packed = col_lane; packed < packed_per_row; packed += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t gate_word = gate_weights[static_cast<uint64_t>(row) * packed_per_row + packed];
+			const uint32_t up_word = up_weights[static_cast<uint64_t>(row) * packed_per_row + packed];
+			const uint32_t col = packed << 2u;
+			const uint32_t group = row * groups_per_row + (packed >> 4u);
+			const float gate_scale = rocm_bfloat16_to_float(gate_scales[group]);
+			const float gate_bias = rocm_bfloat16_to_float(gate_biases[group]);
+			const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+			const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+			const float gate_q0 = static_cast<float>(gate_word & 0xffu);
+			const float gate_q1 = static_cast<float>((gate_word >> 8u) & 0xffu);
+			const float gate_q2 = static_cast<float>((gate_word >> 16u) & 0xffu);
+			const float gate_q3 = static_cast<float>(gate_word >> 24u);
+			const float up_q0 = static_cast<float>(up_word & 0xffu);
+			const float up_q1 = static_cast<float>((up_word >> 8u) & 0xffu);
+			const float up_q2 = static_cast<float>((up_word >> 16u) & 0xffu);
+			const float up_q3 = static_cast<float>(up_word >> 24u);
+#pragma unroll
+			for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK; ++token_lane) {
+				const uint32_t batch = batch_base + token_lane;
+				if (batch >= args.batch) {
+					continue;
+				}
+				const float *input = input_base + batch * args.cols;
+				const float in0 = input[col];
+				const float in1 = input[col + 1u];
+				const float in2 = input[col + 2u];
+				const float in3 = input[col + 3u];
+				const float input_sum = in0 + in1 + in2 + in3;
+				const float gate_q_dot = gate_q0 * in0 + gate_q1 * in1 + gate_q2 * in2 + gate_q3 * in3;
+				const float up_q_dot = up_q0 * in0 + up_q1 * in1 + up_q2 * in2 + up_q3 * in3;
+				gate_sums[token_lane] += gate_scale * gate_q_dot + gate_bias * input_sum;
+				up_sums[token_lane] += up_scale * up_q_dot + up_bias * input_sum;
+			}
+		}
 	} else if (row < args.rows && args.bits == 6u && args.group_size == 64u) {
 		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
 		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
