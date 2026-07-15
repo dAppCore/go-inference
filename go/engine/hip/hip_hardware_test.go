@@ -94,17 +94,20 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 	}
 	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding", want, got, 0.00001, 0.00001)
 
-	const affineVocab, affineHidden, affineRows, affineGroupSize = 3, 64, 17, 64
+	const affineVocab, affineHidden, affineRows, affineGroupSize = 3, 2816, 17, 64
 	for _, bits := range []int{4, 8} {
 		values := make([]uint32, affineVocab*affineHidden)
 		dense := make([]float32, len(values))
 		scaleValues := []float32{1, 0.5, 0.25}
 		biasValues := []float32{0, -1, 2}
-		scales := make([]uint16, affineVocab)
-		biases := make([]uint16, affineVocab)
+		groupsPerRow := affineHidden / affineGroupSize
+		scales := make([]uint16, affineVocab*groupsPerRow)
+		biases := make([]uint16, affineVocab*groupsPerRow)
 		for token := 0; token < affineVocab; token++ {
-			scales[token] = hipFloat32ToBFloat16(scaleValues[token])
-			biases[token] = hipFloat32ToBFloat16(biasValues[token])
+			for group := 0; group < groupsPerRow; group++ {
+				scales[token*groupsPerRow+group] = hipFloat32ToBFloat16(scaleValues[token])
+				biases[token*groupsPerRow+group] = hipFloat32ToBFloat16(biasValues[token])
+			}
 			for dim := 0; dim < affineHidden; dim++ {
 				index := token*affineHidden + dim
 				values[index] = uint32((token*29 + dim*3) % (1 << bits))

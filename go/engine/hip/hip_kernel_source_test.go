@@ -130,6 +130,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_embedding_lookup_greedy_token`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16`,
+		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_dims4_rows4`,
 		`extern "C" __global__ void rocm_embedding_mean_pool`,
 		`extern "C" __global__ void rocm_rerank_cosine`,
 		`extern "C" __global__ void rocm_tiny_prefill`,
@@ -358,6 +359,18 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingAffineG64Rows16_Good(t *testi
 	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t token = 0; token < args.vocab_size; ++token)`), "row-batched expected embedding must preserve vocabulary accumulation order")
 	core.AssertTrue(t, !strings.Contains(kernel, `__shared__`), "row-batched expected embedding must not stage the vocabulary through shared memory")
 	core.AssertTrue(t, !strings.Contains(kernel, `__syncthreads()`), "row-batched expected embedding must not add tile barriers")
+}
+
+func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Dims4Rows4_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_dims4_rows4`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `float sums[ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_THREAD][ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD]`), "q8 expected embedding must retain one ordered sum per output cell")
+	core.AssertTrue(t, strings.Contains(kernel, `const uint32_t word = embedding[static_cast<uint64_t>(token) * packed_per_row + packed_dim]`), "q8 expected embedding must load each packed word once per token")
+	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t token = 0; token < args.vocab_size; ++token)`), "q8 expected embedding must preserve vocabulary accumulation order")
+	core.AssertTrue(t, !strings.Contains(kernel, `__shared__`), "q8 expected embedding must not stage the vocabulary through shared memory")
+	core.AssertTrue(t, !strings.Contains(kernel, `__syncthreads()`), "q8 expected embedding must not add tile barriers")
 }
 
 func TestHIPKernelSource_AMDBuildDefaultsO3_Good(t *testing.T) {
