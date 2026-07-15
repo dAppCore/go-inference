@@ -1469,7 +1469,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		return firstRows + secondRows + thirdRows, inferenceBenchmarkU32At(args, 108), inferenceBenchmarkU32At(args, 112), 0
 	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), 0
-	case hipKernelNameMLXQ4GELUTanhMulBatch:
+	case hipKernelNameMLXQ4GELUTanhMulBatch, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 120)
 	case hipKernelNameMLXQ4GELUTanhProj, hipKernelNameMLXQ4GELUTanhProjQ6Row16:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 64), 0

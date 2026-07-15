@@ -3327,7 +3327,7 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, batch)
+	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.GroupSize, gateCfg.Bits, batch)
 	if err != nil {
 		return nil, err
 	}
@@ -3397,7 +3397,7 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(ctx context.Con
 	if err != nil {
 		return err
 	}
-	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, batch)
+	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.GroupSize, gateCfg.Bits, batch)
 	if err != nil {
 		return err
 	}
@@ -5540,8 +5540,14 @@ func hipMLXQ4GELUTanhMLPPersistentLaunchConfig(args []byte) (hipKernelLaunchConf
 	return config, config.Validate()
 }
 
-func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, batch int) (hipKernelLaunchConfig, error) {
-	gridX, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
+	kernelName := hipKernelNameMLXQ4GELUTanhMulBatch
+	rowsPerBlock := hipMLXQ4ProjectionRowsPerBlock
+	if groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16
+		rowsPerBlock = hipMLXQ4ProjectionRow16RowsPerBlock
+	}
+	gridX, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}
@@ -5550,7 +5556,7 @@ func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, batch int) (hi
 		return hipKernelLaunchConfig{}, err
 	}
 	config := hipKernelLaunchConfig{
-		Name:   hipKernelNameMLXQ4GELUTanhMulBatch,
+		Name:   kernelName,
 		Args:   args,
 		GridX:  gridX,
 		GridY:  gridY,

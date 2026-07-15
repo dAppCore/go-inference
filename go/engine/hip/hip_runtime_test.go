@@ -3073,7 +3073,7 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
 	case hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
-	case hipKernelNameMLXQ4GELUTanhMulBatch:
+	case hipKernelNameMLXQ4GELUTanhMulBatch, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16:
 		return driver.launchMLXQ4GELUTanhMultiplyBatch(config.Args)
 	case hipKernelNameMLXQ4GELUTanhProj:
 		return driver.launchMLXQ4GELUTanhProjection(config.Args)

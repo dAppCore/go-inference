@@ -67,6 +67,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_row16`,
 		`extern "C" __global__ void rocm_moe_mlx_affine_routes`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_q6_row16`,
@@ -531,6 +532,12 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(geluBatch, `const uint32_t gate_word = gate_weights[static_cast<uint64_t>(row) * packed_per_row + packed]`), "batch GELU multiply q8 path must reuse one gate word across four columns")
 	core.AssertTrue(t, strings.Contains(geluBatch, `const uint32_t up_word = up_weights[static_cast<uint64_t>(row) * packed_per_row + packed]`), "batch GELU multiply q8 path must reuse one up word across four columns")
 	core.AssertTrue(t, strings.Contains(geluBatch, `args.bits == 6u && args.group_size == 64u`), "batch GELU multiply must keep the q6 group64 fast path")
+
+	geluBatchQ8G64Row16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_row16`)
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Row16, `args.bits != 8u || args.group_size != 64u`), "q8 group64 row16 batch GELU multiply must guard its quantization shape")
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Row16, `ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW`), "q8 group64 row16 batch GELU multiply must use row16 lane geometry")
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Row16, `for (uint32_t packed = col_lane; packed < packed_per_row; packed += ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW)`), "q8 group64 row16 batch GELU multiply must distribute packed words across row16 lanes")
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Row16, `rocm_mlx_q4_projection_row16_reduce`), "q8 group64 row16 batch GELU multiply must use matching row16 reduction")
 
 	geluProjBatch := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_batch`)
 	core.AssertTrue(t, strings.Contains(geluProjBatch, `blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK`), "batch GELU projection must use grid Y for token blocks")

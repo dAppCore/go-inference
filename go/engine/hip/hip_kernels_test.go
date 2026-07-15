@@ -928,7 +928,7 @@ func TestHIPKernels_MLXAffineQ8ProjectionLaunchArgs_Good(t *testing.T) {
 	)
 	assertFloat32SlicesNear(t, wantActivated, activatedValues, 0.0001)
 	multiplyLaunch := driver.launches[len(driver.launches)-1]
-	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulBatch, multiplyLaunch.Name)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16, multiplyLaunch.Name)
 	core.AssertEqual(t, uint32(8), binary.LittleEndian.Uint32(multiplyLaunch.Args[84:]))
 
 	multiplierPayload, err := hipFloat32Payload([]float32{0.5, 0.25})

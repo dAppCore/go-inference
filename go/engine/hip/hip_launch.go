@@ -57,6 +57,7 @@ const (
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32            = "rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32"
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64            = "rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64"
 	hipKernelNameMLXQ4GELUTanhMulBatch                      = "rocm_mlx_q4_gelu_tanh_multiply_batch"
+	hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16            = "rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_row16"
 	hipKernelNameMLXQ4GELUTanhProj                          = "rocm_mlx_q4_gelu_tanh_projection"
 	hipKernelNameMLXQ4GELUTanhProjQ6Row16                   = "rocm_mlx_q4_gelu_tanh_projection_q6_row16"
 	hipKernelNameMLXQ4GELUTanhProjBatch                     = "rocm_mlx_q4_gelu_tanh_projection_batch"
