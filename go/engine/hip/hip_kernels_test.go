@@ -1334,8 +1334,43 @@ func TestHIPKernels_MLXAffineQ6ProjectionBatchRow16LaunchConfig_Good(t *testing.
 
 	q4, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 1536, 1536, 64, 4, 512)
 	core.RequireNoError(t, err)
-	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatch, q4.Name)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ4G64Tokens16, q4.Name)
 	core.AssertEqual(t, uint32(192), q4.GridX)
+	core.AssertEqual(t, uint32(32), q4.GridY)
+}
+
+func TestHIPKernels_MLXAffineQ4ProjectionBatchTokens16LaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionBatchLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	q4, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 2816, 2816, 64, 4, 256)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ4G64Tokens16, q4.Name)
+	core.AssertEqual(t, uint32(352), q4.GridX)
+	core.AssertEqual(t, uint32(16), q4.GridY)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, q4.BlockX)
+
+	q4Small, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 2816, 2816, 64, 4, 8)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatch, q4Small.Name)
+	core.AssertEqual(t, uint32(1), q4Small.GridY)
+}
+
+func TestHIPKernels_MLXAffineQ8ProjectionBatchTokens16LaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionBatchLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	q8, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 256)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ8G64Tokens16, q8.Name)
+	core.AssertEqual(t, uint32(512), q8.GridX)
+	core.AssertEqual(t, uint32(16), q8.GridY)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, q8.BlockX)
+
+	q8Small, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 8)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatch, q8Small.Name)
+	core.AssertEqual(t, uint32(1), q8Small.GridY)
 }
 
 func TestHIPKernels_MLXQ4ProjectionGreedyBatch_Good(t *testing.T) {

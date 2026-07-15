@@ -104,6 +104,7 @@ constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROW32_THREADS_PER_ROW = ROC
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROW64_ROWS_PER_BLOCK = 64;
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROW64_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROW64_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK = 8;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK = 32;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_GREEDY_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_GREEDY_Q6_ROWS_PER_BLOCK = 64;
@@ -7141,6 +7142,151 @@ extern "C" __global__ void rocm_mlx_q4_projection_batch(const unsigned char *pac
 	}
 #pragma unroll
 	for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK; ++token_lane) {
+		const uint32_t batch = batch_base + token_lane;
+		const float sum = rocm_mlx_q4_row_reduce(sums[token_lane]);
+		if (col_lane == 0 && row < args.rows && batch < args.batch) {
+			float *output = output_base + batch * args.rows;
+			output[row] = sum;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_tokens16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_projection_batch_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_projection_batch_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_projection_batch_args(args) || args.bits != 4u || args.group_size != 64u) {
+		return;
+	}
+	if (blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE ||
+		blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK >= args.batch) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	const uint32_t batch_base = blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK;
+	const float *input_base = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.weight_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output_base = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float sums[ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK] = {};
+	if (row < args.rows) {
+		const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.cols, args.bits);
+		const uint32_t groups_per_row = args.cols >> 6u;
+		constexpr uint32_t packed_per_group = 8u;
+		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t group = row * groups_per_row + group_col;
+			const float scale = rocm_bfloat16_to_float(scales[group]);
+			const float bias = rocm_bfloat16_to_float(biases[group]);
+			const uint32_t first_packed = group_col * packed_per_group;
+			float q_dot_sums[ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK] = {};
+			float input_sums[ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK] = {};
+			for (uint32_t group_packed = 0; group_packed < packed_per_group; ++group_packed) {
+				const uint32_t packed = first_packed + group_packed;
+				const uint32_t word = weights[static_cast<uint64_t>(row) * packed_per_row + packed];
+				const uint32_t col = packed << 3u;
+				const float q0 = static_cast<float>(word & 0x0fu);
+				const float q1 = static_cast<float>((word >> 4u) & 0x0fu);
+				const float q2 = static_cast<float>((word >> 8u) & 0x0fu);
+				const float q3 = static_cast<float>((word >> 12u) & 0x0fu);
+				const float q4 = static_cast<float>((word >> 16u) & 0x0fu);
+				const float q5 = static_cast<float>((word >> 20u) & 0x0fu);
+				const float q6 = static_cast<float>((word >> 24u) & 0x0fu);
+				const float q7 = static_cast<float>((word >> 28u) & 0x0fu);
+#pragma unroll
+				for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK; ++token_lane) {
+					const uint32_t batch = batch_base + token_lane;
+					if (batch >= args.batch) {
+						continue;
+					}
+					const float *input = input_base + batch * args.cols;
+					const float in0 = input[col];
+					const float in1 = input[col + 1u];
+					const float in2 = input[col + 2u];
+					const float in3 = input[col + 3u];
+					const float in4 = input[col + 4u];
+					const float in5 = input[col + 5u];
+					const float in6 = input[col + 6u];
+					const float in7 = input[col + 7u];
+					input_sums[token_lane] += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+					q_dot_sums[token_lane] +=
+						q0 * in0 +
+						q1 * in1 +
+						q2 * in2 +
+						q3 * in3 +
+						q4 * in4 +
+						q5 * in5 +
+						q6 * in6 +
+						q7 * in7;
+				}
+			}
+#pragma unroll
+			for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK; ++token_lane) {
+				sums[token_lane] += scale * q_dot_sums[token_lane] + bias * input_sums[token_lane];
+			}
+		}
+	}
+#pragma unroll
+	for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK; ++token_lane) {
+		const uint32_t batch = batch_base + token_lane;
+		const float sum = rocm_mlx_q4_row_reduce(sums[token_lane]);
+		if (col_lane == 0 && row < args.rows && batch < args.batch) {
+			float *output = output_base + batch * args.rows;
+			output[row] = sum;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_tokens16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_projection_batch_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_projection_batch_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_projection_batch_args(args) || args.bits != 8u || args.group_size != 64u) {
+		return;
+	}
+	if (blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE ||
+		blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK >= args.batch) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	const uint32_t batch_base = blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK;
+	const float *input_base = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.weight_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output_base = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float sums[ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK] = {};
+	if (row < args.rows) {
+		const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.cols, args.bits);
+		const uint32_t groups_per_row = args.cols >> 6u;
+		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+		for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t quantized = rocm_mlx_affine_q8_quantized_value(weights, row_packed_base, col);
+			const uint32_t group = row * groups_per_row + (col >> 6u);
+			const float value = static_cast<float>(quantized) * rocm_bfloat16_to_float(scales[group]) +
+				rocm_bfloat16_to_float(biases[group]);
+#pragma unroll
+			for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK; ++token_lane) {
+				const uint32_t batch = batch_base + token_lane;
+				if (batch < args.batch) {
+					const float *input = input_base + batch * args.cols;
+					sums[token_lane] += input[col] * value;
+				}
+			}
+		}
+	}
+#pragma unroll
+	for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK; ++token_lane) {
 		const uint32_t batch = batch_base + token_lane;
 		const float sum = rocm_mlx_q4_row_reduce(sums[token_lane]);
 		if (col_lane == 0 && row < args.rows && batch < args.batch) {

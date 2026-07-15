@@ -69,6 +69,7 @@ const (
 	hipMLXQ4GELUTanhQ6Cols1536Row32RowsPerBlock           = 32
 	hipMLXQ4GELUTanhQ6Cols1536Row64RowsPerBlock           = 64
 	hipMLXQ4ProjectionBatchTokensPerBlock                 = 8
+	hipMLXQ4ProjectionBatchWideTokensPerBlock             = 16
 	hipMLXQ4ProjectionGreedyRowsPerBlock                  = 32
 	hipMLXQ4ProjectionGreedyQ6RowsPerBlock                = 64
 	hipMLXQ4ProjectionBestBytes                           = 8
@@ -5121,6 +5122,48 @@ func hipMLXQ4ProjectionBatchLaunchConfig(args []byte, rows, batch int) (hipKerne
 }
 
 func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
+	if batch >= hipMLXQ4ProjectionBatchWideTokensPerBlock && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 tokens16 projection batch row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		gridY, err := rocmDeviceKVPositiveUint32("MLX q4 group64 tokens16 projection batch token blocks", (batch+hipMLXQ4ProjectionBatchWideTokensPerBlock-1)/hipMLXQ4ProjectionBatchWideTokensPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjBatchQ4G64Tokens16,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  gridY,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
+	if batch >= hipMLXQ4ProjectionBatchWideTokensPerBlock && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q8 group64 tokens16 projection batch row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		gridY, err := rocmDeviceKVPositiveUint32("MLX q8 group64 tokens16 projection batch token blocks", (batch+hipMLXQ4ProjectionBatchWideTokensPerBlock-1)/hipMLXQ4ProjectionBatchWideTokensPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjBatchQ8G64Tokens16,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  gridY,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if cols >= 1536 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 6 {
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 q6 row16 projection batch row blocks", (rows+hipMLXQ4ProjectionQ6Row16RowsPerBlock-1)/hipMLXQ4ProjectionQ6Row16RowsPerBlock)
 		if err != nil {

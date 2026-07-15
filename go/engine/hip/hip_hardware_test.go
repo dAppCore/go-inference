@@ -6692,6 +6692,62 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 		core.RequireNoError(t, err)
 		assertFloat32SlicesNear(t, []float32{q4Want[0], q4Want[1], q4Want[0] * 2, q4Want[1] * 2}, batchOutput, 0.0001)
 
+		const q4G64Rows, q4G64Cols, q4G64Batch = 2, 64, 16
+		q4G64Input := make([]float32, q4G64Cols)
+		q4G64Values := make([]uint32, q4G64Rows*q4G64Cols)
+		for index := range q4G64Input {
+			q4G64Input[index] = float32(index%11-5) / 8
+		}
+		for index := range q4G64Values {
+			q4G64Values[index] = uint32((index*7 + 3) % 16)
+		}
+		q4G64Req := hipMLXQ4ProjectionRequest{
+			Input:     q4G64Input,
+			Weight:    hipPackMLXAffineValuesForTest(q4G64Values, q4G64Cols, 4),
+			Scales:    []uint16{hipFloat32ToBFloat16(0.25), hipFloat32ToBFloat16(0.5)},
+			Biases:    []uint16{hipFloat32ToBFloat16(-0.5), hipFloat32ToBFloat16(0.25)},
+			Rows:      q4G64Rows,
+			Cols:      q4G64Cols,
+			GroupSize: q4G64Cols,
+		}
+		q4G64Buffers, err := q4G64Req.deviceBuffers(hipRuntime.driver)
+		core.RequireNoError(t, err)
+		defer q4G64Buffers.Close()
+		q4G64BatchInput := make([]float32, 0, q4G64Batch*q4G64Cols)
+		q4G64Want := make([]float32, 0, q4G64Batch*q4G64Rows)
+		for batch := 0; batch < q4G64Batch; batch++ {
+			factor := float32(batch+1) / q4G64Batch
+			tokenInput := make([]float32, q4G64Cols)
+			for index, value := range q4G64Input {
+				tokenInput[index] = value * factor
+			}
+			q4G64BatchInput = append(q4G64BatchInput, tokenInput...)
+			tokenWant, err := hipReferenceMLXQ4Projection(tokenInput, q4G64Req.Weight, q4G64Req.Scales, q4G64Req.Biases, q4G64Rows, q4G64Cols, q4G64Cols)
+			core.RequireNoError(t, err)
+			q4G64Want = append(q4G64Want, tokenWant...)
+		}
+		q4G64BatchPayload, err := hipFloat32Payload(q4G64BatchInput)
+		core.RequireNoError(t, err)
+		q4G64BatchBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 group64 tokens16 input", q4G64BatchPayload, len(q4G64BatchInput))
+		core.RequireNoError(t, err)
+		defer q4G64BatchBuffer.Close()
+		q4G64OutputBuffer, err := hipRunMLXQ4ProjectionBatchKernelWithDeviceInput(context.Background(), hipRuntime.driver, q4G64BatchBuffer, hipMLXQ4DeviceWeightConfig{
+			WeightPointer: q4G64Buffers.Weight.Pointer(),
+			ScalePointer:  q4G64Buffers.Scales.Pointer(),
+			BiasPointer:   q4G64Buffers.Biases.Pointer(),
+			WeightBytes:   q4G64Buffers.Weight.SizeBytes(),
+			ScaleBytes:    q4G64Buffers.Scales.SizeBytes(),
+			BiasBytes:     q4G64Buffers.Biases.SizeBytes(),
+			Rows:          q4G64Rows,
+			Cols:          q4G64Cols,
+			GroupSize:     q4G64Cols,
+		}, q4G64Batch)
+		core.RequireNoError(t, err)
+		defer q4G64OutputBuffer.Close()
+		q4G64Output, err := hipReadFloat32DeviceOutput(q4G64OutputBuffer, "rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 group64 tokens16 output", len(q4G64Want))
+		core.RequireNoError(t, err)
+		assertFloat32SlicesNear(t, q4G64Want, q4G64Output, 0.001)
+
 		batchActivated, err := hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(context.Background(), hipRuntime.driver, batchInputBuffer, hipMLXQ4DeviceWeightConfig{
 			WeightPointer: q4Buffers.Weight.Pointer(),
 			ScalePointer:  q4Buffers.Scales.Pointer(),
@@ -6799,6 +6855,64 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 		batchOutput, err := hipReadFloat32DeviceOutput(batchOutputBuffer, "rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q8 projection batch output", q8Req.Rows*2)
 		core.RequireNoError(t, err)
 		assertFloat32SlicesNear(t, []float32{q8Want[0], q8Want[1], q8Want[0] * 2, q8Want[1] * 2}, batchOutput, 0.0001)
+
+		const q8G64Rows, q8G64Cols, q8G64Batch = 2, 64, 32
+		q8G64Input := make([]float32, q8G64Cols)
+		q8G64Values := make([]uint32, q8G64Rows*q8G64Cols)
+		for index := range q8G64Input {
+			q8G64Input[index] = float32(index%13-6) / 16
+		}
+		for index := range q8G64Values {
+			q8G64Values[index] = uint32((index*29 + 11) % 256)
+		}
+		q8G64Req := hipMLXQ4ProjectionRequest{
+			Input:     q8G64Input,
+			Weight:    hipPackMLXAffineValuesForTest(q8G64Values, q8G64Cols, 8),
+			Scales:    []uint16{hipFloat32ToBFloat16(0.03125), hipFloat32ToBFloat16(0.0625)},
+			Biases:    []uint16{hipFloat32ToBFloat16(-1), hipFloat32ToBFloat16(0.5)},
+			Rows:      q8G64Rows,
+			Cols:      q8G64Cols,
+			GroupSize: q8G64Cols,
+			Bits:      8,
+		}
+		q8G64Buffers, err := q8G64Req.deviceBuffers(hipRuntime.driver)
+		core.RequireNoError(t, err)
+		defer q8G64Buffers.Close()
+		q8G64BatchInput := make([]float32, 0, q8G64Batch*q8G64Cols)
+		q8G64Want := make([]float32, 0, q8G64Batch*q8G64Rows)
+		for batch := 0; batch < q8G64Batch; batch++ {
+			factor := float32(batch+1) / q8G64Batch
+			tokenInput := make([]float32, q8G64Cols)
+			for index, value := range q8G64Input {
+				tokenInput[index] = value * factor
+			}
+			q8G64BatchInput = append(q8G64BatchInput, tokenInput...)
+			tokenWant, err := hipReferenceMLXAffineProjection(tokenInput, q8G64Req.Weight, q8G64Req.Scales, q8G64Req.Biases, q8G64Rows, q8G64Cols, q8G64Cols, 8)
+			core.RequireNoError(t, err)
+			q8G64Want = append(q8G64Want, tokenWant...)
+		}
+		q8G64BatchPayload, err := hipFloat32Payload(q8G64BatchInput)
+		core.RequireNoError(t, err)
+		q8G64BatchBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q8 group64 tokens16 input", q8G64BatchPayload, len(q8G64BatchInput))
+		core.RequireNoError(t, err)
+		defer q8G64BatchBuffer.Close()
+		q8G64OutputBuffer, err := hipRunMLXQ4ProjectionBatchKernelWithDeviceInput(context.Background(), hipRuntime.driver, q8G64BatchBuffer, hipMLXQ4DeviceWeightConfig{
+			WeightPointer: q8G64Buffers.Weight.Pointer(),
+			ScalePointer:  q8G64Buffers.Scales.Pointer(),
+			BiasPointer:   q8G64Buffers.Biases.Pointer(),
+			WeightBytes:   q8G64Buffers.Weight.SizeBytes(),
+			ScaleBytes:    q8G64Buffers.Scales.SizeBytes(),
+			BiasBytes:     q8G64Buffers.Biases.SizeBytes(),
+			Rows:          q8G64Rows,
+			Cols:          q8G64Cols,
+			GroupSize:     q8G64Cols,
+			Bits:          8,
+		}, q8G64Batch)
+		core.RequireNoError(t, err)
+		defer q8G64OutputBuffer.Close()
+		q8G64Output, err := hipReadFloat32DeviceOutput(q8G64OutputBuffer, "rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q8 group64 tokens16 output", len(q8G64Want))
+		core.RequireNoError(t, err)
+		assertFloat32SlicesNear(t, q8G64Want, q8G64Output, 0.001)
 
 		batchActivated, err := hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(context.Background(), hipRuntime.driver, batchInputBuffer, q8Config, q8Config, 2)
 		core.RequireNoError(t, err)
