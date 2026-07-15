@@ -1497,7 +1497,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 56), 0
 	case hipKernelNameMLXQ4ProjGreedyBatch, hipKernelNameMLXQ4ProjGreedyBatchQ6Row64:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 64)
-	case hipKernelNameMLXQ4ProjBatch, hipKernelNameMLXQ4ProjBatchQ6Row16:
+	case hipKernelNameMLXQ4ProjBatch, hipKernelNameMLXQ4ProjBatchQ4G64Tokens16, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16, hipKernelNameMLXQ4ProjBatchQ6Row16:
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 56)
 	case hipKernelNameMLXQ4TripleProj, hipKernelNameMLXQ4TripleProjQ6Row16, hipKernelNameMLXQ4TripleProjQ6Row64, hipKernelNameMLXQ4PairProj:
 		firstRows := inferenceBenchmarkU32At(args, 96)
@@ -2583,6 +2583,24 @@ func TestInferenceBenchmarkHIPKernelTensorShape_AttentionUsesChunkCount(t *testi
 	})
 	if rows != 33 || cols != 256 || group != 64 || batch != 3 {
 		t.Fatalf("batch chunked attention shape = %dx%d qg%d batch%d, want chunk_count=33 dim256 qg64 batch3", rows, cols, group, batch)
+	}
+}
+
+func TestInferenceBenchmarkHIPKernelTensorShape_SpecializedAffineBatchProjections(t *testing.T) {
+	args, err := benchmarkHIPMLXQ4ProjectionBatchLaunchArgs(4096, 2816, 256, 64, 8).Binary()
+	if err != nil {
+		t.Fatalf("q8 batch projection args: %v", err)
+	}
+	defer hipReleaseLaunchPacket(args)
+
+	for _, name := range []string{
+		hipKernelNameMLXQ4ProjBatchQ4G64Tokens16,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16,
+	} {
+		rows, cols, group, batch := inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{Name: name, Args: args})
+		if rows != 4096 || cols != 2816 || group != 64 || batch != 256 {
+			t.Fatalf("%s shape = %dx%d qg%d batch%d, want 4096x2816 qg64 batch256", name, rows, cols, group, batch)
+		}
 	}
 }
 
