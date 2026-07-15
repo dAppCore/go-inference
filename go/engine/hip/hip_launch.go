@@ -35,6 +35,7 @@ const (
 	hipKernelNameMLXQ4ProjBatch                             = "rocm_mlx_q4_projection_batch"
 	hipKernelNameMLXQ4ProjBatchQ4G64Tokens16                = "rocm_mlx_q4_projection_batch_q4_g64_tokens16"
 	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16           = "rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16"
+	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared     = "rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16_shared"
 	hipKernelNameMLXQ4ProjBatchQ6Row16                      = "rocm_mlx_q4_projection_batch_q6_row16"
 	hipKernelNameMLXQ4ProjGreedy                            = "rocm_mlx_q4_projection_greedy"
 	hipKernelNameMLXQ4ProjGreedyQ6Row64                     = "rocm_mlx_q4_projection_greedy_q6_row64"

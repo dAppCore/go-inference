@@ -39,6 +39,7 @@ const (
 	hipMLXQ4GELUTanhMLPPersistentRouteEnv                 = "GO_ROCM_ENABLE_EXPERIMENTAL_PERSISTENT_MLP"
 	hipMLXQ4Projection12BDownRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_DOWN_PROJECTION"
 	hipMLXQ4GELUTanh12BGateUpRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_GATE_UP"
+	hipMLXQ4ProjectionBatchQ8SharedDisableEnv             = "GO_ROCM_DISABLE_Q8_BATCH_SHARED"
 	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
 	hipMLXQ4Projection12BHeadGridEnv                      = "GO_ROCM_EXPERIMENTAL_12B_HEAD_GRID"
 	hipMLXQ4GELUTanhProjLaunchArgsVersion          uint32 = 1
@@ -5187,8 +5188,12 @@ func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupS
 		if err != nil {
 			return hipKernelLaunchConfig{}, err
 		}
+		kernelName := hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared
+		if core.Env(hipMLXQ4ProjectionBatchQ8SharedDisableEnv) == "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16
+		}
 		config := hipKernelLaunchConfig{
-			Name:   hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16,
+			Name:   kernelName,
 			Args:   args,
 			GridX:  gridX,
 			GridY:  gridY,
