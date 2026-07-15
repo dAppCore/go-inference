@@ -45,6 +45,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_tokens16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16_shared`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens64_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_greedy`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_greedy_q6_row64`,
@@ -561,6 +562,10 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(batchQ8G64Shared, `__shared__ float scale_tile`), "shared q8 batch projection must reuse affine scales across packed columns")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Shared, `__syncthreads()`), "shared q8 batch projection must synchronize tile producers and consumers")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Shared, `rocm_mlx_q4_projection_row16_reduce`), "shared q8 batch projection must preserve row16 reduction order")
+	batchQ8G64Shared64 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens64_shared`)
+	core.AssertTrue(t, strings.Contains(batchQ8G64Shared64, `ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK`), "tokens64 q8 batch projection must use its wider token tile")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Shared64, `__shared__ float input_tile`), "tokens64 q8 batch projection must share each input tile across output rows")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Shared64, `rocm_mlx_q4_projection_row16_reduce`), "tokens64 q8 batch projection must preserve row16 reduction order")
 
 	batchQ6Row16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16`)
 	core.AssertTrue(t, strings.Contains(batchQ6Row16, `args.bits != 6u || args.group_size != 64u || args.cols < 1536u`), "q6 row16 batch projection must guard its specialized tensor shape")

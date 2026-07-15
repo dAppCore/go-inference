@@ -2441,7 +2441,7 @@ func TestHIPHardwareMLXAffineQ8ProjectionBatchRow16MatchesRow8_Good(t *testing.T
 		t.Fatal("native ROCm runtime is not available")
 	}
 
-	const rows, cols, batch, groupSize, bits = 17, 2816, 32, 64, 8
+	const rows, cols, batch, groupSize, bits = 17, 2816, 64, 64, 8
 	input := make([]float32, batch*cols)
 	values := make([]uint32, rows*cols)
 	scales := make([]uint16, rows*(cols/groupSize))

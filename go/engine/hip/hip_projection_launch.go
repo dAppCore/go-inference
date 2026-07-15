@@ -40,6 +40,7 @@ const (
 	hipMLXQ4Projection12BDownRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_DOWN_PROJECTION"
 	hipMLXQ4GELUTanh12BGateUpRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_GATE_UP"
 	hipMLXQ4ProjectionBatchQ8SharedDisableEnv             = "GO_ROCM_DISABLE_Q8_BATCH_SHARED"
+	hipMLXQ4ProjectionBatchQ8Tokens64DisableEnv           = "GO_ROCM_DISABLE_Q8_BATCH_TOKENS64"
 	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
 	hipMLXQ4Projection12BHeadGridEnv                      = "GO_ROCM_EXPERIMENTAL_12B_HEAD_GRID"
 	hipMLXQ4GELUTanhProjLaunchArgsVersion          uint32 = 1
@@ -71,6 +72,7 @@ const (
 	hipMLXQ4GELUTanhQ6Cols1536Row64RowsPerBlock           = 64
 	hipMLXQ4ProjectionBatchTokensPerBlock                 = 8
 	hipMLXQ4ProjectionBatchWideTokensPerBlock             = 16
+	hipMLXQ4ProjectionBatchQ8Tokens64PerBlock             = 64
 	hipMLXQ4ProjectionGreedyRowsPerBlock                  = 32
 	hipMLXQ4ProjectionGreedyQ6RowsPerBlock                = 64
 	hipMLXQ4ProjectionBestBytes                           = 8
@@ -5184,13 +5186,17 @@ func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupS
 		if err != nil {
 			return hipKernelLaunchConfig{}, err
 		}
-		gridY, err := rocmDeviceKVPositiveUint32("MLX q8 group64 tokens16 projection batch token blocks", (batch+hipMLXQ4ProjectionBatchWideTokensPerBlock-1)/hipMLXQ4ProjectionBatchWideTokensPerBlock)
-		if err != nil {
-			return hipKernelLaunchConfig{}, err
-		}
 		kernelName := hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared
+		tokensPerBlock := hipMLXQ4ProjectionBatchWideTokensPerBlock
 		if core.Env(hipMLXQ4ProjectionBatchQ8SharedDisableEnv) == "1" {
 			kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16
+		} else if batch >= hipMLXQ4ProjectionBatchQ8Tokens64PerBlock && core.Env(hipMLXQ4ProjectionBatchQ8Tokens64DisableEnv) != "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared
+			tokensPerBlock = hipMLXQ4ProjectionBatchQ8Tokens64PerBlock
+		}
+		gridY, err := rocmDeviceKVPositiveUint32("MLX q8 group64 projection batch token blocks", (batch+tokensPerBlock-1)/tokensPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
 		}
 		config := hipKernelLaunchConfig{
 			Name:   kernelName,
