@@ -63,6 +63,9 @@ func rocmNativeGemma4TextConfig(path string) nativeGemma4TextConfig {
 func rocmNativeGemma4TextConfigFromProbe(cfg rocmModelPackConfigProbe) nativeGemma4TextConfig {
 	layerTypes := rocmConfigLayerTypes(cfg)
 	numLayers := firstPositiveInt(cfg.NumHiddenLayers, cfg.NumLayers, cfg.TextConfig.NumHiddenLayers, cfg.TextConfig.NumLayers)
+	numExperts := firstPositiveInt(cfg.NumExperts, cfg.TextConfig.NumExperts)
+	topKExperts := firstPositiveInt(cfg.TopKExperts, cfg.NumExpertsPerTok, cfg.TextConfig.TopKExperts, cfg.TextConfig.NumExpertsPerTok)
+	moeIntermediateSize := firstPositiveInt(cfg.MoEIntermediateSize, cfg.ExpertIntermediateSize, cfg.TextConfig.MoEIntermediateSize, cfg.TextConfig.ExpertIntermediateSize)
 	if numLayers > 0 && len(layerTypes) >= numLayers {
 		layerTypes = append([]string(nil), layerTypes[:numLayers]...)
 	} else {
@@ -83,10 +86,10 @@ func rocmNativeGemma4TextConfigFromProbe(cfg rocmModelPackConfigProbe) nativeGem
 		AttentionKEqV:           cfg.AttentionKEqV || cfg.TextConfig.AttentionKEqV,
 		FinalLogitSoftcap:       firstPositiveFloat(cfg.FinalLogitSoftcap, cfg.TextConfig.FinalLogitSoftcap),
 		UseDoubleWideMLP:        cfg.UseDoubleWideMLP || cfg.TextConfig.UseDoubleWideMLP,
-		EnableMoEBlock:          cfg.EnableMoEBlock || cfg.TextConfig.EnableMoEBlock,
-		NumExperts:              firstPositiveInt(cfg.NumExperts, cfg.TextConfig.NumExperts),
-		TopKExperts:             firstPositiveInt(cfg.TopKExperts, cfg.NumExpertsPerTok, cfg.TextConfig.TopKExperts, cfg.TextConfig.NumExpertsPerTok),
-		MoEIntermediateSize:     firstPositiveInt(cfg.MoEIntermediateSize, cfg.ExpertIntermediateSize, cfg.TextConfig.MoEIntermediateSize, cfg.TextConfig.ExpertIntermediateSize),
+		EnableMoEBlock:          cfg.EnableMoEBlock || cfg.TextConfig.EnableMoEBlock || (numExperts > 0 && topKExperts > 0 && moeIntermediateSize > 0),
+		NumExperts:              numExperts,
+		TopKExperts:             topKExperts,
+		MoEIntermediateSize:     moeIntermediateSize,
 		Vision:                  rocmModelPackConfigHasVision(cfg),
 		Audio:                   rocmModelPackConfigHasAudio(cfg),
 		RoPEParameters:          rocmNativeGemma4RoPEParameters(cfg),
@@ -103,7 +106,7 @@ func rocmModelPackConfigHasAudio(cfg rocmModelPackConfigProbe) bool {
 
 func rocmNativeGemma4RoPEParameters(cfg rocmModelPackConfigProbe) map[string]nativeGemma4RoPEParameters {
 	params := rocmGemma4RoPEParametersFromProbe(cfg)
-	if isROCmGemma4Architecture(rocmConfigArchitecture(cfg)) {
+	if isROCmGemma4BackboneArchitecture(rocmConfigArchitecture(cfg)) {
 		policy := modelgemma4.RoPEPolicyOf(modelgemma4.TextConfig{
 			GlobalPartialRotaryFactor: firstPositiveFloat(cfg.GlobalPartialRotary, cfg.TextConfig.GlobalPartialRotary),
 			RoPEParameters:            params,

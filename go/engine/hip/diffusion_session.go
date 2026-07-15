@@ -6,15 +6,19 @@ package hip
 
 import (
 	"context"
+	"encoding/binary"
 	"math"
+	"sort"
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 )
 
 const (
 	rocmDiffusionDefaultCanvasLength = 64
 	rocmDiffusionDefaultMaxSteps     = 16
+	rocmDiffusionCanvasSeedStride    = uint64(0x9E3779B97F4A7C15)
 )
 
 // ROCmBlockDiffusionOptions configures a DiffusionGemma token stream.
@@ -146,6 +150,8 @@ func RunROCmDiffusionGenerate(ctx context.Context, cfg ROCmDiffusionGenerateConf
 			prefix = offset
 		}
 		canvas := rocmDiffusionInitialCanvas(canvasLength, cfg.Step.TextVocabSize, cfg.Step.Seed, canvasIndex)
+		canvasStep := cfg.Step
+		canvasStep.Seed += uint64(canvasIndex) * rocmDiffusionCanvasSeedStride
 		keyLength := prefix + canvasLength
 		globalMask, globalShape := rocmDiffusionGlobalCanvasMask(canvasLength, keyLength)
 		localMask, localShape := rocmDiffusionLocalCanvasMask(canvasLength, keyLength, prefix, cfg.SlidingWindow)
@@ -171,7 +177,7 @@ func RunROCmDiffusionGenerate(ctx context.Context, cfg ROCmDiffusionGenerateConf
 				GlobalMaskShape: append([]int(nil), globalShape...),
 				LocalMask:       append([]float32(nil), localMask...),
 				LocalMaskShape:  append([]int(nil), localShape...),
-				StepConfig:      cfg.Step,
+				StepConfig:      canvasStep,
 			})
 			if err != nil {
 				return metrics, core.E(op, "canvas denoise", err)
@@ -276,12 +282,12 @@ func rocmDiffusionInitialCanvas(length int, vocab int32, seed uint64, canvasInde
 	if vocab <= 0 {
 		return canvas
 	}
-	state := seed ^ (uint64(canvasIndex+1) << 32) ^ 0x9E3779B97F4A7C15
+	sampler := model.NewSampler(seed ^ (uint64(canvasIndex+1) << 32))
 	for index := range canvas {
-		state ^= state << 7
-		state ^= state >> 9
-		state ^= state << 8
-		canvas[index] = int32(state % uint64(vocab))
+		canvas[index] = int32(sampler.Draw() * float32(vocab))
+		if canvas[index] >= vocab {
+			canvas[index] = vocab - 1
+		}
 	}
 	return canvas
 }
@@ -332,6 +338,195 @@ func rocmDiffusionTokensEqual(left, right []int32) bool {
 		}
 	}
 	return true
+}
+
+func rocmDiffusionSampleDenoiseStep(logits []float32, canvas []int32, vocab, hidden, step int, noiseProportion float32, cfg ROCmDiffusionStepConfig, encode func([]float32) ([]byte, error)) (ROCmDiffusionStepResult, error) {
+	const op = "hip.rocmDiffusionSampleDenoiseStep"
+	length := len(canvas)
+	if vocab <= 0 || hidden <= 0 {
+		return ROCmDiffusionStepResult{}, core.NewError(op + ": vocab and hidden sizes must be positive")
+	}
+	if cfg.TextVocabSize <= 0 {
+		return ROCmDiffusionStepResult{}, core.NewError(op + ": TextVocabSize must be positive")
+	}
+	if len(logits) != length*vocab {
+		return ROCmDiffusionStepResult{}, core.NewError(op + ": logits must be len(canvas)*vocab float32 values")
+	}
+	if encode == nil {
+		return ROCmDiffusionStepResult{}, core.NewError(op + ": encode callback is nil")
+	}
+	if length == 0 {
+		return ROCmDiffusionStepResult{Canvas: []int32{}, Greedy: []int32{}, SCEmb: []byte{}}, nil
+	}
+
+	fraction := 1 - float32(math.Pow(float64(1-noiseProportion), float64(cfg.Exponent)))
+	temperature := cfg.MinTemperature + fraction*(cfg.MaxTemperature-cfg.MinTemperature)
+	if temperature <= 0 {
+		temperature = 1e-6
+	}
+	shaped := make([]float32, len(logits))
+	shapedBF16 := make([]byte, len(logits)*2)
+	for index, logit := range logits {
+		value := logit / temperature
+		bf16 := hipFloat32ToBFloat16(value)
+		binary.LittleEndian.PutUint16(shapedBF16[index*2:], bf16)
+		shaped[index] = hipBFloat16ToFloat32(bf16)
+	}
+
+	probabilities := make([]float32, len(shaped))
+	categorical := model.NewSampler(cfg.Seed ^ (uint64(step)*2 + 1))
+	renoiseSampler := model.NewSampler(cfg.Seed ^ (uint64(step)*2 + 2))
+	sampled := make([]int32, length)
+	greedy := make([]int32, length)
+	entropies := make([]float32, length)
+	var entropySum float32
+	for row := 0; row < length; row++ {
+		rowBytes := shapedBF16[row*vocab*2 : (row+1)*vocab*2]
+		id, err := categorical.Sample(rowBytes, vocab, model.SampleParams{Temperature: 1})
+		if err != nil {
+			return ROCmDiffusionStepResult{}, err
+		}
+		sampled[row] = id
+		id, err = model.Greedy(rowBytes, vocab)
+		if err != nil {
+			return ROCmDiffusionStepResult{}, err
+		}
+		greedy[row] = id
+		rowLogits := shaped[row*vocab : (row+1)*vocab]
+		rowProbabilities := probabilities[row*vocab : (row+1)*vocab]
+		entropy, err := rocmDiffusionSoftmaxEntropy(rowLogits, rowProbabilities)
+		if err != nil {
+			return ROCmDiffusionStepResult{}, err
+		}
+		entropies[row] = entropy
+		entropySum += entropy
+	}
+
+	scEmb, err := encode(probabilities)
+	if err != nil {
+		return ROCmDiffusionStepResult{}, err
+	}
+	if len(scEmb) != length*hidden*2 {
+		return ROCmDiffusionStepResult{}, core.NewError(op + ": self-conditioning embedding byte count mismatch")
+	}
+
+	renoise := make([]int32, length)
+	for index := range renoise {
+		id := int32(renoiseSampler.Draw() * float32(cfg.TextVocabSize))
+		if id >= cfg.TextVocabSize {
+			id = cfg.TextVocabSize - 1
+		}
+		renoise[index] = id
+	}
+	order := make([]int, length)
+	for index := range order {
+		order[index] = index
+	}
+	sort.Slice(order, func(left, right int) bool { return entropies[order[left]] < entropies[order[right]] })
+	accepted := make([]bool, length)
+	acceptedCount := 0
+	var accumulated float32
+	for _, index := range order {
+		if accumulated > cfg.EntropyBound {
+			break
+		}
+		accepted[index] = true
+		acceptedCount++
+		accumulated += entropies[index]
+	}
+	next := make([]int32, length)
+	changed := 0
+	for index := range next {
+		if accepted[index] {
+			next[index] = sampled[index]
+		} else {
+			next[index] = renoise[index]
+		}
+		if next[index] != canvas[index] {
+			changed++
+		}
+	}
+	return ROCmDiffusionStepResult{
+		Canvas:      next,
+		Greedy:      greedy,
+		SCEmb:       scEmb,
+		Accepted:    acceptedCount,
+		Changed:     changed,
+		MeanEntropy: entropySum / float32(length),
+	}, nil
+}
+
+func rocmDiffusionSoftmaxEntropy(logits, probabilities []float32) (float32, error) {
+	if len(logits) == 0 || len(probabilities) != len(logits) {
+		return 0, core.NewError("hip.rocmDiffusionSoftmaxEntropy: row shape mismatch")
+	}
+	maximum := logits[0]
+	for _, value := range logits[1:] {
+		if value > maximum {
+			maximum = value
+		}
+	}
+	var sum, weighted float32
+	for index, value := range logits {
+		probability := float32(math.Exp(float64(value - maximum)))
+		probabilities[index] = probability
+		sum += probability
+		weighted += probability * value
+	}
+	if sum <= 0 || math.IsNaN(float64(sum)) || math.IsInf(float64(sum), 0) {
+		return 0, core.NewError("hip.rocmDiffusionSoftmaxEntropy: probability sum is not finite")
+	}
+	for index := range probabilities {
+		probabilities[index] /= sum
+	}
+	return maximum + float32(math.Log(float64(sum))) - weighted/sum, nil
+}
+
+func (model *hipLoadedModel) loadedDiffusionGemmaEncoderLayerScalar(layer int) (float32, error) {
+	if model == nil || model.driver == nil {
+		return 0, core.E("rocm.hip.DiffusionGemma", "loaded model is required", nil)
+	}
+	base := core.Sprintf("model.encoder.language_model.layers.%d.layer_scalar", layer)
+	var tensor hipTensor
+	var ok bool
+	for _, name := range []string{base, base + ".weight"} {
+		if tensor, ok = model.tensors[name]; ok {
+			break
+		}
+	}
+	if !ok {
+		return 0, core.E("rocm.hip.DiffusionGemma", core.Sprintf("encoder layer %d scalar tensor is required", layer), nil)
+	}
+	bytes, err := hipGemma4LayerScalarBytes(tensor.info, "encoder layer scalar tensor")
+	if err != nil {
+		return 0, err
+	}
+	if tensor.pointer == 0 {
+		return 0, core.E("rocm.hip.DiffusionGemma", "encoder layer scalar tensor pointer is required", nil)
+	}
+	payload := make([]byte, bytes)
+	if err := model.driver.CopyDeviceToHost(tensor.pointer, payload); err != nil {
+		return 0, core.E("rocm.hip.DiffusionGemma", "copy encoder layer scalar", err)
+	}
+	return hipGemma4LayerScalarValue(tensor.info, payload)
+}
+
+func hipDiffusionDenoiseForwardConfig(base hipGemma4Q4ForwardConfig, encoderScalars []float32, canvasLength int) (hipGemma4Q4ForwardConfig, error) {
+	if canvasLength <= 0 {
+		return hipGemma4Q4ForwardConfig{}, core.E("rocm.hip.DiffusionGemma", "canvas length must be positive", nil)
+	}
+	if len(base.Layers) == 0 || len(encoderScalars) != len(base.Layers) {
+		return hipGemma4Q4ForwardConfig{}, core.E("rocm.hip.DiffusionGemma", "encoder layer scalar count mismatch", nil)
+	}
+	out := base
+	out.Layers = append([]hipGemma4Q4Layer0Config(nil), base.Layers...)
+	for index := range out.Layers {
+		out.Layers[index].LayerScalar = encoderScalars[index]
+		if out.Layers[index].SlidingWindow > 0 {
+			out.Layers[index].SlidingWindow += canvasLength
+		}
+	}
+	return out, nil
 }
 
 type hipROCmDiffusionSessionProvider interface {
@@ -386,6 +581,9 @@ func (model *rocmModel) GenerateBlockDiffusionTokens(ctx context.Context, prompt
 	session, err := loaded.OpenROCmDiffusionSession(ctx)
 	if err != nil {
 		return metrics, err
+	}
+	if closer, ok := session.(interface{ Close() error }); ok {
+		defer func() { _ = closer.Close() }()
 	}
 	route, _ := ROCmDiffusionSamplerRouteForInfo(loaded.modelPath, model.modelInfo, model.modelLabels)
 	canvasLength := rocmDiffusionLabelPositiveInt(model.modelLabels["diffusion_canvas_length"])

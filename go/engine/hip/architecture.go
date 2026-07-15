@@ -22,6 +22,10 @@ func isROCmGemma4Architecture(architecture string) bool {
 	}
 }
 
+func isROCmGemma4BackboneArchitecture(architecture string) bool {
+	return isROCmGemma4Architecture(architecture) || normalizeROCmArchitecture(architecture) == "diffusion_gemma"
+}
+
 func isROCmDenseQuickWinArchitecture(architecture string) bool {
 	switch normalizeROCmArchitecture(architecture) {
 	case "gemma3", "gemma3_text", "qwen3", "qwen3_6", "mistral", "phi", "glm", "glm4", "hermes", "granite":

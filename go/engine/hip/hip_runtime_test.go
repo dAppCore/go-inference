@@ -97,12 +97,72 @@ func TestHIPGemma4HostResidentExpertTensor_Good(t *testing.T) {
 	}
 	expert := nativeTensorInfo{Name: "blk.0.ffn_gate_up_exps.weight", Dimensions: []uint64{2816, 1408, 128}}
 	core.AssertEqual(t, true, hipGemma4HostResidentExpertTensor(moe, expert))
-	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{Name: "blk.0.ffn_down_exps.scale", Dimensions: []uint64{128}}))
-	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{Name: "blk.0.ffn_gate.weight", Dimensions: []uint64{2816, 2112}}))
 	moe.Gemma4TextConfig.EnableMoEBlock = false
 	core.AssertEqual(t, true, hipGemma4HostResidentExpertTensor(moe, expert))
+
+	for _, architecture := range []string{"gemma4", "diffusion_gemma"} {
+		moe.ModelInfo.Architecture = architecture
+		for _, name := range []string{
+			"language_model.model.layers.0.experts.gate_up_proj.weight",
+			"language_model.model.layers.0.experts.gate_up_proj.scales",
+			"language_model.model.layers.0.experts.gate_up_proj.biases",
+			"language_model.model.layers.0.experts.down_proj.weight",
+			"language_model.model.layers.0.experts.down_proj.scales",
+			"language_model.model.layers.0.experts.down_proj.biases",
+		} {
+			core.AssertEqual(t, true, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+				Name:       name,
+				Dimensions: []uint64{2816, 1408, 128},
+			}))
+		}
+	}
+}
+
+func TestHIPGemma4HostResidentExpertTensor_Bad(t *testing.T) {
+	moe := nativeLoadConfig{ModelInfo: inference.ModelInfo{Architecture: "gemma4"}}
+	for _, name := range []string{
+		"language_model.model.layers.0.experts.gate_up_proj.scale",
+		"language_model.model.layers.0.experts.gate_up_proj.weight.extra",
+		"language_model.model.layers.0.experts.gate_up_proj.weightish",
+		"language_model.model.layers.0.mlp.gate_up_proj.weight",
+		"language_model.model.layers.0.experts.down_proj.bias",
+	} {
+		core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+			Name:       name,
+			Dimensions: []uint64{2816, 1408, 128},
+		}))
+	}
 	moe.ModelInfo.Architecture = "qwen3_moe"
-	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, expert))
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "language_model.model.layers.0.experts.gate_up_proj.weight",
+		Dimensions: []uint64{2816, 1408, 128},
+	}))
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "blk.0.ffn_down_exps.scale",
+		Dimensions: []uint64{128},
+	}))
+}
+
+func TestHIPGemma4HostResidentExpertTensor_Ugly(t *testing.T) {
+	moe := nativeLoadConfig{ModelInfo: inference.ModelInfo{Architecture: "diffusion_gemma"}}
+	for _, dimensions := range [][]uint64{
+		nil,
+		{2816, 1408},
+		{2816, 1408, 128, 1},
+	} {
+		core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+			Name:       "language_model.model.layers.0.experts.gate_up_proj.weight",
+			Dimensions: dimensions,
+		}))
+	}
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "",
+		Dimensions: []uint64{2816, 1408, 128},
+	}))
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "blk.0.ffn_gate.weight",
+		Dimensions: []uint64{2816, 2112},
+	}))
 }
 
 func TestHIPRuntime_LoadModelCarriesDeviceKVMode_Good(t *testing.T) {
@@ -2594,6 +2654,23 @@ func TestHIPRuntime_Validate_GoodProjectionShapes(t *testing.T) {
 		Tensors: []nativeTensorInfo{
 			{Name: "tok_embeddings.weight", Type: 0, Dimensions: []uint64{2, 4}, ByteSize: 32},
 			{Name: "output.weight", Type: 1, Dimensions: []uint64{4, 2}, ByteSize: 16},
+		},
+	})
+
+	core.AssertNoError(t, err)
+}
+
+func TestHIPRuntime_Validate_GoodMLXAffinePerModuleBits(t *testing.T) {
+	const (
+		vocab      = 4
+		hidden     = 2816
+		packedCols = hidden * 8 / 32
+	)
+	err := validateHIPLoadConfig(nativeLoadConfig{
+		ModelInfo: inference.ModelInfo{Architecture: "diffusion_gemma", VocabSize: vocab, HiddenSize: hidden, QuantBits: 4, QuantGroup: 64},
+		Tensors: []nativeTensorInfo{
+			{Name: "language_model.model.embed_tokens.weight", Type: 26, TypeName: "U32", Dimensions: []uint64{vocab, packedCols}, ByteSize: vocab * packedCols * 4},
+			{Name: "language_model.lm_head.weight", Type: 26, TypeName: "U32", Dimensions: []uint64{vocab, packedCols}, ByteSize: vocab * packedCols * 4},
 		},
 	})
 

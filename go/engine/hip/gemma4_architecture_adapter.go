@@ -77,7 +77,7 @@ func ResolveGemma4ArchitectureDeclaration(data []byte) (Gemma4ArchitectureDeclar
 	if !resolution.Matched() {
 		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: unknown architecture")
 	}
-	if !rocmprofile.IsGemma4TargetArchitecture(resolution.Architecture) {
+	if !isROCmGemma4BackboneArchitecture(resolution.Architecture) {
 		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: unsupported architecture " + resolution.Architecture)
 	}
 

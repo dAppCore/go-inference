@@ -19,6 +19,7 @@ import (
 	"dappco.re/go/inference/engine/hip/internal/gguf"
 	rocmmodel "dappco.re/go/inference/engine/hip/model"
 	modelgemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
+	evalprofile "dappco.re/go/inference/eval/profile"
 	"dappco.re/go/inference/model/quant/codebook"
 	"dappco.re/go/inference/model/quant/jang"
 )
@@ -1570,6 +1571,7 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		}
 		tensors = append(tensors, weightTensors...)
 	}
+	tensors = canonicalizeROCmNativeTensorNames(inspection.Model.Architecture, tensors)
 	sequenceMixerPlan, err := sequenceMixerLoadPlanFromInspection(inspection, tensors)
 	if err != nil {
 		return "", nativeLoadConfig{}, core.E("rocm.safetensorsNativeLoadConfig", "build sequence mixer load plan", err)
@@ -1621,7 +1623,7 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 			cfg.AudioModelPath = mediaRoot
 		}
 	}
-	if isROCmGemma4Architecture(inspection.Model.Architecture) {
+	if isROCmGemma4BackboneArchitecture(inspection.Model.Architecture) {
 		cfg.Gemma4Architecture, err = resolveGemma4ModelPackArchitectureDeclaration(path)
 		if err != nil {
 			return "", nativeLoadConfig{}, core.E("rocm.safetensorsNativeLoadConfig", "resolve shared Gemma4 architecture", err)
@@ -1631,6 +1633,22 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		cfg.DataOffset = tensors[0].DataOffset
 	}
 	return loadPath, cfg, nil
+}
+
+func canonicalizeROCmNativeTensorNames(architecture string, tensors []nativeTensorInfo) []nativeTensorInfo {
+	out := append([]nativeTensorInfo(nil), tensors...)
+	if normalizeROCmArchitecture(architecture) != "diffusion_gemma" {
+		return out
+	}
+	for index := range out {
+		if canonical, ok := evalprofile.CanonicalWeightName("diffusion_gemma", out[index].Name); ok && canonical != "" {
+			if strings.HasPrefix(canonical, "model.") {
+				canonical = "language_model." + canonical
+			}
+			out[index].Name = canonical
+		}
+	}
+	return out
 }
 
 func rocmNativeTensorPlanHasVision(tensors []nativeTensorInfo) bool {

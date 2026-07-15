@@ -122,6 +122,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_lora_projection`,
 		`extern "C" __global__ void rocm_embedding_lookup`,
 		`extern "C" __global__ void rocm_embedding_lookup_greedy_token`,
+		`extern "C" __global__ void rocm_diffusion_expected_embedding`,
 		`extern "C" __global__ void rocm_embedding_mean_pool`,
 		`extern "C" __global__ void rocm_rerank_cosine`,
 		`extern "C" __global__ void rocm_tiny_prefill`,

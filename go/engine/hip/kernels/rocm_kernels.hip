@@ -218,6 +218,8 @@ constexpr uint32_t ROCM_LORA_LAUNCH_ARGS_BYTES = 128;
 constexpr uint32_t ROCM_LORA_LAUNCH_FLAG_BIAS = 1;
 constexpr uint32_t ROCM_EMBEDDING_LOOKUP_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_EMBEDDING_LOOKUP_LAUNCH_ARGS_BYTES = 104;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES = 120;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_F32 = 1;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_BF16 = 2;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4 = 3;
@@ -788,6 +790,29 @@ struct rocm_embedding_lookup_launch_args {
 	uint32_t bias_bytes;
 	uint32_t output_scale_bits;
 	uint32_t bits;
+};
+
+struct rocm_diffusion_expected_embedding_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t probability_pointer;
+	uint64_t embedding_pointer;
+	uint64_t scale_pointer;
+	uint64_t bias_pointer;
+	uint64_t output_pointer;
+	uint32_t rows;
+	uint32_t vocab_size;
+	uint32_t hidden_size;
+	uint32_t table_encoding;
+	uint32_t group_size;
+	uint32_t bits;
+	uint64_t probability_bytes;
+	uint64_t embedding_bytes;
+	uint64_t scale_bytes;
+	uint64_t bias_bytes;
+	uint64_t output_bytes;
+	uint32_t output_scale_bits;
+	uint32_t reserved;
 };
 
 struct rocm_embedding_mean_pool_launch_args {
@@ -1679,6 +1704,7 @@ static_assert(sizeof(rocm_jangtq_launch_args) == ROCM_JANGTQ_LAUNCH_ARGS_BYTES, 
 static_assert(sizeof(rocm_codebook_launch_args) == ROCM_CODEBOOK_LAUNCH_ARGS_BYTES, "codebook launch ABI drift");
 static_assert(sizeof(rocm_lora_launch_args) == ROCM_LORA_LAUNCH_ARGS_BYTES, "LoRA launch ABI drift");
 static_assert(sizeof(rocm_embedding_lookup_launch_args) == ROCM_EMBEDDING_LOOKUP_LAUNCH_ARGS_BYTES, "embedding lookup launch ABI drift");
+static_assert(sizeof(rocm_diffusion_expected_embedding_launch_args) == ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES, "diffusion expected embedding launch ABI drift");
 static_assert(sizeof(rocm_embedding_mean_pool_launch_args) == ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_BYTES, "embedding mean-pool launch ABI drift");
 static_assert(sizeof(rocm_rerank_cosine_launch_args) == ROCM_RERANK_COSINE_LAUNCH_ARGS_BYTES, "rerank cosine launch ABI drift");
 static_assert(sizeof(rocm_tiny_prefill_launch_args) == ROCM_TINY_PREFILL_LAUNCH_ARGS_BYTES, "tiny prefill launch ABI drift");
@@ -2435,6 +2461,37 @@ __device__ bool rocm_valid_embedding_lookup_greedy_token_args(const rocm_embeddi
 	rocm_embedding_lookup_launch_args normalized = args;
 	normalized.token_bytes = sizeof(int32_t);
 	return rocm_valid_embedding_lookup_args(normalized);
+}
+
+__device__ bool rocm_valid_diffusion_expected_embedding_args(const rocm_diffusion_expected_embedding_launch_args &args)
+{
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+	if (args.version != ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES ||
+		args.probability_pointer == 0 ||
+		args.embedding_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.vocab_size == 0 ||
+		args.hidden_size == 0 ||
+		args.probability_bytes != static_cast<uint64_t>(args.rows) * args.vocab_size * sizeof(float) ||
+		args.output_bytes != static_cast<uint64_t>(args.rows) * args.hidden_size * sizeof(float) ||
+		!isfinite(output_scale)) {
+		return false;
+	}
+	if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_F32) {
+		return args.embedding_bytes == static_cast<uint64_t>(args.vocab_size) * args.hidden_size * sizeof(float);
+	}
+	if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_BF16) {
+		return args.embedding_bytes == static_cast<uint64_t>(args.vocab_size) * args.hidden_size * sizeof(uint16_t);
+	}
+	if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4) {
+		const uint32_t bits = args.bits == 0u ? ROCM_MLX_Q4_PROJECTION_BITS : args.bits;
+		return args.scale_pointer != 0 &&
+			args.bias_pointer != 0 &&
+			rocm_mlx_affine_shape_valid(args.vocab_size, args.hidden_size, args.group_size, bits, args.embedding_bytes, args.scale_bytes, args.bias_bytes);
+	}
+	return false;
 }
 
 __device__ bool rocm_valid_rerank_cosine_args(const rocm_rerank_cosine_launch_args &args)
@@ -8860,6 +8917,54 @@ extern "C" __global__ void rocm_embedding_lookup_greedy_token(const unsigned cha
 	const int32_t token_id = static_cast<int32_t>(~static_cast<uint32_t>(*best));
 	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
 	rocm_embedding_lookup_store(args, index, token_id, index, output_scale);
+}
+
+extern "C" __global__ void rocm_diffusion_expected_embedding(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_diffusion_expected_embedding_launch_args &args = *reinterpret_cast<const rocm_diffusion_expected_embedding_launch_args *>(packet);
+	if (!rocm_valid_diffusion_expected_embedding_args(args)) {
+		return;
+	}
+	const uint32_t dim = blockIdx.x * blockDim.x + threadIdx.x;
+	const uint32_t row = blockIdx.y;
+	if (dim >= args.hidden_size || row >= args.rows) {
+		return;
+	}
+	const float *probabilities = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.probability_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t probability_base = static_cast<uint64_t>(row) * args.vocab_size;
+	float sum = 0.0f;
+	if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4) {
+		const uint32_t *embedding = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.embedding_pointer));
+		const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+		const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+		const uint32_t bits = args.bits == 0u ? ROCM_MLX_Q4_PROJECTION_BITS : args.bits;
+		const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.hidden_size, bits);
+		const uint32_t groups_per_row = args.hidden_size / args.group_size;
+		for (uint32_t token = 0; token < args.vocab_size; ++token) {
+			const uint32_t quantized = rocm_mlx_affine_quantized_value(embedding, static_cast<uint64_t>(token) * packed_per_row, dim, bits);
+			const uint64_t group = static_cast<uint64_t>(token) * groups_per_row + dim / args.group_size;
+			const float value = static_cast<float>(quantized) * rocm_bfloat16_to_float(scales[group]) + rocm_bfloat16_to_float(biases[group]);
+			sum = fmaf(probabilities[probability_base + token], value, sum);
+		}
+	} else if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_BF16) {
+		const uint16_t *embedding = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.embedding_pointer));
+		for (uint32_t token = 0; token < args.vocab_size; ++token) {
+			const uint64_t index = static_cast<uint64_t>(token) * args.hidden_size + dim;
+			sum = fmaf(probabilities[probability_base + token], rocm_bfloat16_to_float(embedding[index]), sum);
+		}
+	} else {
+		const float *embedding = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.embedding_pointer));
+		for (uint32_t token = 0; token < args.vocab_size; ++token) {
+			const uint64_t index = static_cast<uint64_t>(token) * args.hidden_size + dim;
+			sum = fmaf(probabilities[probability_base + token], embedding[index], sum);
+		}
+	}
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+	output[static_cast<uint64_t>(row) * args.hidden_size + dim] = sum * output_scale;
 }
 
 extern "C" __global__ void rocm_embedding_mean_pool(const unsigned char *packet)

@@ -303,9 +303,21 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 }
 
 func hipGemma4HostResidentExpertTensor(cfg nativeLoadConfig, tensor nativeTensorInfo) bool {
-	return isROCmGemma4Architecture(cfg.ModelInfo.Architecture) &&
-		len(tensor.Dimensions) == 3 &&
-		core.Contains(tensor.Name, "_exps.weight")
+	if len(tensor.Dimensions) != 3 {
+		return false
+	}
+	if isROCmGemma4Architecture(cfg.ModelInfo.Architecture) && core.Contains(tensor.Name, "_exps.weight") {
+		return true
+	}
+	if !isROCmGemma4BackboneArchitecture(cfg.ModelInfo.Architecture) {
+		return false
+	}
+	return core.HasSuffix(tensor.Name, ".experts.gate_up_proj.weight") ||
+		core.HasSuffix(tensor.Name, ".experts.gate_up_proj.scales") ||
+		core.HasSuffix(tensor.Name, ".experts.gate_up_proj.biases") ||
+		core.HasSuffix(tensor.Name, ".experts.down_proj.weight") ||
+		core.HasSuffix(tensor.Name, ".experts.down_proj.scales") ||
+		core.HasSuffix(tensor.Name, ".experts.down_proj.biases")
 }
 
 var hipGemma4Q4WarmKernelNames = []string{
@@ -1356,9 +1368,11 @@ func hipTensorDimensionsContainLogical(tensor nativeTensorInfo, value uint64, in
 			if dimension > uint64(int(^uint(0)>>1)) {
 				continue
 			}
-			cols, err := hipMLXAffineColsFromPackedCols(int(dimension), info.QuantBits)
-			if err == nil && uint64(cols) == value {
-				return true
+			for _, bits := range hipMLXAffineCandidateBits(info.QuantBits) {
+				cols, err := hipMLXAffineColsFromPackedCols(int(dimension), bits)
+				if err == nil && uint64(cols) == value {
+					return true
+				}
 			}
 		}
 	}

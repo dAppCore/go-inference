@@ -96,17 +96,45 @@ type hipGemma4ExpertCacheKey struct {
 	Expert int
 }
 
+type hipGemma4MoEExpertStorage uint8
+
+const (
+	hipGemma4MoEExpertStorageGGUF hipGemma4MoEExpertStorage = iota
+	hipGemma4MoEExpertStorageMLXAffine
+)
+
+type hipGemma4MLXAffineTensorSet struct {
+	Weight nativeTensorInfo
+	Scales nativeTensorInfo
+	Biases nativeTensorInfo
+}
+
+type hipGemma4MLXAffineExpertSource struct {
+	GateUp hipGemma4MLXAffineTensorSet
+	Down   hipGemma4MLXAffineTensorSet
+}
+
 type hipGemma4ExpertCacheEntry struct {
-	GateUp       *hipDeviceByteBuffer
-	Down         *hipDeviceByteBuffer
-	GateUpRows   int
-	GateUpCols   int
-	DownRows     int
-	DownCols     int
-	GateUpFormat uint32
-	DownFormat   uint32
-	bytes        uint64
-	lastUse      uint64
+	Storage         hipGemma4MoEExpertStorage
+	GateUp          *hipDeviceByteBuffer
+	Down            *hipDeviceByteBuffer
+	GateUpRows      int
+	GateUpCols      int
+	DownRows        int
+	DownCols        int
+	GateUpFormat    uint32
+	DownFormat      uint32
+	MLXGateUpWeight *hipDeviceByteBuffer
+	MLXGateUpScales *hipDeviceByteBuffer
+	MLXGateUpBiases *hipDeviceByteBuffer
+	MLXDownWeight   *hipDeviceByteBuffer
+	MLXDownScales   *hipDeviceByteBuffer
+	MLXDownBiases   *hipDeviceByteBuffer
+	MLXGate         hipMLXQ4DeviceWeightConfig
+	MLXUp           hipMLXQ4DeviceWeightConfig
+	MLXDown         hipMLXQ4DeviceWeightConfig
+	bytes           uint64
+	lastUse         uint64
 }
 
 type hipGemma4MappedExpertSource struct {
@@ -142,10 +170,16 @@ type hipGemma4MoELayerConfig struct {
 	PostFeedForwardNorm2   hipRMSNormDeviceWeightConfig
 	RouterNorm             hipRMSNormDeviceWeightConfig
 	RouterProjection       hipGemma4MoERouterProjectionConfig
+	RouterProjectionMLX    hipMLXQ4DeviceWeightConfig
 	PerExpertScale         []float32
 	ExpertCache            *hipGemma4ExpertCache
+	ExpertStorage          hipGemma4MoEExpertStorage
 	GateUpInfo             nativeTensorInfo
 	DownInfo               nativeTensorInfo
+	MLXExperts             hipGemma4MLXAffineExpertSource
+	MLXHiddenSize          int
+	MLXGroupSize           int
+	MLXPreferredBits       int
 }
 
 type hipGemma4ExpertCache struct {
@@ -173,6 +207,9 @@ type hipGemma4MoEWorkspace struct {
 	BatchOutputFixed     hipDeviceByteBuffer
 	BatchOutputCap       int
 	BatchOutputView      hipDeviceByteBuffer
+	ExpertDownFixed      hipDeviceByteBuffer
+	ExpertDownCap        int
+	ExpertDownView       hipDeviceByteBuffer
 	RouterScoresFixed    hipDeviceByteBuffer
 	RouterScoresCap      int
 	RouterScoresView     hipDeviceByteBuffer
@@ -241,6 +278,21 @@ func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureMoEBatchOutput(driver 
 	)
 }
 
+func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureMoEExpertDownOutput(driver nativeHIPDriver, count int) (*hipDeviceByteBuffer, error) {
+	if workspace == nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "attention workspace is required", nil)
+	}
+	return workspace.ensureFixedOutputReusableCapacity(
+		driver,
+		&workspace.MoE.ExpertDownFixed,
+		&workspace.MoE.ExpertDownCap,
+		&workspace.MoE.ExpertDownView,
+		count,
+		"MoE expert down output",
+		"MoE expert down output view",
+	)
+}
+
 func (workspace *hipAttentionHeadsChunkedWorkspace) prepareMoERouterBuffers(driver nativeHIPDriver, logits *hipDeviceByteBuffer, topK, layer int) (*hipMoERouterDeviceBuffers, error) {
 	if workspace == nil {
 		return nil, core.E("rocm.hip.Gemma4MoE", "attention workspace is required", nil)
@@ -299,6 +351,7 @@ func (workspace *hipGemma4MoEWorkspace) resetBorrowedViews() {
 	}
 	workspace.HiddenViews = [2]hipDeviceByteBuffer{}
 	workspace.BatchOutputView = hipDeviceByteBuffer{}
+	workspace.ExpertDownView = hipDeviceByteBuffer{}
 	workspace.RouterScoresView = hipDeviceByteBuffer{}
 	workspace.RouterOutputView = hipDeviceByteBuffer{}
 	workspace.RouterIDView = hipDeviceByteBuffer{}
@@ -318,6 +371,9 @@ func (workspace *hipGemma4MoEWorkspace) Close() error {
 	if err := workspace.BatchOutputFixed.Close(); err != nil {
 		lastErr = err
 	}
+	if err := workspace.ExpertDownFixed.Close(); err != nil {
+		lastErr = err
+	}
 	if err := workspace.RouterScoresFixed.Close(); err != nil {
 		lastErr = err
 	}
@@ -328,6 +384,8 @@ func (workspace *hipGemma4MoEWorkspace) Close() error {
 	workspace.HiddenPairCap = 0
 	workspace.BatchOutputFixed = hipDeviceByteBuffer{}
 	workspace.BatchOutputCap = 0
+	workspace.ExpertDownFixed = hipDeviceByteBuffer{}
+	workspace.ExpertDownCap = 0
 	workspace.RouterScoresFixed = hipDeviceByteBuffer{}
 	workspace.RouterScoresCap = 0
 	workspace.RouterOutputFixed = hipDeviceByteBuffer{}
@@ -349,9 +407,6 @@ func hipLoadedGemma4MoERuntimeError(model *hipLoadedModel) error {
 	if !model.gemma4TextConfig.EnableMoEBlock {
 		return core.E(hipGemma4Q4Layer0Operation, "Gemma4 MoE block is not enabled", nil)
 	}
-	if !model.hipGGUFTensorAliasesEnabled() {
-		return core.E(hipGemma4Q4Layer0Operation, "GGUF tensor aliases are not enabled", nil)
-	}
 	if model.modelInfo.NumLayers <= 0 || model.modelInfo.HiddenSize <= 0 {
 		return core.E(hipGemma4Q4Layer0Operation, "model layer count and hidden size must be positive", nil)
 	}
@@ -360,6 +415,30 @@ func hipLoadedGemma4MoERuntimeError(model *hipLoadedModel) error {
 		return core.E(hipGemma4Q4Layer0Operation, "Gemma4 MoE expert geometry is invalid", nil)
 	}
 	for layer := 0; layer < model.modelInfo.NumLayers; layer++ {
+		prefix := core.Sprintf("language_model.model.layers.%d", layer)
+		if model.hasHIPTensor(prefix + ".router.proj.weight") {
+			router, rows, cols, err := model.loadedGemma4Q4ProjectionConfig(prefix+".router.proj", "router.proj", model.modelInfo.QuantGroup)
+			if err != nil {
+				return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("load MLX affine MoE router for layer %d", layer), err)
+			}
+			if rows != text.NumExperts || cols != model.modelInfo.HiddenSize || !router.hasCompleteWeightStorage() {
+				return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("MLX affine MoE router geometry mismatch for layer %d", layer), nil)
+			}
+			experts, ok, err := model.loadedGemma4MLXAffineExpertSource(prefix)
+			if err != nil {
+				return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("load MLX affine MoE experts for layer %d", layer), err)
+			}
+			if !ok {
+				return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("missing host-resident MLX affine MoE expert tensors for layer %d", layer), nil)
+			}
+			if err := hipValidateGemma4MLXAffineExpertSource(experts, text.NumExperts, model.modelInfo.HiddenSize, text.MoEIntermediateSize, model.modelInfo.QuantGroup, model.modelInfo.QuantBits); err != nil {
+				return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("validate MLX affine MoE experts for layer %d", layer), err)
+			}
+			continue
+		}
+		if !model.hipGGUFTensorAliasesEnabled() {
+			return core.E(hipGemma4Q4Layer0Operation, "GGUF tensor aliases are not enabled", nil)
+		}
 		routerName := core.Sprintf("blk.%d.ffn_gate_inp.weight", layer)
 		router, ok := model.tensors[routerName]
 		if !ok {
@@ -458,21 +537,45 @@ func (model *hipLoadedModel) loadedGemma4MoELayerConfig(layer, hidden int) (*hip
 	if err != nil {
 		return nil, err
 	}
-	router, err := model.loadedGemma4MoERouterProjectionConfig(layer, hidden, text.NumExperts)
-	if err != nil {
-		return nil, err
+	var router hipGemma4MoERouterProjectionConfig
+	var routerMLX hipMLXQ4DeviceWeightConfig
+	if model.hasHIPTensor(prefix + ".router.proj.weight") {
+		var routerRows, routerCols int
+		routerMLX, routerRows, routerCols, err = model.loadedGemma4Q4ProjectionConfig(prefix+".router.proj", "router.proj", model.modelInfo.QuantGroup)
+		if err != nil {
+			return nil, err
+		}
+		if routerRows != text.NumExperts || routerCols != hidden {
+			return nil, core.E("rocm.hip.Gemma4MoEConfig", "MLX affine router projection geometry is invalid", nil)
+		}
+	} else {
+		router, err = model.loadedGemma4MoERouterProjectionConfig(layer, hidden, text.NumExperts)
+		if err != nil {
+			return nil, err
+		}
 	}
 	perExpertScale, err := model.loadedGemma4Float32Vector(prefix+".router.per_expert_scale", "per-expert scale", text.NumExperts)
 	if err != nil {
 		return nil, err
 	}
-	gateUp, ok := model.hostTensors[core.Sprintf("blk.%d.ffn_gate_up_exps.weight", layer)]
-	if !ok {
-		return nil, core.E("rocm.hip.Gemma4MoEConfig", "expert gate/up tensor is required", nil)
+	storage := hipGemma4MoEExpertStorageGGUF
+	mlxExperts, mlxExpertsOK, err := model.loadedGemma4MLXAffineExpertSource(prefix)
+	if err != nil {
+		return nil, err
 	}
-	down, ok := model.hostTensors[core.Sprintf("blk.%d.ffn_down_exps.weight", layer)]
-	if !ok {
-		return nil, core.E("rocm.hip.Gemma4MoEConfig", "expert down tensor is required", nil)
+	var gateUp, down nativeTensorInfo
+	if mlxExpertsOK {
+		storage = hipGemma4MoEExpertStorageMLXAffine
+	} else {
+		var ok bool
+		gateUp, ok = model.hostTensors[core.Sprintf("blk.%d.ffn_gate_up_exps.weight", layer)]
+		if !ok {
+			return nil, core.E("rocm.hip.Gemma4MoEConfig", "expert gate/up tensor is required", nil)
+		}
+		down, ok = model.hostTensors[core.Sprintf("blk.%d.ffn_down_exps.weight", layer)]
+		if !ok {
+			return nil, core.E("rocm.hip.Gemma4MoEConfig", "expert down tensor is required", nil)
+		}
 	}
 	model.expertCacheMu.Lock()
 	if model.expertCache == nil {
@@ -490,15 +593,56 @@ func (model *hipLoadedModel) loadedGemma4MoELayerConfig(layer, hidden int) (*hip
 		PostFeedForwardNorm2:   post2,
 		RouterNorm:             routerNorm,
 		RouterProjection:       router,
+		RouterProjectionMLX:    routerMLX,
 		PerExpertScale:         perExpertScale,
 		ExpertCache:            cache,
+		ExpertStorage:          storage,
 		GateUpInfo:             gateUp,
 		DownInfo:               down,
+		MLXExperts:             mlxExperts,
+		MLXHiddenSize:          hidden,
+		MLXGroupSize:           model.modelInfo.QuantGroup,
+		MLXPreferredBits:       model.modelInfo.QuantBits,
 	}
 	if err := cfg.validate(hidden); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+func (model *hipLoadedModel) loadedGemma4MLXAffineExpertSource(layerPrefix string) (hipGemma4MLXAffineExpertSource, bool, error) {
+	for _, expertPrefix := range []string{
+		layerPrefix + ".experts",
+		layerPrefix + ".experts.switch_glu",
+	} {
+		gateUpBase := expertPrefix + ".gate_up_proj"
+		downBase := expertPrefix + ".down_proj"
+		names := []string{
+			gateUpBase + ".weight", gateUpBase + ".scales", gateUpBase + ".biases",
+			downBase + ".weight", downBase + ".scales", downBase + ".biases",
+		}
+		found := 0
+		for _, name := range names {
+			if _, ok := model.hostTensors[name]; ok {
+				found++
+			}
+		}
+		if found == 0 {
+			continue
+		}
+		if found != len(names) {
+			return hipGemma4MLXAffineExpertSource{}, false, core.E("rocm.hip.Gemma4MoEConfig", "MLX affine expert tensor set is incomplete", nil)
+		}
+		return hipGemma4MLXAffineExpertSource{
+			GateUp: hipGemma4MLXAffineTensorSet{
+				Weight: model.hostTensors[names[0]], Scales: model.hostTensors[names[1]], Biases: model.hostTensors[names[2]],
+			},
+			Down: hipGemma4MLXAffineTensorSet{
+				Weight: model.hostTensors[names[3]], Scales: model.hostTensors[names[4]], Biases: model.hostTensors[names[5]],
+			},
+		}, true, nil
+	}
+	return hipGemma4MLXAffineExpertSource{}, false, nil
 }
 
 func (model *hipLoadedModel) loadedGemma4ScaledNormConfig(name, label string, count int, scale float32) (hipRMSNormDeviceWeightConfig, error) {
@@ -592,9 +736,22 @@ func (cfg *hipGemma4MoELayerConfig) validate(hidden int) error {
 			return err
 		}
 	}
-	if cfg.RouterProjection.WeightPointer == 0 || cfg.RouterProjection.Rows != cfg.NumExperts ||
-		cfg.RouterProjection.Cols != hidden || cfg.RouterProjection.WeightBytes != uint64(cfg.NumExperts)*uint64(hidden)*4 {
+	hasGGUFRouter := cfg.RouterProjection.WeightPointer != 0
+	hasMLXRouter := cfg.RouterProjectionMLX.hasCompleteWeightStorage()
+	if hasGGUFRouter == hasMLXRouter {
+		return core.E("rocm.hip.Gemma4MoEConfig", "exactly one router projection format is required", nil)
+	}
+	if hasGGUFRouter && (cfg.RouterProjection.Rows != cfg.NumExperts || cfg.RouterProjection.Cols != hidden ||
+		cfg.RouterProjection.WeightBytes != uint64(cfg.NumExperts)*uint64(hidden)*4) {
 		return core.E("rocm.hip.Gemma4MoEConfig", "router projection geometry is invalid", nil)
+	}
+	if hasMLXRouter {
+		if cfg.RouterProjectionMLX.Rows != cfg.NumExperts || cfg.RouterProjectionMLX.Cols != hidden {
+			return core.E("rocm.hip.Gemma4MoEConfig", "MLX affine router projection geometry is invalid", nil)
+		}
+		if err := cfg.RouterProjectionMLX.validateInputCount(hidden); err != nil {
+			return core.E("rocm.hip.Gemma4MoEConfig", "MLX affine router projection config", err)
+		}
 	}
 	if len(cfg.PerExpertScale) != cfg.NumExperts || !rocmFloat32SliceFinite(cfg.PerExpertScale) {
 		return core.E("rocm.hip.Gemma4MoEConfig", "per-expert scale must match the expert count", nil)
@@ -602,24 +759,100 @@ func (cfg *hipGemma4MoELayerConfig) validate(hidden int) error {
 	if cfg.ExpertCache == nil {
 		return core.E("rocm.hip.Gemma4MoEConfig", "expert cache is required", nil)
 	}
-	if !hipGemma4ExpertFormatPairSupported(cfg.GateUpInfo, cfg.DownInfo) || len(cfg.GateUpInfo.Dimensions) != 3 ||
-		cfg.GateUpInfo.Dimensions[0] != uint64(hidden) || cfg.GateUpInfo.Dimensions[1] != uint64(2*cfg.ExpertIntermediateSize) ||
-		cfg.GateUpInfo.Dimensions[2] != uint64(cfg.NumExperts) {
-		return core.E("rocm.hip.Gemma4MoEConfig", "expert gate/up tensor geometry is invalid", nil)
-	}
-	if len(cfg.DownInfo.Dimensions) != 3 ||
-		cfg.DownInfo.Dimensions[0] != uint64(cfg.ExpertIntermediateSize) || cfg.DownInfo.Dimensions[1] != uint64(hidden) ||
-		cfg.DownInfo.Dimensions[2] != uint64(cfg.NumExperts) {
-		return core.E("rocm.hip.Gemma4MoEConfig", "expert down tensor geometry is invalid", nil)
+	if cfg.ExpertStorage == hipGemma4MoEExpertStorageMLXAffine {
+		if cfg.MLXHiddenSize != hidden {
+			return core.E("rocm.hip.Gemma4MoEConfig", "MLX affine expert hidden size mismatch", nil)
+		}
+		if err := hipValidateGemma4MLXAffineExpertSource(cfg.MLXExperts, cfg.NumExperts, hidden, cfg.ExpertIntermediateSize, cfg.MLXGroupSize, cfg.MLXPreferredBits); err != nil {
+			return err
+		}
+	} else {
+		if !hipGemma4ExpertFormatPairSupported(cfg.GateUpInfo, cfg.DownInfo) || len(cfg.GateUpInfo.Dimensions) != 3 ||
+			cfg.GateUpInfo.Dimensions[0] != uint64(hidden) || cfg.GateUpInfo.Dimensions[1] != uint64(2*cfg.ExpertIntermediateSize) ||
+			cfg.GateUpInfo.Dimensions[2] != uint64(cfg.NumExperts) {
+			return core.E("rocm.hip.Gemma4MoEConfig", "expert gate/up tensor geometry is invalid", nil)
+		}
+		if len(cfg.DownInfo.Dimensions) != 3 ||
+			cfg.DownInfo.Dimensions[0] != uint64(cfg.ExpertIntermediateSize) || cfg.DownInfo.Dimensions[1] != uint64(hidden) ||
+			cfg.DownInfo.Dimensions[2] != uint64(cfg.NumExperts) {
+			return core.E("rocm.hip.Gemma4MoEConfig", "expert down tensor geometry is invalid", nil)
+		}
 	}
 	return nil
+}
+
+func hipValidateGemma4MLXAffineExpertSource(source hipGemma4MLXAffineExpertSource, experts, hidden, expertFF, groupSize, preferredBits int) error {
+	gateWeight, err := hipGemma4MLXAffineExpertRank2Tensor(source.GateUp.Weight, experts, "U32", "expert gate/up weight")
+	if err != nil {
+		return err
+	}
+	gateScales, err := hipGemma4MLXAffineExpertRank2Tensor(source.GateUp.Scales, experts, "BF16", "expert gate/up scales")
+	if err != nil {
+		return err
+	}
+	gateBiases, err := hipGemma4MLXAffineExpertRank2Tensor(source.GateUp.Biases, experts, "BF16", "expert gate/up biases")
+	if err != nil {
+		return err
+	}
+	_, gateRows, gateCols, _, _, _, err := hipInferMLXAffineBitsFromTensorShapes(gateWeight, gateScales, gateBiases, groupSize, preferredBits, "expert gate/up")
+	if err != nil {
+		return err
+	}
+	if gateRows != 2*expertFF || gateCols != hidden {
+		return core.E("rocm.hip.Gemma4MoEConfig", "MLX affine expert gate/up geometry is invalid", nil)
+	}
+	downWeight, err := hipGemma4MLXAffineExpertRank2Tensor(source.Down.Weight, experts, "U32", "expert down weight")
+	if err != nil {
+		return err
+	}
+	downScales, err := hipGemma4MLXAffineExpertRank2Tensor(source.Down.Scales, experts, "BF16", "expert down scales")
+	if err != nil {
+		return err
+	}
+	downBiases, err := hipGemma4MLXAffineExpertRank2Tensor(source.Down.Biases, experts, "BF16", "expert down biases")
+	if err != nil {
+		return err
+	}
+	_, downRows, downCols, _, _, _, err := hipInferMLXAffineBitsFromTensorShapes(downWeight, downScales, downBiases, groupSize, preferredBits, "expert down")
+	if err != nil {
+		return err
+	}
+	if downRows != hidden || downCols != expertFF {
+		return core.E("rocm.hip.Gemma4MoEConfig", "MLX affine expert down geometry is invalid", nil)
+	}
+	return nil
+}
+
+func hipGemma4MLXAffineExpertRank2Tensor(info nativeTensorInfo, experts int, expectedType, label string) (hipTensor, error) {
+	if experts <= 0 || core.Upper(info.TypeName) != expectedType || len(info.Dimensions) != 3 || info.Dimensions[0] != uint64(experts) {
+		return hipTensor{}, core.E("rocm.hip.Gemma4MoEConfig", label+" type or shape mismatch", nil)
+	}
+	elementBytes := uint64(2)
+	if expectedType == "U32" {
+		elementBytes = 4
+	}
+	rows, cols := info.Dimensions[1], info.Dimensions[2]
+	if rows == 0 || cols == 0 || rows > ^uint64(0)/cols || rows*cols > ^uint64(0)/elementBytes {
+		return hipTensor{}, core.E("rocm.hip.Gemma4MoEConfig", label+" geometry overflows", nil)
+	}
+	perExpertBytes := rows * cols * elementBytes
+	if uint64(experts) > ^uint64(0)/perExpertBytes || info.ByteSize != uint64(experts)*perExpertBytes || info.SourcePath == "" {
+		return hipTensor{}, core.E("rocm.hip.Gemma4MoEConfig", label+" byte count or source path mismatch", nil)
+	}
+	return hipTensor{info: nativeTensorInfo{
+		TypeName: expectedType, Dimensions: []uint64{rows, cols}, ByteSize: perExpertBytes,
+	}}, nil
 }
 
 func (cfg *hipGemma4MoELayerConfig) expertEntry(expert int) (*hipGemma4ExpertCacheEntry, error) {
 	if cfg == nil || cfg.ExpertCache == nil {
 		return nil, core.E("rocm.hip.Gemma4MoE", "MoE expert cache is required", nil)
 	}
-	return cfg.ExpertCache.entry(hipGemma4ExpertCacheKey{Layer: cfg.Layer, Expert: expert}, cfg.GateUpInfo, cfg.DownInfo, cfg.NumExperts)
+	key := hipGemma4ExpertCacheKey{Layer: cfg.Layer, Expert: expert}
+	if cfg.ExpertStorage == hipGemma4MoEExpertStorageMLXAffine {
+		return cfg.ExpertCache.entryMLXAffine(key, cfg.MLXExperts, cfg.NumExperts, cfg.MLXHiddenSize, cfg.ExpertIntermediateSize, cfg.MLXGroupSize, cfg.MLXPreferredBits)
+	}
+	return cfg.ExpertCache.entry(key, cfg.GateUpInfo, cfg.DownInfo, cfg.NumExperts)
 }
 
 func hipRunGemma4MoEDeviceMLP(ctx context.Context, driver nativeHIPDriver, attentionResidual, localInput *hipDeviceByteBuffer, layer hipGemma4Q4Layer0Config, epsilon float32) (*hipDeviceByteBuffer, error) {
@@ -631,6 +864,21 @@ func hipRunGemma4MoEDeviceMLPWithWorkspace(ctx context.Context, driver nativeHIP
 		return hipRunGemma4MoEDeviceMLPAllocated(ctx, driver, attentionResidual, localInput, layer, epsilon)
 	}
 	return hipRunGemma4MoEDeviceMLPWithWorkspaceOutput(ctx, driver, attentionResidual, localInput, layer, epsilon, workspace, nil)
+}
+
+func hipRunGemma4MoERouterProjectionWithOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, moe *hipGemma4MoELayerConfig, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	if moe == nil {
+		return core.E("rocm.hip.Gemma4MoE", "MoE layer config is required", nil)
+	}
+	if moe.RouterProjectionMLX.hasCompleteWeightStorage() {
+		return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, moe.RouterProjectionMLX, output, workspace)
+	}
+	return hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(
+		ctx, driver, input,
+		moe.RouterProjection.WeightPointer, moe.RouterProjection.WeightBytes,
+		moe.RouterProjection.Rows, moe.RouterProjection.Cols,
+		hipProjectionWeightEncodingF32, output, workspace,
+	)
 }
 
 func hipRunGemma4MoEDeviceMLPWithWorkspaceOutput(ctx context.Context, driver nativeHIPDriver, attentionResidual, localInput *hipDeviceByteBuffer, layer hipGemma4Q4Layer0Config, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace, output *hipDeviceByteBuffer) (*hipDeviceByteBuffer, error) {
@@ -682,12 +930,7 @@ func hipRunGemma4MoEDeviceMLPWithWorkspaceOutput(ctx context.Context, driver nat
 	if err != nil {
 		return nil, err
 	}
-	if err := hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(
-		ctx, driver, routerInput,
-		moe.RouterProjection.WeightPointer, moe.RouterProjection.WeightBytes,
-		moe.RouterProjection.Rows, moe.RouterProjection.Cols,
-		hipProjectionWeightEncodingF32, routerScores, workspace,
-	); err != nil {
+	if err := hipRunGemma4MoERouterProjectionWithOutput(ctx, driver, routerInput, moe, routerScores, workspace); err != nil {
 		return nil, core.E("rocm.hip.Gemma4MoE", "run router projection", err)
 	}
 	routed, err := hipRunMoERouterKernelWithDeviceInputWorkspace(ctx, driver, routerScores, moe.TopKExperts, moe.Layer, workspace)
@@ -710,14 +953,29 @@ func hipRunGemma4MoEDeviceMLPWithWorkspaceOutput(ctx context.Context, driver nat
 		return nil, err
 	}
 	activationCount := len(entries) * moe.ExpertIntermediateSize
+	if moe.ExpertStorage == hipGemma4MoEExpertStorageMLXAffine {
+		activationCount = moe.ExpertIntermediateSize
+	}
 	activation, err := workspace.EnsureActivationOutput(driver, activationCount)
 	if err != nil {
 		return nil, err
 	}
-	if err := hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(
-		ctx, driver, expertInput, entries, routeWeights,
-		layer.HiddenSize, moe.ExpertIntermediateSize, activation, expertOutput, workspace,
-	); err != nil {
+	if moe.ExpertStorage == hipGemma4MoEExpertStorageMLXAffine {
+		downOutput, downErr := workspace.EnsureMoEExpertDownOutput(driver, layer.HiddenSize)
+		if downErr != nil {
+			return nil, downErr
+		}
+		err = hipRunGemma4MLXAffineSelectedExpertsWithWorkspace(
+			ctx, driver, expertInput, entries, routeWeights,
+			layer.HiddenSize, moe.ExpertIntermediateSize, activation, downOutput, expertOutput, workspace,
+		)
+	} else {
+		err = hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(
+			ctx, driver, expertInput, entries, routeWeights,
+			layer.HiddenSize, moe.ExpertIntermediateSize, activation, expertOutput, workspace,
+		)
+	}
+	if err != nil {
 		return nil, core.E("rocm.hip.Gemma4MoE", "run selected experts", err)
 	}
 
@@ -801,16 +1059,14 @@ func hipRunGemma4MoEDeviceMLPAllocated(ctx context.Context, driver nativeHIPDriv
 		return nil, core.E("rocm.hip.Gemma4MoE", "run router norm", err)
 	}
 	defer routerInput.Close()
-	routerScores, err := hipRunProjectionKernelWithDeviceInputWeightEncoding(
-		ctx, driver, routerInput,
-		moe.RouterProjection.WeightPointer, moe.RouterProjection.WeightBytes,
-		moe.RouterProjection.Rows, moe.RouterProjection.Cols,
-		hipProjectionWeightEncodingF32,
-	)
+	routerScores, err := hipAllocateByteBuffer(driver, "rocm.hip.Gemma4MoE", "router scores", uint64(moe.NumExperts*4), moe.NumExperts)
 	if err != nil {
-		return nil, core.E("rocm.hip.Gemma4MoE", "run router projection", err)
+		return nil, err
 	}
 	defer routerScores.Close()
+	if err := hipRunGemma4MoERouterProjectionWithOutput(ctx, driver, routerInput, moe, routerScores, nil); err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "run router projection", err)
+	}
 	routed, err := hipRunMoERouterKernelWithDeviceInput(ctx, driver, routerScores, moe.TopKExperts, moe.Layer)
 	if err != nil {
 		return nil, core.E("rocm.hip.Gemma4MoE", "select experts", err)
@@ -832,15 +1088,31 @@ func hipRunGemma4MoEDeviceMLPAllocated(ctx context.Context, driver nativeHIPDriv
 	}
 	defer expertOutput.Close()
 	activationCount := len(entries) * moe.ExpertIntermediateSize
+	if moe.ExpertStorage == hipGemma4MoEExpertStorageMLXAffine {
+		activationCount = moe.ExpertIntermediateSize
+	}
 	activation, err := hipAllocateByteBuffer(driver, "rocm.hip.Gemma4MoE", "selected expert activation", uint64(activationCount*4), activationCount)
 	if err != nil {
 		return nil, err
 	}
 	defer activation.Close()
-	if err := hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(
-		ctx, driver, expertInput, entries, routeWeights,
-		layer.HiddenSize, moe.ExpertIntermediateSize, activation, expertOutput,
-	); err != nil {
+	if moe.ExpertStorage == hipGemma4MoEExpertStorageMLXAffine {
+		downOutput, downErr := hipAllocateByteBuffer(driver, "rocm.hip.Gemma4MoE", "selected expert down output", uint64(layer.HiddenSize*4), layer.HiddenSize)
+		if downErr != nil {
+			return nil, downErr
+		}
+		err = hipRunGemma4MLXAffineSelectedExpertsWithWorkspace(
+			ctx, driver, expertInput, entries, routeWeights,
+			layer.HiddenSize, moe.ExpertIntermediateSize, activation, downOutput, expertOutput, nil,
+		)
+		_ = downOutput.Close()
+	} else {
+		err = hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(
+			ctx, driver, expertInput, entries, routeWeights,
+			layer.HiddenSize, moe.ExpertIntermediateSize, activation, expertOutput,
+		)
+	}
+	if err != nil {
 		return nil, core.E("rocm.hip.Gemma4MoE", "run selected experts", err)
 	}
 
@@ -981,6 +1253,174 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 		GateUpRows: gateUpRows, GateUpCols: gateUpCols,
 		DownRows: downRows, DownCols: downCols,
 		GateUpFormat: gateUpFormat, DownFormat: downFormat,
+		bytes: entryBytes, lastUse: cache.clock,
+	}
+	cache.entries[key] = entry
+	cache.bytes += entryBytes
+	return entry, nil
+}
+
+func (cache *hipGemma4ExpertCache) entryMLXAffine(key hipGemma4ExpertCacheKey, source hipGemma4MLXAffineExpertSource, expectedExperts, hidden, expertFF, groupSize, preferredBits int) (*hipGemma4ExpertCacheEntry, error) {
+	const operation = "rocm.hip.Gemma4ExpertCache"
+	if cache == nil || cache.driver == nil || !cache.driver.Available() {
+		return nil, core.E(operation, "HIP driver is not available", nil)
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	cache.clock++
+	if entry := cache.entries[key]; entry != nil {
+		if entry.Storage != hipGemma4MoEExpertStorageMLXAffine {
+			return nil, core.E(operation, "cached expert storage format mismatch", nil)
+		}
+		cache.stats.Hits++
+		entry.lastUse = cache.clock
+		if cache.clock%hipGemma4ExpertCacheRefreshEvery == 0 {
+			if err := cache.refreshAdaptiveBudget(entry.bytes); err != nil {
+				return nil, err
+			}
+		}
+		return entry, nil
+	}
+	cache.stats.Misses++
+
+	gateUpWeight, gateUpWeightRows, gateUpPackedCols, err := cache.mlxAffineExpertTensorSlice(source.GateUp.Weight, key.Expert, expectedExperts, "U32")
+	if err != nil {
+		return nil, core.E(operation, "resolve MLX affine expert gate/up weight slice", err)
+	}
+	gateUpScales, gateUpScaleRows, gateUpGroups, err := cache.mlxAffineExpertTensorSlice(source.GateUp.Scales, key.Expert, expectedExperts, "BF16")
+	if err != nil {
+		return nil, core.E(operation, "resolve MLX affine expert gate/up scale slice", err)
+	}
+	gateUpBiases, gateUpBiasRows, gateUpBiasGroups, err := cache.mlxAffineExpertTensorSlice(source.GateUp.Biases, key.Expert, expectedExperts, "BF16")
+	if err != nil {
+		return nil, core.E(operation, "resolve MLX affine expert gate/up bias slice", err)
+	}
+	downWeight, downWeightRows, downPackedCols, err := cache.mlxAffineExpertTensorSlice(source.Down.Weight, key.Expert, expectedExperts, "U32")
+	if err != nil {
+		return nil, core.E(operation, "resolve MLX affine expert down weight slice", err)
+	}
+	downScales, downScaleRows, downGroups, err := cache.mlxAffineExpertTensorSlice(source.Down.Scales, key.Expert, expectedExperts, "BF16")
+	if err != nil {
+		return nil, core.E(operation, "resolve MLX affine expert down scale slice", err)
+	}
+	downBiases, downBiasRows, downBiasGroups, err := cache.mlxAffineExpertTensorSlice(source.Down.Biases, key.Expert, expectedExperts, "BF16")
+	if err != nil {
+		return nil, core.E(operation, "resolve MLX affine expert down bias slice", err)
+	}
+
+	gateUpWeightTensor := hipTensor{info: nativeTensorInfo{TypeName: "U32", Dimensions: []uint64{uint64(gateUpWeightRows), uint64(gateUpPackedCols)}, ByteSize: uint64(len(gateUpWeight))}}
+	gateUpScaleTensor := hipTensor{info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{uint64(gateUpScaleRows), uint64(gateUpGroups)}, ByteSize: uint64(len(gateUpScales))}}
+	gateUpBiasTensor := hipTensor{info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{uint64(gateUpBiasRows), uint64(gateUpBiasGroups)}, ByteSize: uint64(len(gateUpBiases))}}
+	gateUpBits, gateUpRows, gateUpCols, gateUpGroupSize, gateUpGroupCount, gateUpPacked, err := hipInferMLXAffineBitsFromTensorShapes(
+		gateUpWeightTensor, gateUpScaleTensor, gateUpBiasTensor, groupSize, preferredBits, "expert gate/up",
+	)
+	if err != nil {
+		return nil, err
+	}
+	downWeightTensor := hipTensor{info: nativeTensorInfo{TypeName: "U32", Dimensions: []uint64{uint64(downWeightRows), uint64(downPackedCols)}, ByteSize: uint64(len(downWeight))}}
+	downScaleTensor := hipTensor{info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{uint64(downScaleRows), uint64(downGroups)}, ByteSize: uint64(len(downScales))}}
+	downBiasTensor := hipTensor{info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{uint64(downBiasRows), uint64(downBiasGroups)}, ByteSize: uint64(len(downBiases))}}
+	downBits, downRows, downCols, downGroupSize, downGroupCount, downPacked, err := hipInferMLXAffineBitsFromTensorShapes(
+		downWeightTensor, downScaleTensor, downBiasTensor, groupSize, preferredBits, "expert down",
+	)
+	if err != nil {
+		return nil, err
+	}
+	if gateUpRows != 2*expertFF || gateUpCols != hidden || downRows != hidden || downCols != expertFF {
+		return nil, core.E(operation, "MLX affine expert tensor geometry mismatch", nil)
+	}
+
+	entryBytes := uint64(len(gateUpWeight) + len(gateUpScales) + len(gateUpBiases) + len(downWeight) + len(downScales) + len(downBiases))
+	if err := cache.refreshAdaptiveBudget(entryBytes); err != nil {
+		return nil, err
+	}
+	if entryBytes > cache.maxBytes {
+		return nil, core.E(operation, "one expert exceeds the cache byte limit", nil)
+	}
+	for cache.bytes+entryBytes > cache.maxBytes {
+		if err := cache.evictOldest(); err != nil {
+			return nil, err
+		}
+	}
+
+	var uploaded []*hipDeviceByteBuffer
+	upload := func(label string, payload []byte) (*hipDeviceByteBuffer, error) {
+		buffer, uploadErr := cache.uploadExpertBuffer(label, payload, len(payload))
+		if uploadErr != nil {
+			for _, existing := range uploaded {
+				_ = existing.Close()
+			}
+			return nil, uploadErr
+		}
+		uploaded = append(uploaded, buffer)
+		return buffer, nil
+	}
+	gateUpWeightBuffer, err := upload("MLX affine expert gate/up weight", gateUpWeight)
+	if err != nil {
+		return nil, err
+	}
+	gateUpScaleBuffer, err := upload("MLX affine expert gate/up scales", gateUpScales)
+	if err != nil {
+		return nil, err
+	}
+	gateUpBiasBuffer, err := upload("MLX affine expert gate/up biases", gateUpBiases)
+	if err != nil {
+		return nil, err
+	}
+	downWeightBuffer, err := upload("MLX affine expert down weight", downWeight)
+	if err != nil {
+		return nil, err
+	}
+	downScaleBuffer, err := upload("MLX affine expert down scales", downScales)
+	if err != nil {
+		return nil, err
+	}
+	downBiasBuffer, err := upload("MLX affine expert down biases", downBiases)
+	if err != nil {
+		return nil, err
+	}
+
+	gateWeightBytes := uint64(expertFF) * uint64(gateUpPacked) * 4
+	gateScaleBytes := uint64(expertFF) * uint64(gateUpGroupCount) * 2
+	gate := hipMLXQ4DeviceWeightConfig{
+		WeightPointer: gateUpWeightBuffer.Pointer(), ScalePointer: gateUpScaleBuffer.Pointer(), BiasPointer: gateUpBiasBuffer.Pointer(),
+		WeightBytes: gateWeightBytes, ScaleBytes: gateScaleBytes, BiasBytes: gateScaleBytes,
+		Rows: expertFF, Cols: hidden, GroupSize: gateUpGroupSize, Bits: gateUpBits,
+	}
+	up := gate
+	up.WeightPointer += nativeDevicePointer(gateWeightBytes)
+	up.ScalePointer += nativeDevicePointer(gateScaleBytes)
+	up.BiasPointer += nativeDevicePointer(gateScaleBytes)
+	down := hipMLXQ4DeviceWeightConfig{
+		WeightPointer: downWeightBuffer.Pointer(), ScalePointer: downScaleBuffer.Pointer(), BiasPointer: downBiasBuffer.Pointer(),
+		WeightBytes: uint64(downRows) * uint64(downPacked) * 4,
+		ScaleBytes:  uint64(downRows) * uint64(downGroupCount) * 2,
+		BiasBytes:   uint64(downRows) * uint64(downGroupCount) * 2,
+		Rows:        downRows, Cols: downCols, GroupSize: downGroupSize, Bits: downBits,
+	}
+	if err := gate.validateInputCount(hidden); err != nil {
+		for _, buffer := range uploaded {
+			_ = buffer.Close()
+		}
+		return nil, core.E(operation, "validate MLX affine expert gate projection", err)
+	}
+	if err := up.validateInputCount(hidden); err != nil {
+		for _, buffer := range uploaded {
+			_ = buffer.Close()
+		}
+		return nil, core.E(operation, "validate MLX affine expert up projection", err)
+	}
+	if err := down.validateInputCount(expertFF); err != nil {
+		for _, buffer := range uploaded {
+			_ = buffer.Close()
+		}
+		return nil, core.E(operation, "validate MLX affine expert down projection", err)
+	}
+	entry := &hipGemma4ExpertCacheEntry{
+		Storage:         hipGemma4MoEExpertStorageMLXAffine,
+		MLXGateUpWeight: gateUpWeightBuffer, MLXGateUpScales: gateUpScaleBuffer, MLXGateUpBiases: gateUpBiasBuffer,
+		MLXDownWeight: downWeightBuffer, MLXDownScales: downScaleBuffer, MLXDownBiases: downBiasBuffer,
+		MLXGate: gate, MLXUp: up, MLXDown: down,
 		bytes: entryBytes, lastUse: cache.clock,
 	}
 	cache.entries[key] = entry
@@ -1171,8 +1611,28 @@ func (entry *hipGemma4ExpertCacheEntry) Close() error {
 	if err := entry.Down.Close(); err != nil {
 		lastErr = err
 	}
+	for _, buffer := range []*hipDeviceByteBuffer{
+		entry.MLXGateUpWeight, entry.MLXGateUpScales, entry.MLXGateUpBiases,
+		entry.MLXDownWeight, entry.MLXDownScales, entry.MLXDownBiases,
+	} {
+		if buffer == nil {
+			continue
+		}
+		if err := buffer.Close(); err != nil {
+			lastErr = err
+		}
+	}
 	entry.GateUp = nil
 	entry.Down = nil
+	entry.MLXGateUpWeight = nil
+	entry.MLXGateUpScales = nil
+	entry.MLXGateUpBiases = nil
+	entry.MLXDownWeight = nil
+	entry.MLXDownScales = nil
+	entry.MLXDownBiases = nil
+	entry.MLXGate = hipMLXQ4DeviceWeightConfig{}
+	entry.MLXUp = hipMLXQ4DeviceWeightConfig{}
+	entry.MLXDown = hipMLXQ4DeviceWeightConfig{}
 	return lastErr
 }
 
@@ -1311,6 +1771,69 @@ func (cache *hipGemma4ExpertCache) expertTensorSlice(info nativeTensorInfo, expe
 	}
 	payload := source.data[int(start):int(end)]
 	return payload, rows, cols, format, nil
+}
+
+func (cache *hipGemma4ExpertCache) mlxAffineExpertTensorSlice(info nativeTensorInfo, expert, expectedExperts int, expectedType string) ([]byte, int, int, error) {
+	const operation = "rocm.hip.Gemma4ExpertCache"
+	elementBytes := uint64(0)
+	switch core.Upper(expectedType) {
+	case "U32":
+		elementBytes = 4
+	case "BF16":
+		elementBytes = 2
+	default:
+		return nil, 0, 0, core.E(operation, "unsupported MLX affine expert element type", nil)
+	}
+	if core.Upper(info.TypeName) != core.Upper(expectedType) || len(info.Dimensions) != 3 {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor type or rank mismatch", nil)
+	}
+	experts64, rows64, cols64 := info.Dimensions[0], info.Dimensions[1], info.Dimensions[2]
+	maxInt := uint64(^uint(0) >> 1)
+	if experts64 == 0 || rows64 == 0 || cols64 == 0 || experts64 > maxInt || rows64 > maxInt || cols64 > maxInt {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor geometry is invalid", nil)
+	}
+	experts, rows, cols := int(experts64), int(rows64), int(cols64)
+	if expectedExperts > 0 && experts != expectedExperts {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor count mismatch", nil)
+	}
+	if expert < 0 || expert >= experts {
+		return nil, 0, 0, core.E(operation, "expert index is outside the MLX affine tensor", nil)
+	}
+	if rows64 > ^uint64(0)/cols64 || rows64*cols64 > ^uint64(0)/elementBytes {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor byte count overflows", nil)
+	}
+	sliceBytes := rows64 * cols64 * elementBytes
+	if sliceBytes == 0 || experts64 > ^uint64(0)/sliceBytes || info.ByteSize != sliceBytes*experts64 || sliceBytes > maxInt {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor byte count mismatch", nil)
+	}
+	if info.SourcePath == "" {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor source path is required", nil)
+	}
+	source, err := cache.mappedExpertSource(info.SourcePath)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if info.DataOffset < 0 {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor data offset is invalid", nil)
+	}
+	start := uint64(info.DataOffset)
+	if info.Offset > ^uint64(0)-start {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor slice offset overflows", nil)
+	}
+	start += info.Offset
+	expertOffset := uint64(expert) * sliceBytes
+	if expertOffset > ^uint64(0)-start {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor slice offset overflows", nil)
+	}
+	start += expertOffset
+	if sliceBytes > ^uint64(0)-start {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor slice range overflows", nil)
+	}
+	end := start + sliceBytes
+	if end > uint64(len(source.data)) {
+		return nil, 0, 0, core.E(operation, "MLX affine expert tensor slice is truncated", nil)
+	}
+	return source.data[int(start):int(end)], rows, cols, nil
 }
 
 func (args hipGGUFQ4KExpandLaunchArgs) Binary() ([]byte, error) {
@@ -1504,6 +2027,64 @@ func (args hipGGUFQ4_0SelectedExpertsLaunchArgs) BinaryInto(payload []byte) ([]b
 	binary.LittleEndian.PutUint32(payload[232:], args.GateUpFormat)
 	binary.LittleEndian.PutUint32(payload[236:], args.DownFormat)
 	return payload, nil
+}
+
+func hipRunGemma4MLXAffineSelectedExpertsWithWorkspace(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, entries []*hipGemma4ExpertCacheEntry, routeWeights []float32, hidden, expertFF int, activation, downOutput, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	const operation = "rocm.hip.Gemma4MLXAffineSelectedExperts"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if driver == nil || !driver.Available() {
+		return core.E(operation, "HIP driver is not available", nil)
+	}
+	if hidden <= 0 || expertFF <= 0 || len(entries) == 0 || len(entries) != len(routeWeights) || len(entries) > hipGGUFQ4_0SelectedExpertsMaxTopK {
+		return core.E(operation, "selected expert geometry is invalid", nil)
+	}
+	if input == nil || input.Pointer() == 0 || input.Count() != hidden || input.SizeBytes() != uint64(hidden*4) {
+		return core.E(operation, "selected expert input must match the hidden size", nil)
+	}
+	if activation == nil || activation.Pointer() == 0 || activation.Count() != expertFF || activation.SizeBytes() != uint64(expertFF*4) {
+		return core.E(operation, "selected expert activation must match the expert intermediate size", nil)
+	}
+	for label, buffer := range map[string]*hipDeviceByteBuffer{"down output": downOutput, "output": output} {
+		if buffer == nil || buffer.Pointer() == 0 || buffer.Count() != hidden || buffer.SizeBytes() != uint64(hidden*4) {
+			return core.E(operation, label+" must match the hidden size", nil)
+		}
+	}
+	if downOutput.Pointer() == output.Pointer() {
+		return core.E(operation, "down output and accumulated output must not alias", nil)
+	}
+	for index, entry := range entries {
+		if entry == nil || entry.Storage != hipGemma4MoEExpertStorageMLXAffine {
+			return core.E(operation, core.Sprintf("selected expert %d is not MLX affine", index), nil)
+		}
+		if math.IsNaN(float64(routeWeights[index])) || math.IsInf(float64(routeWeights[index]), 0) {
+			return core.E(operation, "route weights must be finite", nil)
+		}
+		if entry.MLXGate.Rows != expertFF || entry.MLXGate.Cols != hidden ||
+			entry.MLXUp.Rows != expertFF || entry.MLXUp.Cols != hidden ||
+			entry.MLXDown.Rows != hidden || entry.MLXDown.Cols != expertFF {
+			return core.E(operation, "selected expert projection geometry mismatch", nil)
+		}
+	}
+	if err := hipMemsetDevice(driver, output.Pointer(), 0, output.SizeBytes()); err != nil {
+		return core.E(operation, "clear accumulated expert output", err)
+	}
+	for index, entry := range entries {
+		if err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, entry.MLXGate, entry.MLXUp, activation, workspace); err != nil {
+			return core.E(operation, core.Sprintf("run expert %d gate/up projection", index), err)
+		}
+		if err := hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, activation, entry.MLXDown, downOutput, workspace); err != nil {
+			return core.E(operation, core.Sprintf("run expert %d down projection", index), err)
+		}
+		if err := hipRunVectorScaleDeviceKernelOutputWithWorkspace(ctx, driver, downOutput, routeWeights[index], downOutput, workspace); err != nil {
+			return core.E(operation, core.Sprintf("scale expert %d output", index), err)
+		}
+		if err := hipRunVectorAddScaledDeviceKernelOutputWithWorkspace(ctx, driver, output, downOutput, 1, output, workspace); err != nil {
+			return core.E(operation, core.Sprintf("accumulate expert %d output", index), err)
+		}
+	}
+	return nil
 }
 
 func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, entries []*hipGemma4ExpertCacheEntry, routeWeights []float32, hidden, expertFF int, activation, output *hipDeviceByteBuffer) error {

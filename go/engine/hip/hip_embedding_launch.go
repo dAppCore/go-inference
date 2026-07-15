@@ -13,12 +13,14 @@ import (
 )
 
 const (
-	hipEmbeddingMeanPoolLaunchArgsVersion uint32 = 1
-	hipEmbeddingMeanPoolLaunchArgsBytes          = 64
-	hipEmbeddingLookupLaunchArgsVersion   uint32 = 1
-	hipEmbeddingLookupLaunchArgsBytes            = 104
-	hipRerankCosineLaunchArgsVersion      uint32 = 1
-	hipRerankCosineLaunchArgsBytes               = 64
+	hipEmbeddingMeanPoolLaunchArgsVersion    uint32 = 1
+	hipEmbeddingMeanPoolLaunchArgsBytes             = 64
+	hipEmbeddingLookupLaunchArgsVersion      uint32 = 1
+	hipEmbeddingLookupLaunchArgsBytes               = 104
+	hipDiffusionExpectedEmbeddingArgsVersion uint32 = 1
+	hipDiffusionExpectedEmbeddingArgsBytes          = 120
+	hipRerankCosineLaunchArgsVersion         uint32 = 1
+	hipRerankCosineLaunchArgsBytes                  = 64
 )
 
 const hipEmbeddingMeanPoolLaunchFlagNormalize uint32 = 1
@@ -112,6 +114,26 @@ type hipDeviceEmbeddingLookupConfig struct {
 	ScaleBytes       uint64
 	BiasBytes        uint64
 	QuantBits        int
+}
+
+type hipDiffusionExpectedEmbeddingLaunchArgs struct {
+	ProbabilityPointer nativeDevicePointer
+	EmbeddingPointer   nativeDevicePointer
+	ScalePointer       nativeDevicePointer
+	BiasPointer        nativeDevicePointer
+	OutputPointer      nativeDevicePointer
+	Rows               int
+	VocabSize          int
+	HiddenSize         int
+	TableEncoding      uint32
+	GroupSize          int
+	QuantBits          int
+	ProbabilityBytes   uint64
+	EmbeddingBytes     uint64
+	ScaleBytes         uint64
+	BiasBytes          uint64
+	OutputBytes        uint64
+	OutputScale        float32
 }
 
 func (cfg hipDeviceEmbeddingLookupConfig) validate(tokenIDs []int32) error {
@@ -553,6 +575,157 @@ func (req hipEmbeddingLookupRequest) launchArgs(buffers *hipEmbeddingLookupDevic
 
 func (args hipEmbeddingLookupLaunchArgs) Binary() ([]byte, error) {
 	return args.BinaryInto(nil)
+}
+
+func (args hipDiffusionExpectedEmbeddingLaunchArgs) Binary() ([]byte, error) {
+	if args.ProbabilityPointer == 0 || args.EmbeddingPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "probability, embedding, and output pointers are required", nil)
+	}
+	rows, err := rocmDeviceKVPositiveUint32("diffusion expected embedding rows", args.Rows)
+	if err != nil {
+		return nil, err
+	}
+	vocab, err := rocmDeviceKVPositiveUint32("diffusion expected embedding vocab size", args.VocabSize)
+	if err != nil {
+		return nil, err
+	}
+	hidden, err := rocmDeviceKVPositiveUint32("diffusion expected embedding hidden size", args.HiddenSize)
+	if err != nil {
+		return nil, err
+	}
+	if args.ProbabilityBytes != uint64(rows)*uint64(vocab)*4 {
+		return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "probability byte count mismatch", nil)
+	}
+	if args.OutputBytes != uint64(rows)*uint64(hidden)*4 {
+		return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "output byte count mismatch", nil)
+	}
+	var groupSize, bits uint32
+	switch args.TableEncoding {
+	case hipEmbeddingTableEncodingF32:
+		if args.EmbeddingBytes != uint64(vocab)*uint64(hidden)*4 {
+			return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "F32 embedding byte count mismatch", nil)
+		}
+	case hipEmbeddingTableEncodingBF16:
+		if args.EmbeddingBytes != uint64(vocab)*uint64(hidden)*2 {
+			return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "BF16 embedding byte count mismatch", nil)
+		}
+	case hipEmbeddingTableEncodingMLXQ4:
+		if args.ScalePointer == 0 || args.BiasPointer == 0 {
+			return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "MLX affine scale and bias pointers are required", nil)
+		}
+		groupSize, err = rocmDeviceKVPositiveUint32("diffusion expected embedding group size", args.GroupSize)
+		if err != nil {
+			return nil, err
+		}
+		bits, err = rocmDeviceKVPositiveUint32("diffusion expected embedding quant bits", hipMLXQ4ProjectionBitsOrDefault(args.QuantBits))
+		if err != nil {
+			return nil, err
+		}
+		packedPerRow, groupsPerRow, err := hipMLXAffineLaunchPackedGroups("rocm.hip.DiffusionExpectedEmbeddingLaunch", hidden, groupSize, bits)
+		if err != nil {
+			return nil, err
+		}
+		if args.EmbeddingBytes != uint64(vocab)*packedPerRow*4 ||
+			args.ScaleBytes != uint64(vocab)*groupsPerRow*2 ||
+			args.BiasBytes != uint64(vocab)*groupsPerRow*2 {
+			return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "MLX affine embedding byte count mismatch", nil)
+		}
+	default:
+		return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "unsupported embedding table encoding", nil)
+	}
+	if math.IsNaN(float64(args.OutputScale)) || math.IsInf(float64(args.OutputScale), 0) {
+		return nil, core.E("rocm.hip.DiffusionExpectedEmbeddingLaunch", "output scale must be finite", nil)
+	}
+	payload := hipBorrowLaunchPacket(hipDiffusionExpectedEmbeddingArgsBytes)
+	binary.LittleEndian.PutUint32(payload[0:], hipDiffusionExpectedEmbeddingArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.ProbabilityPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.EmbeddingPointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(args.ScalePointer))
+	binary.LittleEndian.PutUint64(payload[32:], uint64(args.BiasPointer))
+	binary.LittleEndian.PutUint64(payload[40:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[48:], rows)
+	binary.LittleEndian.PutUint32(payload[52:], vocab)
+	binary.LittleEndian.PutUint32(payload[56:], hidden)
+	binary.LittleEndian.PutUint32(payload[60:], args.TableEncoding)
+	binary.LittleEndian.PutUint32(payload[64:], groupSize)
+	binary.LittleEndian.PutUint32(payload[68:], bits)
+	binary.LittleEndian.PutUint64(payload[72:], args.ProbabilityBytes)
+	binary.LittleEndian.PutUint64(payload[80:], args.EmbeddingBytes)
+	binary.LittleEndian.PutUint64(payload[88:], args.ScaleBytes)
+	binary.LittleEndian.PutUint64(payload[96:], args.BiasBytes)
+	binary.LittleEndian.PutUint64(payload[104:], args.OutputBytes)
+	if args.OutputScale != 0 && args.OutputScale != 1 {
+		binary.LittleEndian.PutUint32(payload[112:], math.Float32bits(args.OutputScale))
+	}
+	return payload, nil
+}
+
+func hipRunDiffusionExpectedEmbeddingKernel(ctx context.Context, driver nativeHIPDriver, probabilities []float32, rows int, cfg hipDeviceEmbeddingLookupConfig, outputScale float32) ([]float32, error) {
+	const op = "rocm.hip.DiffusionExpectedEmbeddingLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return nil, err
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E(op, "HIP driver is not available", nil)
+	}
+	if rows <= 0 || cfg.VocabSize <= 0 || cfg.HiddenSize <= 0 || len(probabilities) != rows*cfg.VocabSize {
+		return nil, core.E(op, "probability and embedding geometry mismatch", nil)
+	}
+	probabilityBuffer, err := hipUploadGemma4Q4Float32Input(driver, "diffusion probabilities", probabilities)
+	if err != nil {
+		return nil, err
+	}
+	defer probabilityBuffer.Close()
+	outputCount := rows * cfg.HiddenSize
+	output, err := hipAllocateByteBuffer(driver, op, "diffusion expected embedding output", uint64(outputCount*4), outputCount)
+	if err != nil {
+		return nil, err
+	}
+	defer output.Close()
+	args, err := (hipDiffusionExpectedEmbeddingLaunchArgs{
+		ProbabilityPointer: probabilityBuffer.Pointer(),
+		EmbeddingPointer:   cfg.EmbeddingPointer,
+		ScalePointer:       cfg.ScalePointer,
+		BiasPointer:        cfg.BiasPointer,
+		OutputPointer:      output.Pointer(),
+		Rows:               rows,
+		VocabSize:          cfg.VocabSize,
+		HiddenSize:         cfg.HiddenSize,
+		TableEncoding:      cfg.TableEncoding,
+		GroupSize:          cfg.GroupSize,
+		QuantBits:          cfg.QuantBits,
+		ProbabilityBytes:   probabilityBuffer.SizeBytes(),
+		EmbeddingBytes:     cfg.EmbeddingBytes,
+		ScaleBytes:         cfg.ScaleBytes,
+		BiasBytes:          cfg.BiasBytes,
+		OutputBytes:        output.SizeBytes(),
+		OutputScale:        outputScale,
+	}).Binary()
+	if err != nil {
+		return nil, err
+	}
+	gridX, err := rocmDeviceKVPositiveUint32("diffusion expected embedding hidden blocks", (cfg.HiddenSize+255)/256)
+	if err != nil {
+		return nil, err
+	}
+	gridY, err := rocmDeviceKVPositiveUint32("diffusion expected embedding rows", rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := hipLaunchKernel(driver, hipKernelLaunchConfig{
+		Name:   hipKernelNameDiffusionExpectedEmbedding,
+		Args:   args,
+		GridX:  gridX,
+		GridY:  gridY,
+		GridZ:  1,
+		BlockX: 256,
+		BlockY: 1,
+		BlockZ: 1,
+	}); err != nil {
+		return nil, err
+	}
+	return hipReadFloat32DeviceOutput(output, op, "diffusion expected embedding output", outputCount)
 }
 
 func (args hipEmbeddingLookupLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {

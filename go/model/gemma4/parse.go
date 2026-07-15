@@ -392,6 +392,15 @@ func parseGemma4Config(data []byte) (*Gemma4TextConfig, error) {
 	case wrapper.MoEIntermediateSize != nil:
 		cfg.MoEIntermediateSize = cloneGemma4Int32Ptr(wrapper.MoEIntermediateSize)
 	}
+	if !cfg.EnableMoEBlockDeclared && !cfg.EnableMoEBlock &&
+		cfg.NumExperts != nil && *cfg.NumExperts > 0 &&
+		cfg.TopKExperts != nil && *cfg.TopKExperts > 0 &&
+		cfg.MoEIntermediateSize != nil && *cfg.MoEIntermediateSize > 0 {
+		// DiffusionGemma declares complete expert geometry but omits the
+		// redundant enable_moe_block flag. Geometry is authoritative here;
+		// an explicitly declared false flag still wins above.
+		cfg.EnableMoEBlock = true
+	}
 	switch {
 	case wrapper.SlidingWindow != nil:
 		cfg.SlidingWindow = *wrapper.SlidingWindow

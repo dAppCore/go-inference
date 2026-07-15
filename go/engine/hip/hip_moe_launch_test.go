@@ -289,6 +289,104 @@ func TestHIPGGUFMixedSelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing
 	}
 }
 
+func TestHIPMLXAffineSelectedExpertsLaunch_Good(t *testing.T) {
+	const (
+		hidden    = 32
+		expertFF  = 32
+		groupSize = 32
+		bits      = 4
+	)
+	driver := &fakeHIPDriver{available: true}
+	inputValues := make([]float32, hidden)
+	for index := range inputValues {
+		inputValues[index] = 1
+	}
+	inputPayload, err := hipFloat32Payload(inputValues)
+	core.RequireNoError(t, err)
+	input, err := hipUploadByteBuffer(driver, "test", "MLX affine selected expert input", inputPayload, hidden)
+	core.RequireNoError(t, err)
+	defer input.Close()
+
+	var owned []*hipDeviceByteBuffer
+	projection := func(rows, cols int, biasValue float32) hipMLXQ4DeviceWeightConfig {
+		t.Helper()
+		packedCols := cols * bits / 32
+		groups := cols / groupSize
+		weight, allocErr := hipUploadByteBuffer(driver, "test", "MLX affine selected expert weight", make([]byte, rows*packedCols*4), rows*packedCols)
+		core.RequireNoError(t, allocErr)
+		scales, allocErr := hipUploadByteBuffer(driver, "test", "MLX affine selected expert scales", make([]byte, rows*groups*2), rows*groups)
+		core.RequireNoError(t, allocErr)
+		biasPayload := make([]byte, rows*groups*2)
+		for index := 0; index < rows*groups; index++ {
+			binary.LittleEndian.PutUint16(biasPayload[index*2:], hipFloat32ToBFloat16(biasValue))
+		}
+		biases, allocErr := hipUploadByteBuffer(driver, "test", "MLX affine selected expert biases", biasPayload, rows*groups)
+		core.RequireNoError(t, allocErr)
+		owned = append(owned, weight, scales, biases)
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: weight.Pointer(), ScalePointer: scales.Pointer(), BiasPointer: biases.Pointer(),
+			WeightBytes: weight.SizeBytes(), ScaleBytes: scales.SizeBytes(), BiasBytes: biases.SizeBytes(),
+			Rows: rows, Cols: cols, GroupSize: groupSize, Bits: bits,
+		}
+	}
+	entries := []*hipGemma4ExpertCacheEntry{
+		{Storage: hipGemma4MoEExpertStorageMLXAffine, MLXGate: projection(expertFF, hidden, 1.0/hidden), MLXUp: projection(expertFF, hidden, 2.0/hidden), MLXDown: projection(hidden, expertFF, 1.0/expertFF)},
+		{Storage: hipGemma4MoEExpertStorageMLXAffine, MLXGate: projection(expertFF, hidden, 0.5/hidden), MLXUp: projection(expertFF, hidden, 1.0/hidden), MLXDown: projection(hidden, expertFF, 0.5/expertFF)},
+	}
+	defer func() {
+		for _, buffer := range owned {
+			core.AssertNoError(t, buffer.Close())
+		}
+	}()
+	activation, err := hipAllocateByteBuffer(driver, "test", "MLX affine selected expert activation", expertFF*4, expertFF)
+	core.RequireNoError(t, err)
+	defer activation.Close()
+	downOutput, err := hipAllocateByteBuffer(driver, "test", "MLX affine selected expert down output", hidden*4, hidden)
+	core.RequireNoError(t, err)
+	defer downOutput.Close()
+	expertOutput, err := hipAllocateByteBuffer(driver, "test", "MLX affine selected expert output", hidden*4, hidden)
+	core.RequireNoError(t, err)
+	defer expertOutput.Close()
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+
+	err = hipRunGemma4MLXAffineSelectedExpertsWithWorkspace(
+		context.Background(), driver, input, entries, []float32{0.75, 0.25}, hidden, expertFF,
+		activation, downOutput, expertOutput, workspace,
+	)
+	core.RequireNoError(t, err)
+	got, err := hipReadFloat32DeviceOutput(expertOutput, "test", "MLX affine selected expert output", hidden)
+	core.RequireNoError(t, err)
+	gelu := func(value float64) float64 {
+		return 0.5 * value * (1 + math.Tanh(math.Sqrt(2/math.Pi)*(value+0.044715*value*value*value)))
+	}
+	want := float32(0.75*(gelu(1)*2) + 0.25*(gelu(0.5)*0.5))
+	for _, value := range got {
+		if math.Abs(float64(value-want)) > 1e-5 {
+			t.Fatalf("MLX affine selected expert output=%g want=%g", value, want)
+		}
+	}
+	var geluLaunches, projectionLaunches, scaleLaunches, addLaunches int
+	for _, launch := range driver.launches {
+		switch launch.Name {
+		case hipKernelNameMLXQ4GELUTanhMul:
+			geluLaunches++
+		case hipKernelNameMLXQ4Proj:
+			projectionLaunches++
+		case hipKernelNameVectorScale:
+			scaleLaunches++
+		case hipKernelNameVectorAddScaled:
+			addLaunches++
+		case hipKernelNameGGUFQ4_0SelectedExpertGateUp, hipKernelNameGGUFQ4_0SelectedExpertDown:
+			t.Fatalf("MLX affine path launched GGUF selected-expert kernel %q", launch.Name)
+		}
+	}
+	core.AssertEqual(t, 2, geluLaunches)
+	core.AssertEqual(t, 2, projectionLaunches)
+	core.AssertEqual(t, 2, scaleLaunches)
+	core.AssertEqual(t, 2, addLaunches)
+}
+
 func TestHIPGGUFQ4_0ProjectionLaunch_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	input := hipBorrowDeviceByteBufferValue(driver, "input", 11, 32*4, 32)
@@ -392,6 +490,193 @@ func TestHIPGemma4ExpertCache_Good(t *testing.T) {
 	core.AssertEqual(t, 0, len(model.expertCache.entries))
 	core.AssertEqual(t, 0, len(model.expertCache.sources))
 	core.AssertEqual(t, uint64(0), model.expertCache.bytes)
+}
+
+func TestHIPGemma4ExpertCache_MLXAffine_Good(t *testing.T) {
+	const (
+		experts   = 2
+		hidden    = 64
+		expertFF  = 32
+		groupSize = 32
+		bits      = 4
+	)
+	type tensorFixture struct {
+		info    nativeTensorInfo
+		payload []byte
+	}
+	writeTensor := func(name, typeName string, dimensions []uint64, elementBytes int, seed byte) tensorFixture {
+		t.Helper()
+		count := 1
+		for _, dimension := range dimensions {
+			count *= int(dimension)
+		}
+		payload := make([]byte, count*elementBytes)
+		perExpert := len(payload) / experts
+		for index := range payload {
+			payload[index] = seed + byte(index/perExpert)
+		}
+		const dataOffset = 7
+		const tensorOffset = 11
+		filePayload := make([]byte, dataOffset+tensorOffset+len(payload)+5)
+		copy(filePayload[dataOffset+tensorOffset:], payload)
+		path := core.PathJoin(t.TempDir(), strings.ReplaceAll(name, ".", "_")+".safetensors")
+		core.RequireTrue(t, core.WriteFile(path, filePayload, 0o644).OK)
+		return tensorFixture{
+			info: nativeTensorInfo{
+				Name: name, TypeName: typeName, Dimensions: dimensions,
+				SourcePath: path, DataOffset: dataOffset, Offset: tensorOffset,
+				ByteSize: uint64(len(payload)),
+			},
+			payload: payload,
+		}
+	}
+	prefix := "language_model.model.layers.0.experts.gate_up_proj"
+	gateUpWeight := writeTensor(prefix+".weight", "U32", []uint64{experts, 2 * expertFF, hidden * bits / 32}, 4, 1)
+	gateUpScales := writeTensor(prefix+".scales", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2, 11)
+	gateUpBiases := writeTensor(prefix+".biases", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2, 21)
+	prefix = "language_model.model.layers.0.experts.down_proj"
+	downWeight := writeTensor(prefix+".weight", "U32", []uint64{experts, hidden, expertFF * bits / 32}, 4, 31)
+	downScales := writeTensor(prefix+".scales", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2, 41)
+	downBiases := writeTensor(prefix+".biases", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2, 51)
+	source := hipGemma4MLXAffineExpertSource{
+		GateUp: hipGemma4MLXAffineTensorSet{Weight: gateUpWeight.info, Scales: gateUpScales.info, Biases: gateUpBiases.info},
+		Down:   hipGemma4MLXAffineTensorSet{Weight: downWeight.info, Scales: downScales.info, Biases: downBiases.info},
+	}
+	entryBytes := uint64((len(gateUpWeight.payload) + len(gateUpScales.payload) + len(gateUpBiases.payload) +
+		len(downWeight.payload) + len(downScales.payload) + len(downBiases.payload)) / experts)
+	driver := &fakeHIPDriver{available: true}
+	cache := newHIPGemma4ExpertCache(driver, entryBytes)
+	t.Cleanup(func() { core.AssertNoError(t, cache.Close()) })
+
+	entry1, err := cache.entryMLXAffine(hipGemma4ExpertCacheKey{Layer: 0, Expert: 1}, source, experts, hidden, expertFF, groupSize, bits)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 6, len(driver.copies))
+	core.AssertEqual(t, uint64(1), cache.stats.Misses)
+	core.AssertEqual(t, uint64(6), cache.stats.HostMappings)
+	core.AssertEqual(t, entryBytes, cache.stats.H2DBytes)
+	core.AssertEqual(t, entryBytes, cache.bytes)
+	core.AssertEqual(t, 1, len(cache.entries))
+	core.AssertEqual(t, gateUpWeight.payload[len(gateUpWeight.payload)/experts:], driver.memory[entry1.MLXGateUpWeight.Pointer()])
+	core.AssertEqual(t, gateUpScales.payload[len(gateUpScales.payload)/experts:], driver.memory[entry1.MLXGateUpScales.Pointer()])
+	core.AssertEqual(t, gateUpBiases.payload[len(gateUpBiases.payload)/experts:], driver.memory[entry1.MLXGateUpBiases.Pointer()])
+	core.AssertEqual(t, downWeight.payload[len(downWeight.payload)/experts:], driver.memory[entry1.MLXDownWeight.Pointer()])
+	core.AssertEqual(t, downScales.payload[len(downScales.payload)/experts:], driver.memory[entry1.MLXDownScales.Pointer()])
+	core.AssertEqual(t, downBiases.payload[len(downBiases.payload)/experts:], driver.memory[entry1.MLXDownBiases.Pointer()])
+	core.AssertEqual(t, entry1.MLXGateUpWeight.Pointer(), entry1.MLXGate.WeightPointer)
+	core.AssertEqual(t, entry1.MLXGateUpWeight.Pointer()+nativeDevicePointer(entry1.MLXGate.WeightBytes), entry1.MLXUp.WeightPointer)
+	core.AssertEqual(t, entry1.MLXGateUpScales.Pointer()+nativeDevicePointer(entry1.MLXGate.ScaleBytes), entry1.MLXUp.ScalePointer)
+	core.AssertEqual(t, entry1.MLXGateUpBiases.Pointer()+nativeDevicePointer(entry1.MLXGate.BiasBytes), entry1.MLXUp.BiasPointer)
+	core.AssertEqual(t, hidden, entry1.MLXGate.Cols)
+	core.AssertEqual(t, expertFF, entry1.MLXGate.Rows)
+	core.AssertEqual(t, expertFF, entry1.MLXDown.Cols)
+	core.AssertEqual(t, hidden, entry1.MLXDown.Rows)
+	core.AssertEqual(t, bits, entry1.MLXGate.Bits)
+	core.AssertEqual(t, groupSize, entry1.MLXGate.GroupSize)
+
+	entry1Again, err := cache.entryMLXAffine(hipGemma4ExpertCacheKey{Layer: 0, Expert: 1}, source, experts, hidden, expertFF, groupSize, bits)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, entry1, entry1Again)
+	core.AssertEqual(t, 6, len(driver.copies))
+	core.AssertEqual(t, uint64(1), cache.stats.Hits)
+
+	entry0, err := cache.entryMLXAffine(hipGemma4ExpertCacheKey{Layer: 0, Expert: 0}, source, experts, hidden, expertFF, groupSize, bits)
+	core.RequireNoError(t, err)
+	core.AssertNotEqual(t, entry1, entry0)
+	core.AssertEqual(t, 12, len(driver.copies))
+	core.AssertEqual(t, uint64(1), cache.stats.Evictions)
+	core.AssertEqual(t, 1, len(cache.entries))
+	core.AssertEqual(t, gateUpWeight.payload[:len(gateUpWeight.payload)/experts], driver.memory[entry0.MLXGateUpWeight.Pointer()])
+}
+
+func TestHIPGemma4MoELayerConfig_MLXAffine_Good(t *testing.T) {
+	const (
+		hidden    = 64
+		experts   = 2
+		expertFF  = 32
+		groupSize = 32
+	)
+	driver := &fakeHIPDriver{available: true}
+	model := &hipLoadedModel{
+		driver: driver,
+		modelInfo: inference.ModelInfo{
+			Architecture: "diffusion_gemma", HiddenSize: hidden, NumLayers: 1,
+			QuantBits: 4, QuantGroup: groupSize,
+		},
+		gemma4TextConfig: nativeGemma4TextConfig{
+			EnableMoEBlock: true, NumExperts: experts, TopKExperts: 1, MoEIntermediateSize: expertFF,
+		},
+		tensors:     map[string]hipTensor{},
+		hostTensors: map[string]nativeTensorInfo{},
+	}
+	addDeviceTensor := func(name, typeName string, dimensions []uint64, payload []byte) {
+		t.Helper()
+		pointer, err := driver.Malloc(uint64(len(payload)))
+		core.RequireNoError(t, err)
+		core.RequireNoError(t, driver.CopyHostToDevice(pointer, payload))
+		model.tensors[name] = hipTensor{pointer: pointer, info: nativeTensorInfo{
+			Name: name, TypeName: typeName, Dimensions: dimensions, ByteSize: uint64(len(payload)),
+		}}
+	}
+	bf16 := func(count int, value float32) []byte {
+		payload := make([]byte, count*2)
+		for index := 0; index < count; index++ {
+			binary.LittleEndian.PutUint16(payload[index*2:], hipFloat32ToBFloat16(value))
+		}
+		return payload
+	}
+	prefix := "language_model.model.layers.0"
+	for _, name := range []string{
+		prefix + ".pre_feedforward_layernorm_2.weight",
+		prefix + ".post_feedforward_layernorm_1.weight",
+		prefix + ".post_feedforward_layernorm_2.weight",
+		prefix + ".router.scale",
+	} {
+		addDeviceTensor(name, "BF16", []uint64{hidden}, bf16(hidden, 1))
+	}
+	addDeviceTensor(prefix+".router.per_expert_scale", "BF16", []uint64{experts}, bf16(experts, 1))
+	routerPackedCols := hidden * 8 / 32
+	addDeviceTensor(prefix+".router.proj.weight", "U32", []uint64{experts, uint64(routerPackedCols)}, make([]byte, experts*routerPackedCols*4))
+	addDeviceTensor(prefix+".router.proj.scales", "BF16", []uint64{experts, hidden / groupSize}, bf16(experts*(hidden/groupSize), 1))
+	addDeviceTensor(prefix+".router.proj.biases", "BF16", []uint64{experts, hidden / groupSize}, bf16(experts*(hidden/groupSize), 0))
+	addHostTensor := func(name, typeName string, dimensions []uint64, elementBytes int) {
+		count := 1
+		for _, dimension := range dimensions {
+			count *= int(dimension)
+		}
+		model.hostTensors[name] = nativeTensorInfo{
+			Name: name, TypeName: typeName, Dimensions: dimensions,
+			SourcePath: "/tmp/diffusiongemma.safetensors", ByteSize: uint64(count * elementBytes),
+		}
+	}
+	gateUp := prefix + ".experts.gate_up_proj"
+	addHostTensor(gateUp+".weight", "U32", []uint64{experts, 2 * expertFF, hidden * 4 / 32}, 4)
+	addHostTensor(gateUp+".scales", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2)
+	addHostTensor(gateUp+".biases", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2)
+	down := prefix + ".experts.down_proj"
+	addHostTensor(down+".weight", "U32", []uint64{experts, hidden, expertFF * 4 / 32}, 4)
+	addHostTensor(down+".scales", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2)
+	addHostTensor(down+".biases", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2)
+	t.Cleanup(func() {
+		if model.expertCache != nil {
+			core.AssertNoError(t, model.expertCache.Close())
+		}
+		for _, tensor := range model.tensors {
+			core.AssertNoError(t, driver.Free(tensor.pointer))
+		}
+	})
+
+	moe, err := model.loadedGemma4MoELayerConfig(0, hidden)
+	core.RequireNoError(t, err)
+	core.RequireTrue(t, moe != nil)
+	core.AssertEqual(t, hipGemma4MoEExpertStorageMLXAffine, moe.ExpertStorage)
+	core.AssertEqual(t, nativeDevicePointer(0), moe.RouterProjection.WeightPointer)
+	core.AssertEqual(t, experts, moe.RouterProjectionMLX.Rows)
+	core.AssertEqual(t, hidden, moe.RouterProjectionMLX.Cols)
+	core.AssertEqual(t, 8, moe.RouterProjectionMLX.Bits)
+	core.AssertEqual(t, groupSize, moe.RouterProjectionMLX.GroupSize)
+	core.AssertEqual(t, gateUp+".weight", moe.MLXExperts.GateUp.Weight.Name)
+	core.AssertEqual(t, down+".weight", moe.MLXExperts.Down.Weight.Name)
+	core.RequireTrue(t, moe.ExpertCache != nil)
 }
 
 func TestHIPGemma4ExpertCache_Good_EvictsOnDevicePressure(t *testing.T) {

@@ -29,6 +29,52 @@ func TestNativeContract_RocmBackendImplementsSharedPlanner_Good(t *testing.T) {
 	var _ inference.ModelPackInspector = (*rocmBackend)(nil)
 }
 
+func TestCanonicalizeROCmNativeTensorNames_DiffusionGemma_Good(t *testing.T) {
+	tensors := []nativeTensorInfo{
+		{Name: "model.decoder.language_model.model.embed_tokens.weight"},
+		{Name: "model.decoder.language_model.model.layers.0.self_attn.q_proj.weight"},
+		{Name: "model.decoder.embed_tokens.weight"},
+		{Name: "model.decoder.layers.0.experts.gate_up_proj.weight"},
+		{Name: "model.decoder.norm.weight"},
+		{Name: "model.decoder.self_conditioning.pre_norm.weight"},
+		{Name: "model.encoder.language_model.layers.0.layer_scalar"},
+	}
+
+	got := canonicalizeROCmNativeTensorNames("diffusion_gemma", tensors)
+	want := []string{
+		"language_model.model.embed_tokens.weight",
+		"language_model.model.layers.0.self_attn.q_proj.weight",
+		"language_model.model.embed_tokens.weight",
+		"language_model.model.layers.0.experts.gate_up_proj.weight",
+		"language_model.model.norm.weight",
+		"self_conditioning.pre_norm.weight",
+		"model.encoder.language_model.layers.0.layer_scalar",
+	}
+	for index := range want {
+		if got[index].Name != want[index] {
+			t.Fatalf("tensor %d name = %q, want %q", index, got[index].Name, want[index])
+		}
+	}
+}
+
+func TestNativeContract_DiffusionGemmaInfersMoEFromExpertGeometry_Good(t *testing.T) {
+	cfg := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{
+		ModelType: "diffusion_gemma",
+		TextConfig: rocmModelPackTextConfigProbe{
+			ModelType:           "diffusion_gemma_text",
+			NumHiddenLayers:     30,
+			NumExperts:          128,
+			TopKExperts:         8,
+			MoEIntermediateSize: 704,
+		},
+	})
+
+	core.AssertEqual(t, true, cfg.EnableMoEBlock)
+	core.AssertEqual(t, 128, cfg.NumExperts)
+	core.AssertEqual(t, 8, cfg.TopKExperts)
+	core.AssertEqual(t, 704, cfg.MoEIntermediateSize)
+}
+
 func TestNativeContract_RocmModelImplementsSharedContracts_Good(t *testing.T) {
 	var _ inference.TokenizerModel = (*rocmModel)(nil)
 	var _ inference.AdapterModel = (*rocmModel)(nil)
@@ -1883,6 +1929,21 @@ func TestNativeContract_Gemma4NativeConfigDeclaresMultimodalTowers_Good(t *testi
 	})
 	core.AssertEqual(t, false, assistant.Vision)
 	core.AssertEqual(t, false, assistant.Audio)
+}
+
+func TestNativeContract_DiffusionGemmaDoesNotAttachDecoderUnusedVision_Good(t *testing.T) {
+	cfg := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{
+		ModelType:    "diffusion_gemma",
+		ImageTokenID: 258880,
+		VisionConfig: rocmModelPackVisionConfigProbe{
+			ModelType:       "gemma4_vision",
+			HiddenSize:      1152,
+			NumHiddenLayers: 27,
+		},
+	})
+
+	core.AssertEqual(t, false, cfg.Vision)
+	core.AssertEqual(t, false, Gemma4DeclaredFeaturesOfNativeConfig(cfg).Vision)
 }
 
 func TestNativeContract_SamePackMediaRequiresTowerTensors_Ugly(t *testing.T) {

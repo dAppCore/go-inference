@@ -662,6 +662,59 @@ func TestHipLoadedGemma4Q4GenerateLinkedAcceptsIntegratedMoEGGUF(t *testing.T) {
 	core.AssertEqual(t, true, hipLoadedGemma4Q4GenerateLinked(model))
 }
 
+func TestHipLoadedGemma4Q4GenerateLinkedAcceptsIntegratedMoEMLXAffine_Good(t *testing.T) {
+	const (
+		hidden    = 64
+		experts   = 2
+		expertFF  = 32
+		groupSize = 32
+	)
+	prefix := "language_model.model.layers.0"
+	model := &hipLoadedModel{
+		driver:    &fakeHIPDriver{available: true},
+		modelPath: "/models/diffusiongemma-26b-a4b-4bit",
+		modelInfo: inference.ModelInfo{Architecture: "diffusion_gemma", QuantBits: 4, QuantGroup: groupSize, NumLayers: 1, HiddenSize: hidden},
+		gemma4TextConfig: nativeGemma4TextConfig{
+			EnableMoEBlock: true, NumExperts: experts, TopKExperts: 1, MoEIntermediateSize: expertFF,
+		},
+		modelLabels: map[string]string{
+			"gemma4_source_format": "safetensors",
+		},
+		tensors: map[string]hipTensor{
+			prefix + ".router.proj.weight": {
+				pointer: 1, info: nativeTensorInfo{TypeName: "U32", Dimensions: []uint64{experts, hidden * 8 / 32}, ByteSize: experts * hidden * 8 / 8},
+			},
+			prefix + ".router.proj.scales": {
+				pointer: 2, info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{experts, hidden / groupSize}, ByteSize: experts * (hidden / groupSize) * 2},
+			},
+			prefix + ".router.proj.biases": {
+				pointer: 3, info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{experts, hidden / groupSize}, ByteSize: experts * (hidden / groupSize) * 2},
+			},
+		},
+		hostTensors: map[string]nativeTensorInfo{},
+	}
+	addHost := func(name, typeName string, dimensions []uint64, elementBytes int) {
+		count := 1
+		for _, dimension := range dimensions {
+			count *= int(dimension)
+		}
+		model.hostTensors[name] = nativeTensorInfo{
+			Name: name, TypeName: typeName, Dimensions: dimensions,
+			SourcePath: "/models/model-00001-of-00004.safetensors", ByteSize: uint64(count * elementBytes),
+		}
+	}
+	gateUp := prefix + ".experts.gate_up_proj"
+	addHost(gateUp+".weight", "U32", []uint64{experts, 2 * expertFF, hidden * 4 / 32}, 4)
+	addHost(gateUp+".scales", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2)
+	addHost(gateUp+".biases", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2)
+	down := prefix + ".experts.down_proj"
+	addHost(down+".weight", "U32", []uint64{experts, hidden, expertFF * 4 / 32}, 4)
+	addHost(down+".scales", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2)
+	addHost(down+".biases", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2)
+
+	core.AssertEqual(t, true, hipLoadedGemma4Q4GenerateLinked(model))
+}
+
 func TestROCmCapabilityReportGemma4MoEUsesProductionIntegration_Good(t *testing.T) {
 	labels := linkedGemma4TestLabels("26B-A4B", "q4")
 	labels["gemma4_source_format"] = "gguf"

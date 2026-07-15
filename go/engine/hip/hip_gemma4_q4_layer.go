@@ -327,7 +327,7 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfigWithSharedKV(layer int, sh
 	if model.driver == nil || !model.driver.Available() {
 		return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "HIP driver is not available", nil)
 	}
-	if !hipLoadedGemma4Q4GenerateLinked(model) {
+	if !hipLoadedGemma4Q4GenerateLinked(model) && normalizeROCmArchitecture(model.modelIdentity().Architecture) != "diffusion_gemma" {
 		if model.gemma4TextConfig.EnableMoEBlock {
 			return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "loaded Gemma4 MoE runtime is not ready", hipLoadedGemma4MoERuntimeError(model))
 		}
@@ -4374,7 +4374,7 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerAttentionKEqV(layerPrefix, layer
 	if model.loadedGemma4Q4AttentionKEqV(layerType) {
 		return true
 	}
-	if model == nil || layerType != "full_attention" || !model.hipGGUFTensorAliasesEnabled() {
+	if model == nil || layerType != "full_attention" {
 		return false
 	}
 	keyName := layerPrefix + ".self_attn.k_proj.weight"

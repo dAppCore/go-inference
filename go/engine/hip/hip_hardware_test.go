@@ -49,6 +49,104 @@ func TestHIPHardwareAvailabilitySmoke_Good(t *testing.T) {
 	}
 }
 
+func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || !runtime.Available() || hipRuntime.driver == nil {
+		t.Fatal("native ROCm runtime is not available")
+	}
+
+	const vocab, hidden, rows = 3, 4, 2
+	embeddingValues := []float32{
+		1, 2, 3, 4,
+		5, 6, 7, 8,
+		9, 10, 11, 12,
+	}
+	embeddingPayload := make([]byte, len(embeddingValues)*2)
+	for index, value := range embeddingValues {
+		binary.LittleEndian.PutUint16(embeddingPayload[index*2:], hipFloat32ToBFloat16(value))
+	}
+	embedding, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", "embedding", embeddingPayload, len(embeddingValues))
+	core.RequireNoError(t, err)
+	defer embedding.Close()
+	probabilities := []float32{0.5, 0.25, 0.25, 0.2, 0.3, 0.5}
+	got, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, rows, hipDeviceEmbeddingLookupConfig{
+		EmbeddingPointer: embedding.Pointer(),
+		EmbeddingBytes:   embedding.SizeBytes(),
+		TableEncoding:    hipEmbeddingTableEncodingBF16,
+		VocabSize:        vocab,
+		HiddenSize:       hidden,
+	}, 2)
+	core.RequireNoError(t, err)
+	want := make([]float32, rows*hidden)
+	for row := 0; row < rows; row++ {
+		for dim := 0; dim < hidden; dim++ {
+			for token := 0; token < vocab; token++ {
+				want[row*hidden+dim] += probabilities[row*vocab+token] * embeddingValues[token*hidden+dim] * 2
+			}
+		}
+	}
+	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding", want, got, 0.00001, 0.00001)
+}
+
+func TestHIPHardwareDiffusionGemmaMLXMoE_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to the linked ROCm kernels HSACO")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_DIFFUSION_MODEL_PATH"))
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_DIFFUSION_MODEL_PATH to a DiffusionGemma MLX affine checkpoint")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatal("native ROCm runtime is not available")
+	}
+	textModel, err := newROCmBackendWithRuntime(runtime).loadModelWithROCmConfig(modelPath, inference.LoadConfig{ContextLen: 64}, ROCmLoadConfig{})
+	if err != nil {
+		t.Fatalf("load DiffusionGemma MLX MoE model: %v", err)
+	}
+	defer textModel.Close()
+	rocmLoaded, ok := textModel.(*rocmModel)
+	core.RequireTrue(t, ok)
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	core.RequireTrue(t, ok)
+	core.AssertEqual(t, "diffusion_gemma", core.Lower(loaded.modelInfo.Architecture))
+	core.AssertEqual(t, true, loaded.gemma4TextConfig.EnableMoEBlock)
+	core.AssertEqual(t, 128, loaded.gemma4TextConfig.NumExperts)
+	core.AssertEqual(t, 8, loaded.gemma4TextConfig.TopKExperts)
+	core.AssertEqual(t, 704, loaded.gemma4TextConfig.MoEIntermediateSize)
+	core.AssertEqual(t, loaded.modelInfo.NumLayers*6, len(loaded.hostTensors))
+	moe, err := loaded.loadedGemma4MoELayerConfig(0, loaded.modelInfo.HiddenSize)
+	core.RequireNoError(t, err)
+	core.RequireTrue(t, moe != nil)
+	core.AssertEqual(t, hipGemma4MoEExpertStorageMLXAffine, moe.ExpertStorage)
+	core.AssertEqual(t, 8, moe.RouterProjectionMLX.Bits)
+	core.AssertEqual(t, 4, moe.MLXPreferredBits)
+	core.AssertEqual(t, 64, moe.MLXGroupSize)
+
+	session, err := loaded.OpenROCmDiffusionSession(context.Background())
+	core.RequireNoError(t, err)
+	closer, ok := session.(interface{ Close() error })
+	core.RequireTrue(t, ok)
+	defer closer.Close()
+	position, err := session.PrefillTokens([]int32{1})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 1, position)
+	core.AssertEqual(t, 1, session.CacheOffset())
+	core.RequireTrue(t, loaded.expertCache != nil)
+	core.AssertGreater(t, len(loaded.expertCache.entries), 0)
+	t.Logf("DiffusionGemma MLX MoE resident prefill: device=%s host_expert_tensors=%d cached_experts=%d cache_bytes=%d", loaded.driver.DeviceInfo().Name, len(loaded.hostTensors), len(loaded.expertCache.entries), loaded.expertCache.bytes)
+}
+
 func TestHIPHardwareGemma4AudioChat_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_AUDIO_CHAT_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_AUDIO_CHAT_TESTS=1 to run the Gemma 4 audio chat smoke")

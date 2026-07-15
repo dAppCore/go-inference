@@ -103,7 +103,8 @@ func rocmGemma4RoPEParametersFromProbeMap(src map[string]rocmRoPEProbe) map[stri
 }
 
 func rocmGemma4ConfigHasVision(cfg rocmModelPackConfigProbe) bool {
-	if isROCmGemma4AssistantArchitecture(rocmConfigArchitecture(cfg)) {
+	architecture := rocmConfigArchitecture(cfg)
+	if !isROCmGemma4Architecture(architecture) || isROCmGemma4AssistantArchitecture(architecture) {
 		return false
 	}
 	return rocmGemma4VisionConfigFromProbe(cfg).Present()

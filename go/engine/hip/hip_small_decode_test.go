@@ -4212,6 +4212,18 @@ func TestHIPGemma4Q4LoadedGGUFFullAttentionInfersKEqVFromMissingV_Good(t *testin
 	core.AssertEqual(t, false, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "full_attention"))
 }
 
+func TestHIPGemma4Q4LoadedSafetensorsFullAttentionInfersKEqVFromMissingV_Good(t *testing.T) {
+	const prefix = "language_model.model.layers.5"
+	model := &hipLoadedModel{tensors: map[string]hipTensor{
+		prefix + ".self_attn.k_proj.weight": {pointer: 1},
+	}}
+
+	core.AssertEqual(t, true, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "full_attention"))
+	core.AssertEqual(t, false, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "sliding_attention"))
+	model.tensors[prefix+".self_attn.v_proj.weight"] = hipTensor{pointer: 2}
+	core.AssertEqual(t, false, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "full_attention"))
+}
+
 func TestHIPGemma4Q4LoadedNormConfigPreservesF32_Good(t *testing.T) {
 	model := &hipLoadedModel{tensors: map[string]hipTensor{
 		"language_model.model.norm.weight": {
