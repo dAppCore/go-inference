@@ -34,7 +34,7 @@ const (
 	hipRoPEHeadsLaunchArgsBytes                                      = 64
 	hipGreedyLaunchArgsVersion                                uint32 = 1
 	hipGreedyLaunchArgsBytes                                         = 64
-	hipSoftcapGreedyLaunchArgsVersion                         uint32 = 1
+	hipSoftcapGreedyLaunchArgsVersion                         uint32 = 2
 	hipSoftcapGreedyLaunchArgsBytes                                  = 64
 	hipGreedyResultBytes                                             = 8
 	hipAttentionLaunchArgsVersion                             uint32 = 1
@@ -338,12 +338,14 @@ type hipGreedySampleLaunchArgs struct {
 }
 
 type hipSoftcapGreedySampleLaunchArgs struct {
-	LogitsPointer nativeDevicePointer
-	OutputPointer nativeDevicePointer
-	Count         int
-	LogitsBytes   uint64
-	OutputBytes   uint64
-	Softcap       float32
+	LogitsPointer   nativeDevicePointer
+	OutputPointer   nativeDevicePointer
+	Count           int
+	LogitsBytes     uint64
+	OutputBytes     uint64
+	Softcap         float32
+	SuppressPointer nativeDevicePointer
+	SuppressCount   int
 }
 
 type hipGreedySampleResult struct {
@@ -2126,6 +2128,24 @@ func (args hipSoftcapGreedySampleLaunchArgs) BinaryInto(payload []byte) ([]byte,
 	if args.Softcap < 0 || math.IsNaN(float64(args.Softcap)) || math.IsInf(float64(args.Softcap), 0) {
 		return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "softcap must be non-negative and finite", nil)
 	}
+	var suppressCount uint32
+	if args.SuppressCount < 0 {
+		return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token count must be non-negative", nil)
+	}
+	if args.SuppressCount > 0 {
+		if args.SuppressPointer == 0 {
+			return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token pointer is required", nil)
+		}
+		if args.SuppressCount >= args.Count {
+			return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token count must be smaller than logits count", nil)
+		}
+		suppressCount, err = rocmDeviceKVPositiveUint32("suppress token count", args.SuppressCount)
+		if err != nil {
+			return nil, err
+		}
+	} else if args.SuppressPointer != 0 {
+		return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token count is required with a suppress pointer", nil)
+	}
 	if cap(payload) < hipSoftcapGreedyLaunchArgsBytes {
 		payload = hipBorrowLaunchPacket(hipSoftcapGreedyLaunchArgsBytes)
 	} else {
@@ -2140,6 +2160,8 @@ func (args hipSoftcapGreedySampleLaunchArgs) BinaryInto(payload []byte) ([]byte,
 	binary.LittleEndian.PutUint32(payload[28:], logitsBytes)
 	binary.LittleEndian.PutUint32(payload[32:], uint32(args.OutputBytes))
 	binary.LittleEndian.PutUint32(payload[36:], math.Float32bits(args.Softcap))
+	binary.LittleEndian.PutUint64(payload[40:], uint64(args.SuppressPointer))
+	binary.LittleEndian.PutUint32(payload[48:], suppressCount)
 	return payload, nil
 }
 

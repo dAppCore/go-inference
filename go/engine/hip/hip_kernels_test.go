@@ -3563,6 +3563,44 @@ func TestHIPKernels_SoftcapGreedySampleLaunchArgs_Good(t *testing.T) {
 	assertFloat32Near(t, float32(math.Tanh(1))*30, runnerOutput.Score)
 }
 
+func TestHIPKernels_DenseProjectionSoftcapGreedySuppress_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	req := hipProjectionRequest{
+		Input: []float32{1, 1},
+		BF16: []uint16{
+			0x4080, 0,
+			0, 0x4040,
+			0x3f80, 0x3f80,
+		},
+		Rows: 3,
+		Cols: 2,
+	}
+	buffers, err := req.projectionDeviceBuffers(driver)
+	core.RequireNoError(t, err)
+	defer buffers.Close()
+	cfg := hipMLXQ4DeviceWeightConfig{
+		WeightPointer:  buffers.Weights.Pointer(),
+		WeightBytes:    buffers.Weights.SizeBytes(),
+		Rows:           req.Rows,
+		Cols:           req.Cols,
+		WeightEncoding: hipProjectionWeightEncodingBF16,
+	}
+
+	greedy, err := hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(context.Background(), driver, buffers.Input, cfg, 30, nil, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 0, greedy.TokenID)
+
+	copyStart := len(driver.copies)
+	suppressed, err := hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(context.Background(), driver, buffers.Input, cfg, 30, []int32{0}, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 1, suppressed.TokenID)
+	for _, copied := range driver.copies[copyStart:] {
+		if copied == uint64(req.Rows*4) {
+			t.Fatalf("suppressed dense greedy copied %d-byte full logits row to host", copied)
+		}
+	}
+}
+
 func TestHIPKernels_SoftcapGreedySampleLaunchArgs_Bad(t *testing.T) {
 	_, err := (hipSoftcapGreedySampleLaunchArgs{
 		LogitsPointer: 1,

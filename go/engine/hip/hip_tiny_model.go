@@ -1133,7 +1133,9 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 		}
 		suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, generate.StopTokens)
 		denseProjectionWeights := cfg.usesDenseProjectionWeights()
-		hostSampling := hipGemma4Q4HostSamplingRequested(generate) || denseProjectionWeights
+		hostSamplingRequested := hipGemma4Q4HostSamplingRequested(generate)
+		denseDeviceGreedy := denseProjectionWeights && cfg.HeadLoRA == nil && !hostSamplingRequested
+		hostSampling := hostSamplingRequested || (denseProjectionWeights && !denseDeviceGreedy)
 		if err := req.validate(cfg); err != nil {
 			runErr = err
 			return
@@ -1377,7 +1379,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				}
 				haveCurrent = true
 			}
-			if hostSampling {
+			if hostSampling || denseDeviceGreedy {
 				outputRow := ubatch.OutputRow
 				if outputRow < 0 {
 					outputRow = len(ubatch.Tokens) - 1
@@ -1566,6 +1568,10 @@ func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDri
 		return hipGemma4Q4ForwardResult{}, err
 	}
 	defer finalNorm.Close()
+	if _, dense := last.LMHeadProjection.denseWeightEncoding(); dense && headLoRA == nil && !hipGemma4Q4HostSamplingRequested(generate) {
+		greedy, err := hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(ctx, driver, finalNorm, last.LMHeadProjection, last.FinalLogitSoftcap, suppressTokens, workspace)
+		return hipGemma4Q4ForwardResult{Greedy: greedy}, err
+	}
 	if deviceTopK {
 		greedy, greedyDevice, err := hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx, driver, finalNorm, last.LMHeadProjection, last.FinalLogitSoftcap, generate.TopK, generate.Temperature, generate.TopP, draw, finalGreedyBuffer, suppressTokens, workspace)
 		return hipGemma4Q4ForwardResult{Greedy: greedy, GreedyDevice: greedyDevice}, err

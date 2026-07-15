@@ -1060,7 +1060,15 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 			}
 			receipts.recordNext("fused-greedy", "sampler-input-pre-softcap", rawLogits)
 		}
-		if req.DeviceFinalTopKSample {
+		if _, dense := last.LMHeadProjection.denseWeightEncoding(); dense {
+			if req.DeviceFinalScores || req.DeviceFinalTopKSample || req.DeferFinalSampleRead {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, core.E(hipGemma4Q4Layer0Operation, "dense device head supports immediate greedy sampling only", nil)
+			}
+			greedy, err = hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(ctx, driver, finalNormBuffer, last.LMHeadProjection, last.FinalLogitSoftcap, req.SuppressTokens, req.AttentionWorkspace)
+			if err != nil {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
+			}
+		} else if req.DeviceFinalTopKSample {
 			greedy, greedyDevice, err = hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx, driver, finalNormBuffer, last.LMHeadProjection, last.FinalLogitSoftcap, req.FinalCandidateCount, req.FinalTemperature, req.FinalTopP, req.FinalDraw, req.FinalGreedyBuffer, req.SuppressTokens, req.AttentionWorkspace)
 			if err != nil {
 				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err

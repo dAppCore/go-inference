@@ -2514,6 +2514,32 @@ func hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx context.Context, driver nati
 	return output, nil
 }
 
+func hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, softcap float32, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) (hipGreedySampleResult, error) {
+	if _, dense := cfg.denseWeightEncoding(); !dense {
+		return hipGreedySampleResult{}, core.E("rocm.hip.DenseProjectionGreedyLaunch", "dense projection weights are required", nil)
+	}
+	logits, err := hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, input, cfg)
+	if err != nil {
+		return hipGreedySampleResult{}, err
+	}
+	defer logits.Close()
+	var suppress *hipDeviceTokenBuffer
+	if len(suppressTokens) > 0 {
+		if workspace != nil {
+			suppress, err = workspace.EnsureSuppressTokenBuffer(driver, suppressTokens)
+		} else {
+			suppress, err = hipUploadTokenIDs(driver, suppressTokens)
+		}
+		if err != nil {
+			return hipGreedySampleResult{}, err
+		}
+		if workspace == nil {
+			defer suppress.Close()
+		}
+	}
+	return hipRunSoftcapGreedyKernelWithDeviceLogitsSuppressBuffer(ctx, driver, logits, softcap, suppress)
+}
+
 func hipRunMLXQ4ProjectionKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, output *hipDeviceByteBuffer) error {
 	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, cfg, output, nil)
 }

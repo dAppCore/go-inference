@@ -147,7 +147,7 @@ constexpr uint32_t ROCM_ROPE_HEADS_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_ROPE_HEADS_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_GREEDY_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_GREEDY_LAUNCH_ARGS_BYTES = 64;
-constexpr uint32_t ROCM_SOFTCAP_GREEDY_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_SOFTCAP_GREEDY_LAUNCH_ARGS_VERSION = 2;
 constexpr uint32_t ROCM_SOFTCAP_GREEDY_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_GREEDY_RESULT_BYTES = 8;
 constexpr uint32_t ROCM_ATTENTION_LAUNCH_ARGS_VERSION = 1;
@@ -1111,8 +1111,9 @@ struct rocm_softcap_greedy_launch_args {
 	uint32_t logits_bytes;
 	uint32_t output_bytes;
 	uint32_t softcap_bits;
-	uint64_t reserved2;
-	uint64_t reserved3;
+	uint64_t suppress_pointer;
+	uint32_t suppress_count;
+	uint32_t reserved3;
 	uint64_t reserved4;
 };
 
@@ -2871,6 +2872,7 @@ __device__ bool rocm_valid_softcap_greedy_args(const rocm_softcap_greedy_launch_
 		args.count > 0 &&
 		args.logits_bytes == args.count * sizeof(float) &&
 		args.output_bytes == ROCM_GREEDY_RESULT_BYTES &&
+		(args.suppress_count == 0 || (args.suppress_pointer != 0 && args.suppress_count < args.count)) &&
 		softcap >= 0.0f &&
 		isfinite(softcap);
 }
@@ -9876,12 +9878,20 @@ extern "C" __global__ void rocm_softcap_greedy_sample(const unsigned char *packe
 	}
 	__shared__ float scores[256];
 	__shared__ int32_t indices[256];
-	const float *logits = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.logits_pointer));
+	float *logits = reinterpret_cast<float *>(static_cast<uintptr_t>(args.logits_pointer));
+	const int32_t *suppress_tokens = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(args.suppress_pointer));
+	for (uint32_t suppress_index = tid; suppress_index < args.suppress_count; suppress_index += threads) {
+		const int32_t token = suppress_tokens[suppress_index];
+		if (token >= 0 && static_cast<uint32_t>(token) < args.count) {
+			logits[token] = -FLT_MAX;
+		}
+	}
+	__syncthreads();
 	float best_score = -FLT_MAX;
-	int32_t best_index = 0;
+	int32_t best_index = -1;
 	for (uint32_t index = tid; index < args.count; index += threads) {
 		const float score = logits[index];
-		if (score > best_score || (score == best_score && static_cast<int32_t>(index) < best_index)) {
+		if (best_index < 0 || score > best_score || (score == best_score && static_cast<int32_t>(index) < best_index)) {
 			best_score = score;
 			best_index = static_cast<int32_t>(index);
 		}
@@ -9893,7 +9903,7 @@ extern "C" __global__ void rocm_softcap_greedy_sample(const unsigned char *packe
 		if (tid < stride) {
 			const float other_score = scores[tid + stride];
 			const int32_t other_index = indices[tid + stride];
-			if (other_score > scores[tid] || (other_score == scores[tid] && other_index < indices[tid])) {
+			if (other_index >= 0 && (indices[tid] < 0 || other_score > scores[tid] || (other_score == scores[tid] && other_index < indices[tid]))) {
 				scores[tid] = other_score;
 				indices[tid] = other_index;
 			}

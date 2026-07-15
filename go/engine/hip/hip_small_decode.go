@@ -5580,6 +5580,10 @@ func hipRunGreedyKernelWithDeviceLogits(ctx context.Context, driver nativeHIPDri
 }
 
 func hipRunSoftcapGreedyKernelWithDeviceLogits(ctx context.Context, driver nativeHIPDriver, logits *hipDeviceByteBuffer, softcap float32) (hipGreedySampleResult, error) {
+	return hipRunSoftcapGreedyKernelWithDeviceLogitsSuppressBuffer(ctx, driver, logits, softcap, nil)
+}
+
+func hipRunSoftcapGreedyKernelWithDeviceLogitsSuppressBuffer(ctx context.Context, driver nativeHIPDriver, logits *hipDeviceByteBuffer, softcap float32, suppress *hipDeviceTokenBuffer) (hipGreedySampleResult, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return hipGreedySampleResult{}, err
 	}
@@ -5595,19 +5599,27 @@ func hipRunSoftcapGreedyKernelWithDeviceLogits(ctx context.Context, driver nativ
 	if softcap < 0 || math.IsNaN(float64(softcap)) || math.IsInf(float64(softcap), 0) {
 		return hipGreedySampleResult{}, core.E("rocm.hip.SoftcapGreedyLaunch", "softcap must be non-negative and finite", nil)
 	}
+	if suppress != nil && (suppress.Pointer() == 0 || suppress.Count() <= 0 || suppress.SizeBytes() != uint64(suppress.Count()*4)) {
+		return hipGreedySampleResult{}, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token buffer shape mismatch", nil)
+	}
 	output, err := hipAllocateByteBuffer(driver, "rocm.hip.SoftcapGreedyLaunch", "softcap greedy output", hipGreedyResultBytes, 1)
 	if err != nil {
 		return hipGreedySampleResult{}, err
 	}
 	defer output.Close()
-	launchBytes, err := (hipSoftcapGreedySampleLaunchArgs{
+	launchArgs := hipSoftcapGreedySampleLaunchArgs{
 		LogitsPointer: logits.Pointer(),
 		OutputPointer: output.Pointer(),
 		Count:         logits.Count(),
 		LogitsBytes:   logits.SizeBytes(),
 		OutputBytes:   output.SizeBytes(),
 		Softcap:       softcap,
-	}).Binary()
+	}
+	if suppress != nil {
+		launchArgs.SuppressPointer = suppress.Pointer()
+		launchArgs.SuppressCount = suppress.Count()
+	}
+	launchBytes, err := launchArgs.Binary()
 	if err != nil {
 		return hipGreedySampleResult{}, err
 	}

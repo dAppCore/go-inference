@@ -7041,8 +7041,11 @@ func (driver *fakeHIPDriver) launchSoftcapGreedySample(args []byte) error {
 	logitsBytes := int(binary.LittleEndian.Uint32(args[28:]))
 	outputBytes := int(binary.LittleEndian.Uint32(args[32:]))
 	softcap := math.Float32frombits(binary.LittleEndian.Uint32(args[36:]))
+	suppressPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[40:]))
+	suppressCount := int(binary.LittleEndian.Uint32(args[48:]))
 	if count <= 0 || logitsBytes != count*4 || outputBytes != hipGreedyResultBytes ||
-		softcap < 0 || math.IsNaN(float64(softcap)) || math.IsInf(float64(softcap), 0) {
+		softcap < 0 || math.IsNaN(float64(softcap)) || math.IsInf(float64(softcap), 0) ||
+		(suppressCount > 0 && (suppressPointer == 0 || suppressCount >= count)) {
 		return core.E("rocm.hip.FakeLaunch", "softcap greedy shape metadata mismatch", nil)
 	}
 	logitsData, logitsOffset, ok := driver.memoryForPointer(logitsPointer, logitsBytes)
@@ -7057,7 +7060,18 @@ func (driver *fakeHIPDriver) launchSoftcapGreedySample(args []byte) error {
 	if err != nil {
 		return err
 	}
-	index, score, err := hipReferenceGreedySample(logits)
+	var suppressTokens []int32
+	if suppressCount > 0 {
+		suppressData, suppressOffset, ok := driver.memoryForPointer(suppressPointer, suppressCount*4)
+		if !ok {
+			return core.E("rocm.hip.FakeLaunch", "softcap greedy suppress buffer is missing", nil)
+		}
+		suppressTokens = make([]int32, suppressCount)
+		for index := range suppressTokens {
+			suppressTokens[index] = int32(binary.LittleEndian.Uint32(suppressData[suppressOffset+index*4:]))
+		}
+	}
+	index, score, err := hipReferenceGreedySampleSuppress(logits, suppressTokens)
 	if err != nil {
 		return err
 	}
