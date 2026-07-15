@@ -239,17 +239,29 @@ func TestHIPInferenceModel_ROCmProductionBridge_Good(t *testing.T) {
 	}
 
 	var _ inference.SessionFactory = model
+	core.AssertFalse(t, model.ChatInterceptorInstalled())
 	model.SetChatInterceptor(func(context.Context, []inference.Message, ...inference.GenerateOption) (iter.Seq[inference.Token], bool) {
 		return func(yield func(inference.Token) bool) {
 			yield(inference.Token{ID: 7, Text: "bridge"})
 		}, true
 	})
+	core.AssertTrue(t, model.ChatInterceptorInstalled())
 	got := slices.Collect(model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hello"}}))
 	core.AssertEqual(t, []inference.Token{{ID: 7, Text: "bridge"}}, got)
 	core.AssertEqual(t,
 		"<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n",
 		model.FormatChatPromptWithThinking([]inference.Message{{Role: "user", Content: "hello"}}, nil),
 	)
+	core.AssertEqual(t,
+		shared.FormatChatPrompt([]inference.Message{{Role: "user", Content: "hello"}}),
+		model.FormatChatPrompt([]inference.Message{{Role: "user", Content: "hello"}}),
+	)
+	core.AssertEqual(t,
+		shared.FormatChatContinuation([]inference.Message{{Role: "user", Content: "hello"}}),
+		model.FormatChatContinuation([]inference.Message{{Role: "user", Content: "hello"}}),
+	)
+	model.SetChatInterceptor(nil)
+	core.AssertFalse(t, model.ChatInterceptorInstalled())
 }
 
 func TestHIPInferenceModel_CaptureKV_Good(t *testing.T) {

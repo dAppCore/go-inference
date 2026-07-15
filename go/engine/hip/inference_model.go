@@ -411,6 +411,24 @@ func (m *rocmModel) NewSession() inference.SessionHandle {
 	return m.engineModel.NewSession()
 }
 
+// FormatChatPrompt exposes the shared model-declared template to serving,
+// continuous batching, state continuity, and training callers.
+func (m *rocmModel) FormatChatPrompt(messages []inference.Message) string {
+	if m == nil || m.engineModel == nil {
+		return ""
+	}
+	return m.engineModel.FormatChatPrompt(messages)
+}
+
+// FormatChatContinuation renders only the appended turns for a retained
+// conversation, preserving the shared engine's exact boundary framing.
+func (m *rocmModel) FormatChatContinuation(messages []inference.Message) string {
+	if m == nil || m.engineModel == nil {
+		return ""
+	}
+	return m.engineModel.FormatChatContinuation(messages)
+}
+
 func (m *rocmModel) FormatChatPromptWithThinking(messages []inference.Message, enableThinking *bool) string {
 	if m == nil || m.engineModel == nil {
 		return ""
@@ -432,6 +450,18 @@ func (m *rocmModel) SetChatInterceptor(fn func(context.Context, []inference.Mess
 	m.stateMutex.Lock()
 	m.chatIntercept = fn
 	m.stateMutex.Unlock()
+}
+
+// ChatInterceptorInstalled lets the scheduler hand continuation-shaped chats
+// back to the retained-state continuity owner instead of opening a fresh lane.
+func (m *rocmModel) ChatInterceptorInstalled() bool {
+	if m == nil {
+		return false
+	}
+	m.stateMutex.Lock()
+	installed := m.chatIntercept != nil
+	m.stateMutex.Unlock()
+	return installed
 }
 
 func (m *rocmModel) interceptChat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) (iter.Seq[inference.Token], bool) {
