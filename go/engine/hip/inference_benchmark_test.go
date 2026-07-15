@@ -2707,6 +2707,8 @@ func BenchmarkInferenceDiffusionGemmaGenerate(b *testing.B) {
 		b.Fatal(err)
 	}
 	inferenceBenchmarkReportGemma4ProductionQuant(b, rocmLoaded.modelInfo, modelPath)
+	nativeLoaded, _ := rocmLoaded.native.(*hipLoadedModel)
+	expertCacheBefore, _, _ := inferenceBenchmarkGemma4ExpertCacheSnapshot(nativeLoaded)
 	if kernelCounter != nil {
 		kernelCounter.ResetKernelStats()
 	}
@@ -2764,6 +2766,13 @@ func BenchmarkInferenceDiffusionGemmaGenerate(b *testing.B) {
 	b.ReportMetric(float64(denoiseDur)/float64(time.Millisecond)/operations, "denoise_ms/op")
 	b.ReportMetric(float64(commitDur)/float64(time.Millisecond)/operations, "commit_ms/op")
 	b.ReportMetric(float64(diffusionDur)/float64(time.Millisecond)/operations, "diffusion_ms/op")
+	expertCacheAfter, expertCacheResidentBytes, expertCacheResidentEntries := inferenceBenchmarkGemma4ExpertCacheSnapshot(nativeLoaded)
+	b.ReportMetric(float64(expertCacheAfter.Hits-expertCacheBefore.Hits)/operations, "expert_cache_hits/op")
+	b.ReportMetric(float64(expertCacheAfter.Misses-expertCacheBefore.Misses)/operations, "expert_cache_misses/op")
+	b.ReportMetric(float64(expertCacheAfter.Evictions-expertCacheBefore.Evictions)/operations, "expert_cache_evictions/op")
+	b.ReportMetric(float64(expertCacheAfter.H2DBytes-expertCacheBefore.H2DBytes)/operations, "expert_cache_h2d_bytes/op")
+	b.ReportMetric(float64(expertCacheResidentEntries), "expert_cache_resident_entries")
+	b.ReportMetric(float64(expertCacheResidentBytes), "expert_cache_resident_bytes")
 	inferenceBenchmarkReportHIPKernelRouteMetrics(b, kernelCounter)
 }
 

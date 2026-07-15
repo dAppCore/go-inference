@@ -40,6 +40,7 @@ const (
 	hipGemma4SelectedExpertGateUpSplitEnv = "GO_ROCM_GEMMA4_Q4_K_GATE_UP_SPLIT"
 	hipGemma4SelectedExpertDownExpert8Env = "GO_ROCM_GEMMA4_Q5_1_DOWN_EXPERT8"
 	hipGemma4Q4KExpandedEnv               = "GO_ROCM_GEMMA4_Q4_K_EXPANDED"
+	hipGemma4MoEMLXAffineRoutesEnv        = "GO_ROCM_GEMMA4_MOE_MLX_AFFINE_ROUTES"
 )
 
 type hipGGUFQ4_0ProjectionLaunchArgs struct {
@@ -86,7 +87,7 @@ type hipGGUFQ4_0SelectedExpertsLaunchArgs struct {
 
 const (
 	hipGemma4ExpertCacheDefaultBytes = 6 * memoryGiB
-	hipGemma4ExpertCacheMaximumBytes = 8 * memoryGiB
+	hipGemma4ExpertCacheMaximumBytes = 10 * memoryGiB
 	hipGemma4ExpertCacheReserveBytes = 2 * memoryGiB
 	hipGemma4ExpertCacheRefreshEvery = 256
 )
@@ -190,6 +191,8 @@ type hipGemma4ExpertCache struct {
 	adaptive                        bool
 	minimumEntries                  int
 	entries                         map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry
+	deferredEvictionDepth           int
+	deferredEvictions               []*hipGemma4ExpertCacheEntry
 	gateUpStaging                   *hipDeviceByteBuffer
 	expandedGPUDisabled             bool
 	sources                         map[string]*hipGemma4MappedExpertSource
@@ -237,6 +240,7 @@ type hipGemma4MoEWorkspace struct {
 	CombineNormsArgs        [hipMoECombineNormsLaunchArgsBytes]byte
 	BatchRouteRowsArgs      [hipMoEBatchRouteRowsLaunchArgsBytes]byte
 	BatchReduceArgs         [hipMoEBatchReduceLaunchArgsBytes]byte
+	AffineRoutesArgs        [hipMoEMLXAffineRoutesLaunchArgsBytes]byte
 	RouterPayload           [hipGemma4MoERouterMaximumOutputBytes]byte
 	Routes                  [hipGGUFQ4_0SelectedExpertsMaxTopK]rocmExpertRoute
 	Entries                 [hipGGUFQ4_0SelectedExpertsMaxTopK]*hipGemma4ExpertCacheEntry
@@ -245,6 +249,7 @@ type hipGemma4MoEWorkspace struct {
 	BatchRouterScores       []float32
 	BatchRoutePayload       []byte
 	BatchRouteGroups        [][]hipGemma4MoEBatchRoute
+	BatchAffineRouteChunks  []hipMoEMLXAffineRouteChunk
 }
 
 type hipGemma4MoEBatchRoute struct {
@@ -326,6 +331,165 @@ func hipGemma4MoEBatchRouteGroups(scores []float32, rows, experts, topK int, exp
 		}
 	}
 	return groups, nil
+}
+
+func hipPrepareGemma4MoEMLXAffineRouteChunks(moe *hipGemma4MoELayerConfig, groups [][]hipGemma4MoEBatchRoute, tokenCount, pairCount int, reuse []hipMoEMLXAffineRouteChunk) ([]hipMoEMLXAffineRouteChunk, int, bool, error) {
+	const operation = "rocm.hip.Gemma4MoEAffineRoutes"
+	if moe == nil || moe.ExpertCache == nil || moe.ExpertStorage != hipGemma4MoEExpertStorageMLXAffine ||
+		tokenCount <= 0 || pairCount <= 0 || len(groups) != moe.NumExperts {
+		return nil, 0, false, core.E(operation, "MLX affine route geometry is invalid", nil)
+	}
+	if core.Env(hipGemma4MoEMLXAffineRoutesEnv) != "1" {
+		return reuse[:0], 0, false, nil
+	}
+	routeCount := 0
+	chunkCount := 0
+	for _, routes := range groups {
+		routeCount += len(routes)
+		chunkCount += (len(routes) + hipMoEMLXAffineRoutesPerChunk - 1) / hipMoEMLXAffineRoutesPerChunk
+	}
+	if routeCount != pairCount || chunkCount <= 0 {
+		return nil, 0, false, core.E(operation, "route groups do not cover every selected pair", nil)
+	}
+	if !hipGemma4MoEMLXAffineWorkingSetFits(moe, groups) {
+		return reuse[:0], 0, false, nil
+	}
+	if cap(reuse) < chunkCount {
+		reuse = make([]hipMoEMLXAffineRouteChunk, chunkCount)
+	} else {
+		reuse = reuse[:chunkCount]
+		clear(reuse)
+	}
+
+	chunkIndex := 0
+	bits := 0
+	for expert, routes := range groups {
+		if len(routes) == 0 {
+			continue
+		}
+		entry, err := moe.expertEntry(expert)
+		if err != nil {
+			return nil, 0, false, core.E(operation, core.Sprintf("load expert %d", expert), err)
+		}
+		if err := hipValidateGemma4MoEMLXAffineRouteEntry(entry, moe); err != nil {
+			return nil, 0, false, core.E(operation, core.Sprintf("validate expert %d", expert), err)
+		}
+		entryBits := entry.MLXGate.quantBits()
+		if bits == 0 {
+			bits = entryBits
+		}
+		if entryBits != bits || entry.MLXUp.quantBits() != bits || entry.MLXDown.quantBits() != bits ||
+			entry.MLXGate.GroupSize != moe.MLXGroupSize || entry.MLXUp.GroupSize != moe.MLXGroupSize || entry.MLXDown.GroupSize != moe.MLXGroupSize ||
+			!hipGemma4MoEMLXAffineGateUpContiguous(entry) {
+			return reuse[:0], 0, false, nil
+		}
+		for start := 0; start < len(routes); start += hipMoEMLXAffineRoutesPerChunk {
+			end := min(start+hipMoEMLXAffineRoutesPerChunk, len(routes))
+			chunk := hipMoEMLXAffineRouteChunk{
+				GateUpWeightPointer: entry.MLXGate.WeightPointer,
+				GateUpScalePointer:  entry.MLXGate.ScalePointer,
+				GateUpBiasPointer:   entry.MLXGate.BiasPointer,
+				DownWeightPointer:   entry.MLXDown.WeightPointer,
+				DownScalePointer:    entry.MLXDown.ScalePointer,
+				DownBiasPointer:     entry.MLXDown.BiasPointer,
+				RouteCount:          end - start,
+			}
+			for index, route := range routes[start:end] {
+				if route.Row < 0 || route.Row >= tokenCount || route.Pair < 0 || route.Pair >= pairCount ||
+					math.IsNaN(float64(route.Weight)) || math.IsInf(float64(route.Weight), 0) {
+					return nil, 0, false, core.E(operation, "route row, pair, or weight is invalid", nil)
+				}
+				chunk.TokenRows[index] = route.Row
+				chunk.PairIndices[index] = route.Pair
+				chunk.RouteWeights[index] = route.Weight
+			}
+			reuse[chunkIndex] = chunk
+			chunkIndex++
+		}
+	}
+	if bits == 0 || !moe.ExpertCache.mlxAffineRouteEntriesResident(moe.Layer, groups) {
+		return reuse[:0], 0, false, nil
+	}
+	return reuse, bits, true, nil
+}
+
+func hipGemma4MoEMLXAffineWorkingSetFits(moe *hipGemma4MoELayerConfig, groups [][]hipGemma4MoEBatchRoute) bool {
+	entryBytes, ok := hipGemma4MoEMLXAffineSourceEntryBytes(moe.MLXExperts, moe.NumExperts)
+	if !ok || entryBytes == 0 {
+		return false
+	}
+	activeExperts := 0
+	for _, routes := range groups {
+		if len(routes) > 0 {
+			activeExperts++
+		}
+	}
+	if activeExperts == 0 || uint64(activeExperts) > ^uint64(0)/entryBytes {
+		return false
+	}
+	moe.ExpertCache.mu.Lock()
+	maxBytes := moe.ExpertCache.maxBytes
+	moe.ExpertCache.mu.Unlock()
+	return uint64(activeExperts)*entryBytes <= maxBytes
+}
+
+func hipGemma4MoEMLXAffineSourceEntryBytes(source hipGemma4MLXAffineExpertSource, experts int) (uint64, bool) {
+	if experts <= 0 {
+		return 0, false
+	}
+	tensors := [...]nativeTensorInfo{
+		source.GateUp.Weight, source.GateUp.Scales, source.GateUp.Biases,
+		source.Down.Weight, source.Down.Scales, source.Down.Biases,
+	}
+	total := uint64(0)
+	for _, tensor := range tensors {
+		if tensor.ByteSize == 0 || tensor.ByteSize%uint64(experts) != 0 {
+			return 0, false
+		}
+		bytes := tensor.ByteSize / uint64(experts)
+		if total > ^uint64(0)-bytes {
+			return 0, false
+		}
+		total += bytes
+	}
+	return total, true
+}
+
+func hipValidateGemma4MoEMLXAffineRouteEntry(entry *hipGemma4ExpertCacheEntry, moe *hipGemma4MoELayerConfig) error {
+	if entry == nil || entry.Storage != hipGemma4MoEExpertStorageMLXAffine || moe == nil ||
+		entry.MLXGate.Rows != moe.ExpertIntermediateSize || entry.MLXGate.Cols != moe.MLXHiddenSize ||
+		entry.MLXUp.Rows != moe.ExpertIntermediateSize || entry.MLXUp.Cols != moe.MLXHiddenSize ||
+		entry.MLXDown.Rows != moe.MLXHiddenSize || entry.MLXDown.Cols != moe.ExpertIntermediateSize {
+		return core.E("rocm.hip.Gemma4MoEAffineRoutes", "expert projection geometry mismatch", nil)
+	}
+	return nil
+}
+
+func hipGemma4MoEMLXAffineGateUpContiguous(entry *hipGemma4ExpertCacheEntry) bool {
+	if entry == nil {
+		return false
+	}
+	return entry.MLXUp.WeightPointer == entry.MLXGate.WeightPointer+nativeDevicePointer(entry.MLXGate.WeightBytes) &&
+		entry.MLXUp.ScalePointer == entry.MLXGate.ScalePointer+nativeDevicePointer(entry.MLXGate.ScaleBytes) &&
+		entry.MLXUp.BiasPointer == entry.MLXGate.BiasPointer+nativeDevicePointer(entry.MLXGate.BiasBytes)
+}
+
+func (cache *hipGemma4ExpertCache) mlxAffineRouteEntriesResident(layer int, groups [][]hipGemma4MoEBatchRoute) bool {
+	if cache == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	for expert, routes := range groups {
+		if len(routes) == 0 {
+			continue
+		}
+		entry := cache.entries[hipGemma4ExpertCacheKey{Layer: layer, Expert: expert}]
+		if entry == nil || entry.Storage != hipGemma4MoEExpertStorageMLXAffine {
+			return false
+		}
+	}
+	return true
 }
 
 func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureMoEHiddenOutput(driver nativeHIPDriver, count, slot int) (*hipDeviceByteBuffer, error) {
@@ -437,6 +601,24 @@ func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureMoEBatchRouteMetadata(
 		routeCount*(hipMoEBatchRouteMetadataBytes/4),
 		"MoE batch route metadata",
 		"MoE batch route metadata view",
+	)
+}
+
+func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureMoEMLXAffineRouteChunks(driver nativeHIPDriver, chunkCount int) (*hipDeviceByteBuffer, error) {
+	if workspace == nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "attention workspace is required", nil)
+	}
+	if chunkCount <= 0 || chunkCount > int(^uint(0)>>1)/(hipMoEMLXAffineRouteChunkBytes/4) {
+		return nil, core.E("rocm.hip.Gemma4MoE", "MoE affine route chunk count is invalid", nil)
+	}
+	return workspace.ensureFixedOutputReusableCapacity(
+		driver,
+		&workspace.MoE.BatchRouteMetadataFixed,
+		&workspace.MoE.BatchRouteMetadataCap,
+		&workspace.MoE.BatchRouteMetadataView,
+		chunkCount*(hipMoEMLXAffineRouteChunkBytes/4),
+		"MoE affine route chunks",
+		"MoE affine route chunk view",
 	)
 }
 
@@ -579,6 +761,7 @@ func (workspace *hipGemma4MoEWorkspace) Close() error {
 	workspace.BatchRouterScores = nil
 	workspace.BatchRoutePayload = nil
 	workspace.BatchRouteGroups = nil
+	workspace.BatchAffineRouteChunks = nil
 	workspace.resetBorrowedViews()
 	return lastErr
 }
@@ -1234,7 +1417,7 @@ func hipRunGemma4MoEDeviceMLPBatchWithWorkspace(ctx context.Context, driver nati
 	return output, nil
 }
 
-func hipRunGemma4MoEMLXAffineDeviceMLPBatchWithWorkspace(ctx context.Context, driver nativeHIPDriver, attentionResidual, localInput *hipDeviceByteBuffer, layer hipGemma4Q4Layer0Config, epsilon float32, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
+func hipRunGemma4MoEMLXAffineDeviceMLPBatchWithWorkspace(ctx context.Context, driver nativeHIPDriver, attentionResidual, localInput *hipDeviceByteBuffer, layer hipGemma4Q4Layer0Config, epsilon float32, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace) (result *hipDeviceByteBuffer, resultErr error) {
 	const operation = "rocm.hip.Gemma4MoEBatch"
 	moe := layer.MoE
 	if workspace == nil {
@@ -1323,74 +1506,53 @@ func hipRunGemma4MoEMLXAffineDeviceMLPBatchWithWorkspace(ctx context.Context, dr
 	if err != nil {
 		return nil, err
 	}
-	for expert, routes := range groups {
-		if len(routes) == 0 {
-			continue
+	if err := moe.ExpertCache.beginDeferredEvictions(); err != nil {
+		return nil, err
+	}
+	deferredEvictionsActive := true
+	finishDeferredEvictions := func() error {
+		if !deferredEvictionsActive {
+			return nil
 		}
-		entry, entryErr := moe.expertEntry(expert)
-		if entryErr != nil {
-			return nil, core.E(operation, core.Sprintf("load expert %d", expert), entryErr)
-		}
-		if entry == nil || entry.Storage != hipGemma4MoEExpertStorageMLXAffine ||
-			entry.MLXGate.Rows != moe.ExpertIntermediateSize || entry.MLXGate.Cols != layer.HiddenSize ||
-			entry.MLXUp.Rows != moe.ExpertIntermediateSize || entry.MLXUp.Cols != layer.HiddenSize ||
-			entry.MLXDown.Rows != layer.HiddenSize || entry.MLXDown.Cols != moe.ExpertIntermediateSize {
-			return nil, core.E(operation, core.Sprintf("expert %d projection geometry mismatch", expert), nil)
-		}
-
-		metadataBytes := len(routes) * hipMoEBatchRouteMetadataBytes
-		if cap(moeWorkspace.BatchRoutePayload) < metadataBytes {
-			moeWorkspace.BatchRoutePayload = make([]byte, metadataBytes)
-		} else {
-			moeWorkspace.BatchRoutePayload = moeWorkspace.BatchRoutePayload[:metadataBytes]
-		}
-		for index, route := range routes {
-			base := index * hipMoEBatchRouteMetadataBytes
-			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base:], uint32(route.Row))
-			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base+4:], uint32(route.Pair))
-			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base+8:], math.Float32bits(route.Weight))
-			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base+12:], 0)
-		}
-		metadata, metadataErr := workspace.EnsureMoEBatchRouteMetadata(driver, len(routes))
-		if metadataErr != nil {
-			return nil, metadataErr
-		}
-		if copyErr := hipCopyHostToDeviceLabeled(driver, metadata.Pointer(), moeWorkspace.BatchRoutePayload, operation, "grouped expert route metadata"); copyErr != nil {
-			return nil, core.E(operation, core.Sprintf("upload expert %d route metadata", expert), copyErr)
-		}
-		groupInput, groupErr := workspace.EnsureMoEBatchExpertInput(driver, len(routes)*layer.HiddenSize)
-		if groupErr != nil {
-			return nil, groupErr
-		}
-		if groupErr = hipRunMoEBatchGatherRowsKernelWithArgs(
-			ctx, driver, expertInput, metadata, len(routes), layer.HiddenSize, tokenCount, groupInput, moeWorkspace.BatchRouteRowsArgs[:],
-		); groupErr != nil {
-			return nil, core.E(operation, core.Sprintf("gather expert %d rows", expert), groupErr)
-		}
-		activation, activationErr := workspace.EnsureActivationOutput(driver, len(routes)*moe.ExpertIntermediateSize)
-		if activationErr != nil {
-			return nil, activationErr
-		}
-		if activationErr = hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(
-			ctx, driver, groupInput, entry.MLXGate, entry.MLXUp, len(routes), activation,
-		); activationErr != nil {
-			return nil, core.E(operation, core.Sprintf("run expert %d gate/up batch", expert), activationErr)
-		}
-		downOutput, downErr := workspace.EnsureMoEExpertDownOutput(driver, len(routes)*layer.HiddenSize)
-		if downErr != nil {
-			return nil, downErr
-		}
-		if downErr = hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx, driver, activation, entry.MLXDown, len(routes), downOutput); downErr != nil {
-			return nil, core.E(operation, core.Sprintf("run expert %d down batch", expert), downErr)
-		}
-		if downErr = hipRunMoEBatchScatterRoutesKernelWithArgs(
-			ctx, driver, downOutput, metadata, len(routes), layer.HiddenSize, pairCount, routeOutput, moeWorkspace.BatchRouteRowsArgs[:],
-		); downErr != nil {
-			return nil, core.E(operation, core.Sprintf("scatter expert %d routes", expert), downErr)
-		}
+		deferredEvictionsActive = false
 		if syncErr := hipSynchronizeGemma4MoEExpertUse(driver); syncErr != nil {
-			return nil, core.E(operation, core.Sprintf("finish expert %d batch", expert), syncErr)
+			if abandonErr := moe.ExpertCache.abandonDeferredEvictions(); abandonErr != nil {
+				return core.E(operation, "leave deferred expert eviction scope", abandonErr)
+			}
+			return core.E(operation, "finish grouped expert device work", syncErr)
 		}
+		if endErr := moe.ExpertCache.endDeferredEvictions(); endErr != nil {
+			return core.E(operation, "release deferred expert evictions", endErr)
+		}
+		return nil
+	}
+	defer func() {
+		if finishErr := finishDeferredEvictions(); finishErr != nil && resultErr == nil {
+			result = nil
+			resultErr = finishErr
+		}
+	}()
+	chunks, routeBits, useAllRoutes, routeErr := hipPrepareGemma4MoEMLXAffineRouteChunks(
+		moe, groups, tokenCount, pairCount, moeWorkspace.BatchAffineRouteChunks,
+	)
+	if routeErr != nil {
+		return nil, routeErr
+	}
+	moeWorkspace.BatchAffineRouteChunks = chunks
+	if useAllRoutes {
+		routeErr = hipRunGemma4MoEMLXAffineAllRoutes(
+			ctx, driver, expertInput, routeOutput, layer.HiddenSize, tokenCount, pairCount, routeBits, moe, chunks, workspace,
+		)
+	} else {
+		routeErr = hipRunGemma4MoEMLXAffineGroupedRoutes(
+			ctx, driver, expertInput, routeOutput, layer.HiddenSize, tokenCount, pairCount, moe, groups, workspace,
+		)
+	}
+	if routeErr != nil {
+		return nil, routeErr
+	}
+	if finishErr := finishDeferredEvictions(); finishErr != nil {
+		return nil, finishErr
 	}
 
 	output, err := workspace.EnsureMoEBatchOutput(driver, wantCount)
@@ -1424,6 +1586,119 @@ func hipRunGemma4MoEMLXAffineDeviceMLPBatchWithWorkspace(ctx context.Context, dr
 		return nil, core.E(operation, "combine batched local and expert outputs", err)
 	}
 	return output, nil
+}
+
+func hipRunGemma4MoEMLXAffineAllRoutes(ctx context.Context, driver nativeHIPDriver, expertInput, routeOutput *hipDeviceByteBuffer, hidden, tokenCount, pairCount, bits int, moe *hipGemma4MoELayerConfig, chunks []hipMoEMLXAffineRouteChunk, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	const operation = "rocm.hip.Gemma4MoEAffineRoutes"
+	if len(chunks) == 0 || bits <= 0 || moe == nil || workspace == nil {
+		return core.E(operation, "prepared affine routes are required", nil)
+	}
+	moeWorkspace := &workspace.MoE
+	metadataBytes := len(chunks) * hipMoEMLXAffineRouteChunkBytes
+	if cap(moeWorkspace.BatchRoutePayload) < metadataBytes {
+		moeWorkspace.BatchRoutePayload = make([]byte, metadataBytes)
+	} else {
+		moeWorkspace.BatchRoutePayload = moeWorkspace.BatchRoutePayload[:metadataBytes]
+	}
+	payload, err := hipMoEMLXAffineRouteChunksBinaryInto(chunks, moeWorkspace.BatchRoutePayload)
+	if err != nil {
+		return err
+	}
+	metadata, err := workspace.EnsureMoEMLXAffineRouteChunks(driver, len(chunks))
+	if err != nil {
+		return err
+	}
+	if err := hipCopyHostToDeviceLabeled(driver, metadata.Pointer(), payload, operation, "all-route expert chunks"); err != nil {
+		return core.E(operation, "upload all-route expert chunks", err)
+	}
+	activation, err := workspace.EnsureActivationOutput(driver, pairCount*moe.ExpertIntermediateSize)
+	if err != nil {
+		return err
+	}
+	if err := hipRunMoEMLXAffineRoutesKernelWithArgs(
+		ctx, driver, expertInput, metadata,
+		moe.ExpertIntermediateSize, hidden, tokenCount, pairCount, len(chunks), moe.MLXGroupSize, bits, true,
+		activation, moeWorkspace.AffineRoutesArgs[:],
+	); err != nil {
+		return core.E(operation, "run all-route expert gate/up", err)
+	}
+	if err := hipRunMoEMLXAffineRoutesKernelWithArgs(
+		ctx, driver, activation, metadata,
+		hidden, moe.ExpertIntermediateSize, pairCount, pairCount, len(chunks), moe.MLXGroupSize, bits, false,
+		routeOutput, moeWorkspace.AffineRoutesArgs[:],
+	); err != nil {
+		return core.E(operation, "run all-route expert down", err)
+	}
+	return nil
+}
+
+func hipRunGemma4MoEMLXAffineGroupedRoutes(ctx context.Context, driver nativeHIPDriver, expertInput, routeOutput *hipDeviceByteBuffer, hidden, tokenCount, pairCount int, moe *hipGemma4MoELayerConfig, groups [][]hipGemma4MoEBatchRoute, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	const operation = "rocm.hip.Gemma4MoEBatch"
+	moeWorkspace := &workspace.MoE
+	for expert, routes := range groups {
+		if len(routes) == 0 {
+			continue
+		}
+		entry, err := moe.expertEntry(expert)
+		if err != nil {
+			return core.E(operation, core.Sprintf("load expert %d", expert), err)
+		}
+		if err := hipValidateGemma4MoEMLXAffineRouteEntry(entry, moe); err != nil {
+			return core.E(operation, core.Sprintf("validate expert %d", expert), err)
+		}
+
+		metadataBytes := len(routes) * hipMoEBatchRouteMetadataBytes
+		if cap(moeWorkspace.BatchRoutePayload) < metadataBytes {
+			moeWorkspace.BatchRoutePayload = make([]byte, metadataBytes)
+		} else {
+			moeWorkspace.BatchRoutePayload = moeWorkspace.BatchRoutePayload[:metadataBytes]
+		}
+		for index, route := range routes {
+			base := index * hipMoEBatchRouteMetadataBytes
+			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base:], uint32(route.Row))
+			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base+4:], uint32(route.Pair))
+			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base+8:], math.Float32bits(route.Weight))
+			binary.LittleEndian.PutUint32(moeWorkspace.BatchRoutePayload[base+12:], 0)
+		}
+		metadata, err := workspace.EnsureMoEBatchRouteMetadata(driver, len(routes))
+		if err != nil {
+			return err
+		}
+		if err := hipCopyHostToDeviceLabeled(driver, metadata.Pointer(), moeWorkspace.BatchRoutePayload, operation, "grouped expert route metadata"); err != nil {
+			return core.E(operation, core.Sprintf("upload expert %d route metadata", expert), err)
+		}
+		groupInput, err := workspace.EnsureMoEBatchExpertInput(driver, len(routes)*hidden)
+		if err != nil {
+			return err
+		}
+		if err := hipRunMoEBatchGatherRowsKernelWithArgs(
+			ctx, driver, expertInput, metadata, len(routes), hidden, tokenCount, groupInput, moeWorkspace.BatchRouteRowsArgs[:],
+		); err != nil {
+			return core.E(operation, core.Sprintf("gather expert %d rows", expert), err)
+		}
+		activation, err := workspace.EnsureActivationOutput(driver, len(routes)*moe.ExpertIntermediateSize)
+		if err != nil {
+			return err
+		}
+		if err := hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(
+			ctx, driver, groupInput, entry.MLXGate, entry.MLXUp, len(routes), activation,
+		); err != nil {
+			return core.E(operation, core.Sprintf("run expert %d gate/up batch", expert), err)
+		}
+		downOutput, err := workspace.EnsureMoEExpertDownOutput(driver, len(routes)*hidden)
+		if err != nil {
+			return err
+		}
+		if err := hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx, driver, activation, entry.MLXDown, len(routes), downOutput); err != nil {
+			return core.E(operation, core.Sprintf("run expert %d down batch", expert), err)
+		}
+		if err := hipRunMoEBatchScatterRoutesKernelWithArgs(
+			ctx, driver, downOutput, metadata, len(routes), hidden, pairCount, routeOutput, moeWorkspace.BatchRouteRowsArgs[:],
+		); err != nil {
+			return core.E(operation, core.Sprintf("scatter expert %d routes", expert), err)
+		}
+	}
+	return nil
 }
 
 func hipSynchronizeGemma4MoEExpertUse(driver nativeHIPDriver) error {
@@ -1573,6 +1848,67 @@ func newHIPGemma4AdaptiveExpertCache(driver nativeHIPDriver, minimumEntries int)
 	cache.minimumEntries = minimumEntries
 	cache.releaseTransientPoolSuppression = hipSuppressDeviceByteBufferPool()
 	return cache
+}
+
+func (cache *hipGemma4ExpertCache) beginDeferredEvictions() error {
+	if cache == nil {
+		return core.E("rocm.hip.Gemma4ExpertCache", "expert cache is required", nil)
+	}
+	cache.mu.Lock()
+	cache.deferredEvictionDepth++
+	cache.mu.Unlock()
+	return nil
+}
+
+func (cache *hipGemma4ExpertCache) endDeferredEvictions() error {
+	if cache == nil {
+		return core.E("rocm.hip.Gemma4ExpertCache", "expert cache is required", nil)
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.deferredEvictionDepth <= 0 {
+		return core.E("rocm.hip.Gemma4ExpertCache", "deferred eviction scope is not active", nil)
+	}
+	cache.deferredEvictionDepth--
+	if cache.deferredEvictionDepth > 0 {
+		return nil
+	}
+	return cache.closeDeferredEvictionsLocked()
+}
+
+func (cache *hipGemma4ExpertCache) abandonDeferredEvictions() error {
+	if cache == nil {
+		return core.E("rocm.hip.Gemma4ExpertCache", "expert cache is required", nil)
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if cache.deferredEvictionDepth <= 0 {
+		return core.E("rocm.hip.Gemma4ExpertCache", "deferred eviction scope is not active", nil)
+	}
+	cache.deferredEvictionDepth--
+	return nil
+}
+
+func (cache *hipGemma4ExpertCache) closeDeferredEvictionsLocked() error {
+	var lastErr error
+	for index, entry := range cache.deferredEvictions {
+		if err := entry.Close(); err != nil {
+			lastErr = err
+		}
+		cache.deferredEvictions[index] = nil
+	}
+	cache.deferredEvictions = cache.deferredEvictions[:0]
+	return lastErr
+}
+
+func (cache *hipGemma4ExpertCache) flushDeferredEvictionsLocked() error {
+	if len(cache.deferredEvictions) == 0 {
+		return nil
+	}
+	if err := hipSynchronizeGemma4MoEExpertUse(cache.driver); err != nil {
+		return err
+	}
+	return cache.closeDeferredEvictionsLocked()
 }
 
 func hipGemma4ExpertCacheBudget(driver nativeHIPDriver) uint64 {
@@ -1899,6 +2235,13 @@ func (cache *hipGemma4ExpertCache) allocateExpertBuffer(label string, sizeBytes 
 			buffer.pooled = false
 			return buffer, nil
 		}
+		if len(cache.deferredEvictions) > 0 {
+			cache.stats.AllocationRetries++
+			if flushErr := cache.flushDeferredEvictionsLocked(); flushErr != nil {
+				return nil, flushErr
+			}
+			continue
+		}
 		if len(cache.entries) == 0 {
 			return nil, err
 		}
@@ -1930,6 +2273,13 @@ func (cache *hipGemma4ExpertCache) uploadExpertBuffer(label string, payload []by
 	for {
 		buffer, err := hipAllocateByteBuffer(cache.driver, operation, label, uint64(len(payload)), count)
 		if err != nil {
+			if len(cache.deferredEvictions) > 0 {
+				cache.stats.AllocationRetries++
+				if flushErr := cache.flushDeferredEvictionsLocked(); flushErr != nil {
+					return nil, flushErr
+				}
+				continue
+			}
 			if len(cache.entries) == 0 {
 				return nil, err
 			}
@@ -2009,7 +2359,9 @@ func (cache *hipGemma4ExpertCache) evictOldest() error {
 	if oldest == nil {
 		return core.E("rocm.hip.Gemma4ExpertCache", "cache byte limit cannot satisfy expert allocation", nil)
 	}
-	if err := oldest.Close(); err != nil {
+	if cache.deferredEvictionDepth > 0 {
+		cache.deferredEvictions = append(cache.deferredEvictions, oldest)
+	} else if err := oldest.Close(); err != nil {
 		return err
 	}
 	delete(cache.entries, oldestKey)
@@ -2061,6 +2413,12 @@ func (cache *hipGemma4ExpertCache) Close() error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	var lastErr error
+	if len(cache.deferredEvictions) > 0 {
+		if err := cache.flushDeferredEvictionsLocked(); err != nil {
+			lastErr = err
+		}
+	}
+	cache.deferredEvictionDepth = 0
 	for key, entry := range cache.entries {
 		if err := entry.Close(); err != nil {
 			lastErr = err

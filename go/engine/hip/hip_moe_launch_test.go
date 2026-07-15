@@ -89,6 +89,94 @@ func TestHIPMoEBatchRouteRows_Good_GathersScattersAndReduces(t *testing.T) {
 	assertFloat32SlicesNear(t, []float32{2, 4, 0, 0, 2.5, 3}, got, 0)
 }
 
+func TestHIPMoEMLXAffineRouteChunk_Good(t *testing.T) {
+	chunk := hipMoEMLXAffineRouteChunk{
+		GateUpWeightPointer: 11,
+		GateUpScalePointer:  22,
+		GateUpBiasPointer:   33,
+		DownWeightPointer:   44,
+		DownScalePointer:    55,
+		DownBiasPointer:     66,
+		RouteCount:          2,
+	}
+	chunk.TokenRows[0], chunk.TokenRows[1] = 7, 3
+	chunk.PairIndices[0], chunk.PairIndices[1] = 9, 4
+	chunk.RouteWeights[0], chunk.RouteWeights[1] = 0.75, 0.25
+	payload, err := chunk.Binary()
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, hipMoEMLXAffineRouteChunkBytes, len(payload))
+	core.AssertEqual(t, uint64(11), binary.LittleEndian.Uint64(payload[0:]))
+	core.AssertEqual(t, uint64(22), binary.LittleEndian.Uint64(payload[8:]))
+	core.AssertEqual(t, uint64(33), binary.LittleEndian.Uint64(payload[16:]))
+	core.AssertEqual(t, uint64(44), binary.LittleEndian.Uint64(payload[24:]))
+	core.AssertEqual(t, uint64(55), binary.LittleEndian.Uint64(payload[32:]))
+	core.AssertEqual(t, uint64(66), binary.LittleEndian.Uint64(payload[40:]))
+	core.AssertEqual(t, uint32(2), binary.LittleEndian.Uint32(payload[48:]))
+	core.AssertEqual(t, uint32(7), binary.LittleEndian.Uint32(payload[56:]))
+	core.AssertEqual(t, uint32(3), binary.LittleEndian.Uint32(payload[60:]))
+	core.AssertEqual(t, uint32(9), binary.LittleEndian.Uint32(payload[88:]))
+	core.AssertEqual(t, uint32(4), binary.LittleEndian.Uint32(payload[92:]))
+	assertFloat32Near(t, 0.75, math.Float32frombits(binary.LittleEndian.Uint32(payload[120:])))
+	assertFloat32Near(t, 0.25, math.Float32frombits(binary.LittleEndian.Uint32(payload[124:])))
+}
+
+func TestHIPMoEMLXAffineRoutesLaunchArgs_Good(t *testing.T) {
+	args := hipMoEMLXAffineRoutesLaunchArgs{
+		InputPointer: 11, ChunkPointer: 22, OutputPointer: 33,
+		Rows: 704, Cols: 2816, InputRows: 64, PairCount: 512, ChunkCount: 73,
+		GroupSize: 64, Bits: 4, InputBytes: 64 * 2816 * 4,
+		ChunkBytes:  73 * hipMoEMLXAffineRouteChunkBytes,
+		OutputBytes: 512 * 704 * 4, GateUp: true,
+	}
+	payload, err := args.Binary()
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, hipMoEMLXAffineRoutesLaunchArgsBytes, len(payload))
+	core.AssertEqual(t, hipMoEMLXAffineRoutesLaunchArgsVersion, binary.LittleEndian.Uint32(payload[0:]))
+	core.AssertEqual(t, uint32(hipMoEMLXAffineRoutesLaunchArgsBytes), binary.LittleEndian.Uint32(payload[4:]))
+	core.AssertEqual(t, uint64(11), binary.LittleEndian.Uint64(payload[8:]))
+	core.AssertEqual(t, uint64(22), binary.LittleEndian.Uint64(payload[16:]))
+	core.AssertEqual(t, uint64(33), binary.LittleEndian.Uint64(payload[24:]))
+	core.AssertEqual(t, uint32(704), binary.LittleEndian.Uint32(payload[32:]))
+	core.AssertEqual(t, uint32(2816), binary.LittleEndian.Uint32(payload[36:]))
+	core.AssertEqual(t, uint32(64), binary.LittleEndian.Uint32(payload[40:]))
+	core.AssertEqual(t, uint32(512), binary.LittleEndian.Uint32(payload[44:]))
+	core.AssertEqual(t, uint32(73), binary.LittleEndian.Uint32(payload[48:]))
+	core.AssertEqual(t, uint32(64), binary.LittleEndian.Uint32(payload[52:]))
+	core.AssertEqual(t, uint32(4), binary.LittleEndian.Uint32(payload[56:]))
+	core.AssertEqual(t, uint32(hipMoEMLXAffineRoutesFlagGateUp), binary.LittleEndian.Uint32(payload[72:]))
+}
+
+func TestHIPMoEMLXAffineRoutesLaunch_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	input := hipBorrowDeviceByteBufferValue(driver, "route input", 11, 2*32*4, 2*32)
+	chunks := hipBorrowDeviceByteBufferValue(driver, "route chunks", 22, 2*hipMoEMLXAffineRouteChunkBytes, 2*(hipMoEMLXAffineRouteChunkBytes/4))
+	output := hipBorrowDeviceByteBufferValue(driver, "route output", 33, 4*16*4, 4*16)
+
+	core.RequireNoError(t, hipRunMoEMLXAffineRoutesKernel(
+		context.Background(), driver, &input, &chunks, 16, 32, 2, 4, 2, 32, 4, true, &output,
+	))
+	core.AssertEqual(t, 1, len(driver.launches))
+	core.AssertEqual(t, hipKernelNameMoEMLXAffineRoutes, driver.launches[0].Name)
+	core.AssertEqual(t, uint32(2), driver.launches[0].GridX)
+	core.AssertEqual(t, uint32(2), driver.launches[0].GridY)
+	core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
+}
+
+func TestHIPMoEMLXAffineRoutesLaunch_Bad_RejectsChunkShape(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	input := hipBorrowDeviceByteBufferValue(driver, "route input", 11, 2*32*4, 2*32)
+	chunks := hipBorrowDeviceByteBufferValue(driver, "short route chunks", 22, hipMoEMLXAffineRouteChunkBytes, hipMoEMLXAffineRouteChunkBytes/4)
+	output := hipBorrowDeviceByteBufferValue(driver, "route output", 33, 4*16*4, 4*16)
+
+	err := hipRunMoEMLXAffineRoutesKernel(
+		context.Background(), driver, &input, &chunks, 16, 32, 2, 4, 2, 32, 4, true, &output,
+	)
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "buffer shape")
+}
+
 func TestHIPMoEBatchRouteRowsHardware_Good_GathersScattersAndReduces(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_MOE_LANE_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_MOE_LANE_TESTS=1 to run the HIP MoE route-kernel receipt")
@@ -867,6 +955,65 @@ func TestHIPGemma4ExpertCache_Good_AdaptsToLiveHeadroom(t *testing.T) {
 	core.RequireTrue(t, cache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: 2}] != nil)
 }
 
+func TestHIPGemma4ExpertCache_Good_DefersEvictedBufferRelease(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL", "1")
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
+	cache := newHIPGemma4ExpertCache(driver, 64)
+	t.Cleanup(func() { core.AssertNoError(t, cache.Close()) })
+	gateUp, err := hipAllocateByteBuffer(driver, "test", "deferred gate/up", 32, 32)
+	core.RequireNoError(t, err)
+	down, err := hipAllocateByteBuffer(driver, "test", "deferred down", 32, 32)
+	core.RequireNoError(t, err)
+	cache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: 0}] = &hipGemma4ExpertCacheEntry{
+		GateUp: gateUp, Down: down, bytes: 64, lastUse: 1,
+	}
+	cache.bytes = 64
+
+	core.RequireNoError(t, cache.beginDeferredEvictions())
+	core.RequireNoError(t, cache.evictOldest())
+	core.AssertEqual(t, 0, len(cache.entries))
+	core.AssertEqual(t, uint64(0), cache.bytes)
+	core.AssertEqual(t, 1, len(cache.deferredEvictions))
+	core.AssertEqual(t, 0, len(driver.frees))
+	core.AssertEqual(t, uint64(64), driver.liveBytes)
+
+	core.RequireNoError(t, hipSynchronizeGemma4MoEExpertUse(driver))
+	core.RequireNoError(t, cache.endDeferredEvictions())
+	core.AssertEqual(t, 1, driver.synchronizes)
+	core.AssertEqual(t, 0, len(cache.deferredEvictions))
+	core.AssertEqual(t, 2, len(driver.frees))
+	core.AssertEqual(t, uint64(0), driver.liveBytes)
+}
+
+func TestHIPGemma4ExpertCache_Good_ReclaimsDeferredBuffersOnAllocationPressure(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL", "1")
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true, maxLiveBytes: 64}}
+	cache := newHIPGemma4ExpertCache(driver, 64)
+	t.Cleanup(func() { core.AssertNoError(t, cache.Close()) })
+	gateUp, err := hipAllocateByteBuffer(driver, "test", "pressure gate/up", 32, 32)
+	core.RequireNoError(t, err)
+	down, err := hipAllocateByteBuffer(driver, "test", "pressure down", 32, 32)
+	core.RequireNoError(t, err)
+	cache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: 0}] = &hipGemma4ExpertCacheEntry{
+		GateUp: gateUp, Down: down, bytes: 64, lastUse: 1,
+	}
+	cache.bytes = 64
+
+	core.RequireNoError(t, cache.beginDeferredEvictions())
+	core.RequireNoError(t, cache.evictOldest())
+	replacement, err := cache.allocateExpertBuffer("replacement expert", 64, 64)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, uint64(1), cache.stats.AllocationRetries)
+	core.AssertEqual(t, 1, driver.synchronizes)
+	core.AssertEqual(t, 0, len(cache.deferredEvictions))
+	core.AssertEqual(t, 2, len(driver.frees))
+	core.AssertEqual(t, uint64(64), driver.liveBytes)
+	core.RequireNoError(t, replacement.Close())
+	core.RequireNoError(t, cache.endDeferredEvictions())
+	core.AssertEqual(t, 0, cache.deferredEvictionDepth)
+	core.AssertEqual(t, uint64(0), driver.liveBytes)
+}
+
 func TestHIPGemma4ExpertCache_Good_AdaptiveCacheSuppressesTransientPool(t *testing.T) {
 	t.Setenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL", "")
 	driver := &fakeHIPDriver{available: true}
@@ -893,8 +1040,8 @@ func TestHIPGemma4ExpertCache_Good_AdaptiveCacheSuppressesTransientPool(t *testi
 }
 
 func TestHIPGemma4ExpertCacheBudget_Good(t *testing.T) {
-	core.AssertEqual(t, uint64(8*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
-	core.AssertEqual(t, uint64(8*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
+	core.AssertEqual(t, uint64(10*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
+	core.AssertEqual(t, uint64(9*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
 	core.AssertEqual(t, uint64(5*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
 	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true}))
 }
@@ -1017,7 +1164,8 @@ func TestHIPGemma4MoEWorkspace_Good_BatchRowsUseDistinctOutput(t *testing.T) {
 	core.AssertEqual(t, rows, countLaunchName(driver.launches, hipKernelNameMoECombineNorms))
 }
 
-func TestHIPGemma4MoEWorkspace_Good_MLXAffineBatchGroupsExperts(t *testing.T) {
+func TestHIPGemma4MoEWorkspace_Good_MLXAffineBatchDefaultsToGroupedExperts(t *testing.T) {
+	t.Setenv("GO_ROCM_GEMMA4_MOE_MLX_AFFINE_ROUTES", "")
 	const rows = 2
 	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
 	workspace := hipNewAttentionHeadsChunkedWorkspace()
@@ -1038,7 +1186,51 @@ func TestHIPGemma4MoEWorkspace_Good_MLXAffineBatchGroupsExperts(t *testing.T) {
 	core.AssertEqual(t, 4, countLaunchName(driver.launches, hipKernelNameRMSNormHeads))
 	core.AssertEqual(t, 3, countLaunchName(driver.launches, hipKernelNameMLXQ4GELUTanhMulBatch))
 	core.AssertEqual(t, 4, countLaunchName(driver.launches, hipKernelNameMLXQ4ProjBatch))
+	core.AssertEqual(t, 0, countLaunchName(driver.launches, hipKernelNameMoEMLXAffineRoutes))
 	core.AssertEqual(t, 1, countLaunchName(driver.launches, hipKernelNameVectorAddScaled))
+	core.AssertEqual(t, 1, driver.synchronizes)
+}
+
+func TestHIPGemma4MoEWorkspace_Good_MLXAffineBatchCanEnableAllRoutes(t *testing.T) {
+	t.Setenv("GO_ROCM_GEMMA4_MOE_MLX_AFFINE_ROUTES", "1")
+	const rows = 2
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+	attentionResidual, localInput, layer, cleanup := hipGemma4MoEMLXWorkspaceFixture(t, driver, rows)
+	defer cleanup()
+
+	output, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(
+		context.Background(), driver, attentionResidual, localInput, layer, 1e-6, rows, workspace,
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, rows*layer.HiddenSize, output.Count())
+	core.AssertEqual(t, 2, countLaunchName(driver.launches, hipKernelNameMoEMLXAffineRoutes))
+	core.AssertEqual(t, 0, countLaunchName(driver.launches, hipKernelNameMoEBatchGatherRows))
+	core.AssertEqual(t, 0, countLaunchName(driver.launches, hipKernelNameMoEBatchScatterRoutes))
+	core.AssertEqual(t, 1, countLaunchName(driver.launches, hipKernelNameMLXQ4GELUTanhMulBatch))
+	core.AssertEqual(t, 2, countLaunchName(driver.launches, hipKernelNameMLXQ4ProjBatch))
+	core.AssertEqual(t, 1, driver.synchronizes)
+}
+
+func TestHIPGemma4MoEWorkspace_Bad_MLXAffineBatchSyncFailureReleasesScope(t *testing.T) {
+	const rows = 2
+	driver := &hipGemma4MoEWorkspaceTestDriver{
+		fakeHIPDriver:  &fakeHIPDriver{available: true},
+		synchronizeErr: core.E("rocm.hip.Test", "device synchronization failed", nil),
+	}
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+	attentionResidual, localInput, layer, cleanup := hipGemma4MoEMLXWorkspaceFixture(t, driver, rows)
+	defer cleanup()
+
+	_, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(
+		context.Background(), driver, attentionResidual, localInput, layer, 1e-6, rows, workspace,
+	)
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "finish grouped expert device work")
+	core.AssertEqual(t, 1, driver.synchronizes)
+	core.AssertEqual(t, 0, layer.MoE.ExpertCache.deferredEvictionDepth)
 }
 
 func TestHIPGemma4MoEBatchRouteGroups_Good_MatchesReference(t *testing.T) {
@@ -1073,6 +1265,56 @@ func TestHIPGemma4MoEBatchRouteGroups_Good_MatchesReference(t *testing.T) {
 			assertFloat32Near(t, route.Prob*scales[route.ID], got[route.ID])
 		}
 	}
+}
+
+func TestHIPGemma4MoEAffineRouteChunks_Good_PreservesGroupedPairs(t *testing.T) {
+	t.Setenv("GO_ROCM_GEMMA4_MOE_MLX_AFFINE_ROUTES", "1")
+	const rows = 3
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
+	_, _, layer, cleanup := hipGemma4MoEMLXWorkspaceFixture(t, driver, rows)
+	defer cleanup()
+	groups := make([][]hipGemma4MoEBatchRoute, layer.MoE.NumExperts)
+	groups[0] = []hipGemma4MoEBatchRoute{
+		{Row: 2, Pair: 1, Weight: 0.75},
+		{Row: 0, Pair: 0, Weight: 0.25},
+	}
+	groups[1] = []hipGemma4MoEBatchRoute{{Row: 1, Pair: 2, Weight: 1}}
+
+	chunks, bits, useAllRoutes, err := hipPrepareGemma4MoEMLXAffineRouteChunks(layer.MoE, groups, rows, 3, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, true, useAllRoutes)
+	core.AssertEqual(t, 4, bits)
+	if len(chunks) != 2 {
+		t.Fatalf("hipPrepareGemma4MoEMLXAffineRouteChunks returned %d chunks, want 2", len(chunks))
+	}
+	core.AssertEqual(t, 2, chunks[0].RouteCount)
+	core.AssertEqual(t, 2, chunks[0].TokenRows[0])
+	core.AssertEqual(t, 1, chunks[0].PairIndices[0])
+	assertFloat32Near(t, 0.75, chunks[0].RouteWeights[0])
+	core.AssertEqual(t, 1, chunks[1].RouteCount)
+	core.AssertEqual(t, 1, chunks[1].TokenRows[0])
+	core.AssertEqual(t, 2, chunks[1].PairIndices[0])
+	entry0 := layer.MoE.ExpertCache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: 0}]
+	entry1 := layer.MoE.ExpertCache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: 1}]
+	core.AssertEqual(t, entry0.MLXGate.WeightPointer, chunks[0].GateUpWeightPointer)
+	core.AssertEqual(t, entry1.MLXDown.WeightPointer, chunks[1].DownWeightPointer)
+}
+
+func TestHIPGemma4MoEAffineRouteChunks_Good_FallsBackWhenWorkingSetExceedsCache(t *testing.T) {
+	const rows = 2
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
+	_, _, layer, cleanup := hipGemma4MoEMLXWorkspaceFixture(t, driver, rows)
+	defer cleanup()
+	layer.MoE.ExpertCache.maxBytes = 1
+	groups := make([][]hipGemma4MoEBatchRoute, layer.MoE.NumExperts)
+	groups[0] = []hipGemma4MoEBatchRoute{{Row: 0, Pair: 0, Weight: 1}}
+	groups[1] = []hipGemma4MoEBatchRoute{{Row: 1, Pair: 1, Weight: 1}}
+
+	chunks, bits, useAllRoutes, err := hipPrepareGemma4MoEMLXAffineRouteChunks(layer.MoE, groups, rows, 2, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, false, useAllRoutes)
+	core.AssertEqual(t, 0, bits)
+	core.AssertEqual(t, 0, len(chunks))
 }
 
 func TestHIPGemma4MoEBatchRouteGroups_Bad_RejectsShape(t *testing.T) {
@@ -1154,13 +1396,23 @@ func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	defer local.Close()
 
-	batchWorkspace := hipNewAttentionHeadsChunkedWorkspace()
-	defer batchWorkspace.Close()
-	batch, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(context.Background(), loaded.driver, attention, local, *layer, 1e-6, rows, batchWorkspace)
+	t.Setenv(hipGemma4MoEMLXAffineRoutesEnv, "")
+	groupedWorkspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer groupedWorkspace.Close()
+	batch, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(context.Background(), loaded.driver, attention, local, *layer, 1e-6, rows, groupedWorkspace)
 	core.RequireNoError(t, err)
-	got, err := hipReadFloat32DeviceOutput(batch, "rocm.hip.Gemma4MoEBatchHardware", "batch output", rows*hidden)
+	grouped, err := hipReadFloat32DeviceOutput(batch, "rocm.hip.Gemma4MoEBatchHardware", "grouped batch output", rows*hidden)
 	core.RequireNoError(t, err)
 
+	t.Setenv(hipGemma4MoEMLXAffineRoutesEnv, "1")
+	fusedWorkspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer fusedWorkspace.Close()
+	batch, err = hipRunGemma4MoEDeviceMLPBatchWithWorkspace(context.Background(), loaded.driver, attention, local, *layer, 1e-6, rows, fusedWorkspace)
+	core.RequireNoError(t, err)
+	fused, err := hipReadFloat32DeviceOutput(batch, "rocm.hip.Gemma4MoEBatchHardware", "fused batch output", rows*hidden)
+	core.RequireNoError(t, err)
+
+	t.Setenv(hipGemma4MoEMLXAffineRoutesEnv, "")
 	want := make([]float32, 0, rows*hidden)
 	rowBytes := uint64(hidden * 4)
 	for row := 0; row < rows; row++ {
@@ -1175,28 +1427,35 @@ func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
 		want = append(want, values...)
 		core.RequireNoError(t, workspace.Close())
 	}
-	maxAbs := float64(0)
-	maxRel := float64(0)
-	maxAbsIndex := 0
-	maxRelIndex := 0
-	for index := range want {
-		difference := math.Abs(float64(got[index] - want[index]))
-		scale := math.Max(math.Abs(float64(want[index])), 1)
-		if difference > maxAbs {
-			maxAbs = difference
-			maxAbsIndex = index
+	compare := func(label string, got []float32) {
+		t.Helper()
+		maxAbs := float64(0)
+		maxRel := float64(0)
+		maxAbsIndex := 0
+		maxRelIndex := 0
+		for index := range want {
+			difference := math.Abs(float64(got[index] - want[index]))
+			scale := math.Max(math.Abs(float64(want[index])), 1)
+			if difference > maxAbs {
+				maxAbs = difference
+				maxAbsIndex = index
+			}
+			if relative := difference / scale; relative > maxRel {
+				maxRel = relative
+				maxRelIndex = index
+			}
 		}
-		if relative := difference / scale; relative > maxRel {
-			maxRel = relative
-			maxRelIndex = index
-		}
+		t.Logf("%s max_abs=%g index=%d max_rel=%g index=%d", label, maxAbs, maxAbsIndex, maxRel, maxRelIndex)
+		assertFloat32SlicesNearRelative(t, want, got, 1e-4, 1e-6)
 	}
-	t.Logf("grouped versus serial max_abs=%g index=%d max_rel=%g index=%d", maxAbs, maxAbsIndex, maxRel, maxRelIndex)
-	assertFloat32SlicesNearRelative(t, want, got, 1e-4, 1e-6)
+	compare("grouped versus serial", grouped)
+	compare("fused versus serial", fused)
 }
 
 type hipGemma4MoEWorkspaceTestDriver struct {
 	*fakeHIPDriver
+	synchronizes   int
+	synchronizeErr error
 }
 
 func hipGemma4MoEWorkspaceFixture(t *testing.T, driver nativeHIPDriver, rows int) (*hipDeviceByteBuffer, *hipDeviceByteBuffer, hipGemma4Q4Layer0Config, func()) {
@@ -1288,11 +1547,21 @@ func hipGemma4MoEMLXWorkspaceFixture(t *testing.T, driver nativeHIPDriver, rows 
 	}
 	for expert := 0; expert < experts; expert++ {
 		base := nativeDevicePointer(0x60000 + expert*0x10000)
+		gate := projection(expertFF, hidden, base)
+		gate.ScalePointer = base + 0x2000
+		gate.BiasPointer = base + 0x3000
+		up := gate
+		up.WeightPointer += nativeDevicePointer(gate.WeightBytes)
+		up.ScalePointer += nativeDevicePointer(gate.ScaleBytes)
+		up.BiasPointer += nativeDevicePointer(gate.BiasBytes)
+		down := projection(hidden, expertFF, base+0x4000)
+		down.ScalePointer = base + 0x6000
+		down.BiasPointer = base + 0x7000
 		expertCache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: expert}] = &hipGemma4ExpertCacheEntry{
 			Storage: hipGemma4MoEExpertStorageMLXAffine,
-			MLXGate: projection(expertFF, hidden, base),
-			MLXUp:   projection(expertFF, hidden, base+0x1000),
-			MLXDown: projection(hidden, expertFF, base+0x2000),
+			MLXGate: gate,
+			MLXUp:   up,
+			MLXDown: down,
 		}
 	}
 	norm := hipRMSNormDeviceWeightConfig{
@@ -1352,6 +1621,11 @@ func (driver *hipGemma4MoEWorkspaceTestDriver) LaunchKernel(config hipKernelLaun
 	copied.Args = append([]byte(nil), config.Args...)
 	driver.launches = append(driver.launches, copied)
 	return nil
+}
+
+func (driver *hipGemma4MoEWorkspaceTestDriver) DeviceSynchronize() error {
+	driver.synchronizes++
+	return driver.synchronizeErr
 }
 
 func TestHIPGemma4ExpertCache_Good_MixedKQuant(t *testing.T) {

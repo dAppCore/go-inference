@@ -195,6 +195,11 @@ constexpr uint32_t ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_BYTES = 56;
 constexpr uint32_t ROCM_MOE_BATCH_ROUTE_METADATA_BYTES = 16;
 constexpr uint32_t ROCM_MOE_BATCH_ROUTE_BLOCK_SIZE = 256;
+constexpr uint32_t ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_BYTES = 80;
+constexpr uint32_t ROCM_MOE_MLX_AFFINE_ROUTES_CHUNK_BYTES = 152;
+constexpr uint32_t ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK = 8;
+constexpr uint32_t ROCM_MOE_MLX_AFFINE_ROUTES_FLAG_GATE_UP = 1;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_VERSION = 1;
@@ -1474,6 +1479,40 @@ struct rocm_moe_batch_reduce_launch_args {
 	uint64_t output_bytes;
 };
 
+struct rocm_moe_mlx_affine_routes_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t input_pointer;
+	uint64_t chunk_pointer;
+	uint64_t output_pointer;
+	uint32_t rows;
+	uint32_t cols;
+	uint32_t input_rows;
+	uint32_t pair_count;
+	uint32_t chunk_count;
+	uint32_t group_size;
+	uint32_t bits;
+	uint32_t input_bytes;
+	uint32_t chunk_bytes;
+	uint32_t output_bytes;
+	uint32_t flags;
+	uint32_t reserved0;
+};
+
+struct rocm_moe_mlx_affine_routes_chunk {
+	uint64_t gate_up_weight_pointer;
+	uint64_t gate_up_scale_pointer;
+	uint64_t gate_up_bias_pointer;
+	uint64_t down_weight_pointer;
+	uint64_t down_scale_pointer;
+	uint64_t down_bias_pointer;
+	uint32_t route_count;
+	uint32_t reserved0;
+	uint32_t token_rows[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK];
+	uint32_t pair_indices[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK];
+	float route_weights[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK];
+};
+
 struct rocm_gguf_q4_0_projection_launch_args {
 	uint32_t version;
 	uint32_t total_bytes;
@@ -1744,6 +1783,8 @@ static_assert(sizeof(rocm_moe_lazy_launch_args) == ROCM_MOE_LAZY_LAUNCH_ARGS_BYT
 static_assert(sizeof(rocm_moe_batch_route_metadata) == ROCM_MOE_BATCH_ROUTE_METADATA_BYTES, "MoE batch route metadata ABI drift");
 static_assert(sizeof(rocm_moe_batch_route_rows_launch_args) == ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_BYTES, "MoE batch route rows launch ABI drift");
 static_assert(sizeof(rocm_moe_batch_reduce_launch_args) == ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_BYTES, "MoE batch reduce launch ABI drift");
+static_assert(sizeof(rocm_moe_mlx_affine_routes_launch_args) == ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_BYTES, "MoE MLX affine routes launch ABI drift");
+static_assert(sizeof(rocm_moe_mlx_affine_routes_chunk) == ROCM_MOE_MLX_AFFINE_ROUTES_CHUNK_BYTES, "MoE MLX affine routes chunk ABI drift");
 static_assert(sizeof(rocm_gguf_q4_0_projection_launch_args) == ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES, "GGUF Q4_0 projection launch ABI drift");
 static_assert(sizeof(rocm_gguf_q4_k_expand_launch_args) == ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_BYTES, "GGUF Q4_K expansion launch ABI drift");
 static_assert(sizeof(rocm_gguf_q4_0_selected_experts_launch_args) == ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_BYTES, "GGUF Q4_0 selected experts launch ABI drift");
@@ -4530,6 +4571,32 @@ __device__ bool rocm_valid_moe_batch_reduce_args(const rocm_moe_batch_reduce_lau
 		args.row_width > 0 &&
 		args.input_bytes == static_cast<uint64_t>(args.rows) * args.top_k * args.row_width * sizeof(float) &&
 		args.output_bytes == static_cast<uint64_t>(args.rows) * args.row_width * sizeof(float);
+}
+
+__device__ bool rocm_valid_moe_mlx_affine_routes_args(const rocm_moe_mlx_affine_routes_launch_args &args)
+{
+	if (args.version != ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.chunk_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.input_rows == 0 ||
+		args.pair_count == 0 ||
+		args.chunk_count == 0 ||
+		args.group_size == 0 ||
+		(args.flags & ~ROCM_MOE_MLX_AFFINE_ROUTES_FLAG_GATE_UP) != 0 ||
+		!rocm_mlx_affine_bits_supported(args.bits)) {
+		return false;
+	}
+	const uint64_t total_bits = static_cast<uint64_t>(args.cols) * args.bits;
+	if ((total_bits % 32u) != 0u || (args.cols % args.group_size) != 0u) {
+		return false;
+	}
+	return args.input_bytes == static_cast<uint64_t>(args.input_rows) * args.cols * sizeof(float) &&
+		args.chunk_bytes == static_cast<uint64_t>(args.chunk_count) * ROCM_MOE_MLX_AFFINE_ROUTES_CHUNK_BYTES &&
+		args.output_bytes == static_cast<uint64_t>(args.pair_count) * args.rows * sizeof(float);
 }
 
 __device__ bool rocm_valid_gguf_q4_0_projection_args(const rocm_gguf_q4_0_projection_launch_args &args, bool fused_gate_up)
@@ -13308,6 +13375,247 @@ extern "C" __global__ void rocm_moe_batch_reduce_routes(const unsigned char *pac
 	}
 	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
 	output[index] = sum;
+}
+
+extern "C" __global__ void rocm_moe_mlx_affine_routes(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_moe_mlx_affine_routes_launch_args &args = *reinterpret_cast<const rocm_moe_mlx_affine_routes_launch_args *>(packet);
+	if (!rocm_valid_moe_mlx_affine_routes_args(args) ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE ||
+		gridDim.x != ((args.rows - 1u) / ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK) + 1u ||
+		gridDim.y != args.chunk_count ||
+		blockIdx.y >= args.chunk_count) {
+		return;
+	}
+
+	const rocm_moe_mlx_affine_routes_chunk *chunks = reinterpret_cast<const rocm_moe_mlx_affine_routes_chunk *>(static_cast<uintptr_t>(args.chunk_pointer));
+	const rocm_moe_mlx_affine_routes_chunk &chunk = chunks[blockIdx.y];
+	const bool gate_up = (args.flags & ROCM_MOE_MLX_AFFINE_ROUTES_FLAG_GATE_UP) != 0u;
+	if (chunk.route_count == 0u || chunk.route_count > ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK ||
+		(gate_up && (chunk.gate_up_weight_pointer == 0 || chunk.gate_up_scale_pointer == 0 || chunk.gate_up_bias_pointer == 0)) ||
+		(!gate_up && (chunk.down_weight_pointer == 0 || chunk.down_scale_pointer == 0 || chunk.down_bias_pointer == 0))) {
+		return;
+	}
+	for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+		if (chunk.pair_indices[route_lane] >= args.pair_count ||
+			!isfinite(chunk.route_weights[route_lane]) ||
+			(gate_up && chunk.token_rows[route_lane] >= args.input_rows) ||
+			(!gate_up && chunk.pair_indices[route_lane] >= args.input_rows)) {
+			return;
+		}
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	if (row >= args.rows) {
+		return;
+	}
+
+	const float *input_base = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output_base = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.cols, args.bits);
+	const uint32_t groups_per_row = args.cols / args.group_size;
+	const uint32_t row_group_base = row * groups_per_row;
+
+	if (gate_up) {
+		const uint32_t *gate_up_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(chunk.gate_up_weight_pointer));
+		const uint16_t *gate_up_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(chunk.gate_up_scale_pointer));
+		const uint16_t *gate_up_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(chunk.gate_up_bias_pointer));
+		const uint32_t *up_weights = gate_up_weights + static_cast<uint64_t>(args.rows) * packed_per_row;
+		const uint16_t *up_scales = gate_up_scales + static_cast<uint64_t>(args.rows) * groups_per_row;
+		const uint16_t *up_biases = gate_up_biases + static_cast<uint64_t>(args.rows) * groups_per_row;
+		float gate_sums[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+		float up_sums[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+
+		if (args.bits == 4u && (args.group_size & 7u) == 0u) {
+			const uint32_t packed_per_group = args.group_size >> 3u;
+			for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+				const uint32_t group = row_group_base + group_col;
+				const float gate_scale = rocm_bfloat16_to_float(gate_up_scales[group]);
+				const float gate_bias = rocm_bfloat16_to_float(gate_up_biases[group]);
+				const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+				const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+				float gate_q_dots[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+				float up_q_dots[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+				float input_sums[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+				const uint32_t first_packed = group_col * packed_per_group;
+				for (uint32_t group_packed = 0; group_packed < packed_per_group; ++group_packed) {
+					const uint32_t packed = first_packed + group_packed;
+					const uint32_t gate_word = gate_up_weights[static_cast<uint64_t>(row) * packed_per_row + packed];
+					const uint32_t up_word = up_weights[static_cast<uint64_t>(row) * packed_per_row + packed];
+					const uint32_t col = packed << 3u;
+					for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+						const float *input = input_base + static_cast<uint64_t>(chunk.token_rows[route_lane]) * args.cols;
+						const float in0 = input[col];
+						const float in1 = input[col + 1u];
+						const float in2 = input[col + 2u];
+						const float in3 = input[col + 3u];
+						const float in4 = input[col + 4u];
+						const float in5 = input[col + 5u];
+						const float in6 = input[col + 6u];
+						const float in7 = input[col + 7u];
+						input_sums[route_lane] += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+						gate_q_dots[route_lane] +=
+							static_cast<float>(gate_word & 0x0fu) * in0 +
+							static_cast<float>((gate_word >> 4u) & 0x0fu) * in1 +
+							static_cast<float>((gate_word >> 8u) & 0x0fu) * in2 +
+							static_cast<float>((gate_word >> 12u) & 0x0fu) * in3 +
+							static_cast<float>((gate_word >> 16u) & 0x0fu) * in4 +
+							static_cast<float>((gate_word >> 20u) & 0x0fu) * in5 +
+							static_cast<float>((gate_word >> 24u) & 0x0fu) * in6 +
+							static_cast<float>((gate_word >> 28u) & 0x0fu) * in7;
+						up_q_dots[route_lane] +=
+							static_cast<float>(up_word & 0x0fu) * in0 +
+							static_cast<float>((up_word >> 4u) & 0x0fu) * in1 +
+							static_cast<float>((up_word >> 8u) & 0x0fu) * in2 +
+							static_cast<float>((up_word >> 12u) & 0x0fu) * in3 +
+							static_cast<float>((up_word >> 16u) & 0x0fu) * in4 +
+							static_cast<float>((up_word >> 20u) & 0x0fu) * in5 +
+							static_cast<float>((up_word >> 24u) & 0x0fu) * in6 +
+							static_cast<float>((up_word >> 28u) & 0x0fu) * in7;
+					}
+				}
+				for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+					gate_sums[route_lane] += gate_scale * gate_q_dots[route_lane] + gate_bias * input_sums[route_lane];
+					up_sums[route_lane] += up_scale * up_q_dots[route_lane] + up_bias * input_sums[route_lane];
+				}
+			}
+		} else if (args.bits == 6u && args.group_size == 64u) {
+			const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+			for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+				const uint32_t group = row_group_base + group_col;
+				const float gate_scale = rocm_bfloat16_to_float(gate_up_scales[group]);
+				const float gate_bias = rocm_bfloat16_to_float(gate_up_biases[group]);
+				const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+				const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+				const uint32_t first_packed = group_col * 12u;
+				const uint32_t first_col = group_col << 6u;
+				for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+					const float *input = input_base + static_cast<uint64_t>(chunk.token_rows[route_lane]) * args.cols;
+					float gate_q_dot = 0.0f;
+					float up_q_dot = 0.0f;
+					float input_sum = 0.0f;
+					for (uint32_t block = 0; block < 4u; ++block) {
+						rocm_mlx_affine_q6_16_pair_dot(input, gate_up_weights, up_weights, row_packed_base, first_packed + block * 3u, first_col + block * 16u, &gate_q_dot, &up_q_dot, &input_sum);
+					}
+					gate_sums[route_lane] += gate_scale * gate_q_dot + gate_bias * input_sum;
+					up_sums[route_lane] += up_scale * up_q_dot + up_bias * input_sum;
+				}
+			}
+		} else {
+			const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+			for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+				const uint32_t gate_q = rocm_mlx_affine_quantized_value(gate_up_weights, row_packed_base, col, args.bits);
+				const uint32_t up_q = rocm_mlx_affine_quantized_value(up_weights, row_packed_base, col, args.bits);
+				const uint32_t group = row_group_base + col / args.group_size;
+				const float gate_scale = rocm_bfloat16_to_float(gate_up_scales[group]);
+				const float gate_bias = rocm_bfloat16_to_float(gate_up_biases[group]);
+				const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+				const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+				for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+					const float *input = input_base + static_cast<uint64_t>(chunk.token_rows[route_lane]) * args.cols;
+					const float value = input[col];
+					gate_sums[route_lane] += value * (static_cast<float>(gate_q) * gate_scale + gate_bias);
+					up_sums[route_lane] += value * (static_cast<float>(up_q) * up_scale + up_bias);
+				}
+			}
+		}
+
+		for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+			const float gate_sum = rocm_mlx_q4_row_reduce(gate_sums[route_lane]);
+			const float up_sum = rocm_mlx_q4_row_reduce(up_sums[route_lane]);
+			if (col_lane == 0u) {
+				output_base[static_cast<uint64_t>(chunk.pair_indices[route_lane]) * args.rows + row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
+			}
+		}
+		return;
+	}
+
+	const uint32_t *down_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(chunk.down_weight_pointer));
+	const uint16_t *down_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(chunk.down_scale_pointer));
+	const uint16_t *down_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(chunk.down_bias_pointer));
+	float projection_sums[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+	if (args.bits == 4u && (args.group_size & 7u) == 0u) {
+		const uint32_t packed_per_group = args.group_size >> 3u;
+		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t group = row_group_base + group_col;
+			const float scale = rocm_bfloat16_to_float(down_scales[group]);
+			const float bias = rocm_bfloat16_to_float(down_biases[group]);
+			float q_dots[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+			float input_sums[ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK] = {};
+			const uint32_t first_packed = group_col * packed_per_group;
+			for (uint32_t group_packed = 0; group_packed < packed_per_group; ++group_packed) {
+				const uint32_t packed = first_packed + group_packed;
+				const uint32_t word = down_weights[static_cast<uint64_t>(row) * packed_per_row + packed];
+				const uint32_t col = packed << 3u;
+				for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+					const float *input = input_base + static_cast<uint64_t>(chunk.pair_indices[route_lane]) * args.cols;
+					const float in0 = input[col];
+					const float in1 = input[col + 1u];
+					const float in2 = input[col + 2u];
+					const float in3 = input[col + 3u];
+					const float in4 = input[col + 4u];
+					const float in5 = input[col + 5u];
+					const float in6 = input[col + 6u];
+					const float in7 = input[col + 7u];
+					input_sums[route_lane] += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+					q_dots[route_lane] +=
+						static_cast<float>(word & 0x0fu) * in0 +
+						static_cast<float>((word >> 4u) & 0x0fu) * in1 +
+						static_cast<float>((word >> 8u) & 0x0fu) * in2 +
+						static_cast<float>((word >> 12u) & 0x0fu) * in3 +
+						static_cast<float>((word >> 16u) & 0x0fu) * in4 +
+						static_cast<float>((word >> 20u) & 0x0fu) * in5 +
+						static_cast<float>((word >> 24u) & 0x0fu) * in6 +
+						static_cast<float>((word >> 28u) & 0x0fu) * in7;
+				}
+			}
+			for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+				projection_sums[route_lane] += scale * q_dots[route_lane] + bias * input_sums[route_lane];
+			}
+		}
+	} else if (args.bits == 6u && args.group_size == 64u) {
+		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t group = row_group_base + group_col;
+			const float scale = rocm_bfloat16_to_float(down_scales[group]);
+			const float bias = rocm_bfloat16_to_float(down_biases[group]);
+			const uint32_t first_packed = group_col * 12u;
+			const uint32_t first_col = group_col << 6u;
+			for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+				const float *input = input_base + static_cast<uint64_t>(chunk.pair_indices[route_lane]) * args.cols;
+				float q_dot = 0.0f;
+				float input_sum = 0.0f;
+				for (uint32_t block = 0; block < 4u; ++block) {
+					rocm_mlx_affine_q6_16_dot(input, down_weights, row_packed_base, first_packed + block * 3u, first_col + block * 16u, &q_dot, &input_sum);
+				}
+				projection_sums[route_lane] += scale * q_dot + bias * input_sum;
+			}
+		}
+	} else {
+		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+		for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t q = rocm_mlx_affine_quantized_value(down_weights, row_packed_base, col, args.bits);
+			const uint32_t group = row_group_base + col / args.group_size;
+			const float scale = rocm_bfloat16_to_float(down_scales[group]);
+			const float bias = rocm_bfloat16_to_float(down_biases[group]);
+			for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+				const float *input = input_base + static_cast<uint64_t>(chunk.pair_indices[route_lane]) * args.cols;
+				projection_sums[route_lane] += input[col] * (static_cast<float>(q) * scale + bias);
+			}
+		}
+	}
+
+	for (uint32_t route_lane = 0; route_lane < chunk.route_count; ++route_lane) {
+		const float projection_sum = rocm_mlx_q4_row_reduce(projection_sums[route_lane]);
+		if (col_lane == 0u) {
+			output_base[static_cast<uint64_t>(chunk.pair_indices[route_lane]) * args.rows + row] = projection_sum * chunk.route_weights[route_lane];
+		}
+	}
 }
 
 extern "C" __global__ void rocm_moe_lazy_experts(const unsigned char *packet)

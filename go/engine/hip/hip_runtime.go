@@ -373,6 +373,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameMoEBatchGatherRows,
 	hipKernelNameMoEBatchScatterRoutes,
 	hipKernelNameMoEBatchReduceRoutes,
+	hipKernelNameMoEMLXAffineRoutes,
 	hipKernelNameGGUFQ4KExpandMetadata,
 	hipKernelNameAttentionHeads,
 	hipKernelNameAttentionHeadsBatchCausal,

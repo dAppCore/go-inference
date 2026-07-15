@@ -94,6 +94,7 @@ const (
 	hipKernelNameMoEBatchGatherRows                         = "rocm_moe_batch_gather_rows"
 	hipKernelNameMoEBatchScatterRoutes                      = "rocm_moe_batch_scatter_routes"
 	hipKernelNameMoEBatchReduceRoutes                       = "rocm_moe_batch_reduce_routes"
+	hipKernelNameMoEMLXAffineRoutes                         = "rocm_moe_mlx_affine_routes"
 	hipKernelNameGGUFQ4_0Projection                         = "rocm_gguf_q4_0_projection"
 	hipKernelNameGGUFQ4_0GELUTanhGateUp                     = "rocm_gguf_q4_0_gelu_tanh_gate_up"
 	hipKernelNameGGUFQ4_0SelectedExpertGateUp               = "rocm_gguf_q4_0_selected_expert_gate_up"

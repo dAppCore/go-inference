@@ -65,6 +65,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch`,
+		`extern "C" __global__ void rocm_moe_mlx_affine_routes`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_q6_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_batch`,
@@ -544,6 +545,42 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(topK, `blockIdx.x * args.chunk_size`), "packed top-k partitions scores by chunk")
 	core.AssertTrue(t, strings.Contains(topK, `local ^ stride`), "packed top-k uses parallel compare-swap passes")
 	core.AssertTrue(t, strings.Contains(topK, `output[blockIdx.x * args.top_k + threadIdx.x] = scratch[threadIdx.x]`), "packed top-k writes chunk-local candidates")
+}
+
+func TestHIPKernelSource_MoEMLXAffineRoutesABIAndSemantics_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	source := string(sourceBytes)
+
+	for _, abi := range []string{
+		`ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_VERSION = 1`,
+		`ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_BYTES = 80`,
+		`ROCM_MOE_MLX_AFFINE_ROUTES_CHUNK_BYTES = 152`,
+		`ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK = 8`,
+		`ROCM_MOE_MLX_AFFINE_ROUTES_FLAG_GATE_UP = 1`,
+		`struct rocm_moe_mlx_affine_routes_launch_args`,
+		`struct rocm_moe_mlx_affine_routes_chunk`,
+		`static_assert(sizeof(rocm_moe_mlx_affine_routes_launch_args) == ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_BYTES`,
+		`static_assert(sizeof(rocm_moe_mlx_affine_routes_chunk) == ROCM_MOE_MLX_AFFINE_ROUTES_CHUNK_BYTES`,
+	} {
+		core.AssertContains(t, source, abi)
+	}
+
+	kernel := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_moe_mlx_affine_routes`)
+	core.AssertContains(t, kernel, `rocm_valid_moe_mlx_affine_routes_args(args)`)
+	core.AssertContains(t, kernel, `blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE`)
+	core.AssertContains(t, kernel, `gridDim.x != ((args.rows - 1u) / ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK) + 1u`)
+	core.AssertContains(t, kernel, `gridDim.y != args.chunk_count`)
+	core.AssertContains(t, kernel, `chunk.route_count == 0u || chunk.route_count > ROCM_MOE_MLX_AFFINE_ROUTES_PER_CHUNK`)
+	core.AssertContains(t, kernel, `chunk.token_rows[route_lane]`)
+	core.AssertContains(t, kernel, `chunk.pair_indices[route_lane]`)
+	core.AssertContains(t, kernel, `gate_up_weights + static_cast<uint64_t>(args.rows) * packed_per_row`)
+	core.AssertContains(t, kernel, `if (args.bits == 4u && (args.group_size & 7u) == 0u)`)
+	core.AssertContains(t, kernel, `rocm_mlx_affine_q6_16_pair_dot`)
+	core.AssertContains(t, kernel, `rocm_mlx_affine_q6_16_dot`)
+	core.AssertContains(t, kernel, `rocm_mlx_q4_row_reduce`)
+	core.AssertContains(t, kernel, `rocm_gelu_tanh_value(gate_sum) * up_sum`)
+	core.AssertContains(t, kernel, `projection_sum * chunk.route_weights[route_lane]`)
 }
 
 func TestHIPKernelSource_MLXQ8Group32UsesPackedDot_Good(t *testing.T) {
