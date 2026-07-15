@@ -64,7 +64,10 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			cm, err := composed.LoadComposedWithArch(normalized, configJSON, arch)
+			// Zero-copy: NormalizeWeights re-exposes the checkpoint tensors (the pass-through map entries keep
+			// their mmap-backed bytes), so the packed quant projection weights VIEW the mapped checkpoint
+			// rather than being copied. model.LoadComposedDir hands the model the mapping via RetainMmap.
+			cm, err := composed.LoadComposedWithArchMmap(normalized, configJSON, arch)
 			if err != nil {
 				return nil, core.E("granitemoe.Load", "assemble composed model", err)
 			}

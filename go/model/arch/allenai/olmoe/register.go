@@ -28,7 +28,10 @@ func init() {
 			if err != nil {
 				return nil, core.E("olmoe.Load", "resolve architecture", err)
 			}
-			cm, err := composed.LoadComposedWithArch(tensors, configJSON, arch)
+			// Zero-copy: the packed quant projection weights (attention q/k/v/o, embed, lm_head) VIEW the
+			// mapped checkpoint rather than being copied to the heap. model.LoadComposedDir hands the model
+			// the mapping via RetainMmap, so it stays alive for the aliasing weights' lifetime.
+			cm, err := composed.LoadComposedWithArchMmap(tensors, configJSON, arch)
 			if err != nil {
 				return nil, core.E("olmoe.Load", "assemble composed model", err)
 			}

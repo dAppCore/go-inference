@@ -228,12 +228,29 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 	return loadComposed(tensors, configJSON, nil, false)
 }
 
-// LoadComposedWithArch assembles a composed model while consuming the neutral MoE
-// policy declared by an architecture package. The policy is validated against the
-// checkpoint instead of re-assuming one family's router behaviour from tensor names.
-// Like LoadComposed, packed weights are copied to owned buffers (not aliased).
+// LoadComposedWithArch assembles a composed model while consuming the neutral MoE policy declared by an
+// architecture package. The policy is validated against the checkpoint instead of re-assuming one family's
+// router behaviour from tensor names. Like LoadComposed, packed weights are COPIED to owned buffers (not
+// aliased) — the owned-copy contract for a caller that unmaps the checkpoint right after the build. The
+// registry path (model.LoadComposedDir → the MoE arch hooks) instead uses LoadComposedWithArchMmap, which
+// aliases the mmap zero-copy.
 func LoadComposedWithArch(tensors map[string]safetensors.Tensor, configJSON []byte, arch model.Arch) (*ComposedModel, error) {
 	return loadComposed(tensors, configJSON, &arch, false)
+}
+
+// LoadComposedWithArchMmap is the ZERO-COPY arch-aware build the registry (model.LoadComposedDir) uses for
+// the MoE architectures (dbrx, olmoe, qwenmoe, granitemoe, llama4). Like LoadComposedWithArch it consumes
+// the arch's neutral MoE policy, but the packed quant PROJECTION weights (attention q/k/v/o, embed, lm_head)
+// VIEW the mapped checkpoint — QuantWeight.Packed aliases the input tensors' mmap region — instead of being
+// copied to the heap, so a quant MoE checkpoint's load-time RSS drops by those packed weights. The model
+// takes ownership of the mapping through the SAME RetainMmap handshake as the base path and unmaps it on
+// Close/finalize; when nothing aliases (a dense checkpoint, or an all-1-bit pack repacked to owned heap)
+// RetainMmap declines and LoadComposedDir unmaps immediately. The MoE expert weights themselves stay on the
+// dequant-to-f32 path (buildFFN routes experts through buildMoE — packed-expert MoE is a later slice), so the
+// aliased weights are the dense-projection quant weights. Use LoadComposedWithArch (copying) when the caller
+// unmaps the checkpoint right after the build.
+func LoadComposedWithArchMmap(tensors map[string]safetensors.Tensor, configJSON []byte, arch model.Arch) (*ComposedModel, error) {
+	return loadComposed(tensors, configJSON, &arch, true)
 }
 
 // loadComposed builds the model. zeroCopy true keeps the packed quant weights as VIEWS into the input

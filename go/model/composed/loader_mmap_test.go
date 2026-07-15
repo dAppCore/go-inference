@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
@@ -174,4 +175,138 @@ func TestComposedTokenModel_CloseUnmapsMmap(t *testing.T) {
 	if err := tm.Close(); err != nil {
 		t.Fatalf("second Close (idempotent) errored: %v", err)
 	}
+}
+
+// moeProjNames lists the dense-projection weights of the synthetic MoE checkpoint — embed, lm_head, and each
+// layer's attention q/k/v/o. These are the weights buildFFN/buildAttn route through tensorAsQuant, so they
+// are the ones the MoE zero-copy build aliases (the experts stay on buildMoE's dequant-to-f32 path).
+func moeProjNames(nLayers int) []string {
+	names := []string{"model.embed_tokens.weight", "lm_head.weight"}
+	for i := range nLayers {
+		ap := "model.layers." + itoa(i) + ".self_attn."
+		names = append(names, ap+"q_proj.weight", ap+"k_proj.weight", ap+"v_proj.weight", ap+"o_proj.weight")
+	}
+	return names
+}
+
+// writeMoEQuantCheckpoint writes a small qwen2_moe-shaped checkpoint — every layer is full attention + a
+// 4-expert top-2 MoE FFN (no shared expert, no gated-delta) — with its attention/embed/lm_head projections
+// quantised (8-bit, gs 8, so no b1→b2 repack: every packed projection is eligible to alias) and its MoE
+// experts left bf16 (buildMoE dequantises them; packed-expert MoE is a later slice). It returns the dir, the
+// config bytes, the MoE Arch policy the registry hook would pass, and the dequantised embed reference.
+func writeMoEQuantCheckpoint(t *testing.T) (dir string, cfg []byte, arch model.Arch, wantEmbed []float32) {
+	t.Helper()
+	const D, vocab, nLayers = 8, 32, 2
+	const AH, AKVH, AHD = 4, 2, 8 // attention: q_proj rows = AH·AHD = 32, k/v = AKVH·AHD = 16
+	const nE, moeFF = 4, 16
+	ts := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight": bf16T(syn(vocab*D, 1), vocab, D),
+		"model.norm.weight":         bf16T(syn(D, 2), D),
+		"lm_head.weight":            bf16T(syn(vocab*D, 3), vocab, D),
+	}
+	for i := range nLayers {
+		lp := "model.layers." + itoa(i) + "."
+		ts[lp+"input_layernorm.weight"] = bf16T(syn(D, i*100+1), D)
+		ts[lp+"post_attention_layernorm.weight"] = bf16T(syn(D, i*100+2), D)
+		ap := lp + "self_attn."
+		ts[ap+"q_proj.weight"] = bf16T(syn(AH*AHD*D, i*100+10), AH*AHD, D)
+		ts[ap+"k_proj.weight"] = bf16T(syn(AKVH*AHD*D, i*100+11), AKVH*AHD, D)
+		ts[ap+"v_proj.weight"] = bf16T(syn(AKVH*AHD*D, i*100+12), AKVH*AHD, D)
+		ts[ap+"o_proj.weight"] = bf16T(syn(D*AH*AHD, i*100+13), D, AH*AHD)
+		mp := lp + "mlp."
+		ts[mp+"gate.weight"] = bf16T(syn(nE*D, i*100+20), nE, D) // router
+		for e := range nE {
+			ep := mp + "experts." + itoa(e) + "."
+			ts[ep+"gate_proj.weight"] = bf16T(syn(moeFF*D, i*100+e*3+30), moeFF, D)
+			ts[ep+"up_proj.weight"] = bf16T(syn(moeFF*D, i*100+e*3+31), moeFF, D)
+			ts[ep+"down_proj.weight"] = bf16T(syn(D*moeFF, i*100+e*3+32), D, moeFF)
+		}
+	}
+	for _, name := range moeProjNames(nLayers) {
+		want := quantiseInPlace(t, ts, name, 8, 8)
+		if name == "model.embed_tokens.weight" {
+			wantEmbed = want
+		}
+	}
+	cfg = []byte(`{"model_type":"qwen2_moe","hidden_size":8,"num_hidden_layers":2,"intermediate_size":16,` +
+		`"num_attention_heads":4,"num_key_value_heads":2,"head_dim":8,"vocab_size":32,"rms_norm_eps":1e-5,` +
+		`"rope_theta":1000000,"num_experts":4,"num_experts_per_tok":2,"moe_intermediate_size":16,` +
+		`"quantization":{"group_size":8,"bits":8}}`)
+	arch = model.Arch{Experts: nE, TopK: 2, MoEGating: model.MoEGatingSoftmax, EmbedScale: 1}
+
+	dir = t.TempDir()
+	if err := coreio.Local.Write(core.PathJoin(dir, "config.json"), string(cfg)); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	blob, err := safetensors.Encode(ts)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if err := coreio.Local.Write(core.PathJoin(dir, "model.safetensors"), string(blob)); err != nil {
+		t.Fatalf("write model.safetensors: %v", err)
+	}
+	return dir, cfg, arch, wantEmbed
+}
+
+// TestLoadComposedWithArch_ZeroCopyAliasesMmap is the MoE-family RSS win, proven: LoadComposedWithArchMmap
+// (the build the MoE arch registry hooks now use) keeps the packed quant projection weights as VIEWS into the
+// mmap — the embed and every layer's attention q_proj alias the mapped shard, no heap copy — while the FFN is
+// a real MoE (so this is the MoE arch path, not a dense fallback). The aliased embed still dequantises to the
+// reference exactly, and the model owns the mapping's lifetime through the SAME RetainMmap/Close handshake as
+// the base path (retain takes it, Close unmaps — no use-after-unmap because the finalizer only fires once
+// every session/stepper holding the model is gone).
+func TestLoadComposedWithArch_ZeroCopyAliasesMmap(t *testing.T) {
+	dir, cfg, arch, wantEmbed := writeMoEQuantCheckpoint(t)
+
+	dm, err := safetensors.LoadDirMmap(dir)
+	if err != nil {
+		t.Fatalf("LoadDirMmap: %v", err)
+	}
+
+	m, err := LoadComposedWithArchMmap(dm.Tensors, cfg, arch)
+	if err != nil {
+		t.Fatalf("LoadComposedWithArchMmap: %v", err)
+	}
+	if !m.mmapAliased {
+		t.Fatal("mmapAliased not set — a quant MoE checkpoint's packed projection weights must alias the mmap")
+	}
+	if m.EmbedQ == nil {
+		t.Fatal("embed must be kept packed")
+	}
+	// The whole point: the packed projection bytes are a view into the mmap, not a heap copy.
+	if !aliasesAnyShard(dm, m.EmbedQ.Packed) {
+		t.Fatal("embed packed bytes are a heap copy, not an mmap view — MoE zero-copy broken")
+	}
+	// This is genuinely the MoE arch path: every layer's FFN is a MoE, and its quant attention aliases too.
+	for li := range m.Layers {
+		if _, ok := m.Layers[li].MLP.(*MoEMLP); !ok {
+			t.Fatalf("layer %d FFN %T, want *MoEMLP (the MoE arch path, not a dense fallback)", li, m.Layers[li].MLP)
+		}
+		am, ok := m.Layers[li].Mixer.(*attnMixer)
+		if !ok {
+			t.Fatalf("layer %d mixer %T, want *attnMixer", li, m.Layers[li].Mixer)
+		}
+		if am.w.QProjQ == nil || !aliasesAnyShard(dm, am.w.QProjQ.Packed) {
+			t.Fatalf("layer %d q_proj packed bytes are a heap copy, not an mmap view", li)
+		}
+	}
+	// The aliased bytes are the real weights: dequantising the embed reproduces the reference exactly.
+	gotEmbed, err := mlxaffine.DequantizeTensor(m.EmbedQ.Packed, m.EmbedQ.Scales, m.EmbedQ.Biases, m.EmbedQ.OutDim, m.EmbedQ.InDim, m.EmbedQ.Bits, m.EmbedQ.GroupSize)
+	if err != nil {
+		t.Fatalf("dequantise aliased embed: %v", err)
+	}
+	assertF32Identical(t, "aliased-moe-embed", gotEmbed, wantEmbed)
+
+	// Lifetime: the model takes ownership of the mapping and unmaps it on Close — exactly the base path.
+	tm := NewTokenModel(m)
+	if !tm.RetainMmap(dm) {
+		t.Fatal("RetainMmap must take ownership of the aliasing MoE model")
+	}
+	if err := tm.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if dm.Shards != nil {
+		t.Fatal("Close did not unmap the shards")
+	}
+	t.Logf("MoE zero-copy: %d-layer quant MoE checkpoint's packed projection weights view the mmap (no heap copy), decode to the reference", len(m.Layers))
 }
