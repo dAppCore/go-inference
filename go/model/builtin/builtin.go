@@ -96,5 +96,5 @@ import (
 	_ "dappco.re/go/inference/model/arch/Qwen/qwenmoe"    // qwen2_moe / qwen3_moe sparse transformers
 	_ "dappco.re/go/inference/model/smollm3"    // SmolLM3 GQA / NoPE decoder
 	_ "dappco.re/go/inference/model/stablelm"   // StableLM partial-RoPE decoder
-	_ "dappco.re/go/inference/model/starcoder2" // starcoder2
+	_ "dappco.re/go/inference/model/arch/bigcode/starcoder2" // starcoder2
 )
