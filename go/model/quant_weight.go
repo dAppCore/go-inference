@@ -11,8 +11,14 @@ package model
 //
 // Bits is always a width the shipped metallib dispatches (2/3/4/5/6/8): Bonsai's 1-bit packs
 // are widened to 2-bit at load (mlxaffine.RepackB1ToB2 — an exact, zero-quality-change code
-// widening) so there is no b_1 kernel to miss. The byte slices are OWNED (copied out of the
-// checkpoint mmap at load), so a QuantWeight outlives the mapping the engine binds it from.
+// widening) so there is no b_1 kernel to miss.
+//
+// Packed memory: usually OWNED (copied out of the checkpoint at load), so a QuantWeight outlives
+// the mapping the engine binds it from. The composed zero-copy loader (LoadComposedDir) is the
+// exception — Packed there is a VIEW into the checkpoint mmap (no heap copy, cutting load RSS), and
+// the composed model owns that mapping and unmaps it on Close/finalize. Under that path a caller
+// must NOT retain Packed beyond the model's lifetime. (A b1→b2 repack always allocates owned
+// buffers, so a repacked weight is owned regardless of load path.)
 type QuantWeight struct {
 	Packed    []byte // MLX packed codes, little-endian uint32 words: [OutDim, InDim·Bits/32]
 	Scales    []byte // bf16, one per group per row: [OutDim, InDim/GroupSize]

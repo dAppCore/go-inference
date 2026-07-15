@@ -34,7 +34,10 @@ func init() {
 			"composed", "hybrid",
 		},
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
-			cm, err := LoadComposed(tensors, configJSON)
+			// Zero-copy build: the packed quant weights VIEW the mapped checkpoint rather than being
+			// copied to the heap (the RSS win for a low-end Bonsai load). model.LoadComposedDir hands the
+			// resulting model the mapping via RetainMmap, so it stays alive for the weights' lifetime.
+			cm, err := loadComposed(tensors, configJSON, nil, true)
 			if err != nil {
 				return nil, err
 			}

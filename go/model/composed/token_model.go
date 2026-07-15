@@ -4,6 +4,7 @@ package composed
 
 import (
 	"bytes"
+	"io"
 	"math"
 
 	core "dappco.re/go"
@@ -42,6 +43,17 @@ type ComposedTokenModel struct{ m *ComposedModel }
 func NewTokenModel(m *ComposedModel) *ComposedTokenModel { return &ComposedTokenModel{m: m} }
 
 func (tm *ComposedTokenModel) Vocab() int { return tm.m.Vocab }
+
+// RetainMmap is the mmap-retain handshake model.LoadComposedDir uses on a zero-copy load: it hands the
+// model the checkpoint mapping so the model — whose packed weights VIEW that mapping — unmaps it on its
+// own Close rather than the loader closing it out from under the live weights. Returns true when the model
+// took ownership (its weights alias the mapping); false when nothing aliases and the loader should unmap
+// now (a dense model, or an all-1-bit pack whose codes were repacked into owned heap buffers).
+func (tm *ComposedTokenModel) RetainMmap(c io.Closer) bool { return tm.m.retain(c) }
+
+// Close unmaps any checkpoint mapping this model owns (a zero-copy quant load). Idempotent; a no-op for a
+// dense/copied model. After Close the model must not be used — its packed weights alias unmapped memory.
+func (tm *ComposedTokenModel) Close() error { return tm.m.Close() }
 
 // HiddenSize is the model hidden dimension D — the width of an embedding / hidden row. The serve wrap
 // reports it on inference.ModelInfo.

@@ -11,6 +11,7 @@
 package composed
 
 import (
+	"io"
 	"math"
 	"runtime"
 
@@ -76,6 +77,44 @@ type ComposedModel struct {
 	// the quant matvec seam. The f32 device tail-fusion hooks (ResidualNormMLPProj*Device) are bypassed —
 	// they take f32 weights, and quant fused tails are a later slice.
 	Quantised bool
+	// mmap is the checkpoint mapping this model's zero-copy packed weights VIEW (a QuantWeight.Packed slice
+	// aliases it), owned so the model unmaps it on Close/finalize; nil when no weight aliases a mapping (a
+	// dense model, an all-1-bit pack repacked to owned heap, or the copying LoadComposed path).
+	mmap io.Closer
+	// mmapAliased is set by loadComposed when at least one packed weight is a view into the input tensors —
+	// the signal model.LoadComposedDir reads (via RetainMmap) to hand this model the checkpoint mapping.
+	mmapAliased bool
+}
+
+// retain gives this model ownership of the checkpoint mapping c when its packed weights ALIAS c (a
+// zero-copy quant load), returning true; the model then unmaps c on Close (a finalizer is the fallback
+// for a caller that never calls Close). Returns false — leaving c for the caller to unmap now — when no
+// weight aliases c (dense, copied, or all-1-bit-repacked), so an unused mapping is never held.
+func (m *ComposedModel) retain(c io.Closer) bool {
+	if m == nil || !m.mmapAliased || c == nil {
+		return false
+	}
+	m.mmap = c
+	// The finalizer can only run once m is unreachable, which means every session and stepper that holds
+	// *ComposedModel is gone too — so no live QuantWeight.Packed slice still aliases the mapping. That is
+	// the safety guarantee for the unmap: no use-after-unmap is possible when the finalizer fires.
+	runtime.SetFinalizer(m, (*ComposedModel).finalizeUnmap)
+	return true
+}
+
+func (m *ComposedModel) finalizeUnmap() { _ = m.Close() }
+
+// Close unmaps the checkpoint mapping backing this model's zero-copy packed weights. After Close the
+// model's QuantWeight.Packed slices alias unmapped memory, so call ONLY when the model and all its
+// sessions/steppers are done. Idempotent, and a no-op on a model that owns no mapping (dense/copied).
+func (m *ComposedModel) Close() error {
+	if m == nil || m.mmap == nil {
+		return nil
+	}
+	c := m.mmap
+	m.mmap = nil
+	runtime.SetFinalizer(m, nil) // an explicit Close cancels the fallback finalizer
+	return c.Close()
 }
 
 func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }

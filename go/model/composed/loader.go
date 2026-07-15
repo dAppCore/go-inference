@@ -7,8 +7,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -160,13 +160,20 @@ func tensorAsF32(tensors map[string]safetensors.Tensor, name string, t safetenso
 }
 
 // tensorAsQuant returns name's projection weight kept PACKED when it is an mlx affine quantised tensor
-// (a packed-uint32 weight with .scales/.biases siblings), else (nil, nil) so the caller widens the dense
-// tensor. The (groupSize, bits) come from the quantization block and are cross-checked against the packed
-// shape so a mismatched config/checkpoint pairing fails loudly. Bonsai's 1-bit packs are widened to 2-bit
-// here (RepackB1ToB2 — exact: w = scale·q + bias unchanged) so the engine dispatches the stock b_2 kernels
-// rather than a b_1 kernel that does not ship. Every returned QuantWeight OWNS its bytes (copied out of the
-// mmap, which LoadComposedDir closes after the build), so the model outlives the mapping.
-func tensorAsQuant(tensors map[string]safetensors.Tensor, name string, t safetensors.Tensor, quant *model.QuantConfig) (*model.QuantWeight, error) {
+// (a packed-uint32 weight with .scales/.biases siblings), else (nil, false, nil) so the caller widens the
+// dense tensor. The (groupSize, bits) come from the quantization block and are cross-checked against the
+// packed shape so a mismatched config/checkpoint pairing fails loudly. Bonsai's 1-bit packs are widened to
+// 2-bit here (RepackB1ToB2 — exact: w = scale·q + bias unchanged) so the engine dispatches the stock b_2
+// kernels rather than a b_1 kernel that does not ship.
+//
+// zeroCopy chooses the packed-weight memory. false (the default LoadComposed contract): the QuantWeight
+// OWNS a heap copy, so it outlives the input tensors — the legacy metal loader relies on this (it unmaps
+// the shard mmap right after the build). true (the LoadComposedDir path): the packed bytes ALIAS t.Data —
+// an mmap view when the checkpoint was mapped — with NO heap copy, cutting the load-time RSS by the packed
+// weight (the dominant term of a quant checkpoint); the model then owns that mapping and unmaps it on Close.
+// The returned bool reports whether the weight aliases t.Data (true only when zeroCopy AND the codes were
+// not repacked — a b1→b2 repack rewrites into owned heap buffers, so a repacked weight never aliases).
+func tensorAsQuant(tensors map[string]safetensors.Tensor, name string, t safetensors.Tensor, quant *model.QuantConfig, zeroCopy bool) (*model.QuantWeight, bool, error) {
 	base := name
 	if core.HasSuffix(base, ".weight") {
 		base = base[:len(base)-len(".weight")]
@@ -174,51 +181,66 @@ func tensorAsQuant(tensors map[string]safetensors.Tensor, name string, t safeten
 	scalesT, sOK := tensors[base+".scales"]
 	biasesT, bOK := tensors[base+".biases"]
 	if !sOK || !bOK {
-		return nil, nil // dense tensor — caller widens with tensorF32
+		return nil, false, nil // dense tensor — caller widens with tensorF32
 	}
 	if quant == nil {
-		return nil, core.NewError("composed.tensorAsQuant: " + name + " carries .scales/.biases but the config has no quantization block")
+		return nil, false, core.NewError("composed.tensorAsQuant: " + name + " carries .scales/.biases but the config has no quantization block")
 	}
 	if len(t.Shape) != 2 || len(scalesT.Shape) != 2 {
-		return nil, core.NewError("composed.tensorAsQuant: quantised " + name + " is not 2-D")
+		return nil, false, core.NewError("composed.tensorAsQuant: quantised " + name + " is not 2-D")
 	}
 	gs, bits := quant.For(base)
 	outDim, packedCols := t.Shape[0], t.Shape[1]
 	inDim := scalesT.Shape[1] * gs
 	if packedCols*32 != inDim*bits {
-		return nil, core.NewError(core.Sprintf("composed.tensorAsQuant: %s packed cols %d ≠ inDim %d·bits %d/32 (groupSize %d)", name, packedCols, inDim, bits, gs))
+		return nil, false, core.NewError(core.Sprintf("composed.tensorAsQuant: %s packed cols %d ≠ inDim %d·bits %d/32 (groupSize %d)", name, packedCols, inDim, bits, gs))
 	}
-	packed := append([]byte(nil), t.Data...)
+	var packed []byte
+	aliased := false
+	if zeroCopy {
+		packed, aliased = t.Data, true // view the (mmap'd) checkpoint bytes — no heap copy
+	} else {
+		packed = append([]byte(nil), t.Data...) // owned copy — the QuantWeight outlives the input tensors
+	}
 	scales, err := bf16Bytes(scalesT) // normalise F16 sidecars (Bonsai) to the bf16 tier the kernels read
 	if err != nil {
-		return nil, core.E("composed.tensorAsQuant", name+" scales", err)
+		return nil, false, core.E("composed.tensorAsQuant", name+" scales", err)
 	}
 	biases, err := bf16Bytes(biasesT)
 	if err != nil {
-		return nil, core.E("composed.tensorAsQuant", name+" biases", err)
+		return nil, false, core.E("composed.tensorAsQuant", name+" biases", err)
 	}
 	if bits == 1 {
 		if packed, scales, biases, err = mlxaffine.RepackB1ToB2(packed, scales, biases, outDim, inDim, gs); err != nil {
-			return nil, core.E("composed.tensorAsQuant", name+" b1→b2 repack", err)
+			return nil, false, core.E("composed.tensorAsQuant", name+" b1→b2 repack", err)
 		}
 		bits = 2
+		aliased = false // repacked into owned heap buffers — no longer a view into the checkpoint
 	}
-	return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: bits, GroupSize: gs, OutDim: outDim, InDim: inDim}, nil
+	return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: bits, GroupSize: gs, OutDim: outDim, InDim: inDim}, aliased, nil
 }
 
-// LoadComposed assembles a ComposedModel from a hybrid checkpoint's tensors + its config.json bytes.
+// LoadComposed assembles a ComposedModel from a hybrid checkpoint's tensors + its config.json bytes. The
+// packed quant weights are COPIED to owned heap buffers, so the model outlives its input tensors — the
+// contract the legacy metal loader depends on (it unmaps the shard mmap right after the build). The
+// registry path (model.LoadComposedDir) instead uses the zero-copy build, which aliases the mmap.
 func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*ComposedModel, error) {
-	return loadComposed(tensors, configJSON, nil)
+	return loadComposed(tensors, configJSON, nil, false)
 }
 
 // LoadComposedWithArch assembles a composed model while consuming the neutral MoE
 // policy declared by an architecture package. The policy is validated against the
 // checkpoint instead of re-assuming one family's router behaviour from tensor names.
+// Like LoadComposed, packed weights are copied to owned buffers (not aliased).
 func LoadComposedWithArch(tensors map[string]safetensors.Tensor, configJSON []byte, arch model.Arch) (*ComposedModel, error) {
-	return loadComposed(tensors, configJSON, &arch)
+	return loadComposed(tensors, configJSON, &arch, false)
 }
 
-func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch *model.Arch) (*ComposedModel, error) {
+// loadComposed builds the model. zeroCopy true keeps the packed quant weights as VIEWS into the input
+// tensors (an mmap region on the LoadComposedDir path) instead of copying them to the heap — the RSS win.
+// It sets ComposedModel.mmapAliased when any weight ends up aliasing, so the loader knows to retain the
+// checkpoint mapping for the model's lifetime (model.LoadComposedDir hands it over via RetainMmap).
+func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch *model.Arch, zeroCopy bool) (*ComposedModel, error) {
 	var raw loaderConfig
 	if r := core.JSONUnmarshal(configJSON, &raw); !r.OK {
 		return nil, core.NewError("composed.LoadComposed: config.json parse failed")
@@ -238,6 +260,9 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 	if _, ok := tensors["model.language_model.embed_tokens.weight"]; ok {
 		prefix = "model.language_model."
 	}
+	// anyAlias records whether any packed weight ended up as a view into the input tensors (zero-copy),
+	// so the model can retain the checkpoint mapping for its lifetime rather than let it be unmapped.
+	var anyAlias bool
 	get := func(name string) (safetensors.Tensor, bool) { t, ok := tensors[name]; return t, ok }
 	f32 := func(name string) ([]float32, error) {
 		t, ok := get(name)
@@ -261,11 +286,12 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 		if !ok {
 			return nil, nil, core.NewError("composed.LoadComposed: missing " + name)
 		}
-		qw, err := tensorAsQuant(tensors, name, t, quant)
+		qw, aliased, err := tensorAsQuant(tensors, name, t, quant, zeroCopy)
 		if err != nil {
 			return nil, nil, err
 		}
 		if qw != nil {
+			anyAlias = anyAlias || aliased
 			return nil, qw, nil
 		}
 		f, err := tensorF32(t)
@@ -360,6 +386,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 			InputNorm: inNorm, Mixer: mixer, PostAttnNorm: postNorm, MLP: ffn,
 		})
 	}
+	m.mmapAliased = anyAlias
 	return m, nil
 }
 
