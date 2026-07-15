@@ -47,6 +47,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens64_shared`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row32_tokens64_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_greedy`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_greedy_q6_row64`,
@@ -571,6 +572,12 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(batchQ8G64Shared64, `ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK`), "tokens64 q8 batch projection must use its wider token tile")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Shared64, `__shared__ float input_tile`), "tokens64 q8 batch projection must share each input tile across output rows")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Shared64, `rocm_mlx_q4_projection_row16_reduce`), "tokens64 q8 batch projection must preserve row16 reduction order")
+
+	batchQ8G64Row32Shared64 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row32_tokens64_shared`)
+	core.AssertTrue(t, strings.Contains(batchQ8G64Row32Shared64, `ROCM_MLX_Q4_PROJECTION_ROW32_ROWS_PER_BLOCK`), "row32 tokens64 q8 projection must use 32 output rows per block")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Row32Shared64, `__shared__ float input_tile`), "row32 tokens64 q8 projection must share each input tile across output rows")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Row32Shared64, `packed_lane += ROCM_MLX_Q4_PROJECTION_ROW32_THREADS_PER_ROW`), "row32 tokens64 q8 projection must distribute two packed words across eight row lanes")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Row32Shared64, `rocm_mlx_q4_projection_row32_reduce`), "row32 tokens64 q8 projection must use an eight-lane reduction")
 
 	batchQ6Row16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16`)
 	core.AssertTrue(t, strings.Contains(batchQ6Row16, `args.bits != 6u || args.group_size != 64u || args.cols < 1536u`), "q6 row16 batch projection must guard its specialized tensor shape")

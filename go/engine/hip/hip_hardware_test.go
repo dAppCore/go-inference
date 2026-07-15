@@ -2428,7 +2428,7 @@ func TestHIPHardwareMLXAffineQ8AssistantMLPGroup32_Good(t *testing.T) {
 	assertFloat32SlicesNear(t, want, got, 0.03)
 }
 
-func TestHIPHardwareMLXAffineQ8ProjectionBatchRow16MatchesRow8_Good(t *testing.T) {
+func TestHIPHardwareMLXAffineQ8ProjectionBatchRows16And32MatchRow8_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
 	}
@@ -2441,7 +2441,7 @@ func TestHIPHardwareMLXAffineQ8ProjectionBatchRow16MatchesRow8_Good(t *testing.T
 		t.Fatal("native ROCm runtime is not available")
 	}
 
-	const rows, cols, batch, groupSize, bits = 17, 2816, 64, 64, 8
+	const rows, cols, batch, groupSize, bits = 33, 2816, 64, 64, 8
 	input := make([]float32, batch*cols)
 	values := make([]uint32, rows*cols)
 	scales := make([]uint16, rows*(cols/groupSize))
@@ -2515,21 +2515,53 @@ func TestHIPHardwareMLXAffineQ8ProjectionBatchRow16MatchesRow8_Good(t *testing.T
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatch, row8Config.Name)
 	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, row8Config))
+	row32Output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.MLXQ8BatchRow32Hardware", "row32 output", uint64(rows*batch*4), rows*batch)
+	core.RequireNoError(t, err)
+	defer row32Output.Close()
+	row32Config := row8Config
+	row32Config.Name = hipKernelNameMLXQ4ProjBatchQ8G64Row32Tokens64Shared
+	row32Config.GridX = (rows + hipMLXQ4ProjectionRow32RowsPerBlock - 1) / hipMLXQ4ProjectionRow32RowsPerBlock
+	row32Config.GridY = (batch + hipMLXQ4ProjectionBatchQ8Tokens64PerBlock - 1) / hipMLXQ4ProjectionBatchQ8Tokens64PerBlock
+	row32Config.Args, err = (hipMLXQ4ProjectionBatchLaunchArgs{
+		InputPointer:  inputBuffer.Pointer(),
+		WeightPointer: cfg.WeightPointer,
+		ScalePointer:  cfg.ScalePointer,
+		BiasPointer:   cfg.BiasPointer,
+		OutputPointer: row32Output.Pointer(),
+		Rows:          rows,
+		Cols:          cols,
+		Batch:         batch,
+		GroupSize:     groupSize,
+		Bits:          bits,
+		InputBytes:    inputBuffer.SizeBytes(),
+		WeightBytes:   cfg.WeightBytes,
+		ScaleBytes:    cfg.ScaleBytes,
+		BiasBytes:     cfg.BiasBytes,
+		OutputBytes:   row32Output.SizeBytes(),
+	}).Binary()
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, row32Config))
 
 	row16Values, err := hipReadFloat32DeviceOutput(row16Output, "rocm.hip.MLXQ8BatchRow16Hardware", "row16 output", rows*batch)
 	core.RequireNoError(t, err)
+	row32Values, err := hipReadFloat32DeviceOutput(row32Output, "rocm.hip.MLXQ8BatchRow32Hardware", "row32 output", rows*batch)
+	core.RequireNoError(t, err)
 	row8Values, err := hipReadFloat32DeviceOutput(row8Output, "rocm.hip.MLXQ8BatchRow16Hardware", "row8 output", rows*batch)
 	core.RequireNoError(t, err)
-	maxAbs := 0.0
-	maxRel := 0.0
-	for index := range row8Values {
-		diff := math.Abs(float64(row16Values[index] - row8Values[index]))
-		scale := math.Max(math.Abs(float64(row8Values[index])), 1)
-		maxAbs = math.Max(maxAbs, diff)
-		maxRel = math.Max(maxRel, diff/scale)
+	compare := func(name string, got []float32) {
+		maxAbs := 0.0
+		maxRel := 0.0
+		for index := range row8Values {
+			diff := math.Abs(float64(got[index] - row8Values[index]))
+			scale := math.Max(math.Abs(float64(row8Values[index])), 1)
+			maxAbs = math.Max(maxAbs, diff)
+			maxRel = math.Max(maxRel, diff/scale)
+		}
+		t.Logf("%s production-shape delta: max_abs=%g max_rel=%g", name, maxAbs, maxRel)
+		assertFloat32SlicesNearRelativeNamedForHardwareTest(t, name+" production-shaped projection", row8Values, got, 0.001, 0.000001)
 	}
-	t.Logf("q8 row16 production-shape delta: max_abs=%g max_rel=%g", maxAbs, maxRel)
-	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "q8 row16 production-shaped projection", row8Values, row16Values, 0.001, 0.000001)
+	compare("q8 row16", row16Values)
+	compare("q8 row32", row32Values)
 }
 
 func TestHIPHardwareMLXAffineQ8GELUTanhBatchPackedProductionShape_Good(t *testing.T) {
