@@ -1289,7 +1289,7 @@ func hipRunRMSNormResidualAddScaledKernelWithDeviceInputWeightConfigOutputWithWo
 	if err != nil {
 		return err
 	}
-	config, err := hipSingleBlockLaunchConfig(hipKernelNameRMSNormResidualAdd, launchBytes, 256)
+	config, err := hipSingleBlockLaunchConfig(hipKernelNameRMSNormResidualAdd, launchBytes, hipRMSNormResidualAddBlockSize(cfg.Count))
 	if err != nil {
 		return err
 	}
@@ -1297,6 +1297,13 @@ func hipRunRMSNormResidualAddScaledKernelWithDeviceInputWeightConfigOutputWithWo
 		return err
 	}
 	return nil
+}
+
+func hipRMSNormResidualAddBlockSize(count int) uint32 {
+	if count == 2560 {
+		return 512
+	}
+	return 256
 }
 
 func hipRunRMSNormResidualAddNormKernelWithDeviceInputWeightConfig(ctx context.Context, driver nativeHIPDriver, input, residual *hipDeviceByteBuffer, residualCfg, normCfg hipRMSNormDeviceWeightConfig) (*hipDeviceByteBuffer, *hipDeviceByteBuffer, error) {

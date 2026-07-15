@@ -58,6 +58,14 @@ func TestHIPRMSNormResidualAddNormBlockSize_Default_Good(t *testing.T) {
 	core.AssertEqual(t, uint32(256), hipRMSNormResidualAddNormBlockSize(1536))
 }
 
+func TestHIPRMSNormResidualAddBlockSize_E4B_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(512), hipRMSNormResidualAddBlockSize(2560))
+}
+
+func TestHIPRMSNormResidualAddBlockSize_Default_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(256), hipRMSNormResidualAddBlockSize(1536))
+}
+
 func TestHIPGemma4Q4Layer0_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	cfg, cleanup := hipGemma4Q4Layer0FixtureConfig(t, driver)
