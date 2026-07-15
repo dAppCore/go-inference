@@ -391,6 +391,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNamePerLayerInputTranspose,
 	hipKernelNameEmbedLookup,
 	hipKernelNameEmbedLookupGreedyToken,
+	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows8,
 }
 
 func hipPrewarmGemma4Q4KernelFunctions(driver nativeHIPDriver) {

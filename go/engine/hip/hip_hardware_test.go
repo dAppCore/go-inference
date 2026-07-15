@@ -94,62 +94,70 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 	}
 	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding", want, got, 0.00001, 0.00001)
 
-	const q4Vocab, q4Hidden, q4Rows, q4GroupSize = 3, 64, 2, 64
-	q4Values := make([]uint32, q4Vocab*q4Hidden)
-	q4Dense := make([]float32, len(q4Values))
-	q4ScaleValues := []float32{1, 0.5, 0.25}
-	q4BiasValues := []float32{0, -1, 2}
-	q4Scales := make([]uint16, q4Vocab)
-	q4Biases := make([]uint16, q4Vocab)
-	for token := 0; token < q4Vocab; token++ {
-		q4Scales[token] = hipFloat32ToBFloat16(q4ScaleValues[token])
-		q4Biases[token] = hipFloat32ToBFloat16(q4BiasValues[token])
-		for dim := 0; dim < q4Hidden; dim++ {
-			index := token*q4Hidden + dim
-			q4Values[index] = uint32((token*5 + dim) % 16)
-			q4Dense[index] = float32(q4Values[index])*q4ScaleValues[token] + q4BiasValues[token]
-		}
-	}
-	q4Packed := hipPackMLXAffineValuesForTest(q4Values, q4Hidden, 4)
-	q4Payload, err := hipUint32Payload(q4Packed)
-	core.RequireNoError(t, err)
-	q4Embedding, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", "q4 embedding", q4Payload, len(q4Packed))
-	core.RequireNoError(t, err)
-	defer q4Embedding.Close()
-	q4ScalePayload, err := hipUint16Payload(q4Scales)
-	core.RequireNoError(t, err)
-	q4ScaleBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", "q4 scales", q4ScalePayload, len(q4Scales))
-	core.RequireNoError(t, err)
-	defer q4ScaleBuffer.Close()
-	q4BiasPayload, err := hipUint16Payload(q4Biases)
-	core.RequireNoError(t, err)
-	q4BiasBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", "q4 biases", q4BiasPayload, len(q4Biases))
-	core.RequireNoError(t, err)
-	defer q4BiasBuffer.Close()
-	q4Probabilities := []float32{0.5, 0.25, 0.25, 0.2, 0.3, 0.5}
-	q4Got, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, q4Probabilities, q4Rows, hipDeviceEmbeddingLookupConfig{
-		EmbeddingPointer: q4Embedding.Pointer(),
-		EmbeddingBytes:   q4Embedding.SizeBytes(),
-		ScalePointer:     q4ScaleBuffer.Pointer(),
-		ScaleBytes:       q4ScaleBuffer.SizeBytes(),
-		BiasPointer:      q4BiasBuffer.Pointer(),
-		BiasBytes:        q4BiasBuffer.SizeBytes(),
-		TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
-		GroupSize:        q4GroupSize,
-		QuantBits:        4,
-		VocabSize:        q4Vocab,
-		HiddenSize:       q4Hidden,
-	}, 2)
-	core.RequireNoError(t, err)
-	q4Want := make([]float32, q4Rows*q4Hidden)
-	for row := 0; row < q4Rows; row++ {
-		for dim := 0; dim < q4Hidden; dim++ {
-			for token := 0; token < q4Vocab; token++ {
-				q4Want[row*q4Hidden+dim] += q4Probabilities[row*q4Vocab+token] * q4Dense[token*q4Hidden+dim] * 2
+	const affineVocab, affineHidden, affineRows, affineGroupSize = 3, 64, 9, 64
+	for _, bits := range []int{4, 8} {
+		values := make([]uint32, affineVocab*affineHidden)
+		dense := make([]float32, len(values))
+		scaleValues := []float32{1, 0.5, 0.25}
+		biasValues := []float32{0, -1, 2}
+		scales := make([]uint16, affineVocab)
+		biases := make([]uint16, affineVocab)
+		for token := 0; token < affineVocab; token++ {
+			scales[token] = hipFloat32ToBFloat16(scaleValues[token])
+			biases[token] = hipFloat32ToBFloat16(biasValues[token])
+			for dim := 0; dim < affineHidden; dim++ {
+				index := token*affineHidden + dim
+				values[index] = uint32((token*29 + dim*3) % (1 << bits))
+				dense[index] = float32(values[index])*scaleValues[token] + biasValues[token]
 			}
 		}
+		packed := hipPackMLXAffineValuesForTest(values, affineHidden, bits)
+		payload, err := hipUint32Payload(packed)
+		core.RequireNoError(t, err)
+		label := core.Sprintf("q%d", bits)
+		embedding, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", label+" embedding", payload, len(packed))
+		core.RequireNoError(t, err)
+		defer embedding.Close()
+		scalePayload, err := hipUint16Payload(scales)
+		core.RequireNoError(t, err)
+		scaleBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", label+" scales", scalePayload, len(scales))
+		core.RequireNoError(t, err)
+		defer scaleBuffer.Close()
+		biasPayload, err := hipUint16Payload(biases)
+		core.RequireNoError(t, err)
+		biasBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", label+" biases", biasPayload, len(biases))
+		core.RequireNoError(t, err)
+		defer biasBuffer.Close()
+		probabilities := make([]float32, affineRows*affineVocab)
+		for row := 0; row < affineRows; row++ {
+			for token := 0; token < affineVocab; token++ {
+				probabilities[row*affineVocab+token] = float32((row+1)*(token+2)) / 37
+			}
+		}
+		got, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{
+			EmbeddingPointer: embedding.Pointer(),
+			EmbeddingBytes:   embedding.SizeBytes(),
+			ScalePointer:     scaleBuffer.Pointer(),
+			ScaleBytes:       scaleBuffer.SizeBytes(),
+			BiasPointer:      biasBuffer.Pointer(),
+			BiasBytes:        biasBuffer.SizeBytes(),
+			TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
+			GroupSize:        affineGroupSize,
+			QuantBits:        bits,
+			VocabSize:        affineVocab,
+			HiddenSize:       affineHidden,
+		}, 2)
+		core.RequireNoError(t, err)
+		want := make([]float32, affineRows*affineHidden)
+		for row := 0; row < affineRows; row++ {
+			for dim := 0; dim < affineHidden; dim++ {
+				for token := 0; token < affineVocab; token++ {
+					want[row*affineHidden+dim] += probabilities[row*affineVocab+token] * dense[token*affineHidden+dim] * 2
+				}
+			}
+		}
+		assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding "+label+" group64", want, got, 0.00001, 0.00001)
 	}
-	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding q4 group64", q4Want, q4Got, 0.00001, 0.00001)
 }
 
 func TestHIPHardwareDiffusionGemmaMLXMoE_Good(t *testing.T) {

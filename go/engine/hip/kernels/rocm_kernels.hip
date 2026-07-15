@@ -237,6 +237,7 @@ constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES = 120;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_F32 = 1;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_BF16 = 2;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4 = 3;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_EMBEDDING_MEAN_POOL_LAUNCH_FLAG_NORMALIZE = 1;
@@ -9444,6 +9445,55 @@ extern "C" __global__ void rocm_diffusion_expected_embedding(const unsigned char
 	}
 	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
 	output[static_cast<uint64_t>(row) * args.hidden_size + dim] = sum * output_scale;
+}
+
+extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows8(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_diffusion_expected_embedding_launch_args &args = *reinterpret_cast<const rocm_diffusion_expected_embedding_launch_args *>(packet);
+	if (!rocm_valid_diffusion_expected_embedding_args(args) ||
+		args.table_encoding != ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4 ||
+		args.group_size != 64u ||
+		(args.bits != 4u && args.bits != 8u) ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t dim = blockIdx.x * blockDim.x + threadIdx.x;
+	const uint32_t row_base = blockIdx.y * ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK;
+	if (dim >= args.hidden_size || row_base >= args.rows) {
+		return;
+	}
+
+	const float *probabilities = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.probability_pointer));
+	const uint32_t *embedding = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.embedding_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.hidden_size, args.bits);
+	const uint32_t groups_per_row = args.hidden_size / args.group_size;
+	float sums[ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK] = {};
+	for (uint32_t token = 0; token < args.vocab_size; ++token) {
+		const uint32_t quantized = rocm_mlx_affine_quantized_value(embedding, static_cast<uint64_t>(token) * packed_per_row, dim, args.bits);
+		const uint64_t group = static_cast<uint64_t>(token) * groups_per_row + dim / args.group_size;
+		const float value = static_cast<float>(quantized) * rocm_bfloat16_to_float(scales[group]) + rocm_bfloat16_to_float(biases[group]);
+#pragma unroll
+		for (uint32_t row_lane = 0; row_lane < ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK; ++row_lane) {
+			const uint32_t row = row_base + row_lane;
+			if (row < args.rows) {
+				sums[row_lane] = fmaf(probabilities[static_cast<uint64_t>(row) * args.vocab_size + token], value, sums[row_lane]);
+			}
+		}
+	}
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+#pragma unroll
+	for (uint32_t row_lane = 0; row_lane < ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK; ++row_lane) {
+		const uint32_t row = row_base + row_lane;
+		if (row < args.rows) {
+			output[static_cast<uint64_t>(row) * args.hidden_size + dim] = sums[row_lane] * output_scale;
+		}
+	}
 }
 
 extern "C" __global__ void rocm_embedding_mean_pool(const unsigned char *packet)

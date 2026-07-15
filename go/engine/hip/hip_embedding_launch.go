@@ -31,6 +31,8 @@ const (
 	hipEmbeddingTableEncodingMLXQ4 uint32 = 3
 )
 
+const hipDiffusionExpectedEmbeddingAffineG64RowsPerBlock = 8
+
 type hipEmbeddingMeanPoolRequest struct {
 	Tokens     []float32
 	TokenCount int
@@ -705,16 +707,26 @@ func hipRunDiffusionExpectedEmbeddingKernel(ctx context.Context, driver nativeHI
 	if err != nil {
 		return nil, err
 	}
+	kernelName := hipKernelNameDiffusionExpectedEmbedding
+	gridRows := rows
+	bits := hipMLXQ4ProjectionBitsOrDefault(cfg.QuantBits)
+	if rows >= hipDiffusionExpectedEmbeddingAffineG64RowsPerBlock &&
+		cfg.TableEncoding == hipEmbeddingTableEncodingMLXQ4 &&
+		cfg.GroupSize == 64 &&
+		(bits == 4 || bits == 8) {
+		kernelName = hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows8
+		gridRows = (rows + hipDiffusionExpectedEmbeddingAffineG64RowsPerBlock - 1) / hipDiffusionExpectedEmbeddingAffineG64RowsPerBlock
+	}
 	gridX, err := rocmDeviceKVPositiveUint32("diffusion expected embedding hidden blocks", (cfg.HiddenSize+255)/256)
 	if err != nil {
 		return nil, err
 	}
-	gridY, err := rocmDeviceKVPositiveUint32("diffusion expected embedding rows", rows)
+	gridY, err := rocmDeviceKVPositiveUint32("diffusion expected embedding rows", gridRows)
 	if err != nil {
 		return nil, err
 	}
 	if err := hipLaunchKernel(driver, hipKernelLaunchConfig{
-		Name:   hipKernelNameDiffusionExpectedEmbedding,
+		Name:   kernelName,
 		Args:   args,
 		GridX:  gridX,
 		GridY:  gridY,
