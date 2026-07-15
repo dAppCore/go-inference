@@ -1166,7 +1166,7 @@ func TestHIPGemma4MoEWorkspace_Good_BatchRowsUseDistinctOutput(t *testing.T) {
 
 func TestHIPGemma4MoEWorkspace_Good_MLXAffineBatchDefaultsToGroupedExperts(t *testing.T) {
 	t.Setenv("GO_ROCM_GEMMA4_MOE_MLX_AFFINE_ROUTES", "")
-	const rows = 2
+	const rows = 10
 	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
 	workspace := hipNewAttentionHeadsChunkedWorkspace()
 	defer workspace.Close()
@@ -1397,11 +1397,18 @@ func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
 	defer local.Close()
 
 	t.Setenv(hipGemma4MoEMLXAffineRoutesEnv, "")
-	groupedWorkspace := hipNewAttentionHeadsChunkedWorkspace()
-	defer groupedWorkspace.Close()
+	groupedWorkspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	defer func() { core.RequireNoError(t, hipRecycleAttentionHeadsChunkedWorkspace(groupedWorkspace)) }()
 	batch, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(context.Background(), loaded.driver, attention, local, *layer, 1e-6, rows, groupedWorkspace)
 	core.RequireNoError(t, err)
 	grouped, err := hipReadFloat32DeviceOutput(batch, "rocm.hip.Gemma4MoEBatchHardware", "grouped batch output", rows*hidden)
+	core.RequireNoError(t, err)
+	rowBytes := uint64(hidden * 4)
+	attentionRow := hipBorrowDeviceByteBufferValue(loaded.driver, "reused serial attention row", attention.Pointer(), rowBytes, hidden)
+	localRow := hipBorrowDeviceByteBufferValue(loaded.driver, "reused serial local row", local.Pointer(), rowBytes, hidden)
+	reusedSingle, err := hipRunGemma4MoEDeviceMLPWithWorkspaceOutput(context.Background(), loaded.driver, &attentionRow, &localRow, *layer, 1e-6, groupedWorkspace, nil)
+	core.RequireNoError(t, err)
+	reused, err := hipReadFloat32DeviceOutput(reusedSingle, "rocm.hip.Gemma4MoEBatchHardware", "batch then single output", hidden)
 	core.RequireNoError(t, err)
 
 	t.Setenv(hipGemma4MoEMLXAffineRoutesEnv, "1")
@@ -1414,13 +1421,12 @@ func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
 
 	t.Setenv(hipGemma4MoEMLXAffineRoutesEnv, "")
 	want := make([]float32, 0, rows*hidden)
-	rowBytes := uint64(hidden * 4)
 	for row := 0; row < rows; row++ {
 		offset := nativeDevicePointer(uint64(row) * rowBytes)
 		attentionRow := hipBorrowDeviceByteBufferValue(loaded.driver, "serial attention row", attention.Pointer()+offset, rowBytes, hidden)
 		localRow := hipBorrowDeviceByteBufferValue(loaded.driver, "serial local row", local.Pointer()+offset, rowBytes, hidden)
 		workspace := hipNewAttentionHeadsChunkedWorkspace()
-		serial, runErr := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(context.Background(), loaded.driver, &attentionRow, &localRow, *layer, 1e-6, 1, workspace)
+		serial, runErr := hipRunGemma4MoEDeviceMLPWithWorkspaceOutput(context.Background(), loaded.driver, &attentionRow, &localRow, *layer, 1e-6, workspace, nil)
 		core.RequireNoError(t, runErr)
 		values, readErr := hipReadFloat32DeviceOutput(serial, "rocm.hip.Gemma4MoEBatchHardware", "serial output", hidden)
 		core.RequireNoError(t, readErr)
@@ -1450,6 +1456,7 @@ func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
 	}
 	compare("grouped versus serial", grouped)
 	compare("fused versus serial", fused)
+	assertFloat32SlicesNearRelative(t, want[:hidden], reused, 1e-4, 1e-6)
 }
 
 type hipGemma4MoEWorkspaceTestDriver struct {
