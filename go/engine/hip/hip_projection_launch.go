@@ -43,6 +43,7 @@ const (
 	hipMLXQ4ProjectionBatchQ8SharedDisableEnv             = "GO_ROCM_DISABLE_Q8_BATCH_SHARED"
 	hipMLXQ4ProjectionBatchQ8Tokens64DisableEnv           = "GO_ROCM_DISABLE_Q8_BATCH_TOKENS64"
 	hipMLXQ4ProjectionBatchQ8Row32DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW32"
+	hipMLXQ4ProjectionBatchQ8Row64DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW64"
 	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
 	hipMLXQ4Projection12BHeadGridEnv                      = "GO_ROCM_EXPERIMENTAL_12B_HEAD_GRID"
 	hipMLXQ4GELUTanhProjLaunchArgsVersion          uint32 = 1
@@ -63,6 +64,7 @@ const (
 	hipMLXQ4ProjectionRowsPerBlock                        = 8
 	hipMLXQ4ProjectionRow16RowsPerBlock                   = 16
 	hipMLXQ4ProjectionRow32RowsPerBlock                   = 32
+	hipMLXQ4ProjectionRow64RowsPerBlock                   = 64
 	hipMLXQ4ProjectionCols256RowsPerBlock                 = 32
 	hipMLXQ4ProjectionQ6Row16RowsPerBlock                 = 16
 	hipMLXQ4ProjectionQ6Row32RowsPerBlock                 = 32
@@ -77,6 +79,7 @@ const (
 	hipMLXQ4ProjectionBatchWideTokensPerBlock             = 16
 	hipMLXQ4ProjectionBatchQ8Tokens64PerBlock             = 64
 	hipMLXQ4ProjectionBatchQ8Row32MinRows                 = 32
+	hipMLXQ4ProjectionBatchQ8Row64MinRows                 = 2048
 	hipMLXQ4ProjectionGreedyRowsPerBlock                  = 32
 	hipMLXQ4ProjectionGreedyQ6RowsPerBlock                = 64
 	hipMLXQ4ProjectionBestBytes                           = 8
@@ -5203,6 +5206,10 @@ func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupS
 			if rows >= hipMLXQ4ProjectionBatchQ8Row32MinRows && core.Env(hipMLXQ4ProjectionBatchQ8Row32DisableEnv) != "1" {
 				kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row32Tokens64Shared
 				rowsPerBlock = hipMLXQ4ProjectionRow32RowsPerBlock
+				if rows >= hipMLXQ4ProjectionBatchQ8Row64MinRows && core.Env(hipMLXQ4ProjectionBatchQ8Row64DisableEnv) != "1" {
+					kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared
+					rowsPerBlock = hipMLXQ4ProjectionRow64RowsPerBlock
+				}
 			}
 		}
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q8 group64 projection batch row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
