@@ -7271,17 +7271,25 @@ extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16(co
 		const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.cols, args.bits);
 		const uint32_t groups_per_row = args.cols >> 6u;
 		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
-		for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW) {
-			const uint32_t quantized = rocm_mlx_affine_q8_quantized_value(weights, row_packed_base, col);
-			const uint32_t group = row * groups_per_row + (col >> 6u);
-			const float value = static_cast<float>(quantized) * rocm_bfloat16_to_float(scales[group]) +
-				rocm_bfloat16_to_float(biases[group]);
+		for (uint32_t packed = col_lane; packed < packed_per_row; packed += ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW) {
+			const uint32_t word = weights[row_packed_base + packed];
+			const uint32_t col = packed << 2u;
+			const uint32_t group = row * groups_per_row + (packed >> 4u);
+			const float scale = rocm_bfloat16_to_float(scales[group]);
+			const float bias = rocm_bfloat16_to_float(biases[group]);
+			const float value0 = static_cast<float>(word & 0xffu) * scale + bias;
+			const float value1 = static_cast<float>((word >> 8u) & 0xffu) * scale + bias;
+			const float value2 = static_cast<float>((word >> 16u) & 0xffu) * scale + bias;
+			const float value3 = static_cast<float>(word >> 24u) * scale + bias;
 #pragma unroll
 			for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK; ++token_lane) {
 				const uint32_t batch = batch_base + token_lane;
 				if (batch < args.batch) {
 					const float *input = input_base + batch * args.cols;
-					sums[token_lane] += input[col] * value;
+					sums[token_lane] = fmaf(input[col], value0, sums[token_lane]);
+					sums[token_lane] = fmaf(input[col + 1u], value1, sums[token_lane]);
+					sums[token_lane] = fmaf(input[col + 2u], value2, sums[token_lane]);
+					sums[token_lane] = fmaf(input[col + 3u], value3, sums[token_lane]);
 				}
 			}
 		}

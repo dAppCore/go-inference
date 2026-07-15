@@ -446,6 +446,8 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `args.bits != 8u || args.group_size != 64u`), "q8 group64 tokens16 batch projection must guard its quantization shape")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK`), "q8 group64 tokens16 batch projection must use the wider token tile")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW`), "q8 group64 tokens16 batch projection must use row16 lane geometry")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `for (uint32_t packed = col_lane; packed < packed_per_row; packed += ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW)`), "q8 group64 tokens16 batch projection must distribute packed words across row16 lanes")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `const uint32_t word = weights[row_packed_base + packed]`), "q8 group64 tokens16 batch projection must reuse one packed word across four columns")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `rocm_mlx_q4_projection_row16_reduce`), "q8 group64 tokens16 batch projection must use the matching row16 reduction")
 
 	batchQ6Row16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16`)
