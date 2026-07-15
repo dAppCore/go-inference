@@ -189,6 +189,12 @@ constexpr uint32_t ROCM_MOE_ROUTER_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_MOE_ROUTER_LAUNCH_STATUS_OK = 0x4d4f4552u;
 constexpr uint32_t ROCM_MOE_LAZY_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES = 64;
+constexpr uint32_t ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_BYTES = 72;
+constexpr uint32_t ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_BYTES = 56;
+constexpr uint32_t ROCM_MOE_BATCH_ROUTE_METADATA_BYTES = 16;
+constexpr uint32_t ROCM_MOE_BATCH_ROUTE_BLOCK_SIZE = 256;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_VERSION = 1;
@@ -1433,6 +1439,41 @@ struct rocm_moe_lazy_launch_args {
 	uint64_t reserved3;
 };
 
+struct rocm_moe_batch_route_metadata {
+	uint32_t row;
+	uint32_t pair;
+	float weight;
+	uint32_t reserved;
+};
+
+struct rocm_moe_batch_route_rows_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t input_pointer;
+	uint64_t metadata_pointer;
+	uint64_t output_pointer;
+	uint32_t route_count;
+	uint32_t row_width;
+	uint32_t input_rows;
+	uint32_t output_rows;
+	uint64_t input_bytes;
+	uint64_t metadata_bytes;
+	uint64_t output_bytes;
+};
+
+struct rocm_moe_batch_reduce_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t input_pointer;
+	uint64_t output_pointer;
+	uint32_t rows;
+	uint32_t top_k;
+	uint32_t row_width;
+	uint32_t reserved;
+	uint64_t input_bytes;
+	uint64_t output_bytes;
+};
+
 struct rocm_gguf_q4_0_projection_launch_args {
 	uint32_t version;
 	uint32_t total_bytes;
@@ -1700,6 +1741,9 @@ static_assert(sizeof(rocm_swiglu_launch_args) == ROCM_SWIGLU_LAUNCH_ARGS_BYTES, 
 static_assert(sizeof(rocm_gelu_tanh_mul_launch_args) == ROCM_GELU_TANH_MUL_LAUNCH_ARGS_BYTES, "GELU tanh multiply launch ABI drift");
 static_assert(sizeof(rocm_moe_router_launch_args) == ROCM_MOE_ROUTER_LAUNCH_ARGS_BYTES, "MoE router launch ABI drift");
 static_assert(sizeof(rocm_moe_lazy_launch_args) == ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES, "MoE lazy expert launch ABI drift");
+static_assert(sizeof(rocm_moe_batch_route_metadata) == ROCM_MOE_BATCH_ROUTE_METADATA_BYTES, "MoE batch route metadata ABI drift");
+static_assert(sizeof(rocm_moe_batch_route_rows_launch_args) == ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_BYTES, "MoE batch route rows launch ABI drift");
+static_assert(sizeof(rocm_moe_batch_reduce_launch_args) == ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_BYTES, "MoE batch reduce launch ABI drift");
 static_assert(sizeof(rocm_gguf_q4_0_projection_launch_args) == ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES, "GGUF Q4_0 projection launch ABI drift");
 static_assert(sizeof(rocm_gguf_q4_k_expand_launch_args) == ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_BYTES, "GGUF Q4_K expansion launch ABI drift");
 static_assert(sizeof(rocm_gguf_q4_0_selected_experts_launch_args) == ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_BYTES, "GGUF Q4_0 selected experts launch ABI drift");
@@ -4457,6 +4501,35 @@ __device__ bool rocm_valid_moe_lazy_args(const rocm_moe_lazy_launch_args &args)
 		args.expert_count > 0 &&
 		args.id_bytes == args.selected_count * sizeof(int32_t) &&
 		args.resident_bytes == args.expert_count * sizeof(uint8_t);
+}
+
+__device__ bool rocm_valid_moe_batch_route_rows_args(const rocm_moe_batch_route_rows_launch_args &args)
+{
+	return args.version == ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.metadata_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.route_count > 0 &&
+		args.row_width > 0 &&
+		args.input_rows > 0 &&
+		args.output_rows > 0 &&
+		args.input_bytes == static_cast<uint64_t>(args.input_rows) * args.row_width * sizeof(float) &&
+		args.metadata_bytes == static_cast<uint64_t>(args.route_count) * ROCM_MOE_BATCH_ROUTE_METADATA_BYTES &&
+		args.output_bytes == static_cast<uint64_t>(args.output_rows) * args.row_width * sizeof(float);
+}
+
+__device__ bool rocm_valid_moe_batch_reduce_args(const rocm_moe_batch_reduce_launch_args &args)
+{
+	return args.version == ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.rows > 0 &&
+		args.top_k > 0 &&
+		args.row_width > 0 &&
+		args.input_bytes == static_cast<uint64_t>(args.rows) * args.top_k * args.row_width * sizeof(float) &&
+		args.output_bytes == static_cast<uint64_t>(args.rows) * args.row_width * sizeof(float);
 }
 
 __device__ bool rocm_valid_gguf_q4_0_projection_args(const rocm_gguf_q4_0_projection_launch_args &args, bool fused_gate_up)
@@ -13156,6 +13229,85 @@ extern "C" __global__ void rocm_moe_router(const unsigned char *packet)
 		uint32_t *status = reinterpret_cast<uint32_t *>(static_cast<uintptr_t>(args.status_pointer));
 		*status = ROCM_MOE_ROUTER_LAUNCH_STATUS_OK;
 	}
+}
+
+extern "C" __global__ void rocm_moe_batch_gather_rows(const unsigned char *packet)
+{
+	if (packet == nullptr || blockDim.x != ROCM_MOE_BATCH_ROUTE_BLOCK_SIZE) {
+		return;
+	}
+	const rocm_moe_batch_route_rows_launch_args &args = *reinterpret_cast<const rocm_moe_batch_route_rows_launch_args *>(packet);
+	if (!rocm_valid_moe_batch_route_rows_args(args) || args.output_rows != args.route_count) {
+		return;
+	}
+	const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+	const uint64_t count = static_cast<uint64_t>(args.route_count) * args.row_width;
+	if (index >= count) {
+		return;
+	}
+	const uint32_t route = static_cast<uint32_t>(index / args.row_width);
+	const uint32_t column = static_cast<uint32_t>(index - static_cast<uint64_t>(route) * args.row_width);
+	const rocm_moe_batch_route_metadata *metadata = reinterpret_cast<const rocm_moe_batch_route_metadata *>(static_cast<uintptr_t>(args.metadata_pointer));
+	const uint32_t row = metadata[route].row;
+	if (row >= args.input_rows) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	output[index] = input[static_cast<uint64_t>(row) * args.row_width + column];
+}
+
+extern "C" __global__ void rocm_moe_batch_scatter_routes(const unsigned char *packet)
+{
+	if (packet == nullptr || blockDim.x != ROCM_MOE_BATCH_ROUTE_BLOCK_SIZE) {
+		return;
+	}
+	const rocm_moe_batch_route_rows_launch_args &args = *reinterpret_cast<const rocm_moe_batch_route_rows_launch_args *>(packet);
+	if (!rocm_valid_moe_batch_route_rows_args(args) || args.input_rows != args.route_count) {
+		return;
+	}
+	const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+	const uint64_t count = static_cast<uint64_t>(args.route_count) * args.row_width;
+	if (index >= count) {
+		return;
+	}
+	const uint32_t route = static_cast<uint32_t>(index / args.row_width);
+	const uint32_t column = static_cast<uint32_t>(index - static_cast<uint64_t>(route) * args.row_width);
+	const rocm_moe_batch_route_metadata *metadata = reinterpret_cast<const rocm_moe_batch_route_metadata *>(static_cast<uintptr_t>(args.metadata_pointer));
+	const uint32_t pair = metadata[route].pair;
+	const float weight = metadata[route].weight;
+	if (pair >= args.output_rows || !isfinite(weight)) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	output[static_cast<uint64_t>(pair) * args.row_width + column] = input[index] * weight;
+}
+
+extern "C" __global__ void rocm_moe_batch_reduce_routes(const unsigned char *packet)
+{
+	if (packet == nullptr || blockDim.x != ROCM_MOE_BATCH_ROUTE_BLOCK_SIZE) {
+		return;
+	}
+	const rocm_moe_batch_reduce_launch_args &args = *reinterpret_cast<const rocm_moe_batch_reduce_launch_args *>(packet);
+	if (!rocm_valid_moe_batch_reduce_args(args)) {
+		return;
+	}
+	const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+	const uint64_t count = static_cast<uint64_t>(args.rows) * args.row_width;
+	if (index >= count) {
+		return;
+	}
+	const uint32_t row = static_cast<uint32_t>(index / args.row_width);
+	const uint32_t column = static_cast<uint32_t>(index - static_cast<uint64_t>(row) * args.row_width);
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float sum = 0.0f;
+	for (uint32_t rank = 0; rank < args.top_k; ++rank) {
+		const uint64_t pair = static_cast<uint64_t>(row) * args.top_k + rank;
+		sum += input[pair * args.row_width + column];
+	}
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	output[index] = sum;
 }
 
 extern "C" __global__ void rocm_moe_lazy_experts(const unsigned char *packet)

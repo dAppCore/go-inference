@@ -78,6 +78,9 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_rms_norm_rope_heads_batch`,
 		`extern "C" __global__ void rocm_rms_norm_rope_heads_pair_lane_batch`,
 		`extern "C" __global__ void rocm_moe_combine_norms`,
+		`extern "C" __global__ void rocm_moe_batch_gather_rows`,
+		`extern "C" __global__ void rocm_moe_batch_scatter_routes`,
+		`extern "C" __global__ void rocm_moe_batch_reduce_routes`,
 		`extern "C" __global__ void rocm_rope`,
 		`extern "C" __global__ void rocm_rope_heads`,
 		`extern "C" __global__ void rocm_greedy_sample`,
@@ -227,6 +230,12 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_BYTES = %d", hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes),
 		core.Sprintf("ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_VERSION = %d", hipMoECombineNormsLaunchArgsVersion),
 		core.Sprintf("ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_BYTES = %d", hipMoECombineNormsLaunchArgsBytes),
+		core.Sprintf("ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_VERSION = %d", hipMoEBatchRouteRowsLaunchArgsVersion),
+		core.Sprintf("ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_BYTES = %d", hipMoEBatchRouteRowsLaunchArgsBytes),
+		core.Sprintf("ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_VERSION = %d", hipMoEBatchReduceLaunchArgsVersion),
+		core.Sprintf("ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_BYTES = %d", hipMoEBatchReduceLaunchArgsBytes),
+		core.Sprintf("ROCM_MOE_BATCH_ROUTE_METADATA_BYTES = %d", hipMoEBatchRouteMetadataBytes),
+		core.Sprintf("ROCM_MOE_BATCH_ROUTE_BLOCK_SIZE = %d", hipMoEBatchRouteBlockSize),
 		core.Sprintf("ROCM_RMS_NORM_WEIGHT_ENCODING_NONE = %d", hipRMSNormWeightEncodingNone),
 		core.Sprintf("ROCM_RMS_NORM_WEIGHT_ENCODING_F32 = %d", hipRMSNormWeightEncodingF32),
 		core.Sprintf("ROCM_RMS_NORM_WEIGHT_ENCODING_BF16 = %d", hipRMSNormWeightEncodingBF16),
@@ -638,6 +647,20 @@ func TestHIPKernelSource_MoERouterRanksExpertsInParallel_Good(t *testing.T) {
 	core.AssertTrue(t, strings.Contains(router, "for (uint32_t candidate = 0; candidate < args.expert_count; ++candidate)"))
 	core.AssertTrue(t, strings.Contains(router, "rank < args.top_k"))
 	core.AssertTrue(t, strings.Contains(router, "__syncthreads();"))
+}
+
+func TestHIPKernelSource_MoEBatchRoutesPreserveRouterRankOrder_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	source := string(sourceBytes)
+	scatter := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_moe_batch_scatter_routes`)
+	reduce := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_moe_batch_reduce_routes`)
+
+	core.AssertTrue(t, strings.Contains(scatter, `const uint32_t pair = metadata[route].pair;`), "grouped expert output must return to its original router pair")
+	core.AssertTrue(t, strings.Contains(scatter, `output[static_cast<uint64_t>(pair) * args.row_width + column] = input[index] * weight;`), "scatter must assign each pair exactly once")
+	core.AssertTrue(t, !strings.Contains(scatter, "atomic"), "scatter must not introduce unordered floating-point atomics")
+	core.AssertTrue(t, strings.Contains(reduce, `for (uint32_t rank = 0; rank < args.top_k; ++rank)`), "reduction must visit router ranks in order")
+	core.AssertTrue(t, strings.Contains(reduce, `const uint64_t pair = static_cast<uint64_t>(row) * args.top_k + rank;`), "reduction must index the original row/rank pair")
 }
 
 func TestHIPDriverCGOSource_HotOutputPointersUseResultWrappers_Good(t *testing.T) {

@@ -13,12 +13,18 @@ import (
 )
 
 const (
-	hipMoERouterLaunchArgsVersion uint32 = 1
-	hipMoERouterLaunchArgsBytes          = 64
-	hipMoERouterLaunchStatusOK    uint32 = 0x4d4f4552
-	hipMoERouterBlockSize         uint32 = 256
-	hipMoELazyLaunchArgsVersion   uint32 = 1
-	hipMoELazyLaunchArgsBytes            = 64
+	hipMoERouterLaunchArgsVersion         uint32 = 1
+	hipMoERouterLaunchArgsBytes                  = 64
+	hipMoERouterLaunchStatusOK            uint32 = 0x4d4f4552
+	hipMoERouterBlockSize                 uint32 = 256
+	hipMoELazyLaunchArgsVersion           uint32 = 1
+	hipMoELazyLaunchArgsBytes                    = 64
+	hipMoEBatchRouteRowsLaunchArgsVersion uint32 = 1
+	hipMoEBatchRouteRowsLaunchArgsBytes          = 72
+	hipMoEBatchReduceLaunchArgsVersion    uint32 = 1
+	hipMoEBatchReduceLaunchArgsBytes             = 56
+	hipMoEBatchRouteMetadataBytes                = 16
+	hipMoEBatchRouteBlockSize             uint32 = 256
 )
 
 type hipMoERouterRequest struct {
@@ -82,6 +88,246 @@ type hipMoELazyExpertLaunchArgs struct {
 
 type hipMoELazyExpertResult struct {
 	Resident []bool
+}
+
+type hipMoEBatchRouteRowsLaunchArgs struct {
+	InputPointer    nativeDevicePointer
+	MetadataPointer nativeDevicePointer
+	OutputPointer   nativeDevicePointer
+	RouteCount      int
+	RowWidth        int
+	InputRows       int
+	OutputRows      int
+	InputBytes      uint64
+	MetadataBytes   uint64
+	OutputBytes     uint64
+}
+
+type hipMoEBatchReduceLaunchArgs struct {
+	InputPointer  nativeDevicePointer
+	OutputPointer nativeDevicePointer
+	Rows          int
+	TopK          int
+	RowWidth      int
+	InputBytes    uint64
+	OutputBytes   uint64
+}
+
+func (args hipMoEBatchRouteRowsLaunchArgs) Binary() ([]byte, error) {
+	return args.BinaryInto(make([]byte, hipMoEBatchRouteRowsLaunchArgsBytes))
+}
+
+func (args hipMoEBatchRouteRowsLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "rocm.hip.MoEBatchRouteRowsLaunch"
+	if len(payload) < hipMoEBatchRouteRowsLaunchArgsBytes {
+		return nil, core.E(operation, "launch arg payload buffer is too small", nil)
+	}
+	if args.InputPointer == 0 || args.MetadataPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E(operation, "input, metadata, and output pointers are required", nil)
+	}
+	routeCount, err := rocmDeviceKVPositiveUint32("MoE batch route count", args.RouteCount)
+	if err != nil {
+		return nil, err
+	}
+	rowWidth, err := rocmDeviceKVPositiveUint32("MoE batch route row width", args.RowWidth)
+	if err != nil {
+		return nil, err
+	}
+	inputRows, err := rocmDeviceKVPositiveUint32("MoE batch route input rows", args.InputRows)
+	if err != nil {
+		return nil, err
+	}
+	outputRows, err := rocmDeviceKVPositiveUint32("MoE batch route output rows", args.OutputRows)
+	if err != nil {
+		return nil, err
+	}
+	wantInputBytes := uint64(inputRows) * uint64(rowWidth) * 4
+	wantMetadataBytes := uint64(routeCount) * hipMoEBatchRouteMetadataBytes
+	wantOutputBytes := uint64(outputRows) * uint64(rowWidth) * 4
+	if args.InputBytes != wantInputBytes || args.MetadataBytes != wantMetadataBytes || args.OutputBytes != wantOutputBytes {
+		return nil, core.E(operation, "input, metadata, or output byte count mismatch", nil)
+	}
+	payload = payload[:hipMoEBatchRouteRowsLaunchArgsBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint32(payload[0:], hipMoEBatchRouteRowsLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.InputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.MetadataPointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[32:], routeCount)
+	binary.LittleEndian.PutUint32(payload[36:], rowWidth)
+	binary.LittleEndian.PutUint32(payload[40:], inputRows)
+	binary.LittleEndian.PutUint32(payload[44:], outputRows)
+	binary.LittleEndian.PutUint64(payload[48:], args.InputBytes)
+	binary.LittleEndian.PutUint64(payload[56:], args.MetadataBytes)
+	binary.LittleEndian.PutUint64(payload[64:], args.OutputBytes)
+	return payload, nil
+}
+
+func (args hipMoEBatchReduceLaunchArgs) Binary() ([]byte, error) {
+	return args.BinaryInto(make([]byte, hipMoEBatchReduceLaunchArgsBytes))
+}
+
+func (args hipMoEBatchReduceLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "rocm.hip.MoEBatchReduceRoutesLaunch"
+	if len(payload) < hipMoEBatchReduceLaunchArgsBytes {
+		return nil, core.E(operation, "launch arg payload buffer is too small", nil)
+	}
+	if args.InputPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E(operation, "input and output pointers are required", nil)
+	}
+	rows, err := rocmDeviceKVPositiveUint32("MoE batch reduce rows", args.Rows)
+	if err != nil {
+		return nil, err
+	}
+	topK, err := rocmDeviceKVPositiveUint32("MoE batch reduce top-k", args.TopK)
+	if err != nil {
+		return nil, err
+	}
+	rowWidth, err := rocmDeviceKVPositiveUint32("MoE batch reduce row width", args.RowWidth)
+	if err != nil {
+		return nil, err
+	}
+	wantInputBytes := uint64(rows) * uint64(topK) * uint64(rowWidth) * 4
+	wantOutputBytes := uint64(rows) * uint64(rowWidth) * 4
+	if args.InputBytes != wantInputBytes || args.OutputBytes != wantOutputBytes {
+		return nil, core.E(operation, "input or output byte count mismatch", nil)
+	}
+	payload = payload[:hipMoEBatchReduceLaunchArgsBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint32(payload[0:], hipMoEBatchReduceLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.InputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[24:], rows)
+	binary.LittleEndian.PutUint32(payload[28:], topK)
+	binary.LittleEndian.PutUint32(payload[32:], rowWidth)
+	binary.LittleEndian.PutUint64(payload[40:], args.InputBytes)
+	binary.LittleEndian.PutUint64(payload[48:], args.OutputBytes)
+	return payload, nil
+}
+
+func hipRunMoEBatchGatherRowsKernel(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, sourceRows int, output *hipDeviceByteBuffer) error {
+	return hipRunMoEBatchGatherRowsKernelWithArgs(ctx, driver, input, metadata, routeCount, rowWidth, sourceRows, output, nil)
+}
+
+func hipRunMoEBatchGatherRowsKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, sourceRows int, output *hipDeviceByteBuffer, packet []byte) error {
+	const operation = "rocm.hip.MoEBatchGatherRowsLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if input == nil || metadata == nil || output == nil || input.Pointer() == 0 || metadata.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E(operation, "input, metadata, and output buffers are required", nil)
+	}
+	if routeCount <= 0 || rowWidth <= 0 || sourceRows <= 0 ||
+		input.Count() != sourceRows*rowWidth || input.SizeBytes() != uint64(sourceRows*rowWidth*4) ||
+		metadata.SizeBytes() != uint64(routeCount*hipMoEBatchRouteMetadataBytes) ||
+		output.Count() != routeCount*rowWidth || output.SizeBytes() != uint64(routeCount*rowWidth*4) {
+		return core.E(operation, "batch gather buffer shape mismatch", nil)
+	}
+	launchArgs := hipMoEBatchRouteRowsLaunchArgs{
+		InputPointer: input.Pointer(), MetadataPointer: metadata.Pointer(), OutputPointer: output.Pointer(),
+		RouteCount: routeCount, RowWidth: rowWidth, InputRows: sourceRows, OutputRows: routeCount,
+		InputBytes: input.SizeBytes(), MetadataBytes: metadata.SizeBytes(), OutputBytes: output.SizeBytes(),
+	}
+	var args []byte
+	var err error
+	if len(packet) >= hipMoEBatchRouteRowsLaunchArgsBytes {
+		args, err = launchArgs.BinaryInto(packet)
+	} else {
+		args, err = launchArgs.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchMoEBatchRouteKernel(driver, hipKernelNameMoEBatchGatherRows, args, routeCount, rowWidth)
+}
+
+func hipRunMoEBatchScatterRoutesKernel(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, pairCount int, output *hipDeviceByteBuffer) error {
+	return hipRunMoEBatchScatterRoutesKernelWithArgs(ctx, driver, input, metadata, routeCount, rowWidth, pairCount, output, nil)
+}
+
+func hipRunMoEBatchScatterRoutesKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, pairCount int, output *hipDeviceByteBuffer, packet []byte) error {
+	const operation = "rocm.hip.MoEBatchScatterRoutesLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if input == nil || metadata == nil || output == nil || input.Pointer() == 0 || metadata.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E(operation, "input, metadata, and output buffers are required", nil)
+	}
+	if routeCount <= 0 || rowWidth <= 0 || pairCount <= 0 ||
+		input.Count() != routeCount*rowWidth || input.SizeBytes() != uint64(routeCount*rowWidth*4) ||
+		metadata.SizeBytes() != uint64(routeCount*hipMoEBatchRouteMetadataBytes) ||
+		output.Count() != pairCount*rowWidth || output.SizeBytes() != uint64(pairCount*rowWidth*4) {
+		return core.E(operation, "batch scatter buffer shape mismatch", nil)
+	}
+	launchArgs := hipMoEBatchRouteRowsLaunchArgs{
+		InputPointer: input.Pointer(), MetadataPointer: metadata.Pointer(), OutputPointer: output.Pointer(),
+		RouteCount: routeCount, RowWidth: rowWidth, InputRows: routeCount, OutputRows: pairCount,
+		InputBytes: input.SizeBytes(), MetadataBytes: metadata.SizeBytes(), OutputBytes: output.SizeBytes(),
+	}
+	var args []byte
+	var err error
+	if len(packet) >= hipMoEBatchRouteRowsLaunchArgsBytes {
+		args, err = launchArgs.BinaryInto(packet)
+	} else {
+		args, err = launchArgs.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchMoEBatchRouteKernel(driver, hipKernelNameMoEBatchScatterRoutes, args, routeCount, rowWidth)
+}
+
+func hipRunMoEBatchReduceRoutesKernel(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, rows, topK, rowWidth int, output *hipDeviceByteBuffer) error {
+	return hipRunMoEBatchReduceRoutesKernelWithArgs(ctx, driver, input, rows, topK, rowWidth, output, nil)
+}
+
+func hipRunMoEBatchReduceRoutesKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, rows, topK, rowWidth int, output *hipDeviceByteBuffer, packet []byte) error {
+	const operation = "rocm.hip.MoEBatchReduceRoutesLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if input == nil || output == nil || input.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E(operation, "input and output buffers are required", nil)
+	}
+	if rows <= 0 || topK <= 0 || rowWidth <= 0 ||
+		input.Count() != rows*topK*rowWidth || input.SizeBytes() != uint64(rows*topK*rowWidth*4) ||
+		output.Count() != rows*rowWidth || output.SizeBytes() != uint64(rows*rowWidth*4) {
+		return core.E(operation, "batch route reduction buffer shape mismatch", nil)
+	}
+	launchArgs := hipMoEBatchReduceLaunchArgs{
+		InputPointer: input.Pointer(), OutputPointer: output.Pointer(),
+		Rows: rows, TopK: topK, RowWidth: rowWidth,
+		InputBytes: input.SizeBytes(), OutputBytes: output.SizeBytes(),
+	}
+	var args []byte
+	var err error
+	if len(packet) >= hipMoEBatchReduceLaunchArgsBytes {
+		args, err = launchArgs.BinaryInto(packet)
+	} else {
+		args, err = launchArgs.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchMoEBatchRouteKernel(driver, hipKernelNameMoEBatchReduceRoutes, args, rows, rowWidth)
+}
+
+func hipLaunchMoEBatchRouteKernel(driver nativeHIPDriver, name string, args []byte, rows, rowWidth int) error {
+	if rows <= 0 || rowWidth <= 0 {
+		return core.E("rocm.hip.MoEBatchRouteLaunch", "route kernel geometry must be positive", nil)
+	}
+	workItems := uint64(rows) * uint64(rowWidth)
+	grid := (workItems + uint64(hipMoEBatchRouteBlockSize) - 1) / uint64(hipMoEBatchRouteBlockSize)
+	if grid == 0 || grid > uint64(^uint32(0)) {
+		return core.E("rocm.hip.MoEBatchRouteLaunch", "route kernel grid exceeds uint32", nil)
+	}
+	return hipLaunchKernel(driver, hipKernelLaunchConfig{
+		Name: name, Args: args,
+		GridX: uint32(grid), GridY: 1, GridZ: 1,
+		BlockX: hipMoEBatchRouteBlockSize, BlockY: 1, BlockZ: 1,
+	})
 }
 
 func (req hipMoERouterRequest) validate() error {

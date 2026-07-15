@@ -43,6 +43,116 @@ func TestHIPMoERouterLaunchArgs_Good(t *testing.T) {
 	core.AssertEqual(t, uint64(buffers.Status.Pointer()), binary.LittleEndian.Uint64(payload[56:]))
 }
 
+func TestHIPMoEBatchRouteRows_Good_GathersScattersAndReduces(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	inputValues := []float32{1, 2, 3, 4, 5, 6}
+	inputPayload, err := hipFloat32Payload(inputValues)
+	core.RequireNoError(t, err)
+	input, err := hipUploadByteBuffer(driver, "test", "MoE batch route input", inputPayload, len(inputValues))
+	core.RequireNoError(t, err)
+	defer input.Close()
+
+	metadataPayload := make([]byte, 32)
+	binary.LittleEndian.PutUint32(metadataPayload[0:], 2)
+	binary.LittleEndian.PutUint32(metadataPayload[4:], 4)
+	binary.LittleEndian.PutUint32(metadataPayload[8:], math.Float32bits(0.5))
+	binary.LittleEndian.PutUint32(metadataPayload[16:], 0)
+	binary.LittleEndian.PutUint32(metadataPayload[20:], 1)
+	binary.LittleEndian.PutUint32(metadataPayload[24:], math.Float32bits(2))
+	metadata, err := hipUploadByteBuffer(driver, "test", "MoE batch route metadata", metadataPayload, 2)
+	core.RequireNoError(t, err)
+	defer metadata.Close()
+
+	gathered, err := hipAllocateByteBuffer(driver, "test", "MoE gathered rows", 4*4, 4)
+	core.RequireNoError(t, err)
+	defer gathered.Close()
+	core.RequireNoError(t, hipRunMoEBatchGatherRowsKernel(context.Background(), driver, input, metadata, 2, 2, 3, gathered))
+	gatheredValues, err := hipReadFloat32DeviceOutput(gathered, "test", "MoE gathered rows", 4)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, []float32{5, 6, 1, 2}, gatheredValues, 0)
+
+	routeOutput, err := hipAllocateByteBuffer(driver, "test", "MoE route output", 12*4, 12)
+	core.RequireNoError(t, err)
+	defer routeOutput.Close()
+	core.RequireNoError(t, hipMemsetDevice(driver, routeOutput.Pointer(), 0, routeOutput.SizeBytes()))
+	core.RequireNoError(t, hipRunMoEBatchScatterRoutesKernel(context.Background(), driver, gathered, metadata, 2, 2, 6, routeOutput))
+	routeValues, err := hipReadFloat32DeviceOutput(routeOutput, "test", "MoE route output", 12)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, []float32{0, 0, 2, 4, 0, 0, 0, 0, 2.5, 3, 0, 0}, routeValues, 0)
+
+	destination, err := hipAllocateByteBuffer(driver, "test", "MoE reduced rows", 6*4, 6)
+	core.RequireNoError(t, err)
+	defer destination.Close()
+	core.RequireNoError(t, hipRunMoEBatchReduceRoutesKernel(context.Background(), driver, routeOutput, 3, 2, 2, destination))
+	got, err := hipReadFloat32DeviceOutput(destination, "test", "MoE reduced rows", 6)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, []float32{2, 4, 0, 0, 2.5, 3}, got, 0)
+}
+
+func TestHIPMoEBatchRouteRowsHardware_Good_GathersScattersAndReduces(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MOE_LANE_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MOE_LANE_TESTS=1 to run the HIP MoE route-kernel receipt")
+	}
+	if strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to the linked ROCm kernels HSACO")
+	}
+	driver := newSystemHIPDriver()
+	if driver == nil || !driver.Available() {
+		t.Skip("ROCm runtime is not available on this host")
+	}
+
+	inputPayload, err := hipFloat32Payload([]float32{1, 2, 3, 4, 5, 6})
+	core.RequireNoError(t, err)
+	input, err := hipUploadByteBuffer(driver, "rocm.hip.MoEBatchRouteRowsHardware", "input rows", inputPayload, 6)
+	core.RequireNoError(t, err)
+	defer input.Close()
+	metadataPayload := make([]byte, 2*hipMoEBatchRouteMetadataBytes)
+	binary.LittleEndian.PutUint32(metadataPayload[0:], 2)
+	binary.LittleEndian.PutUint32(metadataPayload[4:], 4)
+	binary.LittleEndian.PutUint32(metadataPayload[8:], math.Float32bits(0.5))
+	binary.LittleEndian.PutUint32(metadataPayload[16:], 0)
+	binary.LittleEndian.PutUint32(metadataPayload[20:], 1)
+	binary.LittleEndian.PutUint32(metadataPayload[24:], math.Float32bits(2))
+	metadata, err := hipUploadByteBuffer(driver, "rocm.hip.MoEBatchRouteRowsHardware", "route metadata", metadataPayload, 2)
+	core.RequireNoError(t, err)
+	defer metadata.Close()
+
+	gathered, err := hipAllocateByteBuffer(driver, "rocm.hip.MoEBatchRouteRowsHardware", "gathered rows", 4*4, 4)
+	core.RequireNoError(t, err)
+	defer gathered.Close()
+	core.RequireNoError(t, hipRunMoEBatchGatherRowsKernel(context.Background(), driver, input, metadata, 2, 2, 3, gathered))
+
+	routes, err := hipAllocateByteBuffer(driver, "rocm.hip.MoEBatchRouteRowsHardware", "route pairs", 12*4, 12)
+	core.RequireNoError(t, err)
+	defer routes.Close()
+	core.RequireNoError(t, hipMemsetDevice(driver, routes.Pointer(), 0, routes.SizeBytes()))
+	core.RequireNoError(t, hipRunMoEBatchScatterRoutesKernel(context.Background(), driver, gathered, metadata, 2, 2, 6, routes))
+
+	reduced, err := hipAllocateByteBuffer(driver, "rocm.hip.MoEBatchRouteRowsHardware", "reduced rows", 6*4, 6)
+	core.RequireNoError(t, err)
+	defer reduced.Close()
+	core.RequireNoError(t, hipRunMoEBatchReduceRoutesKernel(context.Background(), driver, routes, 3, 2, 2, reduced))
+	got, err := hipReadFloat32DeviceOutput(reduced, "rocm.hip.MoEBatchRouteRowsHardware", "reduced rows", 6)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, []float32{2, 4, 0, 0, 2.5, 3}, got, 0)
+}
+
+func TestHIPMoEBatchRouteRows_Bad_RejectsOutputShape(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	input, err := hipAllocateByteBuffer(driver, "test", "MoE batch route input", 6*4, 6)
+	core.RequireNoError(t, err)
+	defer input.Close()
+	metadata, err := hipAllocateByteBuffer(driver, "test", "MoE batch route metadata", 2*16, 2)
+	core.RequireNoError(t, err)
+	defer metadata.Close()
+	output, err := hipAllocateByteBuffer(driver, "test", "MoE gathered rows", 3*4, 3)
+	core.RequireNoError(t, err)
+	defer output.Close()
+	if err := hipRunMoEBatchGatherRowsKernel(context.Background(), driver, input, metadata, 2, 2, 3, output); err == nil {
+		t.Fatal("hipRunMoEBatchGatherRowsKernel accepted a truncated output")
+	}
+}
+
 func TestHIPGGUFQ4_0ProjectionLaunchArgs_Good(t *testing.T) {
 	args := hipGGUFQ4_0ProjectionLaunchArgs{
 		InputPointer:  11,
@@ -907,6 +1017,76 @@ func TestHIPGemma4MoEWorkspace_Good_BatchRowsUseDistinctOutput(t *testing.T) {
 	core.AssertEqual(t, rows, countLaunchName(driver.launches, hipKernelNameMoECombineNorms))
 }
 
+func TestHIPGemma4MoEWorkspace_Good_MLXAffineBatchGroupsExperts(t *testing.T) {
+	const rows = 2
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+	attentionResidual, localInput, layer, cleanup := hipGemma4MoEMLXWorkspaceFixture(t, driver, rows)
+	defer cleanup()
+
+	output, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(
+		context.Background(), driver, attentionResidual, localInput, layer, 1e-6, rows, workspace,
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, rows*layer.HiddenSize, output.Count())
+	core.AssertEqual(t, 0, countLaunchName(driver.launches, hipKernelNameMoERouter))
+	core.AssertEqual(t, 0, countLaunchName(driver.launches, hipKernelNameMoECombineNorms))
+	core.AssertEqual(t, 2, countLaunchName(driver.launches, hipKernelNameMoEBatchGatherRows))
+	core.AssertEqual(t, 2, countLaunchName(driver.launches, hipKernelNameMoEBatchScatterRoutes))
+	core.AssertEqual(t, 1, countLaunchName(driver.launches, hipKernelNameMoEBatchReduceRoutes))
+	core.AssertEqual(t, 4, countLaunchName(driver.launches, hipKernelNameRMSNormHeads))
+	core.AssertEqual(t, 3, countLaunchName(driver.launches, hipKernelNameMLXQ4GELUTanhMulBatch))
+	core.AssertEqual(t, 4, countLaunchName(driver.launches, hipKernelNameMLXQ4ProjBatch))
+	core.AssertEqual(t, 1, countLaunchName(driver.launches, hipKernelNameVectorAddScaled))
+}
+
+func TestHIPGemma4MoEBatchRouteGroups_Good_MatchesReference(t *testing.T) {
+	const (
+		rows    = 3
+		experts = 4
+		topK    = 2
+	)
+	scores := []float32{
+		1, 4, 2, 3,
+		5, 5, -1, 0,
+		-2, 1, 7, 3,
+	}
+	scales := []float32{1, 0.5, 2, 1.5}
+	groups, err := hipGemma4MoEBatchRouteGroups(scores, rows, experts, topK, scales, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, experts, len(groups))
+
+	for row := 0; row < rows; row++ {
+		want, referenceErr := rocmReferenceRouteExperts(scores[row*experts:(row+1)*experts], topK, 0, nil)
+		core.RequireNoError(t, referenceErr)
+		got := make(map[int]float32, topK)
+		for expert, routes := range groups {
+			for _, route := range routes {
+				if route.Row == row {
+					got[expert] = route.Weight
+				}
+			}
+		}
+		core.AssertEqual(t, topK, len(got))
+		for _, route := range want {
+			assertFloat32Near(t, route.Prob*scales[route.ID], got[route.ID])
+		}
+	}
+}
+
+func TestHIPGemma4MoEBatchRouteGroups_Bad_RejectsShape(t *testing.T) {
+	if _, err := hipGemma4MoEBatchRouteGroups([]float32{1, 2, 3}, 2, 2, 1, []float32{1, 1}, nil); err == nil {
+		t.Fatal("hipGemma4MoEBatchRouteGroups accepted a truncated score slab")
+	}
+}
+
+func TestHIPGemma4MoEBatchRouteGroups_Ugly_RejectsNonFiniteScores(t *testing.T) {
+	if _, err := hipGemma4MoEBatchRouteGroups([]float32{1, float32(math.NaN())}, 1, 2, 1, []float32{1, 1}, nil); err == nil {
+		t.Fatal("hipGemma4MoEBatchRouteGroups accepted NaN scores")
+	}
+}
+
 func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_MOE_LANE_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_MOE_LANE_TESTS=1 to run the HIP MoE batch receipt")
@@ -995,7 +1175,24 @@ func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
 		want = append(want, values...)
 		core.RequireNoError(t, workspace.Close())
 	}
-	assertFloat32SlicesNear(t, want, got, 1e-4)
+	maxAbs := float64(0)
+	maxRel := float64(0)
+	maxAbsIndex := 0
+	maxRelIndex := 0
+	for index := range want {
+		difference := math.Abs(float64(got[index] - want[index]))
+		scale := math.Max(math.Abs(float64(want[index])), 1)
+		if difference > maxAbs {
+			maxAbs = difference
+			maxAbsIndex = index
+		}
+		if relative := difference / scale; relative > maxRel {
+			maxRel = relative
+			maxRelIndex = index
+		}
+	}
+	t.Logf("grouped versus serial max_abs=%g index=%d max_rel=%g index=%d", maxAbs, maxAbsIndex, maxRel, maxRelIndex)
+	assertFloat32SlicesNearRelative(t, want, got, 1e-4, 1e-6)
 }
 
 type hipGemma4MoEWorkspaceTestDriver struct {
@@ -1055,6 +1252,88 @@ func hipGemma4MoEWorkspaceFixture(t *testing.T, driver nativeHIPDriver, rows int
 			PerExpertScale:   []float32{1, 1}, ExpertCache: expertCache,
 			GateUpInfo: nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{hidden, 2 * expertFF, experts}, ByteSize: uint64(experts) * gateUpBytes},
 			DownInfo:   nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{expertFF, hidden, experts}, ByteSize: uint64(experts) * downBytes},
+		},
+	}
+	cleanup := func() {
+		_ = attentionResidual.Close()
+		_ = localInput.Close()
+		_ = expertCache.Close()
+	}
+	return attentionResidual, localInput, layer, cleanup
+}
+
+func hipGemma4MoEMLXWorkspaceFixture(t *testing.T, driver nativeHIPDriver, rows int) (*hipDeviceByteBuffer, *hipDeviceByteBuffer, hipGemma4Q4Layer0Config, func()) {
+	t.Helper()
+	const (
+		hidden    = 32
+		localFF   = 32
+		experts   = 2
+		topK      = 2
+		expertFF  = 32
+		groupSize = 32
+		bits      = 4
+	)
+	attentionResidual, err := hipAllocateByteBuffer(driver, "test", "MLX attention residual", uint64(rows*hidden*4), rows*hidden)
+	core.RequireNoError(t, err)
+	localInput, err := hipAllocateByteBuffer(driver, "test", "MLX local input", uint64(rows*hidden*4), rows*hidden)
+	core.RequireNoError(t, err)
+	expertCache := newHIPGemma4ExpertCache(driver, 1<<20)
+	projection := func(outputRows, cols int, pointer nativeDevicePointer) hipMLXQ4DeviceWeightConfig {
+		groups := outputRows * (cols / groupSize)
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: pointer, ScalePointer: pointer + 0x100, BiasPointer: pointer + 0x200,
+			WeightBytes: uint64(outputRows * cols * bits / 8), ScaleBytes: uint64(groups * 2), BiasBytes: uint64(groups * 2),
+			Rows: outputRows, Cols: cols, GroupSize: groupSize, Bits: bits,
+		}
+	}
+	for expert := 0; expert < experts; expert++ {
+		base := nativeDevicePointer(0x60000 + expert*0x10000)
+		expertCache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: expert}] = &hipGemma4ExpertCacheEntry{
+			Storage: hipGemma4MoEExpertStorageMLXAffine,
+			MLXGate: projection(expertFF, hidden, base),
+			MLXUp:   projection(expertFF, hidden, base+0x1000),
+			MLXDown: projection(hidden, expertFF, base+0x2000),
+		}
+	}
+	norm := hipRMSNormDeviceWeightConfig{
+		WeightPointer: 0x4000, WeightBytes: hidden * 4, Count: hidden,
+		Epsilon: 1e-6, WeightEncoding: hipRMSNormWeightEncodingF32,
+	}
+	tensor := func(shape []uint64, elementBytes uint64) nativeTensorInfo {
+		count := uint64(1)
+		for _, dimension := range shape {
+			count *= dimension
+		}
+		return nativeTensorInfo{TypeName: map[uint64]string{2: "BF16", 4: "U32"}[elementBytes], Dimensions: shape, SourcePath: "cached", ByteSize: count * elementBytes}
+	}
+	packedHidden := uint64(hidden * bits / 32)
+	packedExpert := uint64(expertFF * bits / 32)
+	gateGroups := uint64(hidden / groupSize)
+	downGroups := uint64(expertFF / groupSize)
+	expertSource := hipGemma4MLXAffineExpertSource{
+		GateUp: hipGemma4MLXAffineTensorSet{
+			Weight: tensor([]uint64{experts, 2 * expertFF, packedHidden}, 4),
+			Scales: tensor([]uint64{experts, 2 * expertFF, gateGroups}, 2),
+			Biases: tensor([]uint64{experts, 2 * expertFF, gateGroups}, 2),
+		},
+		Down: hipGemma4MLXAffineTensorSet{
+			Weight: tensor([]uint64{experts, hidden, packedExpert}, 4),
+			Scales: tensor([]uint64{experts, hidden, downGroups}, 2),
+			Biases: tensor([]uint64{experts, hidden, downGroups}, 2),
+		},
+	}
+	layer := hipGemma4Q4Layer0Config{
+		HiddenSize:     hidden,
+		GateProjection: projection(localFF, hidden, 0x10000),
+		UpProjection:   projection(localFF, hidden, 0x20000),
+		DownProjection: projection(hidden, localFF, 0x30000),
+		MoE: &hipGemma4MoELayerConfig{
+			Layer: 0, NumExperts: experts, TopKExperts: topK, ExpertIntermediateSize: expertFF,
+			PreFeedForwardNorm2: norm, PostFeedForwardNorm1: norm, PostFeedForwardNorm2: norm, RouterNorm: norm,
+			RouterProjectionMLX: projection(experts, hidden, 0x50000),
+			PerExpertScale:      []float32{1, 1}, ExpertCache: expertCache,
+			ExpertStorage: hipGemma4MoEExpertStorageMLXAffine, MLXExperts: expertSource,
+			MLXHiddenSize: hidden, MLXGroupSize: groupSize, MLXPreferredBits: bits,
 		},
 	}
 	cleanup := func() {

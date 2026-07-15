@@ -28,6 +28,8 @@ import (
 
 const inferenceBenchmarkKernelRouteMetricsEnv = "GO_ROCM_BENCH_KERNEL_ROUTE_METRICS"
 const inferenceBenchmarkCopySizeMetricLimitEnv = "GO_ROCM_BENCH_COPY_SIZE_LIMIT"
+const inferenceBenchmarkDiffusionCanvasLengthEnv = "GO_ROCM_BENCH_DIFFUSION_CANVAS_LENGTH"
+const inferenceBenchmarkDiffusionMaxStepsEnv = "GO_ROCM_BENCH_DIFFUSION_MAX_STEPS"
 
 const (
 	inferenceBenchmarkGemma4RetainedDepthRunEnv          = "GO_ROCM_RUN_RETAINED_DEPTH_BENCHMARK"
@@ -2644,6 +2646,125 @@ func BenchmarkInferenceBenchmarkTopHIPKernelShapeEntries_SixtyFourShapes(b *test
 
 func BenchmarkInferenceGemma4Q4Generate(b *testing.B) {
 	benchmarkInferenceGemma4Q4Generate(b)
+}
+
+func BenchmarkInferenceDiffusionGemmaGenerate(b *testing.B) {
+	if os.Getenv("GO_ROCM_RUN_BENCHMARKS") != "1" {
+		b.Skip("set GO_ROCM_RUN_BENCHMARKS=1 to run ROCm inference benchmarks")
+	}
+	modelPath := inferenceBenchmarkGemma4ProductionModelPath()
+	if modelPath == "" {
+		b.Skip("set GO_ROCM_PRODUCTION_MODEL_PATH or GO_ROCM_MODEL_PATH to a local DiffusionGemma MLX affine model pack")
+	}
+	contextLen, err := inferenceBenchmarkPositiveEnv("GO_ROCM_BENCH_CONTEXT_LEN", 1024)
+	if err != nil {
+		b.Fatal(err)
+	}
+	maxTokens, err := inferenceBenchmarkPositiveEnv("GO_ROCM_BENCH_TOKENS", 512)
+	if err != nil {
+		b.Fatal(err)
+	}
+	promptCount, err := inferenceBenchmarkPositiveEnv("GO_ROCM_BENCH_PROMPT_TOKEN_COUNT", 2)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if promptCount+maxTokens > contextLen {
+		b.Fatalf("diffusion prompt tokens %d plus generated tokens %d exceed context window %d", promptCount, maxTokens, contextLen)
+	}
+	promptIDs, err := inferenceBenchmarkPromptTokenIDs(os.Getenv("GO_ROCM_BENCH_PROMPT_TOKEN_IDS"))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	nativeRuntime, kernelCounter := inferenceBenchmarkNativeRuntimeAndKernelCounter()
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(nativeRuntime).LoadModel(modelPath, inference.WithContextLen(contextLen)))
+	if err != nil {
+		b.Fatalf("LoadModel(%q): %v", modelPath, err)
+	}
+	defer inferenceBenchmarkCloseModel(b, model)
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		b.Fatalf("LoadModel(%q) returned %T, want *rocmModel", modelPath, model)
+	}
+	if normalizeROCmArchitecture(rocmLoaded.modelInfo.Architecture) != "diffusion_gemma" {
+		b.Fatalf("LoadModel(%q) architecture = %q, want diffusion_gemma", modelPath, rocmLoaded.modelInfo.Architecture)
+	}
+	if !rocmLoaded.BlockDiffusionCapable() {
+		b.Fatalf("LoadModel(%q) has no linked HIP block-diffusion session", modelPath)
+	}
+	if canvasLength, set, overrideErr := inferenceBenchmarkOptionalPositiveEnv(inferenceBenchmarkDiffusionCanvasLengthEnv); overrideErr != nil {
+		b.Fatal(overrideErr)
+	} else if set {
+		rocmLoaded.modelLabels["diffusion_canvas_length"] = strconv.Itoa(canvasLength)
+	}
+	if maxSteps, set, overrideErr := inferenceBenchmarkOptionalPositiveEnv(inferenceBenchmarkDiffusionMaxStepsEnv); overrideErr != nil {
+		b.Fatal(overrideErr)
+	} else if set {
+		rocmLoaded.modelLabels["diffusion_default_max_steps"] = strconv.Itoa(maxSteps)
+	}
+	prompt, err := inferenceBenchmarkDiffusionPromptTokens(promptCount, promptIDs, rocmLoaded.modelInfo.VocabSize)
+	if err != nil {
+		b.Fatal(err)
+	}
+	inferenceBenchmarkReportGemma4ProductionQuant(b, rocmLoaded.modelInfo, modelPath)
+	if kernelCounter != nil {
+		kernelCounter.ResetKernelStats()
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	started := time.Now()
+	var emittedTokens int
+	var canvases int
+	var steps int
+	var prefillDur time.Duration
+	var denoiseDur time.Duration
+	var commitDur time.Duration
+	var diffusionDur time.Duration
+	for i := 0; i < b.N; i++ {
+		generated := 0
+		metrics, generateErr := rocmLoaded.GenerateBlockDiffusionTokens(context.Background(), prompt, ROCmBlockDiffusionOptions{
+			MaxTokens: maxTokens,
+			Seed:      1,
+			SeedSet:   true,
+		}, func(token int32) bool {
+			if token < 0 || int(token) >= rocmLoaded.modelInfo.VocabSize {
+				return false
+			}
+			generated++
+			return true
+		})
+		if generateErr != nil {
+			b.Fatalf("GenerateBlockDiffusionTokens: %v", generateErr)
+		}
+		if generated != maxTokens || metrics.EmittedTokens != maxTokens {
+			b.Fatalf("GenerateBlockDiffusionTokens emitted callback=%d metrics=%d, want %d", generated, metrics.EmittedTokens, maxTokens)
+		}
+		emittedTokens += generated
+		canvases += metrics.Canvases
+		steps += metrics.TotalSteps
+		prefillDur += metrics.PrefillDur
+		denoiseDur += metrics.DenoiseDur
+		commitDur += metrics.CommitDur
+		diffusionDur += metrics.TotalDur
+	}
+	elapsed := time.Since(started)
+	b.StopTimer()
+	operations := float64(b.N)
+	if elapsed > 0 {
+		b.ReportMetric(float64(emittedTokens)/elapsed.Seconds(), "tok/s")
+	}
+	b.ReportMetric(float64(emittedTokens), "tokens")
+	b.ReportMetric(float64(maxTokens), "max_tokens/op")
+	b.ReportMetric(float64(promptCount), "prompt_tokens/op")
+	b.ReportMetric(float64(contextLen), "context_len")
+	b.ReportMetric(float64(canvases)/operations, "canvases/op")
+	b.ReportMetric(float64(steps)/operations, "steps/op")
+	b.ReportMetric(float64(prefillDur)/float64(time.Millisecond)/operations, "prefill_ms/op")
+	b.ReportMetric(float64(denoiseDur)/float64(time.Millisecond)/operations, "denoise_ms/op")
+	b.ReportMetric(float64(commitDur)/float64(time.Millisecond)/operations, "commit_ms/op")
+	b.ReportMetric(float64(diffusionDur)/float64(time.Millisecond)/operations, "diffusion_ms/op")
+	inferenceBenchmarkReportHIPKernelRouteMetrics(b, kernelCounter)
 }
 
 func BenchmarkInferenceGemma4Q4Generate_Ladder(b *testing.B) {
@@ -6080,6 +6201,27 @@ func inferenceBenchmarkTokenPrompt(count int, ids []int) string {
 	return builder.String()
 }
 
+func inferenceBenchmarkDiffusionPromptTokens(count int, ids []int, vocab int) ([]int32, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("diffusion benchmark prompt token count must be positive")
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("diffusion benchmark prompt token IDs are empty")
+	}
+	if vocab <= 0 {
+		return nil, fmt.Errorf("diffusion benchmark vocabulary must be positive")
+	}
+	prompt := make([]int32, count)
+	for index := range prompt {
+		id := ids[index%len(ids)]
+		if id < 0 || id >= vocab {
+			return nil, fmt.Errorf("diffusion benchmark prompt token ID %d is outside vocabulary [0,%d)", id, vocab)
+		}
+		prompt[index] = int32(id)
+	}
+	return prompt, nil
+}
+
 func inferenceBenchmarkGemma4SweepConfigFromEnv(getenv func(string) string) (inferenceBenchmarkGemma4SweepConfig, error) {
 	if getenv == nil {
 		return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("Gemma4 sweep getenv is nil")
@@ -6916,6 +7058,32 @@ func TestInferenceBenchmarkPromptFromEnv_BadTokenID(t *testing.T) {
 
 	if _, err := inferenceBenchmarkPromptFromEnv(); err == nil {
 		t.Fatalf("inferenceBenchmarkPromptFromEnv succeeded, want empty token ID error")
+	}
+}
+
+func TestInferenceBenchmarkDiffusionPromptTokens_Good(t *testing.T) {
+	got, err := inferenceBenchmarkDiffusionPromptTokens(5, []int{2, 10979}, 262144)
+	if err != nil {
+		t.Fatalf("inferenceBenchmarkDiffusionPromptTokens: %v", err)
+	}
+	want := []int32{2, 10979, 2, 10979, 2}
+	if !slices.Equal(got, want) {
+		t.Fatalf("diffusion prompt tokens = %v, want %v", got, want)
+	}
+}
+
+func TestInferenceBenchmarkDiffusionPromptTokens_Bad(t *testing.T) {
+	if _, err := inferenceBenchmarkDiffusionPromptTokens(2, []int{2, 16}, 16); err == nil || !strings.Contains(err.Error(), "outside vocabulary") {
+		t.Fatalf("diffusion prompt token error = %v, want vocabulary rejection", err)
+	}
+}
+
+func TestInferenceBenchmarkDiffusionPromptTokens_Ugly(t *testing.T) {
+	if _, err := inferenceBenchmarkDiffusionPromptTokens(0, []int{2}, 16); err == nil || !strings.Contains(err.Error(), "count must be positive") {
+		t.Fatalf("diffusion prompt count error = %v, want positive-count rejection", err)
+	}
+	if _, err := inferenceBenchmarkDiffusionPromptTokens(2, nil, 16); err == nil || !strings.Contains(err.Error(), "token IDs are empty") {
+		t.Fatalf("diffusion prompt IDs error = %v, want empty-ID rejection", err)
 	}
 }
 

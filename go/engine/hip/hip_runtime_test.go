@@ -3143,6 +3143,12 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchMoERouter(config.Args)
 	case hipKernelNameMoELazy:
 		return driver.launchMoELazyExperts(config.Args)
+	case hipKernelNameMoEBatchGatherRows:
+		return driver.launchMoEBatchRouteRows(config.Args, true)
+	case hipKernelNameMoEBatchScatterRoutes:
+		return driver.launchMoEBatchRouteRows(config.Args, false)
+	case hipKernelNameMoEBatchReduceRoutes:
+		return driver.launchMoEBatchReduceRoutes(config.Args)
 	case hipKernelNameJANGTQ:
 		return driver.launchJANGTQProjection(config.Args)
 	case hipKernelNameCodebook:
@@ -3431,6 +3437,100 @@ func (driver *fakeHIPDriver) launchMoERouter(args []byte) error {
 			return core.E("rocm.hip.FakeLaunch", "MoE router status buffer is missing", nil)
 		}
 		binary.LittleEndian.PutUint32(status[offset:], hipMoERouterLaunchStatusOK)
+	}
+	return nil
+}
+
+func (driver *fakeHIPDriver) launchMoEBatchRouteRows(args []byte, gather bool) error {
+	if len(args) != hipMoEBatchRouteRowsLaunchArgsBytes ||
+		binary.LittleEndian.Uint32(args[0:]) != hipMoEBatchRouteRowsLaunchArgsVersion ||
+		binary.LittleEndian.Uint32(args[4:]) != uint32(hipMoEBatchRouteRowsLaunchArgsBytes) {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route rows launch header mismatch", nil)
+	}
+	inputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[8:]))
+	metadataPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[16:]))
+	outputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[24:]))
+	routeCount := int(binary.LittleEndian.Uint32(args[32:]))
+	rowWidth := int(binary.LittleEndian.Uint32(args[36:]))
+	inputRows := int(binary.LittleEndian.Uint32(args[40:]))
+	outputRows := int(binary.LittleEndian.Uint32(args[44:]))
+	inputBytes := int(binary.LittleEndian.Uint64(args[48:]))
+	metadataBytes := int(binary.LittleEndian.Uint64(args[56:]))
+	outputBytes := int(binary.LittleEndian.Uint64(args[64:]))
+	if routeCount <= 0 || rowWidth <= 0 || inputRows <= 0 || outputRows <= 0 ||
+		inputBytes != inputRows*rowWidth*4 || metadataBytes != routeCount*hipMoEBatchRouteMetadataBytes || outputBytes != outputRows*rowWidth*4 {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route rows shape metadata mismatch", nil)
+	}
+	input, inputOffset, ok := driver.memoryForPointer(inputPointer, inputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route input buffer is missing", nil)
+	}
+	metadata, metadataOffset, ok := driver.memoryForPointer(metadataPointer, metadataBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route metadata buffer is missing", nil)
+	}
+	output, outputOffset, ok := driver.memoryForPointer(outputPointer, outputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route output buffer is missing", nil)
+	}
+	for route := 0; route < routeCount; route++ {
+		metadataBase := metadataOffset + route*hipMoEBatchRouteMetadataBytes
+		row := int(binary.LittleEndian.Uint32(metadata[metadataBase:]))
+		pair := int(binary.LittleEndian.Uint32(metadata[metadataBase+4:]))
+		weight := math.Float32frombits(binary.LittleEndian.Uint32(metadata[metadataBase+8:]))
+		if (gather && (row < 0 || row >= inputRows)) || (!gather && (pair < 0 || pair >= outputRows)) || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+			return core.E("rocm.hip.FakeLaunch", "MoE batch route metadata is invalid", nil)
+		}
+		for column := 0; column < rowWidth; column++ {
+			if gather {
+				source := inputOffset + (row*rowWidth+column)*4
+				target := outputOffset + (route*rowWidth+column)*4
+				copy(output[target:target+4], input[source:source+4])
+				continue
+			}
+			source := inputOffset + (route*rowWidth+column)*4
+			target := outputOffset + (pair*rowWidth+column)*4
+			value := math.Float32frombits(binary.LittleEndian.Uint32(input[source:])) * weight
+			binary.LittleEndian.PutUint32(output[target:], math.Float32bits(value))
+		}
+	}
+	return nil
+}
+
+func (driver *fakeHIPDriver) launchMoEBatchReduceRoutes(args []byte) error {
+	if len(args) != hipMoEBatchReduceLaunchArgsBytes ||
+		binary.LittleEndian.Uint32(args[0:]) != hipMoEBatchReduceLaunchArgsVersion ||
+		binary.LittleEndian.Uint32(args[4:]) != uint32(hipMoEBatchReduceLaunchArgsBytes) {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce launch header mismatch", nil)
+	}
+	inputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[8:]))
+	outputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[16:]))
+	rows := int(binary.LittleEndian.Uint32(args[24:]))
+	topK := int(binary.LittleEndian.Uint32(args[28:]))
+	rowWidth := int(binary.LittleEndian.Uint32(args[32:]))
+	inputBytes := int(binary.LittleEndian.Uint64(args[40:]))
+	outputBytes := int(binary.LittleEndian.Uint64(args[48:]))
+	if rows <= 0 || topK <= 0 || rowWidth <= 0 || inputBytes != rows*topK*rowWidth*4 || outputBytes != rows*rowWidth*4 {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce shape metadata mismatch", nil)
+	}
+	input, inputOffset, ok := driver.memoryForPointer(inputPointer, inputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce input buffer is missing", nil)
+	}
+	output, outputOffset, ok := driver.memoryForPointer(outputPointer, outputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce output buffer is missing", nil)
+	}
+	for row := 0; row < rows; row++ {
+		for column := 0; column < rowWidth; column++ {
+			sum := float32(0)
+			for rank := 0; rank < topK; rank++ {
+				source := inputOffset + ((row*topK+rank)*rowWidth+column)*4
+				sum += math.Float32frombits(binary.LittleEndian.Uint32(input[source:]))
+			}
+			target := outputOffset + (row*rowWidth+column)*4
+			binary.LittleEndian.PutUint32(output[target:], math.Float32bits(sum))
+		}
 	}
 	return nil
 }
