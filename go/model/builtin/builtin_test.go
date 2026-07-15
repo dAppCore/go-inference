@@ -114,3 +114,19 @@ func TestBuiltinRegistersMoEFamilies(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltinRegistersOpenAI confirms the three openai/ arches (privacyfilter, whisper, gptoss) carry their
+// registration through builtin's blank imports — none is a Composed hybrid; each is a Parse-based ArchSpec
+// whose Config.Arch gives a clean, type-correct refusal (see each package's own Refusal test for the
+// message), reached here to prove builtin.go itself (not just each package's own init()) wires them in.
+func TestBuiltinRegistersOpenAI(t *testing.T) {
+	for _, mt := range []string{"openai_privacy_filter", "whisper", "gpt_oss"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok || spec.Composed != nil {
+			t.Fatalf("model_type %q = registered %v composed %v, want a registered Parse-based arch through builtin", mt, ok, spec.Composed != nil)
+		}
+		if spec.Parse == nil {
+			t.Fatalf("model_type %q registered through builtin without a Parse func", mt)
+		}
+	}
+}
