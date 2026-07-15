@@ -43,6 +43,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_row64`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_tokens16`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_row16_tokens16_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens64_shared`,
@@ -548,6 +549,10 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(batchQ4G64Tokens16, `args.bits != 4u || args.group_size != 64u`), "q4 group64 tokens16 batch projection must guard its quantization shape")
 	core.AssertTrue(t, strings.Contains(batchQ4G64Tokens16, `ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK`), "q4 group64 tokens16 batch projection must use its wider token tile")
 	core.AssertTrue(t, strings.Contains(batchQ4G64Tokens16, `rocm_mlx_q4_row_reduce`), "q4 group64 tokens16 batch projection must retain ordered row reduction")
+	batchQ4G64Shared := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_row16_tokens16_shared`)
+	core.AssertTrue(t, strings.Contains(batchQ4G64Shared, `__shared__ float input_tile`), "shared q4 batch projection must reuse a 64-column input tile across output rows")
+	core.AssertTrue(t, strings.Contains(batchQ4G64Shared, `ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW`), "shared q4 batch projection must use row16 lane geometry")
+	core.AssertTrue(t, strings.Contains(batchQ4G64Shared, `rocm_mlx_q4_projection_row16_reduce`), "shared q4 batch projection must preserve portable row16 reduction")
 
 	batchQ8G64Tokens16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16`)
 	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `args.bits != 8u || args.group_size != 64u`), "q8 group64 tokens16 batch projection must guard its quantization shape")

@@ -39,6 +39,7 @@ const (
 	hipMLXQ4GELUTanhMLPPersistentRouteEnv                 = "GO_ROCM_ENABLE_EXPERIMENTAL_PERSISTENT_MLP"
 	hipMLXQ4Projection12BDownRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_DOWN_PROJECTION"
 	hipMLXQ4GELUTanh12BGateUpRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_GATE_UP"
+	hipMLXQ4ProjectionBatchQ4SharedDisableEnv             = "GO_ROCM_DISABLE_Q4_BATCH_SHARED"
 	hipMLXQ4ProjectionBatchQ8SharedDisableEnv             = "GO_ROCM_DISABLE_Q8_BATCH_SHARED"
 	hipMLXQ4ProjectionBatchQ8Tokens64DisableEnv           = "GO_ROCM_DISABLE_Q8_BATCH_TOKENS64"
 	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
@@ -5161,7 +5162,13 @@ func hipMLXQ4ProjectionBatchLaunchConfig(args []byte, rows, batch int) (hipKerne
 
 func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
 	if batch >= hipMLXQ4ProjectionBatchWideTokensPerBlock && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
-		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 tokens16 projection batch row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		kernelName := hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared
+		rowsPerBlock := hipMLXQ4ProjectionRow16RowsPerBlock
+		if core.Env(hipMLXQ4ProjectionBatchQ4SharedDisableEnv) == "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ4G64Tokens16
+			rowsPerBlock = hipMLXQ4ProjectionRowsPerBlock
+		}
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 tokens16 projection batch row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
 		if err != nil {
 			return hipKernelLaunchConfig{}, err
 		}
@@ -5170,7 +5177,7 @@ func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupS
 			return hipKernelLaunchConfig{}, err
 		}
 		config := hipKernelLaunchConfig{
-			Name:   hipKernelNameMLXQ4ProjBatchQ4G64Tokens16,
+			Name:   kernelName,
 			Args:   args,
 			GridX:  gridX,
 			GridY:  gridY,

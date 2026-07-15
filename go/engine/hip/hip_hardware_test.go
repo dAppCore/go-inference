@@ -7071,23 +7071,30 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 		core.RequireNoError(t, err)
 		assertFloat32SlicesNear(t, []float32{q4Want[0], q4Want[1], q4Want[0] * 2, q4Want[1] * 2}, batchOutput, 0.0001)
 
-		const q4G64Rows, q4G64Cols, q4G64Batch = 2, 64, 16
+		const q4G64Rows, q4G64Cols, q4G64GroupSize, q4G64Batch = 17, 704, 64, 16
 		q4G64Input := make([]float32, q4G64Cols)
 		q4G64Values := make([]uint32, q4G64Rows*q4G64Cols)
+		q4G64Groups := q4G64Rows * (q4G64Cols / q4G64GroupSize)
+		q4G64Scales := make([]uint16, q4G64Groups)
+		q4G64Biases := make([]uint16, q4G64Groups)
 		for index := range q4G64Input {
 			q4G64Input[index] = float32(index%11-5) / 8
 		}
 		for index := range q4G64Values {
 			q4G64Values[index] = uint32((index*7 + 3) % 16)
 		}
+		for index := range q4G64Scales {
+			q4G64Scales[index] = hipFloat32ToBFloat16(float32(index%4+1) / 8)
+			q4G64Biases[index] = hipFloat32ToBFloat16(float32(index%5-2) / 8)
+		}
 		q4G64Req := hipMLXQ4ProjectionRequest{
 			Input:     q4G64Input,
 			Weight:    hipPackMLXAffineValuesForTest(q4G64Values, q4G64Cols, 4),
-			Scales:    []uint16{hipFloat32ToBFloat16(0.25), hipFloat32ToBFloat16(0.5)},
-			Biases:    []uint16{hipFloat32ToBFloat16(-0.5), hipFloat32ToBFloat16(0.25)},
+			Scales:    q4G64Scales,
+			Biases:    q4G64Biases,
 			Rows:      q4G64Rows,
 			Cols:      q4G64Cols,
-			GroupSize: q4G64Cols,
+			GroupSize: q4G64GroupSize,
 		}
 		q4G64Buffers, err := q4G64Req.deviceBuffers(hipRuntime.driver)
 		core.RequireNoError(t, err)
@@ -7101,7 +7108,7 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 				tokenInput[index] = value * factor
 			}
 			q4G64BatchInput = append(q4G64BatchInput, tokenInput...)
-			tokenWant, err := hipReferenceMLXQ4Projection(tokenInput, q4G64Req.Weight, q4G64Req.Scales, q4G64Req.Biases, q4G64Rows, q4G64Cols, q4G64Cols)
+			tokenWant, err := hipReferenceMLXQ4Projection(tokenInput, q4G64Req.Weight, q4G64Req.Scales, q4G64Req.Biases, q4G64Rows, q4G64Cols, q4G64GroupSize)
 			core.RequireNoError(t, err)
 			q4G64Want = append(q4G64Want, tokenWant...)
 		}
@@ -7119,7 +7126,7 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 			BiasBytes:     q4G64Buffers.Biases.SizeBytes(),
 			Rows:          q4G64Rows,
 			Cols:          q4G64Cols,
-			GroupSize:     q4G64Cols,
+			GroupSize:     q4G64GroupSize,
 		}, q4G64Batch)
 		core.RequireNoError(t, err)
 		defer q4G64OutputBuffer.Close()
