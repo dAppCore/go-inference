@@ -1018,6 +1018,26 @@ func TestHIPKernels_MLXAffineQ4G64Projection12BDownLaunchConfig_Good(t *testing.
 	core.AssertEqual(t, hipKernelNameMLXQ4Proj, nearby.Name)
 }
 
+func TestHIPKernels_MLXAffineQ4G64ProjectionE4BRow8LaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	attentionQ, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 2048, 2560, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "rocm_mlx_q4_projection_q4_g64_e4b_row8", attentionQ.Name)
+	core.AssertEqual(t, uint32(256), attentionQ.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, attentionQ.BlockX)
+
+	attentionOut, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 2560, 2048, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "rocm_mlx_q4_projection_q4_g64_e4b_row8", attentionOut.Name)
+	core.AssertEqual(t, uint32(320), attentionOut.GridX)
+
+	nearby, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 2560, 2112, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4Proj, nearby.Name)
+}
+
 func TestHIPKernels_MLXAffineQ8G64ProjectionRow8LaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)

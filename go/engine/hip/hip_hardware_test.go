@@ -1928,6 +1928,14 @@ func TestHIPHardwareMLXAffineQ8GELUTanhCols2560Group64_Good(t *testing.T) {
 }
 
 func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group32_Good(t *testing.T) {
+	testHIPHardwareMLXAffineQ4ProjectionCols2560(t, 32, 9)
+}
+
+func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group64_Good(t *testing.T) {
+	testHIPHardwareMLXAffineQ4ProjectionCols2560(t, 64, 2048)
+}
+
+func testHIPHardwareMLXAffineQ4ProjectionCols2560(t *testing.T, groupSize, rows int) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
 	}
@@ -1944,12 +1952,10 @@ func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group32_Good(t *testing.T) {
 	}
 
 	const (
-		rows      = 9
-		cols      = 2560
-		groupSize = 32
-		bits      = 4
-		groups    = cols / groupSize
+		cols = 2560
+		bits = 4
 	)
+	groups := cols / groupSize
 	input := make([]float32, cols)
 	values := make([]uint32, rows*cols)
 	scales := make([]uint16, rows*groups)

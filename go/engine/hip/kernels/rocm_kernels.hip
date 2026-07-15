@@ -6001,6 +6001,76 @@ extern "C" __global__ void rocm_mlx_q4_projection(const unsigned char *packet)
 	}
 }
 
+extern "C" __global__ void rocm_mlx_q4_projection_q4_g64_e4b_row8(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_projection_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_projection_launch_args *>(packet);
+	const bool attention_q = args.rows == 2048u && args.cols == 2560u;
+	const bool attention_out = args.rows == 2560u && args.cols == 2048u;
+	if (!rocm_valid_mlx_q4_projection_args(args) ||
+		args.bits != 4u ||
+		args.group_size != 64u ||
+		(!attention_q && !attention_out) ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.weight_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float sum = 0.0f;
+	if (row < args.rows) {
+		const uint64_t packed_per_row = args.cols >> 3u;
+		const uint32_t groups_per_row = args.cols >> 6u;
+		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+		const uint32_t row_group_base = row * groups_per_row;
+		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t group = row_group_base + group_col;
+			const float scale = rocm_bfloat16_to_float(scales[group]);
+			const float bias = rocm_bfloat16_to_float(biases[group]);
+			const uint32_t first_packed = group_col << 3u;
+			float q_dot_sum = 0.0f;
+			float input_sum = 0.0f;
+#pragma unroll
+			for (uint32_t group_packed = 0; group_packed < 8u; ++group_packed) {
+				const uint32_t packed = first_packed + group_packed;
+				const uint32_t word = weights[row_packed_base + packed];
+				const uint32_t col = packed << 3u;
+				const float in0 = input[col];
+				const float in1 = input[col + 1u];
+				const float in2 = input[col + 2u];
+				const float in3 = input[col + 3u];
+				const float in4 = input[col + 4u];
+				const float in5 = input[col + 5u];
+				const float in6 = input[col + 6u];
+				const float in7 = input[col + 7u];
+				input_sum += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+				q_dot_sum +=
+					static_cast<float>(word & 0x0fu) * in0 +
+					static_cast<float>((word >> 4u) & 0x0fu) * in1 +
+					static_cast<float>((word >> 8u) & 0x0fu) * in2 +
+					static_cast<float>((word >> 12u) & 0x0fu) * in3 +
+					static_cast<float>((word >> 16u) & 0x0fu) * in4 +
+					static_cast<float>((word >> 20u) & 0x0fu) * in5 +
+					static_cast<float>((word >> 24u) & 0x0fu) * in6 +
+					static_cast<float>((word >> 28u) & 0x0fu) * in7;
+			}
+			sum += scale * q_dot_sum + bias * input_sum;
+		}
+	}
+	sum = rocm_mlx_q4_row_reduce(sum);
+	if (col_lane == 0u && row < args.rows) {
+		output[row] = sum;
+	}
+}
+
 extern "C" __global__ void rocm_mlx_q4_projection_q8_g64_row8(const unsigned char *packet)
 {
 	if (packet == nullptr) {
