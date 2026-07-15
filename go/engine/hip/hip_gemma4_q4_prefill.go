@@ -3246,34 +3246,13 @@ func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Co
 			out.FinalHidden = out.PostFeedForward
 		}
 	} else {
-		fusedPerLayerInputGate := false
-		if workspace != nil && tokenCount == 1 && cfg.PerLayerInput.InputGate.WeightEncoding == 0 {
-			activatedOutput, workspaceErr := workspace.EnsureActivationOutput(driver, cfg.PerLayerInput.InputGate.Rows)
-			if workspaceErr != nil {
-				return nil, workspaceErr
-			}
-			err = hipRunRMSNormResidualAddGELUTanhProjectionKernelWithDeviceMultiplierOutputWithWorkspace(ctx, driver, out.MLPOutput, out.AttentionResidual, postFeedForwardNormCfg, perLayerInput, cfg.PerLayerInput.InputGate, postFeedForwardOutput, activatedOutput, postFeedForwardScale, workspace)
-			if err != nil {
-				return nil, err
-			}
-			out.postFeedForwardView = hipBorrowDeviceByteBufferValue(driver, postFeedForwardLabel, postFeedForwardOutput.Pointer(), postFeedForwardOutput.SizeBytes(), postFeedForwardOutput.Count())
-			out.PostFeedForward = &out.postFeedForwardView
-			activated := hipBorrowDeviceByteBufferValue(driver, "prefill fused per-layer activation workspace view", activatedOutput.Pointer(), activatedOutput.SizeBytes(), activatedOutput.Count())
-			out.PerLayerProjection, err = hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, &activated, cfg.PerLayerInput.Projection, tokenCount, workspace, "prefill per-layer projection workspace view", &out.perLayerProjectionView, forceBatchedProjection)
-			if err != nil {
-				return nil, err
-			}
-			fusedPerLayerInputGate = true
+		out.PostFeedForward, err = hipRunGemma4Q4PrefillResidualAddBatchWorkspaceOutputView(ctx, driver, out.MLPOutput, out.AttentionResidual, postFeedForwardNormCfg, tokenCount, postFeedForwardScale, workspace, postFeedForwardOutput, postFeedForwardLabel, &out.postFeedForwardView)
+		if err != nil {
+			return nil, err
 		}
-		if !fusedPerLayerInputGate {
-			out.PostFeedForward, err = hipRunGemma4Q4PrefillResidualAddBatchWorkspaceOutputView(ctx, driver, out.MLPOutput, out.AttentionResidual, postFeedForwardNormCfg, tokenCount, postFeedForwardScale, workspace, postFeedForwardOutput, postFeedForwardLabel, &out.postFeedForwardView)
-			if err != nil {
-				return nil, err
-			}
-			out.PerLayerProjection, err = hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx, driver, cfg, out.PostFeedForward, perLayerInput, tokenCount, workspace, &out.perLayerProjectionView, forceBatchedProjection)
-			if err != nil {
-				return nil, err
-			}
+		out.PerLayerProjection, err = hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx, driver, cfg, out.PostFeedForward, perLayerInput, tokenCount, workspace, &out.perLayerProjectionView, forceBatchedProjection)
+		if err != nil {
+			return nil, err
 		}
 		perLayerNormCfg := cfg.PerLayerInput.PostInputNorm
 		perLayerNormCfg.Epsilon = epsilon

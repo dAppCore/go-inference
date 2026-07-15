@@ -2176,7 +2176,7 @@ func TestHIPGemma4Q4PrefillLayerBodyBatchWorkspaceReusesProjectionOutput_Good(t 
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameVectorAdd))
 }
 
-func TestHIPGemma4Q4PrefillLayerBodyBatchWithPerLayerInput_BatchOneFusesPostMLPResidualAddInputGate_Good(t *testing.T) {
+func TestHIPGemma4Q4PrefillLayerBodyBatchWithPerLayerInput_BatchOneMaterializesPostMLPResidualOnce_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	cfg, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
 	defer cleanup()
@@ -2217,10 +2217,10 @@ func TestHIPGemma4Q4PrefillLayerBodyBatchWithPerLayerInput_BatchOneFusesPostMLPR
 	core.AssertEqual(t, cfg.HiddenSize, body.PerLayerProjection.Count())
 	core.AssertEqual(t, cfg.HiddenSize, body.FinalHidden.Count())
 	launches := driver.launches[start:]
-	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormResidualAddGELUTanhProj))
-	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4GELUTanhProj))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameRMSNormResidualAddGELUTanhProj))
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameMLXQ4GELUTanhProj))
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4GELUTanhProjBatch))
-	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormResidualAdd))
+	core.AssertEqual(t, 2, countLaunchName(launches, hipKernelNameRMSNormResidualAdd))
 }
 
 func TestHIPGemma4Q4PrefillResidualSmallBatchUsesFusedKernels_Good(t *testing.T) {
