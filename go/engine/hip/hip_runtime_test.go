@@ -3009,6 +3009,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchMLXQ4Projection(config.Args)
 	case hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360:
 		return driver.launchMLXQ4Projection(config.Args)
+	case hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16:
+		return driver.launchMLXQ4Projection(config.Args)
 	case hipKernelNameMLXQ4ProjCols256:
 		return driver.launchMLXQ4Projection(config.Args)
 	case hipKernelNameMLXQ4ProjQ6G16Row16:
@@ -3060,6 +3062,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 	case hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840:
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
 	case hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8:
+		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
+	case hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8:
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
 	case hipKernelNameMLXQ4GELUTanhMLPQ4G32Cols1536Persistent:
 		return driver.launchMLXQ4GELUTanhMLPPersistent(config.Args)

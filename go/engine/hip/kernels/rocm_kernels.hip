@@ -72,6 +72,8 @@ constexpr uint32_t ROCM_MLX_Q4_PROJECTION_BITS = 4;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE = 256;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_ROW16_ROWS_PER_BLOCK = 16;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_PROJECTION_ROW16_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_ROWS = 3840;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_COLS = 15360;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_GROUP_SIZE = 32;
@@ -5019,6 +5021,14 @@ __device__ float rocm_mlx_q4_row_reduce(float value)
 	return value;
 }
 
+__device__ float rocm_mlx_q4_projection_row16_reduce(float value)
+{
+	for (uint32_t stride = ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW / 2u; stride > 0u; stride >>= 1u) {
+		value += rocm_shfl_down(value, stride, ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW);
+	}
+	return value;
+}
+
 __device__ uint32_t rocm_mlx_affine_q4_quantized_value(const uint32_t *weights, uint64_t row_packed_base, uint32_t col)
 {
 	const uint32_t word = weights[row_packed_base + (col >> 3u)];
@@ -5073,6 +5083,52 @@ __device__ uint32_t rocm_mlx_affine_q8_quantized_value(const uint32_t *weights, 
 {
 	const uint32_t word = weights[row_packed_base + (col >> 2u)];
 	return (word >> ((col & 3u) << 3u)) & 0xffu;
+}
+
+__device__ void rocm_mlx_affine_q4_64_pair_dot(
+	const float *input,
+	const uint32_t *first_weights,
+	const uint32_t *second_weights,
+	uint64_t row_packed_base,
+	uint32_t first_packed,
+	uint32_t first_col,
+	float *first_q_dot_sum,
+	float *second_q_dot_sum,
+	float *input_sum)
+{
+#pragma unroll
+	for (uint32_t packed_lane = 0; packed_lane < 8u; ++packed_lane) {
+		const uint32_t first_word = first_weights[row_packed_base + first_packed + packed_lane];
+		const uint32_t second_word = second_weights[row_packed_base + first_packed + packed_lane];
+		const uint32_t col = first_col + (packed_lane << 3u);
+		const float in0 = input[col];
+		const float in1 = input[col + 1u];
+		const float in2 = input[col + 2u];
+		const float in3 = input[col + 3u];
+		const float in4 = input[col + 4u];
+		const float in5 = input[col + 5u];
+		const float in6 = input[col + 6u];
+		const float in7 = input[col + 7u];
+		*input_sum += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+		*first_q_dot_sum +=
+			static_cast<float>(first_word & 0x0fu) * in0 +
+			static_cast<float>((first_word >> 4u) & 0x0fu) * in1 +
+			static_cast<float>((first_word >> 8u) & 0x0fu) * in2 +
+			static_cast<float>((first_word >> 12u) & 0x0fu) * in3 +
+			static_cast<float>((first_word >> 16u) & 0x0fu) * in4 +
+			static_cast<float>((first_word >> 20u) & 0x0fu) * in5 +
+			static_cast<float>((first_word >> 24u) & 0x0fu) * in6 +
+			static_cast<float>((first_word >> 28u) & 0x0fu) * in7;
+		*second_q_dot_sum +=
+			static_cast<float>(second_word & 0x0fu) * in0 +
+			static_cast<float>((second_word >> 4u) & 0x0fu) * in1 +
+			static_cast<float>((second_word >> 8u) & 0x0fu) * in2 +
+			static_cast<float>((second_word >> 12u) & 0x0fu) * in3 +
+			static_cast<float>((second_word >> 16u) & 0x0fu) * in4 +
+			static_cast<float>((second_word >> 20u) & 0x0fu) * in5 +
+			static_cast<float>((second_word >> 24u) & 0x0fu) * in6 +
+			static_cast<float>((second_word >> 28u) & 0x0fu) * in7;
+	}
 }
 
 __device__ void rocm_mlx_affine_q8_32_dot(
@@ -5741,6 +5797,46 @@ extern "C" __global__ void rocm_mlx_q4_projection(const unsigned char *packet)
 	}
 	sum = rocm_mlx_q4_row_reduce(sum);
 	if (col_lane == 0 && row < args.rows) {
+		output[row] = sum;
+	}
+}
+
+extern "C" __global__ void rocm_mlx_q4_projection_q4_g64_rows3840_cols15360_row16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_projection_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_projection_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_projection_args(args) ||
+		args.rows != 3840u ||
+		args.cols != 15360u ||
+		args.group_size != 64u ||
+		args.bits != 4u ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROW16_ROWS_PER_BLOCK + row_lane;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.weight_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float sum = rocm_mlx_q4_projection_row_sum(
+		input,
+		weights,
+		scales,
+		biases,
+		row,
+		args.cols,
+		args.group_size,
+		args.bits,
+		col_lane,
+		ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW);
+	sum = rocm_mlx_q4_projection_row16_reduce(sum);
+	if (col_lane == 0u) {
 		output[row] = sum;
 	}
 }
@@ -7931,6 +8027,69 @@ extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply(const unsigned char *p
 	gate_sum = rocm_mlx_q4_row_reduce(gate_sum);
 	up_sum = rocm_mlx_q4_row_reduce(up_sum);
 	if (col_lane == 0 && row < args.rows) {
+		output[row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
+	}
+}
+
+extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g64_rows15360_cols3840_row8(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_gelu_tanh_mul_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_gelu_tanh_mul_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_gelu_tanh_mul_args(args) ||
+		args.rows != 15360u ||
+		args.cols != 3840u ||
+		args.group_size != 64u ||
+		args.bits != 4u ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *gate_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.gate_weight_pointer));
+	const uint16_t *gate_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.gate_scale_pointer));
+	const uint16_t *gate_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.gate_bias_pointer));
+	const uint32_t *up_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.up_weight_pointer));
+	const uint16_t *up_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.up_scale_pointer));
+	const uint16_t *up_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.up_bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t packed_per_row = args.cols >> 3u;
+	const uint32_t groups_per_row = args.cols >> 6u;
+	const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+	const uint32_t row_group_base = row * groups_per_row;
+	float gate_sum = 0.0f;
+	float up_sum = 0.0f;
+	for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+		const uint32_t group = row_group_base + group_col;
+		const float gate_scale = rocm_bfloat16_to_float(gate_scales[group]);
+		const float gate_bias = rocm_bfloat16_to_float(gate_biases[group]);
+		const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+		const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+		const uint32_t first_packed = group_col << 3u;
+		const uint32_t first_col = group_col << 6u;
+		float gate_q_dot = 0.0f;
+		float up_q_dot = 0.0f;
+		float input_sum = 0.0f;
+		rocm_mlx_affine_q4_64_pair_dot(
+			input,
+			gate_weights,
+			up_weights,
+			row_packed_base,
+			first_packed,
+			first_col,
+			&gate_q_dot,
+			&up_q_dot,
+			&input_sum);
+		gate_sum += gate_scale * gate_q_dot + gate_bias * input_sum;
+		up_sum += up_scale * up_q_dot + up_bias * input_sum;
+	}
+	gate_sum = rocm_mlx_q4_row_reduce(gate_sum);
+	up_sum = rocm_mlx_q4_row_reduce(up_sum);
+	if (col_lane == 0u) {
 		output[row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
 	}
 }

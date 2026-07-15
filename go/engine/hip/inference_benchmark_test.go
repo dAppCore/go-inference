@@ -1454,7 +1454,7 @@ func inferenceBenchmarkHIPKernelShapeLabel(entry inferenceBenchmarkHIPKernelShap
 func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows, cols, group, batch uint32) {
 	args := config.Args
 	switch config.Name {
-	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6G16Row16, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
+	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6G16Row16, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 56), 0
 	case hipKernelNameMLXQ4ProjGreedyBatch, hipKernelNameMLXQ4ProjGreedyBatchQ6Row64:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 64)
@@ -1465,7 +1465,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		secondRows := inferenceBenchmarkU32At(args, 100)
 		thirdRows := inferenceBenchmarkU32At(args, 104)
 		return firstRows + secondRows + thirdRows, inferenceBenchmarkU32At(args, 108), inferenceBenchmarkU32At(args, 112), 0
-	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
+	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), 0
 	case hipKernelNameMLXQ4GELUTanhMulBatch:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 120)

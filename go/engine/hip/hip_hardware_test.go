@@ -1849,6 +1849,14 @@ func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group32_Good(t *testing.T) {
 }
 
 func TestHIPHardwareMLXAffineQ4GELUTanhCols2560Group32_Good(t *testing.T) {
+	testHIPHardwareMLXAffineQ4GELUTanhCols2560(t, 32)
+}
+
+func TestHIPHardwareMLXAffineQ4GELUTanhCols2560Group64_Good(t *testing.T) {
+	testHIPHardwareMLXAffineQ4GELUTanhCols2560(t, 64)
+}
+
+func testHIPHardwareMLXAffineQ4GELUTanhCols2560(t *testing.T, groupSize int) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
 	}
@@ -1865,10 +1873,9 @@ func TestHIPHardwareMLXAffineQ4GELUTanhCols2560Group32_Good(t *testing.T) {
 	}
 
 	const (
-		rows      = 32
-		cols      = 2560
-		groupSize = 32
-		bits      = 4
+		rows = 32
+		cols = 2560
+		bits = 4
 	)
 	input := make([]float32, cols)
 	for col := range input {
@@ -1908,7 +1915,7 @@ func TestHIPHardwareMLXAffineQ4GELUTanhCols2560Group32_Good(t *testing.T) {
 	want := expectedGELUTanhMultiply(gate, up)
 	inputPayload, err := hipFloat32Payload(input)
 	core.RequireNoError(t, err)
-	inputBuffer, err := hipUploadByteBuffer(hipRuntime.driver, hipGemma4Q4Layer0Operation, "hardware q4 group32 GELU input", inputPayload, len(input))
+	inputBuffer, err := hipUploadByteBuffer(hipRuntime.driver, hipGemma4Q4Layer0Operation, core.Sprintf("hardware q4 group%d GELU input", groupSize), inputPayload, len(input))
 	core.RequireNoError(t, err)
 	defer inputBuffer.Close()
 	gateBuffers, err := gateReq.deviceBuffers(hipRuntime.driver)
@@ -1934,7 +1941,7 @@ func TestHIPHardwareMLXAffineQ4GELUTanhCols2560Group32_Good(t *testing.T) {
 	output, err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(context.Background(), hipRuntime.driver, inputBuffer, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers))
 	core.RequireNoError(t, err)
 	defer output.Close()
-	got, err := hipReadFloat32DeviceOutput(output, hipGemma4Q4Layer0Operation, "hardware q4 group32 GELU output", rows)
+	got, err := hipReadFloat32DeviceOutput(output, hipGemma4Q4Layer0Operation, core.Sprintf("hardware q4 group%d GELU output", groupSize), rows)
 	core.RequireNoError(t, err)
 	assertFloat32SlicesNear(t, want, got, 0.03)
 }

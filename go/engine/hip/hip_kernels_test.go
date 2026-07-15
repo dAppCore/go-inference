@@ -1003,6 +1003,21 @@ func TestHIPKernels_MLXAffineQ4G32Projection12BDownLaunchConfig_Good(t *testing.
 	core.AssertEqual(t, hipKernelNameMLXQ4Proj, disabled.Name)
 }
 
+func TestHIPKernels_MLXAffineQ4G64Projection12BDownLaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	exact, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 3840, 15360, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16, exact.Name)
+	core.AssertEqual(t, uint32(240), exact.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
+
+	nearby, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 3840, 15328, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4Proj, nearby.Name)
+}
+
 func TestHIPKernels_MLXAffineQ6ProjectionRow64LaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
@@ -1155,6 +1170,21 @@ func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpLaunchConfig_Good(t *testing.
 	disabled, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 32, 4)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, disabled.Name)
+}
+
+func TestHIPKernels_MLXAffineQ4G64GELUTanh12BGateUpLaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	exact, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8, exact.Name)
+	core.AssertEqual(t, uint32(1920), exact.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
+
+	nearby, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15344, 3840, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMul, nearby.Name)
 }
 
 func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpRow8LaunchConfig_Good(t *testing.T) {

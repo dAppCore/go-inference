@@ -57,6 +57,7 @@ const (
 	hipMLXQ4ProjectionBits                                = 4
 	hipMLXQ4ProjectionBlockSize                    uint32 = 256
 	hipMLXQ4ProjectionRowsPerBlock                        = 8
+	hipMLXQ4ProjectionRow16RowsPerBlock                   = 16
 	hipMLXQ4ProjectionCols256RowsPerBlock                 = 32
 	hipMLXQ4ProjectionQ6Row16RowsPerBlock                 = 16
 	hipMLXQ4ProjectionQ6Row32RowsPerBlock                 = 32
@@ -4888,6 +4889,23 @@ func hipMLXQ4ProjectionLaunchConfig(args []byte, rows int) (hipKernelLaunchConfi
 }
 
 func hipMLXQ4ProjectionLaunchConfigForShape(args []byte, rows, cols, groupSize, bits int) (hipKernelLaunchConfig, error) {
+	if rows == 3840 && cols == 15360 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 12B down projection row16 blocks", (rows+hipMLXQ4ProjectionRow16RowsPerBlock-1)/hipMLXQ4ProjectionRow16RowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if hipMLXQ4Projection12BDownRouteEnabled && rows == 3840 && cols == 15360 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group32 12B down projection row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
 		if err != nil {
@@ -5371,6 +5389,23 @@ func hipMLXQ4GELUTanhMultiplyLaunchConfig(args []byte, rows int) (hipKernelLaunc
 }
 
 func hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(args []byte, rows, cols, groupSize, bits int) (hipKernelLaunchConfig, error) {
+	if rows == 15360 && cols == 3840 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 12B GELU tanh multiply row8 blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if hipMLXQ4GELUTanh12BGateUpRouteEnabled && rows == 15360 && cols == 3840 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
 		rowsPerBlock := hipMLXQ4GELUTanhQ4G32Cols1536Row16RowsPerBlock
 		name := hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840
