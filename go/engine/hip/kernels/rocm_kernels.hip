@@ -1362,8 +1362,8 @@ struct rocm_attention_heads_batch_chunked_launch_args {
 	uint32_t window_size;
 	uint32_t chunk_start_token;
 	uint32_t key_heads;
-	uint32_t reserved0;
-	uint64_t reserved2;
+	uint32_t visible_cap_bytes;
+	uint64_t visible_cap_pointer;
 	uint64_t reserved3;
 };
 
@@ -4454,7 +4454,9 @@ __device__ bool rocm_valid_attention_heads_batch_chunked_args(const rocm_attenti
 	const float scale = rocm_float_from_bits(args.scale_bits);
 	const uint64_t query_elements = static_cast<uint64_t>(args.query_count) * args.head_count * args.dim;
 	const bool causal_window_ok = static_cast<uint64_t>(args.query_start_token) + args.query_count <= args.token_count;
-	const uint32_t active_end = args.query_start_token + args.query_count;
+	const bool visible_caps_ok = (args.visible_cap_pointer == 0u && args.visible_cap_bytes == 0u) ||
+		(args.visible_cap_pointer != 0u && static_cast<uint64_t>(args.visible_cap_bytes) == static_cast<uint64_t>(args.query_count) * sizeof(uint32_t));
+	const uint32_t active_end = args.visible_cap_pointer == 0u ? args.query_start_token + args.query_count : args.token_count;
 	const uint32_t expected_chunk_count = args.chunk_size != 0u && active_end > args.chunk_start_token
 		? (active_end - args.chunk_start_token + args.chunk_size - 1u) / args.chunk_size
 		: 0u;
@@ -4476,6 +4478,7 @@ __device__ bool rocm_valid_attention_heads_batch_chunked_args(const rocm_attenti
 		(args.key_heads > 1u && (args.dim & 1u) != 0u) ||
 		args.query_count == 0 ||
 		!causal_window_ok ||
+		!visible_caps_ok ||
 		args.chunk_size == 0 ||
 		args.chunk_count == 0 ||
 		args.chunk_start_token > active_end ||
@@ -11480,6 +11483,15 @@ __device__ const rocm_device_kv_page_descriptor *rocm_attention_heads_batch_chun
 	return rocm_attention_device_kv_page_from_descriptor(args.descriptor_pointer, token);
 }
 
+__device__ uint32_t rocm_attention_heads_batch_chunked_visible_tokens(const rocm_attention_heads_batch_chunked_launch_args &args, uint32_t query_row)
+{
+	if (args.visible_cap_pointer == 0u) {
+		return args.query_start_token + query_row + 1u;
+	}
+	const uint32_t *visible_caps = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.visible_cap_pointer));
+	return visible_caps[query_row];
+}
+
 __device__ bool rocm_device_kv_encoding_is_q8(uint32_t encoding)
 {
 	return encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8 ||
@@ -13022,7 +13034,17 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2(const un
 
 	float *partials = reinterpret_cast<float *>(static_cast<uintptr_t>(args.partial_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * args.dim;
 	float *stats = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * 2u;
-	const uint32_t visible_tokens = args.query_start_token + query_row + 1u;
+	const uint32_t visible_tokens = rocm_attention_heads_batch_chunked_visible_tokens(args, query_row);
+	if (visible_tokens == 0u || visible_tokens > args.token_count) {
+		if (tid == 0u) {
+			stats[0] = -FLT_MAX;
+			stats[1] = 0.0f;
+		}
+		for (uint32_t dim = tid; dim < args.dim; dim += threads) {
+			partials[dim] = 0.0f;
+		}
+		return;
+	}
 	const uint32_t window_start = args.window_size > 0u && visible_tokens > args.window_size
 		? visible_tokens - args.window_size
 		: 0u;
@@ -13285,7 +13307,20 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2(const 
 	float *partials1 = reinterpret_cast<float *>(static_cast<uintptr_t>(args.partial_pointer)) + (static_cast<uint64_t>(row1) * chunk_count + chunk) * args.dim;
 	float *stats0 = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row0) * chunk_count + chunk) * 2u;
 	float *stats1 = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row1) * chunk_count + chunk) * 2u;
-	const uint32_t visible_tokens = args.query_start_token + query_row + 1u;
+	const uint32_t visible_tokens = rocm_attention_heads_batch_chunked_visible_tokens(args, query_row);
+	if (visible_tokens == 0u || visible_tokens > args.token_count) {
+		if (tid == 0u) {
+			stats0[0] = -FLT_MAX;
+			stats0[1] = 0.0f;
+			stats1[0] = -FLT_MAX;
+			stats1[1] = 0.0f;
+		}
+		for (uint32_t dim = tid; dim < args.dim; dim += threads) {
+			partials0[dim] = 0.0f;
+			partials1[dim] = 0.0f;
+		}
+		return;
+	}
 	const uint32_t window_start = args.window_size > 0u && visible_tokens > args.window_size
 		? visible_tokens - args.window_size
 		: 0u;
@@ -13642,7 +13677,21 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4(const 
 		partials[head] = reinterpret_cast<float *>(static_cast<uintptr_t>(args.partial_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * args.dim;
 		stats[head] = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * 2u;
 	}
-	const uint32_t visible_tokens = args.query_start_token + query_row + 1u;
+	const uint32_t visible_tokens = rocm_attention_heads_batch_chunked_visible_tokens(args, query_row);
+	if (visible_tokens == 0u || visible_tokens > args.token_count) {
+		if (tid == 0u) {
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				stats[head][0] = -FLT_MAX;
+				stats[head][1] = 0.0f;
+			}
+		}
+		for (uint32_t dim = tid; dim < args.dim; dim += threads) {
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				partials[head][dim] = 0.0f;
+			}
+		}
+		return;
+	}
 	const uint32_t window_start = args.window_size > 0u && visible_tokens > args.window_size
 		? visible_tokens - args.window_size
 		: 0u;

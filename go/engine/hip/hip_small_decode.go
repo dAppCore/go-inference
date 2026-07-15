@@ -2997,7 +2997,7 @@ const (
 )
 
 func hipAttentionHeadsBatchChunkedEligibilityReasonFor(req hipAttentionHeadsBatchCausalDeviceRequest, workspace *hipAttentionHeadsChunkedWorkspace) hipAttentionHeadsBatchChunkedEligibilityReason {
-	if req.VisibleTokenCaps != nil {
+	if req.VisibleTokenCaps != nil && (req.VisibleTokenCaps.Pointer() == 0 || req.VisibleTokenCaps.Count() != req.QueryCount || req.VisibleTokenCaps.SizeBytes() != uint64(req.QueryCount*4)) {
 		return hipAttentionHeadsBatchChunkedEligibilityVisibleCaps
 	}
 	keyHeads := firstPositiveInt(req.KeyHeads, 1)
@@ -3066,6 +3066,9 @@ func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspac
 	if req.Scale < 0 || math.IsNaN(float64(req.Scale)) || math.IsInf(float64(req.Scale), 0) {
 		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "scale must be non-negative and finite", nil)
 	}
+	if req.VisibleTokenCaps != nil && (req.VisibleTokenCaps.Pointer() == 0 || req.VisibleTokenCaps.Count() != req.QueryCount || req.VisibleTokenCaps.SizeBytes() != uint64(req.QueryCount*4)) {
+		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "visible-token cap device buffer shape mismatch", nil)
+	}
 	queryCount := req.QueryCount * req.HeadCount * req.Dim
 	if query == nil || query.Pointer() == 0 || query.Count() != queryCount || query.SizeBytes() != uint64(queryCount*4) {
 		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "attention query device buffer shape mismatch", nil)
@@ -3087,6 +3090,10 @@ func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspac
 
 	chunkSize := hipAttentionHeadsChunkSizeForRequest(req)
 	chunkStartToken, chunkCount := hipAttentionHeadsBatchChunkedActiveRange(req.QueryStartToken, req.QueryCount, req.TokenCount, req.WindowSize, chunkSize)
+	if req.VisibleTokenCaps != nil {
+		chunkStartToken = 0
+		chunkCount = (req.TokenCount + chunkSize - 1) / chunkSize
+	}
 	workspaceHeadRows := req.HeadCount * req.QueryCount
 	workspaceTokens := chunkCount * chunkSize
 	if err := workspace.Ensure(driver, workspaceHeadRows, req.Dim, workspaceTokens, chunkSize); err != nil {
@@ -3114,6 +3121,10 @@ func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspac
 		StatsBytes:        uint64(workspaceHeadRows * chunkCount * 2 * 4),
 		OutputBytes:       output.SizeBytes(),
 		Scale:             req.Scale,
+	}
+	if req.VisibleTokenCaps != nil {
+		launch.VisibleCapPointer = req.VisibleTokenCaps.Pointer()
+		launch.VisibleCapBytes = req.VisibleTokenCaps.SizeBytes()
 	}
 	launchBytes, err := launch.BinaryInto(workspace.BatchChunkedStage1Args[:])
 	if err != nil {

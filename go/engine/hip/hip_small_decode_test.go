@@ -6957,6 +6957,33 @@ func TestHIPAttentionHeadsBatchChunkedEligibilityReason_Good(t *testing.T) {
 	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityTokenCountMismatch, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, workspace))
 }
 
+func TestHIPAttentionHeadsBatchChunkedEligibilityReason_VisibleCaps_Good(t *testing.T) {
+	const (
+		tokenCount = 672
+		queryCount = 8
+	)
+	cache := &rocmDeviceKVCache{
+		mode:       rocmKVCacheModeKQ8VQ4,
+		blockSize:  1,
+		pages:      []rocmDeviceKVPage{{tokenStart: 0, tokenCount: tokenCount, keyWidth: 4096, valueWidth: 4096}},
+		tokenCount: tokenCount,
+	}
+	caps := &hipDeviceTokenBuffer{pointer: 1, count: queryCount, sizeBytes: queryCount * 4}
+	req := hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:         cache,
+		DescriptorTable:  &rocmDeviceKVDescriptorTable{},
+		VisibleTokenCaps: caps,
+		Dim:              512,
+		TokenCount:       tokenCount,
+		HeadCount:        16,
+		KeyHeads:         8,
+		QueryCount:       queryCount,
+		QueryStartToken:  tokenCount - 256,
+	}
+
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityEligible, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+}
+
 func TestHIPAttentionHeadsBatchChunkedEligibilityReason_SlidingWindowCrossover_Good(t *testing.T) {
 	cache := &rocmDeviceKVCache{
 		mode:       rocmKVCacheModeKQ8VQ4,

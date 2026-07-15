@@ -7976,7 +7976,12 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchChunked(args []byte, write
 	windowSize := int(binary.LittleEndian.Uint32(args[104:]))
 	chunkStartToken := int(binary.LittleEndian.Uint32(args[108:]))
 	keyHeads := int(binary.LittleEndian.Uint32(args[112:]))
+	visibleCapBytes := int(binary.LittleEndian.Uint32(args[116:]))
+	visibleCapPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[120:]))
 	activeEnd := queryStartToken + queryCount
+	if visibleCapPointer != 0 {
+		activeEnd = tokenCount
+	}
 	if activeEnd > tokenCount {
 		activeEnd = tokenCount
 	}
@@ -7990,7 +7995,9 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchChunked(args []byte, write
 		queryBytes != queryCount*headCount*dim*4 ||
 		partialBytes != queryCount*headCount*chunkCount*dim*4 ||
 		statsBytes != queryCount*headCount*chunkCount*2*4 ||
-		outputBytes != queryCount*headCount*dim*4 {
+		outputBytes != queryCount*headCount*dim*4 ||
+		(visibleCapPointer == 0 && visibleCapBytes != 0) ||
+		(visibleCapPointer != 0 && visibleCapBytes != queryCount*4) {
 		return core.E("rocm.hip.FakeLaunch", "attention heads batch chunked shape metadata mismatch", nil)
 	}
 	if scale < 0 || math.IsNaN(float64(scale)) || math.IsInf(float64(scale), 0) {
@@ -8013,12 +8020,29 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchChunked(args []byte, write
 	if !writeOutput {
 		return nil
 	}
+	var visibleCaps []int32
+	if visibleCapPointer != 0 {
+		visibleCapData, visibleCapOffset, ok := driver.memoryForPointer(visibleCapPointer, visibleCapBytes)
+		if !ok {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch chunked visible-token cap buffer is missing", nil)
+		}
+		visibleCaps = make([]int32, queryCount)
+		for index := range visibleCaps {
+			visibleCaps[index] = int32(binary.LittleEndian.Uint32(visibleCapData[visibleCapOffset+index*4:]))
+		}
+	}
 	keyFlat, valueFlat, err := driver.readDeviceKVDescriptorForAttention(descriptorPointer, descriptorBytes, tokenCount, keyHeads*dim)
 	if err != nil {
 		return err
 	}
 	for queryIndex := 0; queryIndex < queryCount; queryIndex++ {
 		visibleTokens := queryStartToken + queryIndex + 1
+		if visibleCaps != nil {
+			visibleTokens = int(visibleCaps[queryIndex])
+		}
+		if visibleTokens <= 0 || visibleTokens > tokenCount {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch chunked visible-token cap is invalid", nil)
+		}
 		windowStart := 0
 		if windowSize > 0 && visibleTokens > windowSize {
 			windowStart = visibleTokens - windowSize

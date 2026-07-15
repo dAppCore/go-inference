@@ -7511,6 +7511,7 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 		queryCount int
 		blockSize  int
 		windowSize int
+		fullCaps   bool
 	}{
 		{
 			name:       "descriptor-pages-e2b-global-dim512-gqa4",
@@ -7539,6 +7540,16 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 			queryCount: 2,
 			blockSize:  1,
 			windowSize: hipAttentionHeadsChunkedBlockSize,
+		},
+		{
+			name:       "diffusiongemma-capped-dim512-gqa2",
+			dim:        512,
+			tokenCount: 672,
+			headCount:  16,
+			keyHeads:   8,
+			queryCount: 8,
+			blockSize:  1,
+			fullCaps:   true,
 		},
 	}
 	for _, tc := range cases {
@@ -7576,38 +7587,56 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 			query, err := hipUploadByteBuffer(hipRuntime.driver, operation, "GQA shared hardware query", queryPayload, len(queryValues))
 			core.RequireNoError(t, err)
 			defer query.Close()
+			var visibleCaps *hipDeviceTokenBuffer
+			if tc.fullCaps {
+				caps := make([]int32, tc.queryCount)
+				for index := range caps {
+					caps[index] = int32(tc.tokenCount)
+				}
+				visibleCaps, err = hipUploadTokenIDs(hipRuntime.driver, caps)
+				core.RequireNoError(t, err)
+				defer visibleCaps.Close()
+			}
 
 			req := hipAttentionHeadsBatchCausalDeviceRequest{
-				DeviceKV:        deviceKV,
-				DescriptorTable: table,
-				Dim:             tc.dim,
-				TokenCount:      tc.tokenCount,
-				HeadCount:       tc.headCount,
-				KeyHeads:        tc.keyHeads,
-				QueryCount:      tc.queryCount,
-				QueryStartToken: queryStartToken,
-				WindowSize:      tc.windowSize,
-				Scale:           1,
+				DeviceKV:         deviceKV,
+				DescriptorTable:  table,
+				VisibleTokenCaps: visibleCaps,
+				Dim:              tc.dim,
+				TokenCount:       tc.tokenCount,
+				HeadCount:        tc.headCount,
+				KeyHeads:         tc.keyHeads,
+				QueryCount:       tc.queryCount,
+				QueryStartToken:  queryStartToken,
+				WindowSize:       tc.windowSize,
+				Scale:            1,
 			}
-			run := func(enableGQA2, enableGQA4 bool, label string) []float32 {
+			run := func(enableGQA2, enableGQA4, useChunked bool, label string) []float32 {
 				hipAttentionHeadsBatchChunkedGQA2Enabled = enableGQA2
 				hipAttentionHeadsBatchChunkedGQA4Enabled = enableGQA4
 				output, err := hipAllocateByteBuffer(hipRuntime.driver, operation, label, uint64(len(queryValues)*4), len(queryValues))
 				core.RequireNoError(t, err)
 				defer output.Close()
-				workspace := &hipAttentionHeadsChunkedWorkspace{}
-				defer workspace.Close()
+				var workspace *hipAttentionHeadsChunkedWorkspace
+				if useChunked {
+					workspace = &hipAttentionHeadsChunkedWorkspace{}
+					defer workspace.Close()
+				}
 				core.RequireNoError(t, hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(context.Background(), hipRuntime.driver, req, query, output, workspace))
 				got, err := hipReadFloat32DeviceOutput(output, operation, label, len(queryValues))
 				core.RequireNoError(t, err)
 				return got
 			}
-			v2 := run(false, false, "v2 hardware output")
-			gqa2 := run(true, false, "GQA2 hardware output")
+			v2 := run(false, false, true, "v2 hardware output")
+			gqa2 := run(true, false, true, "GQA2 hardware output")
 			assertFloat32SlicesNear(t, v2, gqa2, 0.0001)
+			if tc.fullCaps {
+				fallback := run(false, false, false, "capped fallback hardware output")
+				assertFloat32SlicesNear(t, fallback, gqa2, 0.0001)
+			}
 			candidate := gqa2
 			if tc.headCount%tc.keyHeads == 0 && (tc.headCount/tc.keyHeads)%4 == 0 {
-				gqa4 := run(false, true, "GQA4 hardware output")
+				gqa4 := run(false, true, true, "GQA4 hardware output")
 				assertFloat32SlicesNear(t, v2, gqa4, 0.0001)
 				candidate = gqa4
 			}
@@ -7617,6 +7646,9 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 			want := make([]float32, 0, len(queryValues))
 			for queryIndex := 0; queryIndex < tc.queryCount; queryIndex++ {
 				visibleTokens := queryStartToken + queryIndex + 1
+				if tc.fullCaps {
+					visibleTokens = tc.tokenCount
+				}
 				windowStart := 0
 				if tc.windowSize > 0 && visibleTokens > tc.windowSize {
 					windowStart = visibleTokens - tc.windowSize

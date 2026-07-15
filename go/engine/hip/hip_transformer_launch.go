@@ -524,6 +524,7 @@ type hipAttentionHeadsBatchChunkedLaunchArgs struct {
 	PartialPointer    nativeDevicePointer
 	StatsPointer      nativeDevicePointer
 	OutputPointer     nativeDevicePointer
+	VisibleCapPointer nativeDevicePointer
 	Dim               int
 	TokenCount        int
 	HeadCount         int
@@ -537,6 +538,7 @@ type hipAttentionHeadsBatchChunkedLaunchArgs struct {
 	PartialBytes      uint64
 	StatsBytes        uint64
 	OutputBytes       uint64
+	VisibleCapBytes   uint64
 	Scale             float32
 	WindowSize        int
 	ChunkStartToken   int
@@ -3120,6 +3122,13 @@ func (args hipAttentionHeadsBatchChunkedLaunchArgs) BinaryInto(payload []byte) (
 	if uint64(queryStartToken)+uint64(queryCount) > uint64(tokenCount) {
 		return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "causal query window exceeds token count", nil)
 	}
+	if args.VisibleCapPointer == 0 {
+		if args.VisibleCapBytes != 0 {
+			return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "visible-token cap bytes require a cap pointer", nil)
+		}
+	} else if args.VisibleCapBytes != uint64(queryCount)*4 {
+		return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "visible-token cap byte count mismatch", nil)
+	}
 	chunkSize, err := rocmDeviceKVPositiveUint32("attention chunk size", args.ChunkSize)
 	if err != nil {
 		return nil, err
@@ -3129,6 +3138,9 @@ func (args hipAttentionHeadsBatchChunkedLaunchArgs) BinaryInto(payload []byte) (
 		return nil, err
 	}
 	chunkEndToken := int(queryStartToken) + int(queryCount)
+	if args.VisibleCapPointer != 0 {
+		chunkEndToken = int(tokenCount)
+	}
 	if chunkEndToken > int(tokenCount) {
 		chunkEndToken = int(tokenCount)
 	}
@@ -3190,6 +3202,8 @@ func (args hipAttentionHeadsBatchChunkedLaunchArgs) BinaryInto(payload []byte) (
 	binary.LittleEndian.PutUint32(payload[104:], windowSize)
 	binary.LittleEndian.PutUint32(payload[108:], chunkStartToken)
 	binary.LittleEndian.PutUint32(payload[112:], keyHeads)
+	binary.LittleEndian.PutUint32(payload[116:], uint32(args.VisibleCapBytes))
+	binary.LittleEndian.PutUint64(payload[120:], uint64(args.VisibleCapPointer))
 	return payload, nil
 }
 

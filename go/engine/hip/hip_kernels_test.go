@@ -4612,6 +4612,47 @@ func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_Good(t *testing.T) {
 	}
 }
 
+func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_VisibleCaps_Good(t *testing.T) {
+	const (
+		dim             = 4
+		tokenCount      = 513
+		headCount       = 4
+		keyHeads        = 2
+		queryCount      = 2
+		queryStartToken = 257
+		chunkSize       = hipAttentionHeadsDefaultChunkSize
+		chunkCount      = (tokenCount + chunkSize - 1) / chunkSize
+		queryElements   = dim * headCount * queryCount
+	)
+	args := hipAttentionHeadsBatchChunkedLaunchArgs{
+		QueryPointer:      1,
+		DescriptorPointer: 2,
+		PartialPointer:    3,
+		StatsPointer:      4,
+		OutputPointer:     5,
+		VisibleCapPointer: 6,
+		Dim:               dim,
+		TokenCount:        tokenCount,
+		HeadCount:         headCount,
+		KeyHeads:          keyHeads,
+		QueryCount:        queryCount,
+		QueryStartToken:   queryStartToken,
+		ChunkSize:         chunkSize,
+		ChunkCount:        chunkCount,
+		QueryBytes:        queryElements * 4,
+		DescriptorBytes:   rocmDeviceKVDescriptorHeaderBytes,
+		PartialBytes:      queryElements * chunkCount * 4,
+		StatsBytes:        queryCount * headCount * chunkCount * 2 * 4,
+		OutputBytes:       queryElements * 4,
+		VisibleCapBytes:   queryCount * 4,
+	}
+
+	packet, err := args.Binary()
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, uint32(queryCount*4), binary.LittleEndian.Uint32(packet[116:]))
+	core.AssertEqual(t, uint64(args.VisibleCapPointer), binary.LittleEndian.Uint64(packet[120:]))
+}
+
 func TestHIPKernels_AttentionHeadsBatchChunkedGQA2Stage1LaunchConfig_Good(t *testing.T) {
 	previous := hipAttentionHeadsBatchChunkedGQA2Enabled
 	previousGQA4 := hipAttentionHeadsBatchChunkedGQA4Enabled
