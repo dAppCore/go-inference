@@ -1606,6 +1606,7 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 	}
 	declaredVision := cfg.Gemma4TextConfig.Vision
 	declaredAudio := cfg.Gemma4TextConfig.Audio
+	hasAudioTower := rocmNativeTensorPlanHasAudioTower(tensors)
 	cfg.Gemma4TextConfig.Vision = declaredVision && rocmNativeTensorPlanHasVision(tensors)
 	cfg.Gemma4TextConfig.Audio = declaredAudio && rocmNativeTensorPlanHasAudio(tensors)
 	if declaredVision && !cfg.Gemma4TextConfig.Vision {
@@ -1630,7 +1631,7 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		if cfg.Gemma4TextConfig.Vision {
 			cfg.VisionModelPath = mediaRoot
 		}
-		if cfg.Gemma4TextConfig.Audio {
+		if cfg.Gemma4TextConfig.Audio && hasAudioTower {
 			cfg.AudioModelPath = mediaRoot
 		}
 	}
@@ -1679,6 +1680,15 @@ func rocmNativeTensorPlanHasAudio(tensors []nativeTensorInfo) bool {
 	for _, tensor := range tensors {
 		name := strings.ToLower(tensor.Name)
 		if strings.Contains(name, "audio_tower.") || strings.Contains(name, "embed_audio.") {
+			return true
+		}
+	}
+	return false
+}
+
+func rocmNativeTensorPlanHasAudioTower(tensors []nativeTensorInfo) bool {
+	for _, tensor := range tensors {
+		if strings.Contains(strings.ToLower(tensor.Name), "audio_tower.") {
 			return true
 		}
 	}

@@ -1728,6 +1728,42 @@ func TestNativeContract_LoadModelSafetensorsGemma4AutoAttachesMedia_Good(t *test
 	}
 }
 
+func TestNativeContract_LoadModelSafetensorsGemma4UnifiedAudioDoesNotAttachConformer_Good(t *testing.T) {
+	dir := t.TempDir()
+	writeNativeContractFile(t, core.PathJoin(dir, "config.json"), `{
+		"architectures":["Gemma4UnifiedForConditionalGeneration"],
+		"model_type":"gemma4_unified",
+		"image_token_id":4,
+		"audio_token_id":5,
+		"vision_config":{"model_type":"gemma4_unified_vision","hidden_size":8},
+		"audio_config":{"model_type":"gemma4_unified_audio","hidden_size":8,"audio_samples_per_token":4},
+		"tie_word_embeddings":true,
+		"quantization_config":{"bits":4,"group_size":64,"mode":"affine"},
+		"text_config":{
+			"model_type":"gemma4_unified_text",
+			"hidden_size":16,
+			"num_hidden_layers":1,
+			"intermediate_size":32,
+			"num_attention_heads":2,
+			"num_key_value_heads":1,
+			"head_dim":8,
+			"sliding_window":512,
+			"max_position_embeddings":8192,
+			"layer_types":["full_attention"],
+			"vocab_size":8
+		}
+	}`)
+	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[96,608]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[608,1120]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1120,1632]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1632,2144]},"vision_embedder.patch_dense.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2144,2146]},"embed_audio.embedding_projection.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2146,2148]}}`
+	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 2148)
+
+	_, cfg, err := (&rocmBackend{}).safetensorsNativeLoadConfig(context.Background(), dir, inference.LoadConfig{ContextLen: 128})
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, dir, cfg.VisionModelPath)
+	core.AssertEqual(t, "", cfg.AudioModelPath)
+	core.AssertEqual(t, true, cfg.Gemma4TextConfig.Audio)
+}
+
 func TestNativeContract_LoadModelSafetensorsGemma4PropagatesTextRuntimeConfig_Good(t *testing.T) {
 	dir := t.TempDir()
 	writeNativeContractFile(t, core.PathJoin(dir, "config.json"), `{
@@ -1950,9 +1986,13 @@ func TestNativeContract_SamePackMediaRequiresTowerTensors_Ugly(t *testing.T) {
 	textOnly := []nativeTensorInfo{{Name: "language_model.model.embed_tokens.weight"}}
 	core.AssertEqual(t, false, rocmNativeTensorPlanHasVision(textOnly))
 	core.AssertEqual(t, false, rocmNativeTensorPlanHasAudio(textOnly))
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasAudioTower(textOnly))
 	core.AssertEqual(t, true, rocmNativeTensorPlanHasVision(append(textOnly, nativeTensorInfo{Name: "vision_embedder.patch_dense.weight"})))
 	core.AssertEqual(t, true, rocmNativeTensorPlanHasVision(append(textOnly, nativeTensorInfo{Name: "model.vision_tower.embeddings.patch_embedding.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasAudio(append(textOnly, nativeTensorInfo{Name: "embed_audio.embedding_projection.weight"})))
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasAudioTower(append(textOnly, nativeTensorInfo{Name: "embed_audio.embedding_projection.weight"})))
 	core.AssertEqual(t, true, rocmNativeTensorPlanHasAudio(append(textOnly, nativeTensorInfo{Name: "audio_tower.output_proj.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasAudioTower(append(textOnly, nativeTensorInfo{Name: "audio_tower.output_proj.weight"})))
 }
 
 func TestNativeContract_Gemma4LayerTypesDefaultPatternForcesFinalFull_Good(t *testing.T) {
