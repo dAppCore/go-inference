@@ -4,7 +4,7 @@ package granitemoe_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/granitemoe"
+	"dappco.re/go/inference/model/arch/ibm-granite/granitemoe"
 )
 
 func ExampleParseConfig() {

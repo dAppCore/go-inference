@@ -9,7 +9,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/composed"
-	_ "dappco.re/go/inference/model/granite"
+	_ "dappco.re/go/inference/model/arch/ibm-granite/granite"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
