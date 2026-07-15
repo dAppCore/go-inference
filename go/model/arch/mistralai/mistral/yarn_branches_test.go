@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/mistral"
+	"dappco.re/go/inference/model/arch/mistralai/mistral"
 )
 
 // yarn_branches_test.go closes the YaRN edge-case branches the happy-path tests

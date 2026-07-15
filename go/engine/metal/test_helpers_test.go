@@ -13,7 +13,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/model/mistral"
+	"dappco.re/go/inference/model/arch/mistralai/mistral"
 	"dappco.re/go/inference/model/safetensors"
 )
 

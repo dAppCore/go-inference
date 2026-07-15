@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/mistral"
+	"dappco.re/go/inference/model/arch/mistralai/mistral"
 )
 
 // the real Ministral-3-3B-Base-2512 config shape: the multimodal wrapper (text arch nested

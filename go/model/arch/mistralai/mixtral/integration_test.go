@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	_ "dappco.re/go/inference/model/mixtral"
+	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"
 	"dappco.re/go/inference/model/safetensors"
 )
 

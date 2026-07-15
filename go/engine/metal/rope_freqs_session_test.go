@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/mistral"
+	"dappco.re/go/inference/model/arch/mistralai/mistral"
 )
 
 // TestMistralYaRNExecutor_Good gates the freqs-rope threaded through the decode

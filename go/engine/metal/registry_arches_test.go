@@ -10,5 +10,5 @@ package native
 // loaders used to pull in transitively.
 import (
 	_ "dappco.re/go/inference/model/gemma4"
-	_ "dappco.re/go/inference/model/mistral"
+	_ "dappco.re/go/inference/model/arch/mistralai/mistral"
 )

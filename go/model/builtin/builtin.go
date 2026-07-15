@@ -69,14 +69,14 @@ import (
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"      // llama (dense text)
-	_ "dappco.re/go/inference/model/mistral"    // mistral
-	_ "dappco.re/go/inference/model/mistral"    // mistral
-	_ "dappco.re/go/inference/model/mistral"    // mistral
-	_ "dappco.re/go/inference/model/mistral"    // mistral
-	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
-	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
-	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
-	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
+	_ "dappco.re/go/inference/model/arch/mistralai/mistral"    // mistral
+	_ "dappco.re/go/inference/model/arch/mistralai/mistral"    // mistral
+	_ "dappco.re/go/inference/model/arch/mistralai/mistral"    // mistral
+	_ "dappco.re/go/inference/model/arch/mistralai/mistral"    // mistral
+	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
+	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
+	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
+	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/mpt"        // MPT ALiBi / learned-position decoder
 	_ "dappco.re/go/inference/model/olmo"       // OLMo / OLMo 2
 	_ "dappco.re/go/inference/model/olmoe"      // AllenAI OLMoE sparse transformer

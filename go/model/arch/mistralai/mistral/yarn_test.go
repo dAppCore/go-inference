@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/model/mistral"
+	"dappco.re/go/inference/model/arch/mistralai/mistral"
 )
 
 func relDiff(a, b float32) float64 {
