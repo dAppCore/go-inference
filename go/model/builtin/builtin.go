@@ -78,8 +78,8 @@ import (
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/mpt"        // MPT ALiBi / learned-position decoder
-	_ "dappco.re/go/inference/model/olmo"       // OLMo / OLMo 2
-	_ "dappco.re/go/inference/model/olmoe"      // AllenAI OLMoE sparse transformer
+	_ "dappco.re/go/inference/model/arch/allenai/olmo"       // OLMo / OLMo 2
+	_ "dappco.re/go/inference/model/arch/allenai/olmoe"      // AllenAI OLMoE sparse transformer
 	_ "dappco.re/go/inference/model/opt"        // OPT learned-position transformer
 	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
 	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
