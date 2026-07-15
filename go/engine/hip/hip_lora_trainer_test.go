@@ -113,7 +113,7 @@ func testHIPLoRATrainerE2BHardware(t *testing.T, modelPath string, expectedQuant
 		t.Fatalf("LoadModel quant bits = %d, want %d", loaded.modelInfo.QuantBits, expectedQuantBits)
 	}
 
-	trainerValue, err := model.engineModel.OpenTrainer(inference.TrainingConfig{
+	trainerValue, err := model.OpenTrainer(inference.TrainingConfig{
 		LearningRate: 0.01,
 		LoRA:         inference.LoRAConfig{Rank: 1, Alpha: 2},
 	})
