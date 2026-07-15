@@ -1245,6 +1245,21 @@ func TestHIPKernels_MLXAffineQ4G64GELUTanh12BGateUpLaunchConfig_Good(t *testing.
 	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMul, nearby.Name)
 }
 
+func TestHIPKernels_MLXAffineQ4G64GELUTanhE4BRow16LaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	exact, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 10240, 2560, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "rocm_mlx_q4_gelu_tanh_multiply_q4_g64_e4b_row16", exact.Name)
+	core.AssertEqual(t, uint32(640), exact.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
+
+	nearby, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 10224, 2560, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMul, nearby.Name)
+}
+
 func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpRow8LaunchConfig_Good(t *testing.T) {
 	previousRoute := hipMLXQ4GELUTanh12BGateUpRouteEnabled
 	previousGeometry := hipMLXQ4GELUTanh12BGateUpGeometry

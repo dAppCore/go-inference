@@ -64,6 +64,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g64_e4b_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q8_g64_row8`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_mlp_q4_g32_cols1536_persistent`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536`,
@@ -755,6 +756,19 @@ func TestHIPKernelSource_MLXQ4Group64Rows15360Cols3840FusedGELUUsesRow8_Good(t *
 	core.AssertContains(t, kernel, "args.bits != 4u")
 	core.AssertContains(t, kernel, "ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW")
 	core.AssertContains(t, kernel, "rocm_mlx_affine_q4_64_pair_dot")
+}
+
+func TestHIPKernelSource_MLXQ4Group64E4BFusedGELUUsesRow16_Good(t *testing.T) {
+	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(source), `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g64_e4b_row16`)
+	core.AssertContains(t, kernel, "args.rows != 10240u")
+	core.AssertContains(t, kernel, "args.cols != 2560u")
+	core.AssertContains(t, kernel, "args.group_size != 64u")
+	core.AssertContains(t, kernel, "args.bits != 4u")
+	core.AssertContains(t, kernel, "ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW")
+	core.AssertContains(t, kernel, "rocm_mlx_affine_q4_64_pair_dot")
+	core.AssertContains(t, kernel, "rocm_mlx_q4_projection_row16_reduce")
 }
 
 func TestHIPKernelSource_ProjectionUsesCoalescedBlockPerRow_Good(t *testing.T) {
