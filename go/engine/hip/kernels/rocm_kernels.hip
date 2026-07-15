@@ -7957,6 +7957,88 @@ extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_sh
 	}
 }
 
+extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_aligned(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_projection_batch_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_projection_batch_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_projection_batch_args(args) ||
+		args.bits != 8u ||
+		args.group_size != 64u ||
+		args.rows % ROCM_MLX_Q4_PROJECTION_ROW64_ROWS_PER_BLOCK != 0u ||
+		args.batch % ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK != 0u) {
+		return;
+	}
+	const uint32_t row_base = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROW64_ROWS_PER_BLOCK;
+	const uint32_t batch_base = blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK;
+	if (blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE || row_base >= args.rows || batch_base >= args.batch) {
+		return;
+	}
+
+	__shared__ float input_tile[ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK][ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_COLS_PER_TILE];
+	__shared__ float scale_tile[ROCM_MLX_Q4_PROJECTION_ROW64_ROWS_PER_BLOCK];
+	__shared__ float bias_tile[ROCM_MLX_Q4_PROJECTION_ROW64_ROWS_PER_BLOCK];
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_ROW64_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_ROW64_THREADS_PER_ROW;
+	const uint32_t row = row_base + row_lane;
+	const float *input_base = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.weight_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output_base = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.cols, args.bits);
+	const uint32_t groups_per_row = args.cols >> 6u;
+	const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
+	float sums[ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK] = {};
+
+	for (uint32_t group_col = 0; group_col < groups_per_row; ++group_col) {
+		const uint32_t col_base = group_col * ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_COLS_PER_TILE;
+		constexpr uint32_t input_tile_values = ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK * ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_COLS_PER_TILE;
+		for (uint32_t index = threadIdx.x; index < input_tile_values; index += ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+			const uint32_t token_lane = index / ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_COLS_PER_TILE;
+			const uint32_t col_offset = index - token_lane * ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_COLS_PER_TILE;
+			const uint32_t batch = batch_base + token_lane;
+			input_tile[token_lane][col_offset] = input_base[static_cast<uint64_t>(batch) * args.cols + col_base + col_offset];
+		}
+		if (col_lane == 0u) {
+			const uint32_t group = row * groups_per_row + group_col;
+			scale_tile[row_lane] = rocm_bfloat16_to_float(scales[group]);
+			bias_tile[row_lane] = rocm_bfloat16_to_float(biases[group]);
+		}
+		__syncthreads();
+
+		const float scale = scale_tile[row_lane];
+		const float bias = bias_tile[row_lane];
+		for (uint32_t packed_lane = col_lane; packed_lane < ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW; packed_lane += ROCM_MLX_Q4_PROJECTION_ROW64_THREADS_PER_ROW) {
+			const uint32_t packed = group_col * ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW + packed_lane;
+			const uint32_t word = weights[row_packed_base + packed];
+			const float value0 = static_cast<float>(word & 0xffu) * scale + bias;
+			const float value1 = static_cast<float>((word >> 8u) & 0xffu) * scale + bias;
+			const float value2 = static_cast<float>((word >> 16u) & 0xffu) * scale + bias;
+			const float value3 = static_cast<float>(word >> 24u) * scale + bias;
+			const uint32_t col_offset = packed_lane << 2u;
+#pragma unroll
+			for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK; ++token_lane) {
+				sums[token_lane] = fmaf(input_tile[token_lane][col_offset], value0, sums[token_lane]);
+				sums[token_lane] = fmaf(input_tile[token_lane][col_offset + 1u], value1, sums[token_lane]);
+				sums[token_lane] = fmaf(input_tile[token_lane][col_offset + 2u], value2, sums[token_lane]);
+				sums[token_lane] = fmaf(input_tile[token_lane][col_offset + 3u], value3, sums[token_lane]);
+			}
+		}
+		__syncthreads();
+	}
+
+	float *output = output_base + static_cast<uint64_t>(batch_base) * args.rows + row;
+#pragma unroll
+	for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK; ++token_lane) {
+		const float sum = rocm_mlx_q4_projection_row64_reduce(sums[token_lane]);
+		if (col_lane == 0u) {
+			output[token_lane * args.rows] = sum;
+		}
+	}
+}
+
 extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16(const unsigned char *packet)
 {
 	if (packet == nullptr) {

@@ -1536,16 +1536,26 @@ func TestHIPKernels_MLXAffineQ8ProjectionBatchRow32Tokens64LaunchConfig_Good(t *
 	core.AssertEqual(t, uint32(256), config.GridX)
 }
 
-func TestHIPKernels_MLXAffineQ8ProjectionBatchRow64Tokens64LaunchConfig_Good(t *testing.T) {
+func TestHIPKernels_MLXAffineQ8ProjectionBatchRow64Tokens64AlignedLaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionBatchLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
 
 	config, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 256)
 	core.RequireNoError(t, err)
-	core.AssertEqual(t, "rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_shared", config.Name)
+	core.AssertEqual(t, "rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_aligned", config.Name)
 	core.AssertEqual(t, uint32(64), config.GridX)
 	core.AssertEqual(t, uint32(4), config.GridY)
 	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, config.BlockX)
+
+	config, err = hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4097, 2816, 64, 8, 256)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared, config.Name)
+	core.AssertEqual(t, uint32(65), config.GridX)
+
+	t.Setenv(hipMLXQ4ProjectionBatchQ8Row64AlignedDisableEnv, "1")
+	config, err = hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 256)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared, config.Name)
 
 	t.Setenv("GO_ROCM_DISABLE_Q8_BATCH_ROW64", "1")
 	config, err = hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 256)

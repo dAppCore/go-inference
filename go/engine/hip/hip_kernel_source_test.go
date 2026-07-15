@@ -49,6 +49,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens64_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row32_tokens64_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_shared`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_aligned`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_greedy`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_greedy_q6_row64`,
@@ -601,6 +602,13 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(batchQ8G64Row64Shared64, `__shared__ float input_tile`), "row64 tokens64 q8 projection must share each input tile across output rows")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Row64Shared64, `packed_lane += ROCM_MLX_Q4_PROJECTION_ROW64_THREADS_PER_ROW`), "row64 tokens64 q8 projection must distribute four packed words across four row lanes")
 	core.AssertTrue(t, strings.Contains(batchQ8G64Row64Shared64, `rocm_mlx_q4_projection_row64_reduce`), "row64 tokens64 q8 projection must use a four-lane reduction")
+
+	batchQ8G64Row64Aligned64 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_aligned`)
+	core.AssertTrue(t, strings.Contains(batchQ8G64Row64Aligned64, `args.rows % ROCM_MLX_Q4_PROJECTION_ROW64_ROWS_PER_BLOCK != 0u`), "aligned row64 projection must reject row tails")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Row64Aligned64, `args.batch % ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_TOKENS64_PER_BLOCK != 0u`), "aligned row64 projection must reject token tails")
+	core.AssertTrue(t, !strings.Contains(batchQ8G64Row64Aligned64, `row < args.rows`), "aligned row64 projection must remove inner row bounds")
+	core.AssertTrue(t, !strings.Contains(batchQ8G64Row64Aligned64, `batch < args.batch`), "aligned row64 projection must remove inner token bounds")
+	core.AssertTrue(t, strings.Contains(batchQ8G64Row64Aligned64, `output[token_lane * args.rows] = sum`), "aligned row64 projection must advance output by a fixed row stride")
 
 	batchQ6Row16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q6_row16`)
 	core.AssertTrue(t, strings.Contains(batchQ6Row16, `args.bits != 6u || args.group_size != 64u || args.cols < 1536u`), "q6 row16 batch projection must guard its specialized tensor shape")

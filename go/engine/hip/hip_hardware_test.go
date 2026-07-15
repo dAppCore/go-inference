@@ -2586,12 +2586,49 @@ func TestHIPHardwareMLXAffineQ8ProjectionBatchRows16To64MatchRow8_Good(t *testin
 	}).Binary()
 	core.RequireNoError(t, err)
 	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, row64Config))
+	const alignedRows = 64
+	alignedReq := req
+	alignedReq.Weight = alignedReq.Weight[:alignedRows*cols*bits/32]
+	alignedReq.Scales = alignedReq.Scales[:alignedRows*(cols/groupSize)]
+	alignedReq.Biases = alignedReq.Biases[:alignedRows*(cols/groupSize)]
+	alignedReq.Rows = alignedRows
+	alignedBuffers, err := alignedReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer alignedBuffers.Close()
+	alignedOutput, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.MLXQ8BatchRow64AlignedHardware", "aligned row64 output", uint64(alignedRows*batch*4), alignedRows*batch)
+	core.RequireNoError(t, err)
+	defer alignedOutput.Close()
+	alignedConfig := row8Config
+	alignedConfig.Name = hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Aligned
+	alignedConfig.GridX = 1
+	alignedConfig.GridY = 1
+	alignedConfig.Args, err = (hipMLXQ4ProjectionBatchLaunchArgs{
+		InputPointer:  inputBuffer.Pointer(),
+		WeightPointer: alignedBuffers.Weight.Pointer(),
+		ScalePointer:  alignedBuffers.Scales.Pointer(),
+		BiasPointer:   alignedBuffers.Biases.Pointer(),
+		OutputPointer: alignedOutput.Pointer(),
+		Rows:          alignedRows,
+		Cols:          cols,
+		Batch:         batch,
+		GroupSize:     groupSize,
+		Bits:          bits,
+		InputBytes:    inputBuffer.SizeBytes(),
+		WeightBytes:   alignedBuffers.Weight.SizeBytes(),
+		ScaleBytes:    alignedBuffers.Scales.SizeBytes(),
+		BiasBytes:     alignedBuffers.Biases.SizeBytes(),
+		OutputBytes:   alignedOutput.SizeBytes(),
+	}).Binary()
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, alignedConfig))
 
 	row16Values, err := hipReadFloat32DeviceOutput(row16Output, "rocm.hip.MLXQ8BatchRow16Hardware", "row16 output", rows*batch)
 	core.RequireNoError(t, err)
 	row32Values, err := hipReadFloat32DeviceOutput(row32Output, "rocm.hip.MLXQ8BatchRow32Hardware", "row32 output", rows*batch)
 	core.RequireNoError(t, err)
 	row64Values, err := hipReadFloat32DeviceOutput(row64Output, "rocm.hip.MLXQ8BatchRow64Hardware", "row64 output", rows*batch)
+	core.RequireNoError(t, err)
+	alignedValues, err := hipReadFloat32DeviceOutput(alignedOutput, "rocm.hip.MLXQ8BatchRow64AlignedHardware", "aligned row64 output", alignedRows*batch)
 	core.RequireNoError(t, err)
 	row8Values, err := hipReadFloat32DeviceOutput(row8Output, "rocm.hip.MLXQ8BatchRow16Hardware", "row8 output", rows*batch)
 	core.RequireNoError(t, err)
@@ -2610,6 +2647,11 @@ func TestHIPHardwareMLXAffineQ8ProjectionBatchRows16To64MatchRow8_Good(t *testin
 	compare("q8 row16", row16Values)
 	compare("q8 row32", row32Values)
 	compare("q8 row64", row64Values)
+	alignedBaseline := make([]float32, alignedRows*batch)
+	for batchIndex := 0; batchIndex < batch; batchIndex++ {
+		copy(alignedBaseline[batchIndex*alignedRows:(batchIndex+1)*alignedRows], row64Values[batchIndex*rows:batchIndex*rows+alignedRows])
+	}
+	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "q8 row64 aligned control", alignedBaseline, alignedValues, 0, 0)
 }
 
 func TestHIPHardwareMLXAffineQ8GELUTanhBatchPackedProductionShape_Good(t *testing.T) {

@@ -91,6 +91,8 @@ const (
 	hipPackedTopKChunkSize                                = 4096
 )
 
+const hipMLXQ4ProjectionBatchQ8Row64AlignedDisableEnv = "GO_ROCM_DISABLE_Q8_BATCH_ROW64_ALIGNED"
+
 var (
 	hipMLXQ4GELUTanhMLPPersistentRouteEnabled = os.Getenv(hipMLXQ4GELUTanhMLPPersistentRouteEnv) == "1"
 	hipMLXQ4Projection12BDownRouteEnabled     = os.Getenv(hipMLXQ4Projection12BDownRouteEnv) == "1"
@@ -5212,6 +5214,11 @@ func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupS
 				if rows >= hipMLXQ4ProjectionBatchQ8Row64MinRows && core.Env(hipMLXQ4ProjectionBatchQ8Row64DisableEnv) != "1" {
 					kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared
 					rowsPerBlock = hipMLXQ4ProjectionRow64RowsPerBlock
+					if rows%hipMLXQ4ProjectionRow64RowsPerBlock == 0 &&
+						batch%hipMLXQ4ProjectionBatchQ8Tokens64PerBlock == 0 &&
+						core.Env(hipMLXQ4ProjectionBatchQ8Row64AlignedDisableEnv) != "1" {
+						kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Aligned
+					}
 				}
 			}
 		}
