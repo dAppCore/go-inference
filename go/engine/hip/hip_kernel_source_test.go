@@ -34,6 +34,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_projection_batch`,
 		`extern "C" __global__ void rocm_mlx_q4_projection`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q4_g32_rows3840_cols15360`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_q8_g64_row8`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_cols256`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_g16_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_row16`,
@@ -374,6 +375,18 @@ func TestHIPKernelSource_MLXAffineQ8G64GELUTanhRow8_Good(t *testing.T) {
 	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW)`), "q8 group64 row8 gate-up must distribute whole affine groups")
 	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_mlx_affine_q8_32_pair_dot`), "q8 group64 row8 gate-up must consume both halves of each group")
 	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_mlx_q4_row_reduce`), "q8 group64 row8 gate-up must reduce gate and up within portable thirty-two-lane groups")
+}
+
+func TestHIPKernelSource_MLXAffineQ8G64ProjectionRow8_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_mlx_q4_projection_q8_g64_row8`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `args.bits != 8u || args.group_size != 64u || args.cols < 2560u`), "q8 group64 row8 projection must reject other affine shapes")
+	core.AssertTrue(t, strings.Contains(kernel, `ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW`), "q8 group64 row8 projection must preserve thirty-two lanes per output row")
+	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW)`), "q8 group64 row8 projection must distribute whole affine groups")
+	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_mlx_affine_q8_32_dot`), "q8 group64 row8 projection must consume both halves of each group")
+	core.AssertTrue(t, strings.Contains(kernel, `rocm_mlx_q4_row_reduce`), "q8 group64 row8 projection must use the matching portable reduction")
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Dims4Rows4_Good(t *testing.T) {

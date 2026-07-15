@@ -4941,6 +4941,23 @@ func hipMLXQ4ProjectionLaunchConfigForShape(args []byte, rows, cols, groupSize, 
 		}
 		return config, config.Validate()
 	}
+	if cols >= 2560 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q8 group64 row8 projection row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjQ8G64Row8,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if cols > 2048 && groupSize == 16 && hipMLXQ4ProjectionBitsOrDefault(bits) == 6 {
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q6 group16 row16 projection row blocks", (rows+hipMLXQ4ProjectionQ6Row16RowsPerBlock-1)/hipMLXQ4ProjectionQ6Row16RowsPerBlock)
 		if err != nil {

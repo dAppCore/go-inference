@@ -23,6 +23,7 @@ const (
 	hipKernelNameMLXQ4Proj                                  = "rocm_mlx_q4_projection"
 	hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360            = "rocm_mlx_q4_projection_q4_g32_rows3840_cols15360"
 	hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16       = "rocm_mlx_q4_projection_q4_g64_rows3840_cols15360_row16"
+	hipKernelNameMLXQ4ProjQ8G64Row8                         = "rocm_mlx_q4_projection_q8_g64_row8"
 	hipKernelNameMLXQ4ProjCols256                           = "rocm_mlx_q4_projection_cols256"
 	hipKernelNameMLXQ4ProjQ6G16Row16                        = "rocm_mlx_q4_projection_q6_g16_row16"
 	hipKernelNameMLXQ4ProjQ6Row16                           = "rocm_mlx_q4_projection_q6_row16"

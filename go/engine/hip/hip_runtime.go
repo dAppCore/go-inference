@@ -329,6 +329,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameMLXQ4Proj,
 	hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360,
 	hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16,
+	hipKernelNameMLXQ4ProjQ8G64Row8,
 	hipKernelNameMLXQ4ProjCols256,
 	hipKernelNameMLXQ4ProjQ6G16Row16,
 	hipKernelNameMLXQ4ProjQ6Row16,
