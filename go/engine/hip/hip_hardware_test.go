@@ -145,6 +145,26 @@ func TestHIPHardwareDiffusionGemmaMLXMoE_Good(t *testing.T) {
 	core.RequireTrue(t, loaded.expertCache != nil)
 	core.AssertGreater(t, len(loaded.expertCache.entries), 0)
 	t.Logf("DiffusionGemma MLX MoE resident prefill: device=%s host_expert_tensors=%d cached_experts=%d cache_bytes=%d", loaded.driver.DeviceInfo().Name, len(loaded.hostTensors), len(loaded.expertCache.entries), loaded.expertCache.bytes)
+	core.RequireNoError(t, closer.Close())
+
+	rocmLoaded.modelLabels["diffusion_canvas_length"] = "1"
+	rocmLoaded.modelLabels["diffusion_default_max_steps"] = "1"
+	generated := make([]int32, 0, 1)
+	metrics, err := rocmLoaded.GenerateBlockDiffusionTokens(context.Background(), []int32{1}, ROCmBlockDiffusionOptions{
+		MaxTokens: 1,
+		Seed:      1,
+		SeedSet:   true,
+	}, func(token int32) bool {
+		generated = append(generated, token)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("GenerateBlockDiffusionTokens: %v", err)
+	}
+	core.AssertEqual(t, 1, len(generated))
+	core.AssertEqual(t, 1, metrics.EmittedTokens)
+	core.AssertEqual(t, 1, metrics.TotalSteps)
+	t.Logf("DiffusionGemma MLX MoE one-step generation: token=%d prefill=%s denoise=%s commit=%s total=%s", generated[0], metrics.PrefillDur, metrics.DenoiseDur, metrics.CommitDur, metrics.TotalDur)
 }
 
 func TestHIPHardwareGemma4AudioChat_Good(t *testing.T) {

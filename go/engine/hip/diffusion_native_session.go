@@ -218,7 +218,11 @@ func (session *hipROCmNativeDiffusionSession) Denoise(ctx context.Context, req R
 	}
 	defer visibleCaps.Close()
 	priorKV := hipGemma4Q4DeviceLayerCaches(session.device, nil, len(config.Layers))
-	priorDescriptors := hipGemma4Q4DeviceLayerDescriptorTables(session.device, nil, len(config.Layers))
+	priorDescriptors, err := hipGemma4Q4DeviceLayerDescriptorTableAliases(session.device, nil, len(config.Layers))
+	if err != nil {
+		return ROCmDiffusionStepResult{}, core.E(hipDiffusionGemmaOperation, "borrow resident prefix descriptors", err)
+	}
+	defer hipCloseGemma4Q4DeviceLayerDescriptorTables(priorDescriptors)
 	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(
 		ctx,
 		session.driver,
