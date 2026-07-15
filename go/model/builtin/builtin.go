@@ -38,7 +38,7 @@ import (
 	_ "dappco.re/go/inference/model/arch/deepseek-ai/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
 	_ "dappco.re/go/inference/model/arch/deepseek-ai/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
 	_ "dappco.re/go/inference/model/arch/deepseek-ai/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
-	_ "dappco.re/go/inference/model/ernie45"    // ERNIE 4.5 dense text
+	_ "dappco.re/go/inference/model/arch/baidu/ernie45"    // ERNIE 4.5 dense text
 	_ "dappco.re/go/inference/model/arch/LGAI-EXAONE/exaone4"    // EXAONE 4 dense text
 	_ "dappco.re/go/inference/model/arch/tiiuae/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
 	_ "dappco.re/go/inference/model/arch/tiiuae/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
