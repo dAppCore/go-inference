@@ -336,6 +336,18 @@ wrapper through this seam, not writing new compute).
   runtime block) — that's a defensible split, not obviously a duplication to
   collapse, but worth naming so nobody builds a third parser for a third
   format assuming neither existing one applies.
+
+  **Resolved (dispatch item 11): kept intentionally separate, cross-referenced.**
+  `quantfmt.QuantInfo` reads external-tool provenance (`quantization_config`,
+  no in-tree engine load-path caller today — see Open question 3); `model.QuantConfig`
+  reads this engine's own runtime dequant instructions (`quantization`,
+  consumed directly by the assembler via `For(name)`). Different config keys,
+  different shapes, different consumers, zero shared code — unifying them
+  would conflate an import-time detection concern with an execution-time one
+  for no benefit. Both types now carry a doc-comment cross-reference to the
+  other (`model/quant/quantfmt.go`'s `QuantInfo` and `model/quant_config.go`'s
+  `QuantConfig`), so a future reader lands on the right parser instead of
+  building a third one.
 - **The exporter side** (`model/quant/{gptq,awq,fp8,nf4,autoround,jang,codebook,mlxaffine}/`)
   is genuinely engine-neutral pure-Go pack/export code (confirmed no engine
   imports via the package tree — each is `export.go`/`pack.go`/`load.go`
