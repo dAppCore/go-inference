@@ -42,6 +42,32 @@ func TestConfig_Arch_Ugly(t *testing.T) {
 	}
 }
 
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// NoPE-schedule-length guard — distinct from _Bad's all-zero rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{ModelType: "smollm3", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 2, NumAttentionHeads: 2, NumKeyValueHeads: 1, VocabSize: 8, NoRopeLayers: []int{1}}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("short NoPE schedule became valid after InferFromWeights")
+	}
+}
+
 // TestTinySmolLM3Forward_Good proves the declared RoPE and NoPE paths differ under varied fills.
 func TestTinySmolLM3Forward_Good(t *testing.T) {
 	syn := func(n, seed int) []float32 {

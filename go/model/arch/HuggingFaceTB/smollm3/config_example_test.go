@@ -9,3 +9,10 @@ func ExampleConfig_Arch() {
 	core.Println(a.Layer[0].DisableRotary, a.Layer[3].DisableRotary)
 	// Output: true false
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil) // no-op: SmolLM3 declares every dim in config.json
+	core.Println(cfg.HiddenSize)
+	// Output: 8
+}
