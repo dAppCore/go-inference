@@ -143,6 +143,16 @@ and 7,005,408,256 bytes; the timed decode saw 530 misses, 105 evictions, and
 including model load, cold state materialisation, `tg512`, and teardown. Do not
 present that wall time as decode latency or as an isolated prefill measurement.
 
+A 2026-07-16 cache-profile rerun reproduced 49.40 tok/s with 531 misses, 108
+evictions, 1,975,649,280 host-to-device bytes, 1,812 entries, and
+6,997,726,208 resident bytes. A metadata-only recent-eviction refill experiment
+was rejected: the 32K materialisation exposed only one nonresident ghost and
+admitted zero entries; decode remained at 49.21 tok/s with 530 misses and
+1,971,932,160 host-to-device bytes. At 4K there were zero ghosts while the first
+64 decode tokens discovered 484 uncached experts without eviction. Numeric
+prompt prefill therefore does not predict generated decode routes well enough
+for ghost refill; do not repeat this approach.
+
 ## DiffusionGemma diagnostic
 
 The cached `mlx-community/diffusiongemma-26B-A4B-it-4bit` model is block
