@@ -153,6 +153,15 @@ admitted zero entries; decode remained at 49.21 tok/s with 530 misses and
 prompt prefill therefore does not predict generated decode routes well enough
 for ghost refill; do not repeat this approach.
 
+A separate 4K controlled run rejected a dedicated expert-copy stream. A
+16-slot pinned ring used portable `hipStreamCreateWithFlags`, `hipMemcpyAsync`,
+and `hipStreamWaitEvent` while the local FFN was queued after routing. The
+enabled lane measured 56.42 tok/s; the identical build with only expert async
+H2D disabled measured 56.46 tok/s. Both runs produced the same tokens, 592
+misses, 2,207,969,280 H2D bytes, 1,817 residents, and no evictions. The stream
+path added no measurable value and was removed; do not repeat it without a
+trace showing genuine transfer/compute overlap.
+
 ## DiffusionGemma diagnostic
 
 The cached `mlx-community/diffusiongemma-26B-A4B-it-4bit` model is block
