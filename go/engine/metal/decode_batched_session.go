@@ -692,13 +692,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		if s.icb.hasKVQ8() {
 			// q8 ICB caches (#367 slice C): the pass is q8-aware ONLY on the
 			// rows-batched fold — landings stage + quantise (encKVQ8StoreRows)
-			// and the reads ride the multi-query causal q8 kernel. Anything that
-			// would route a q8 layer through a bf16 write or a non-multiQ read
-			// declines to the per-token replay (q8-aware by recording): the
-			// per-row lanes, the deep+small 2-pass corner, vision row caps, and
-			// the test levers that force per-row shapes.
+			// and the reads ride the multi-query causal q8 kernel, or the
+			// per-row q8 ladder when bidirectional row caps disable multiQ
+			// (image/video spans — the chunk-wide q8 landing satisfies their
+			// land-before-read rule, #15). Anything that would route a q8 layer
+			// through a bf16 write or an un-instantiated read declines to the
+			// per-token replay (q8-aware by recording): the per-row lanes, the
+			// deep+small 2-pass corner, and the test levers that force per-row
+			// shapes.
 			if batchedMLPFoldDisabledForTest || batchedRopeDisabledForTest || batchedEpilogueDisabledForTest ||
-				sdpaMultiQDisabledForTest || s.rowAttnCaps != nil ||
+				sdpaMultiQDisabledForTest ||
 				!gpuHasQKNormRopeRows() || !gpuHasKVQ8StoreRows() || !gpuHasMulRowsKernel() {
 				return decline("q8 icb caches: fold prerequisites")
 			}
@@ -717,7 +720,25 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					continue // this layer never touches a q8 cache
 				}
 				lhd := headDimOf(s.specs[li], s.headDim)
-				if !gpuHasSDPAMultiQQ8(lhd) || !gpuHasSDPAMultiQ(lhd) {
+				if s.rowAttnCaps != nil {
+					// bidirectional row caps: multiQ is structurally off (useMultiQ
+					// requires nil caps), so every row reads the per-row q8 ladder
+					// (encSDPADecodeQ8At) against the chunk-wide q8 landing. Require
+					// both rungs up front — a row's cap reaches at most the chunk
+					// end, so the 2-pass rung matters exactly when basePos+K passes
+					// the knee.
+					if _, perr := sdpaVectorQ8Pipeline(lhd); perr != nil {
+						return decline("q8 icb caches: no per-row q8 kernel for head dim")
+					}
+					if basePos+K >= sdpa2PassMinKV {
+						if _, perr := sdpaVector2Pass1Q8Pipeline(lhd, sdpa2PassBlocks(basePos+K, kvHeadsOf(s.specs[li], s.nKVHeads))); perr != nil {
+							return decline("q8 icb caches: no 2-pass q8 kernel for head dim")
+						}
+						if _, perr := sdpaVector2Pass2PipelineForHeadDim(lhd); perr != nil {
+							return decline("q8 icb caches: no 2-pass merge kernel for head dim")
+						}
+					}
+				} else if !gpuHasSDPAMultiQQ8(lhd) || !gpuHasSDPAMultiQ(lhd) {
 					return decline("q8 icb caches: no multiQ q8 kernel for head dim")
 				}
 				if li >= len(s.lb) || s.lb[li].proj == nil || !s.lb[li].proj.rowsCapable() ||

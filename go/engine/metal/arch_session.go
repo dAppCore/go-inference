@@ -1827,6 +1827,37 @@ func (s *ArchSession) prefillRetainedEmbeddingsBidir(ids []int32, embeddings [][
 		if base+n > len(ids) {
 			n = len(ids) - base
 		}
+		spanInChunk := false
+		for _, sp := range spans {
+			if sp[0] < base+n && sp[1] > base {
+				spanInChunk = true
+				break
+			}
+		}
+		if !spanInChunk {
+			// Span-free chunk (a text run the span cuts produced — e.g. the
+			// preamble before a span shrank the chunk, or the tail after the
+			// last one): every row is plain causal, so the causal embedding
+			// lanes apply — including their sequential fallback, which is
+			// legal here precisely because no row looks forward. Routing these
+			// through the caps chunk instead would hard-error on shapes the
+			// batched pass declines (the q8-ICB gate declines small batches).
+			next, ok, err := s.prefillRetainedEmbeddingsBatchedDense(ids[base:base+n], embeddings[base:base+n], scope)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				for i := base; i < base+n; i++ {
+					next, err = s.StepWithID(ids[i], embeddings[i])
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+			hidden = next
+			base += n
+			continue
+		}
 		caps := make([]int32, n)
 		for i := range n {
 			caps[i] = int32(s.pos + i + 1) // causal default

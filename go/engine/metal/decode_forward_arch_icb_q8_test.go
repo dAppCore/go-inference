@@ -728,3 +728,149 @@ func TestQ8StagePromptMatchesMirrorLane(t *testing.T) {
 		}
 	}
 }
+
+// newKVQ8BidirFixture builds the q8-ICB (or, with q8 false, the bf16-KV
+// reference) quant session for the bidirectional-span prefill receipts and
+// marks spanTok as the session's bidirectional span token when spans is true —
+// the same in-package seam TestArchSessionPrefillTokenEmbeddingsBidirSpanEngages
+// uses (token_model.go wires bidirSpanTokens from a real unified-vision config).
+func newKVQ8BidirFixture(t testing.TB, q8, spans bool, spanTok int32) *ArchSession {
+	t.Helper()
+	if q8 {
+		kvQ8ICBForTest = true
+	} else {
+		kvQ8ICBOffForTest = true
+	}
+	sess := newKVQ8ICBFixture(t)
+	kvQ8ICBForTest, kvQ8ICBOffForTest = false, false
+	if sess.state.icb == nil {
+		t.Fatal("fixture must record an ICB")
+	}
+	if got := sess.state.icb.hasKVQ8(); got != q8 {
+		t.Fatalf("hasKVQ8 = %v, want %v", got, q8)
+	}
+	if spans {
+		sess.bidirSpanTokens = [2]int32{spanTok, 0}
+	}
+	return sess
+}
+
+// kvQ8BidirPrefill embeds ids on the session's own table, runs the retained
+// embeddings prefill, and returns a copy of the boundary hidden after the
+// position and shape receipts.
+func kvQ8BidirPrefill(t testing.TB, sess *ArchSession, ids []int32) []byte {
+	t.Helper()
+	embeddings := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := sess.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID(%d): %v", id, err)
+		}
+		embeddings[i] = append([]byte(nil), emb...)
+	}
+	if err := sess.PrefillTokenEmbeddings(ids, embeddings); err != nil {
+		t.Fatalf("PrefillTokenEmbeddings: %v", err)
+	}
+	if sess.Pos() != len(ids) {
+		t.Fatalf("Pos = %d, want %d", sess.Pos(), len(ids))
+	}
+	if len(sess.retainedHidden) != sess.arch.Hidden*bf16Size {
+		t.Fatalf("retained hidden len = %d, want %d", len(sess.retainedHidden), sess.arch.Hidden*bf16Size)
+	}
+	return append([]byte(nil), sess.retainedHidden...)
+}
+
+// kvQ8BidirSpanIDs builds a prompt of preamble + span + tail: two text ids,
+// spanRows contiguous span tokens, two text ids.
+func kvQ8BidirSpanIDs(spanTok int32, spanRows int) []int32 {
+	ids := make([]int32, 0, spanRows+4)
+	ids = append(ids, 1, 2)
+	for range spanRows {
+		ids = append(ids, spanTok)
+	}
+	return append(ids, 3, 4)
+}
+
+// TestKVQ8ICBBidirSpanPrefillEngages pins #15: a bidirectional image/video
+// span chunk ENGAGES the batched dense fold on q8 ICB caches — the chunk-wide
+// rows-store landing satisfies the span's land-before-read rule and every row
+// reads the per-row q8 ladder (encSDPADecodeQ8At) with its cap. Before the fix
+// the q8 gate declined ANY rowAttnCaps batch, and the bidir lane's
+// no-causal-fallback rule (correct: a sequential span evaluation misreads the
+// image) turned the decline into a hard error on every 12B unified image
+// request. Three receipts: the prefill succeeds, the caps ENGAGED (a causal q8
+// twin of the same ids lands a different boundary hidden), and the q8 hidden
+// tracks the bf16-KV bidir lane within quantisation distance (structural
+// failures are orders of magnitude outside it).
+func TestKVQ8ICBBidirSpanPrefillEngages(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const spanTok = 7
+	ids := kvQ8BidirSpanIDs(spanTok, 20) // 24 ids: one span past batchedDenseICBMaxRows, one chunk
+
+	q8Bidir := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, true, true, spanTok), ids)
+	q8Causal := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, true, false, spanTok), ids)
+	if bytes.Equal(q8Bidir, q8Causal) {
+		t.Fatal("q8 bidirectional-span prefill produced the SAME boundary hidden as the causal q8 lane — the span caps had no effect")
+	}
+
+	bfBidir := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, false, true, spanTok), ids)
+	worst, scale := 0.0, 0.0
+	for j := 0; j+1 < len(bfBidir); j += 2 {
+		a := float64(bf16ToF32(q8Bidir[j], q8Bidir[j+1]))
+		b := float64(bf16ToF32(bfBidir[j], bfBidir[j+1]))
+		if d := math.Abs(a - b); d > worst {
+			worst = d
+		}
+		if m := math.Abs(b); m > scale {
+			scale = m
+		}
+	}
+	if worst > 0.05*math.Max(scale, 1) {
+		t.Fatalf("q8 bidir boundary hidden diverges structurally from bf16: worst |Δ|=%g (scale %g)", worst, scale)
+	}
+	t.Logf("q8 bidir tracked bf16 bidir: worst |Δ| = %.5g (scale %.5g)", worst, scale)
+}
+
+// TestKVQ8ICBBidirSpanChunkSplitRoutesCausalRuns pins the #15 companion fix:
+// when the bidirectional cutter splits a prefill around a span, the span-FREE
+// runs it produces (the preamble a span start shrank a chunk to, the tail
+// after the span end) are plain causal chunks and route through the causal
+// embedding lanes — including their sequential per-token fallback for the
+// small runs the q8 gate declines — instead of dying on the caps lane's
+// no-fallback rule. prefillChunkRowsCap forces the split (the 34-id prompt
+// exceeds cap+slack, then the span edges shrink the first chunk to 2 rows and
+// leave a 2-row tail); the split run's boundary hidden must track the
+// single-chunk run within quantisation distance (the fold and the per-token
+// replay trade at the token-identity tier, so bytes may differ; structure may
+// not).
+func TestKVQ8ICBBidirSpanChunkSplitRoutesCausalRuns(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const spanTok = 7
+	ids := kvQ8BidirSpanIDs(spanTok, 30) // 34 ids: past prefillChunkRowsCap+slack at cap 8
+
+	one := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, true, true, spanTok), ids)
+
+	split := newKVQ8BidirFixture(t, true, true, spanTok)
+	split.prefillChunkRowsCap = 8
+	splitHidden := kvQ8BidirPrefill(t, split, ids)
+
+	worst, scale := 0.0, 0.0
+	for j := 0; j+1 < len(one); j += 2 {
+		a := float64(bf16ToF32(splitHidden[j], splitHidden[j+1]))
+		b := float64(bf16ToF32(one[j], one[j+1]))
+		if d := math.Abs(a - b); d > worst {
+			worst = d
+		}
+		if m := math.Abs(b); m > scale {
+			scale = m
+		}
+	}
+	if worst > 0.05*math.Max(scale, 1) {
+		t.Fatalf("split bidir prefill diverges structurally from the single-chunk run: worst |Δ|=%g (scale %g)", worst, scale)
+	}
+	t.Logf("split bidir tracked single-chunk: worst |Δ| = %.5g (scale %.5g)", worst, scale)
+}
