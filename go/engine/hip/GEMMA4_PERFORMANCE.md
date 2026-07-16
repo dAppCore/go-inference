@@ -50,6 +50,10 @@ The llama.cpp files are pinned by Hugging Face snapshot:
 | 12B | `ggml-org/gemma-4-12B-it-GGUF@44ee90c4`, `Q4_K_M` | 7,365,558,464 bytes |
 | 26B-A4B | `unsloth/gemma-4-26B-A4B-it-GGUF@c462057f`, `UD-Q4_K_M` | 16,931,716,216 bytes |
 
+These four GGUF snapshots are the active Linux HIP++ model artifacts. MLX
+repositories also present in the Hugging Face cache are excluded from this
+board and from all AMD, CUDA, and HIP-CPU conclusions.
+
 For 26B, llama.cpp's `--fit-target 512` kept all 31 layers assigned to the
 GPU, used a 15,430.53 MiB ROCm model buffer, and placed selected layer 28/29
 expert tensors in `ROCm_Host`. KV and attention stayed on the GPU. This is the
@@ -161,6 +165,14 @@ H2D disabled measured 56.46 tok/s. Both runs produced the same tokens, 592
 misses, 2,207,969,280 H2D bytes, 1,817 residents, and no evictions. The stream
 path added no measurable value and was removed; do not repeat it without a
 trace showing genuine transfer/compute overlap.
+
+A GQA8 occupancy experiment reduced only the 26B stage-1 launch from 512 to
+256 threads while preserving chunk size 128 and the shared eight-head K/V
+scan. The existing hardware oracle passed, but the 32K synthetic kernel
+benchmark regressed from a stable 598.7-599.8 us to 2.68-3.82 ms. The smaller
+block leaves too much score and value work serial per thread; the change was
+removed. Keep the 512-thread GQA8 block unless a new algorithm reduces work as
+well as resources.
 
 ## DiffusionGemma diagnostic
 
