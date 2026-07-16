@@ -7,9 +7,9 @@ import (
 	"testing"
 )
 
-// TestCausalConv1dKnown checks the causal conv against a hand window: with K=3 and a fresh (zero-padded)
-// start, out[0]=w2·x0, out[1]=w1·x0+w2·x1, out[2]=w0·x0+w1·x1+w2·x2 (per channel), + bias.
-func TestCausalConv1dKnown(t *testing.T) {
+// TestConv_CausalConv1dF32_Good checks the causal conv against a hand window: with K=3 and a fresh
+// (zero-padded) start, out[0]=w2·x0, out[1]=w1·x0+w2·x1, out[2]=w0·x0+w1·x1+w2·x2 (per channel), + bias.
+func TestConv_CausalConv1dF32_Good(t *testing.T) {
 	const L, convDim, K = 4, 2, 3
 	in := syn(L*convDim, 1)
 	w := syn(convDim*K, 2)
@@ -37,10 +37,16 @@ func TestCausalConv1dKnown(t *testing.T) {
 	t.Log("causal conv1d matches the hand window (weight[K-1] = current input)")
 }
 
-// TestCausalConv1dCarry proves the conv-state ring invariant: conv'ing a sequence in one pass is
-// BIT-EXACT to conv'ing it as two chunks carrying the last K-1 inputs across the boundary — the
-// decode-streaming correctness for the conv.
-func TestCausalConv1dCarry(t *testing.T) {
+func TestConv_CausalConv1dF32_Bad(t *testing.T) {
+	if _, _, err := CausalConv1dF32(nil, nil, nil, nil, 0, 1, 1); err == nil {
+		t.Fatal("L=0 accepted")
+	}
+}
+
+// TestConv_CausalConv1dF32_Ugly proves the conv-state ring invariant: conv'ing a sequence in one pass
+// is BIT-EXACT to conv'ing it as two chunks carrying the last K-1 inputs across the boundary — the
+// decode-streaming correctness for the conv. A genuine distinct edge from the hand-window _Good case.
+func TestConv_CausalConv1dF32_Ugly(t *testing.T) {
 	const L, split, convDim, K = 9, 5, 3, 4
 	in := syn(L*convDim, 1)
 	w := syn(convDim*K, 2)

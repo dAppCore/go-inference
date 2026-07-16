@@ -16,9 +16,9 @@ func syn(n, seed int) []float32 {
 	return out
 }
 
-// TestSSDScanL1ClosedForm checks the scan against the closed form for a single step from a zero state:
-// y[h,p] = Δ_h · x[h,p] · (B_h·C_h) + D_h · x[h,p], where B_h·C_h = Σ_n B[h,n]·C[h,n].
-func TestSSDScanL1ClosedForm(t *testing.T) {
+// TestScan_SSDScanF32_Good checks the scan against the closed form for a single step from a zero
+// state: y[h,p] = Δ_h · x[h,p] · (B_h·C_h) + D_h · x[h,p], where B_h·C_h = Σ_n B[h,n]·C[h,n].
+func TestScan_SSDScanF32_Good(t *testing.T) {
 	const H, P, N = 3, 4, 5
 	x := syn(H*P, 1)
 	dt := syn(H, 2)
@@ -46,11 +46,18 @@ func TestSSDScanL1ClosedForm(t *testing.T) {
 	t.Log("SSD scan L=1 matches the closed form Δ·(B·C)·x + D·x")
 }
 
-// TestSSDScanChunkCarry proves the decode-boundary invariant: scanning a sequence in one pass equals
+func TestScan_SSDScanF32_Bad(t *testing.T) {
+	if _, _, err := SSDScanF32(nil, nil, nil, nil, nil, nil, nil, 0, 1, 1, 1); err == nil {
+		t.Fatal("L=0 accepted")
+	}
+}
+
+// TestScan_SSDScanF32_Ugly proves the decode-boundary invariant: scanning a sequence in one pass equals
 // scanning it as two chunks where the first chunk's final state is carried into the second. This MUST
 // be bit-exact (the per-step recurrence is identical regardless of where the chunk boundary falls) — it
-// is what makes Mamba-2 decode (carry the SSM state across calls) correct.
-func TestSSDScanChunkCarry(t *testing.T) {
+// is what makes Mamba-2 decode (carry the SSM state across calls) correct. A genuine distinct edge from
+// the single-step closed-form _Good case.
+func TestScan_SSDScanF32_Ugly(t *testing.T) {
 	const L, split, H, P, N = 7, 4, 2, 3, 5
 	x := syn(L*H*P, 1)
 	dt := syn(L*H, 2)
