@@ -272,13 +272,15 @@ func TestVisionAttentionForward_Bad(t *testing.T) {
 	}
 }
 
-// TestVisionAttentionForward_LearnedPositionsSkipsRope pins visionTowerCfg.LearnedPositions' gate: with it
-// false (the zero value — every visionTowerCfg literal that predates this field, including every OTHER test
-// in this file), reshaping the SAME token sequence into a different grid (gridW=2 vs gridW=4 for L=4 tokens)
-// changes each token's (row,col) mapping and therefore its 2-D rope angle, so the output MUST differ. With
-// it true (the REAL layout's learned-position-table convention), rope is never applied at all, so the
-// SAME reshape must leave the output UNCHANGED — attention itself has no other geometry-dependent term.
-func TestVisionAttentionForward_LearnedPositionsSkipsRope(t *testing.T) {
+// TestVisionAttentionForward_RopeAppliesWithLearnedPositions pins the reference behaviour
+// (Qwen3_5VisionModel.forward: the learned table adds ONCE after the patch embed AND rotary cos/sin
+// thread into EVERY attention — additive mechanisms, not alternatives): with LearnedPositions true,
+// reshaping the SAME token sequence into a different grid (gridW=2 vs gridW=4 for L=4 tokens) still
+// changes each token's (row,col) rope angle, so attention output MUST differ — and must equal the
+// LearnedPositions=false output bit-for-bit, the flag having no effect inside attention at all. The
+// pre-fix XOR gate (rope skipped when the table exists) is what made the first live 27B image turn
+// read 'E' for a giant Q.
+func TestVisionAttentionForward_RopeAppliesWithLearnedPositions(t *testing.T) {
 	const hidden = 4
 	w := &visionAttnWeights{Q: identityLinear(hidden), K: identityLinear(hidden), V: identityLinear(hidden), O: identityLinear(hidden)}
 	x := syn(4*hidden, 900) // L=4 tokens
@@ -292,21 +294,7 @@ func TestVisionAttentionForward_LearnedPositionsSkipsRope(t *testing.T) {
 		return true
 	}
 
-	cfgRope := visionTowerCfg{NumHeads: 1, NumKVHeads: 1, HeadDim: hidden, RopeTheta: 10000, Eps: 1e-6}
-	ropeA, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 2, cfgRope)
-	if err != nil {
-		t.Fatalf("visionAttentionForward (rope, gridW=2): %v", err)
-	}
-	ropeB, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 4, cfgRope)
-	if err != nil {
-		t.Fatalf("visionAttentionForward (rope, gridW=4): %v", err)
-	}
-	if identical(ropeA, ropeB) {
-		t.Fatal("LearnedPositions=false: reshaping the grid did not change the output — 2-D rope is not being applied")
-	}
-
-	cfgLearned := cfgRope
-	cfgLearned.LearnedPositions = true
+	cfgLearned := visionTowerCfg{NumHeads: 1, NumKVHeads: 1, HeadDim: hidden, RopeTheta: 10000, Eps: 1e-6, LearnedPositions: true}
 	learnedA, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 2, cfgLearned)
 	if err != nil {
 		t.Fatalf("visionAttentionForward (learned, gridW=2): %v", err)
@@ -315,8 +303,18 @@ func TestVisionAttentionForward_LearnedPositionsSkipsRope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("visionAttentionForward (learned, gridW=4): %v", err)
 	}
-	if !identical(learnedA, learnedB) {
-		t.Fatal("LearnedPositions=true: reshaping the grid changed the output — rope must be skipped entirely")
+	if identical(learnedA, learnedB) {
+		t.Fatal("LearnedPositions=true: reshaping the grid did not change the output — 2-D rope must apply alongside the learned table")
+	}
+
+	cfgRope := cfgLearned
+	cfgRope.LearnedPositions = false
+	ropeA, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 2, cfgRope)
+	if err != nil {
+		t.Fatalf("visionAttentionForward (rope-only, gridW=2): %v", err)
+	}
+	if !identical(learnedA, ropeA) {
+		t.Fatal("the LearnedPositions flag changed attention output — it must be attention-neutral (the table adds outside attention)")
 	}
 }
 
@@ -660,6 +658,16 @@ func TestVisionInterpolatePosEmbed_Good(t *testing.T) {
 	}
 	if up[0] != 0 || up[2] != 1 || up[6] != 2 || up[8] != 3 {
 		t.Fatalf("corners = %v/%v/%v/%v, want the edge-clamped source corners 0/1/2/3", up[0], up[2], up[6], up[8])
+	}
+	// The convention pin: linspace(0, side-1, n) puts a DOWN-sampled grid's
+	// points exactly on source cells — 3×3 → 2×2 lands on the four source
+	// corners with no blending (the centre-offset convention would blend).
+	down, err := visionInterpolatePosEmbed([]float32{0, 1, 2, 3, 4, 5, 6, 7, 8}, 1, 2, 2)
+	if err != nil {
+		t.Fatalf("3x3->2x2 resample: %v", err)
+	}
+	if down[0] != 0 || down[1] != 2 || down[2] != 6 || down[3] != 8 {
+		t.Fatalf("downsample = %v, want the exact source corners 0/2/6/8 (align-corners linspace)", down)
 	}
 }
 

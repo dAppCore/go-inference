@@ -236,34 +236,29 @@ func visionAttentionForward(x []float32, w *visionAttnWeights, L, gridW int, cfg
 	k := linearForward(x, &w.K, L)
 	v := linearForward(x, &w.V, L)
 
-	// invFreq stays nil (and visionRope2D is never called) when cfg.LearnedPositions — positions were
-	// already injected additively before block 0 (visionTowerForward), so the REAL layout applies neither
-	// 2-D rope nor any other positional signal here. QNorm/KNorm application stays UNCONDITIONAL either way
-	// (rmsNormHead no-ops on its own when the slice is nil), since a layout that ships QK-norm alongside a
-	// learned position table is a fact about per-head normalisation, not positions.
-	var invFreq []float64
+	// The 2-D rope applies in EVERY block, for BOTH layout families: the reference
+	// (Qwen3_5VisionModel.forward) adds the learned table once after the patch embed AND
+	// threads rotary cos/sin into every attention — the two position mechanisms are
+	// additive, not alternatives. (The pre-fix XOR gate here is what made the first live
+	// 27B image turn read 'E' for a giant Q: the real layout ran attention with no rotary
+	// signal at all.) QNorm/KNorm application stays unconditional (rmsNormHead no-ops on
+	// nil).
 	theta := float64(cfg.RopeTheta)
 	if theta == 0 {
 		theta = 10000
 	}
-	if !cfg.LearnedPositions {
-		invFreq = visionRotaryTable(HD, theta)
-	}
+	invFreq := visionRotaryTable(HD, theta)
 	for t := range L {
 		row, col := t/gridW, t%gridW
 		for h := range H {
 			qh := q[t*H*HD+h*HD : t*H*HD+h*HD+HD]
 			rmsNormHead(qh, w.QNorm, cfg.Eps) // no-op when QNorm is nil (rmsNormHead's own guard)
-			if !cfg.LearnedPositions {
-				visionRope2D(qh, row, col, HD, invFreq)
-			}
+			visionRope2D(qh, row, col, HD, invFreq)
 		}
 		for h := range KVH {
 			kh := k[t*KVH*HD+h*HD : t*KVH*HD+h*HD+HD]
 			rmsNormHead(kh, w.KNorm, cfg.Eps)
-			if !cfg.LearnedPositions {
-				visionRope2D(kh, row, col, HD, invFreq)
-			}
+			visionRope2D(kh, row, col, HD, invFreq)
 		}
 	}
 
@@ -502,11 +497,13 @@ func imageToPatchGrid(data []byte, cfg visionTowerCfg) (patches []float32, gridH
 }
 
 // visionInterpolatePosEmbed resamples a learned square [side²,hidden] position
-// table onto a (dstH × dstW) patch grid with bilinear interpolation and edge
-// clamping — the reference towers' F.interpolate(mode="bilinear",
-// align_corners=false) convention — so any image grid rides the one table the
-// checkpoint trained. The source table must be square (side = √positions),
-// the real layout's convention; anything else fails loud.
+// table onto a (dstH × dstW) patch grid with separable bilinear interpolation
+// in the REFERENCE convention (vision_utils.get_vision_bilinear_indices_and_
+// weights): per-axis coordinates are linspace(0, side-1, n) — align_corners
+// style, both endpoints landing exactly on the table's edge rows — with the
+// ceil corner clamped to side-1. A single-point axis (n == 1) sits at 0. The
+// source table must be square (side = √positions), the real layout's
+// convention; anything else fails loud.
 func visionInterpolatePosEmbed(table []float32, hidden, dstH, dstW int) ([]float32, error) {
 	if hidden <= 0 || dstH <= 0 || dstW <= 0 {
 		return nil, core.NewError("composed.visionInterpolatePosEmbed: hidden and grid dims must be positive")
@@ -520,27 +517,28 @@ func visionInterpolatePosEmbed(table []float32, hidden, dstH, dstW int) ([]float
 		return nil, core.NewError(core.Sprintf("composed.visionInterpolatePosEmbed: %d positions is not a square grid", positions))
 	}
 	out := make([]float32, dstH*dstW*hidden)
-	sy := float64(side) / float64(dstH)
-	sx := float64(side) / float64(dstW)
-	clamp := func(v int) int {
-		if v < 0 {
+	axis := func(n, i int) float64 { // linspace(0, side-1, n)[i]
+		if n <= 1 {
 			return 0
 		}
+		return float64(i) * float64(side-1) / float64(n-1)
+	}
+	clamp := func(v int) int {
 		if v >= side {
 			return side - 1
 		}
 		return v
 	}
 	for y := range dstH {
-		fy := (float64(y)+0.5)*sy - 0.5
+		fy := axis(dstH, y)
 		y0 := int(math.Floor(fy))
 		ty := float32(fy - float64(y0))
-		y0c, y1c := clamp(y0), clamp(y0+1)
+		y0c, y1c := y0, clamp(y0+1)
 		for x := range dstW {
-			fx := (float64(x)+0.5)*sx - 0.5
+			fx := axis(dstW, x)
 			x0 := int(math.Floor(fx))
 			tx := float32(fx - float64(x0))
-			x0c, x1c := clamp(x0), clamp(x0+1)
+			x0c, x1c := x0, clamp(x0+1)
 			r00 := table[(y0c*side+x0c)*hidden:]
 			r01 := table[(y0c*side+x1c)*hidden:]
 			r10 := table[(y1c*side+x0c)*hidden:]
