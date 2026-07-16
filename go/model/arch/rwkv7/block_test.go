@@ -33,7 +33,10 @@ func TestBlockForwardShape(t *testing.T) {
 	t.Logf("rwkv7 block: [%d,%d] in → out, [H,K,V] state %d advanced", L, D, len(st))
 }
 
-func TestBlockForwardScratchFromInputF32_Parity(t *testing.T) {
+// TestBlock_BlockForwardScratchFromInputF32_Good proves calling FromInputF32 with manually-computed
+// input projections (via the same matNT the package uses internally) reproduces EXACTLY what
+// BlockForwardScratchNoProjF32 gets by computing those same projections itself.
+func TestBlock_BlockForwardScratchFromInputF32_Good(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
 	const L, D = 5, 8
 	w, x := mkBlockWeights(cfg, D), syn(L*D, 21)
@@ -61,9 +64,37 @@ func TestBlockForwardScratchFromInputF32_Parity(t *testing.T) {
 	}
 }
 
-// TestBlockForwardCarry is the full-block decode invariant: one pass over a sequence is BIT-EXACT to two
-// chunks carrying the [H,K,V] state across the boundary — streaming RWKV-7 decode reproduces prefill.
-func TestBlockForwardCarry(t *testing.T) {
+func TestBlock_BlockForwardScratchFromInputF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	if _, _, _, err := BlockForwardScratchFromInputF32(nil, nil, nil, nil, nil, nil, nil, cfg, nil, 5, 8, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardScratchFromInputF32_Ugly rejects a malformed projected-input length (r one
+// element short of L*hk) — distinct from _Bad's nil-weights case.
+func TestBlock_BlockForwardScratchFromInputF32_Ugly(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	hk := cfg.hk()
+	r := make([]float32, L*hk-1)
+	if _, _, _, err := BlockForwardScratchFromInputF32(r, nil, nil, nil, nil, nil, w, cfg, nil, L, D, nil); err == nil {
+		t.Fatal("malformed projected-input length accepted")
+	}
+}
+
+func TestBlock_BlockForwardF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	if _, _, err := BlockForwardF32(syn(5*8, 1), nil, cfg, nil, 5, 8); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardF32_Ugly is the full-block decode invariant: one pass over a sequence is
+// BIT-EXACT to two chunks carrying the [H,K,V] state across the boundary — streaming RWKV-7 decode
+// reproduces prefill. A genuine distinct edge from the single-pass golden-bits _Good case.
+func TestBlock_BlockForwardF32_Ugly(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
 	const L, split, D = 7, 4, 8
 	w := mkBlockWeights(cfg, D)
@@ -102,7 +133,7 @@ func TestBlockForwardCarry(t *testing.T) {
 // relies on: o (the recurrence read-out) @ projW (OutProj) must equal what the full forward computes
 // internally, so folding the projection into the FFN-tail command buffer changes WHERE the GEMM runs,
 // never its result.
-func TestBlockForwardScratchNoProjF32_Parity(t *testing.T) {
+func TestBlock_BlockForwardScratchNoProjF32_Good(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
 	const L, D = 5, 8
 	w := mkBlockWeights(cfg, D)
@@ -141,9 +172,29 @@ func TestBlockForwardScratchNoProjF32_Parity(t *testing.T) {
 	t.Logf("rwkv7 forwardNoProj+host out_proj byte-identical to full BlockForwardF32 over [%d,%d], hv=%d", L, D, hv)
 }
 
-// TestBlockForwardF32_Golden pins the exact f32 bit-pattern of the block's output and advanced [H,K,V]
-// state for a fixed input, gating the in-place log-decay refactor on bit-identical behaviour.
-func TestBlockForwardF32_Golden(t *testing.T) {
+func TestBlock_BlockForwardScratchNoProjF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	if _, _, _, err := BlockForwardScratchNoProjF32(syn(5*8, 1), nil, cfg, nil, 5, 8, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardScratchNoProjF32_Ugly rejects a malformed VProj shape (one element short) —
+// distinct from _Bad's nil-weights case.
+func TestBlock_BlockForwardScratchNoProjF32_Ugly(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	w.VProj = w.VProj[:len(w.VProj)-1]
+	if _, _, _, err := BlockForwardScratchNoProjF32(syn(L*D, 1), w, cfg, nil, L, D, nil); err == nil {
+		t.Fatal("malformed VProj shape accepted")
+	}
+}
+
+// TestBlock_BlockForwardF32_Good pins the exact f32 bit-pattern of the block's output and advanced
+// [H,K,V] state for a fixed input, gating the in-place log-decay refactor on bit-identical behaviour —
+// a golden bit-pattern pin over real outputs IS the AX-7 "documented happy path with real assertions".
+func TestBlock_BlockForwardF32_Good(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
 	const L, D = 3, 8
 	out, st, err := BlockForwardF32(syn(L*D, 1), mkBlockWeights(cfg, D), cfg, nil, L, D)
@@ -164,4 +215,69 @@ func TestBlockForwardF32_Golden(t *testing.T) {
 	}
 	chk("out", out, wantOut)
 	chk("state", st, wantState)
+}
+
+// TestBlock_BlockForwardScratchF32_Good proves a caller-supplied *BlockScratch produces bit-identical
+// output to the nil-scratch (BlockForwardF32) path, and that the scratch's out buffer is populated for
+// reuse.
+func TestBlock_BlockForwardScratchF32_Good(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	x := syn(L*D, 1)
+	wantOut, wantState, err := BlockForwardF32(x, w, cfg, nil, L, D)
+	if err != nil {
+		t.Fatalf("reference BlockForwardF32: %v", err)
+	}
+	sc := &BlockScratch{}
+	out, state, err := BlockForwardScratchF32(x, w, cfg, nil, L, D, sc)
+	if err != nil {
+		t.Fatalf("BlockForwardScratchF32: %v", err)
+	}
+	for i := range out {
+		if out[i] != wantOut[i] {
+			t.Fatalf("scratch out[%d] = %v, want bit-identical %v", i, out[i], wantOut[i])
+		}
+	}
+	if len(state) != len(wantState) {
+		t.Fatalf("state len %d, want %d", len(state), len(wantState))
+	}
+	if len(sc.out) == 0 {
+		t.Fatal("scratch.out was not populated for reuse")
+	}
+}
+
+func TestBlock_BlockForwardScratchF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	if _, _, err := BlockForwardScratchF32(syn(5*8, 1), nil, cfg, nil, 5, 8, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardScratchF32_Ugly proves scratch-buffer REUSE across successive calls doesn't
+// corrupt correctness: a second call sharing the same *BlockScratch (fed the first call's advanced
+// state) stays bit-identical to the no-scratch reference.
+func TestBlock_BlockForwardScratchF32_Ugly(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	x1, x2 := syn(L*D, 1), syn(L*D, 2)
+	sc := &BlockScratch{}
+	_, state1, err := BlockForwardScratchF32(x1, w, cfg, nil, L, D, sc)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	out2, _, err := BlockForwardScratchF32(x2, w, cfg, state1, L, D, sc)
+	if err != nil {
+		t.Fatalf("second call (reused scratch): %v", err)
+	}
+	wantOut2, _, err := BlockForwardF32(x2, w, cfg, state1, L, D)
+	if err != nil {
+		t.Fatalf("reference second call: %v", err)
+	}
+	for i := range out2 {
+		if out2[i] != wantOut2[i] {
+			t.Fatalf("reused-scratch out[%d] = %v, want %v", i, out2[i], wantOut2[i])
+		}
+	}
 }
