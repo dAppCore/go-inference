@@ -156,6 +156,9 @@ const (
 	hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704                        = "rocm_mlx_q4_projection_batch_q4_g64_rows2816_cols704_row16_tokens16_shared"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64             = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4 = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4"
+	hipKernelNameQ8_1QuantizeF32                                           = "rocm_q8_1_quantize_f32"
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8                 = "rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_row8"
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8            = "rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_batch_row8"
 )
 
 func hipDecodeKernelBatchEnabled() bool {

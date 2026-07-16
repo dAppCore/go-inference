@@ -58,6 +58,73 @@ func TestHIPRMSNormResidualAddNormBlockSize_Default_Good(t *testing.T) {
 	core.AssertEqual(t, uint32(256), hipRMSNormResidualAddNormBlockSize(1536))
 }
 
+func TestHIPRMSNormResidualAddNormLaunchArgs_Q8Output_Good(t *testing.T) {
+	const count = 3840
+	args := benchmarkHIPRMSNormResidualAddNormLaunchArgs(count)
+	args.Q8OutputPointer = 0x7000
+	args.Q8OutputBytes = uint64(count/hipQ8_1BlockSize) * hipQ8_1BlockBytes
+
+	payload, err := args.Binary()
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, uint32(args.Q8OutputBytes), binary.LittleEndian.Uint32(payload[112:]))
+	core.AssertEqual(t, uint64(args.Q8OutputPointer), binary.LittleEndian.Uint64(payload[120:]))
+}
+
+func TestHIPRMSNormResidualAddNormLaunchArgs_Q8Output_Bad(t *testing.T) {
+	args := benchmarkHIPRMSNormResidualAddNormLaunchArgs(3840)
+	args.Q8OutputPointer = 0x7000
+	args.Q8OutputBytes = hipQ8_1BlockBytes
+
+	_, err := args.Binary()
+	core.AssertTrue(t, err != nil, "mismatched Q8_1 output bytes must be rejected")
+}
+
+func TestHIPRMSNormResidualAddNormQ8Output_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	inputValues := make([]float32, hipQ8_1BlockSize)
+	residualValues := make([]float32, hipQ8_1BlockSize)
+	for index := range inputValues {
+		inputValues[index] = float32(index-15) / 8
+		residualValues[index] = float32(index%5-2) / 16
+	}
+	input, err := hipUploadGemma4Q4Float32Input(driver, "fused Q8 RMS input", inputValues)
+	core.RequireNoError(t, err)
+	defer input.Close()
+	residual, err := hipUploadGemma4Q4Float32Input(driver, "fused Q8 RMS residual", residualValues)
+	core.RequireNoError(t, err)
+	defer residual.Close()
+	residualOutput, err := hipAllocateByteBuffer(driver, "rocm.hip.RMSNormResidualAddNormLaunch", "fused Q8 residual output", uint64(hipQ8_1BlockSize*4), hipQ8_1BlockSize)
+	core.RequireNoError(t, err)
+	defer residualOutput.Close()
+	normOutput, err := hipAllocateByteBuffer(driver, "rocm.hip.RMSNormResidualAddNormLaunch", "fused Q8 norm output", uint64(hipQ8_1BlockSize*4), hipQ8_1BlockSize)
+	core.RequireNoError(t, err)
+	defer normOutput.Close()
+	q8Output, err := hipAllocateByteBuffer(driver, "rocm.hip.RMSNormResidualAddNormLaunch", "fused Q8 output", hipQ8_1BlockBytes, hipQ8_1BlockBytes/4)
+	core.RequireNoError(t, err)
+	defer q8Output.Close()
+	cfg := hipRMSNormDeviceWeightConfig{Count: hipQ8_1BlockSize, Epsilon: 1e-6, WeightEncoding: hipRMSNormWeightEncodingNone}
+
+	err = hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputQ8WithWorkspace(
+		context.Background(), driver, input, residual, cfg, cfg, residualOutput, normOutput, q8Output, 1, nil,
+	)
+	core.RequireNoError(t, err)
+
+	normValues, err := hipReadFloat32DeviceOutput(normOutput, "rocm.hip.RMSNormResidualAddNormLaunch", "fused Q8 norm output", hipQ8_1BlockSize)
+	core.RequireNoError(t, err)
+	q8Data, q8Offset, ok := driver.memoryForPointer(q8Output.Pointer(), int(q8Output.SizeBytes()))
+	core.AssertTrue(t, ok, "fused Q8 output must remain addressable")
+	q8Data = q8Data[q8Offset : q8Offset+int(q8Output.SizeBytes())]
+	scale := math.Float32frombits(binary.LittleEndian.Uint32(q8Data[0:]))
+	core.AssertTrue(t, scale > 0, "fused Q8 output scale must be positive")
+	for index, want := range normValues {
+		got := scale * float32(int8(q8Data[8+index]))
+		if math.Abs(float64(got-want)) > float64(scale)*0.51+1e-6 {
+			t.Fatalf("fused Q8 value[%d] = %g, want %g within half scale %g", index, got, want, scale)
+		}
+	}
+}
+
 func TestHIPRMSNormResidualAddBlockSize_E4B_Good(t *testing.T) {
 	core.AssertEqual(t, uint32(512), hipRMSNormResidualAddBlockSize(2560))
 }

@@ -6353,9 +6353,14 @@ func (driver *fakeHIPDriver) launchRMSNormResidualAddNorm(args []byte) error {
 	if bits := binary.LittleEndian.Uint32(args[108:]); bits != 0 {
 		outputScale = math.Float32frombits(bits)
 	}
+	q8OutputBytes := int(binary.LittleEndian.Uint32(args[112:]))
+	q8OutputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[120:]))
 	if count <= 0 || inputBytes != count*4 || residualBytes != count*4 ||
 		residualOutputBytes != count*4 || normOutputBytes != count*4 {
 		return core.E("rocm.hip.FakeLaunch", "rms norm residual-add-norm shape metadata mismatch", nil)
+	}
+	if q8OutputPointer == 0 && q8OutputBytes != 0 || q8OutputPointer != 0 && (count%hipQ8_1BlockSize != 0 || q8OutputBytes != count/hipQ8_1BlockSize*hipQ8_1BlockBytes) {
+		return core.E("rocm.hip.FakeLaunch", "rms norm residual-add-norm Q8_1 shape metadata mismatch", nil)
 	}
 	if math.IsNaN(float64(outputScale)) || math.IsInf(float64(outputScale), 0) {
 		return core.E("rocm.hip.FakeLaunch", "rms norm residual-add-norm output scale must be finite", nil)
@@ -6413,6 +6418,34 @@ func (driver *fakeHIPDriver) launchRMSNormResidualAddNorm(args []byte) error {
 		return err
 	}
 	copy(normOutputData[normOutputOffset:normOutputOffset+normOutputBytes], normPayload)
+	if q8OutputPointer != 0 {
+		q8OutputData, q8OutputOffset, ok := driver.memoryForPointer(q8OutputPointer, q8OutputBytes)
+		if !ok {
+			return core.E("rocm.hip.FakeLaunch", "rms norm residual-add-norm Q8_1 output buffer is missing", nil)
+		}
+		q8OutputData = q8OutputData[q8OutputOffset : q8OutputOffset+q8OutputBytes]
+		for blockStart := 0; blockStart < count; blockStart += hipQ8_1BlockSize {
+			block := normOutput[blockStart : blockStart+hipQ8_1BlockSize]
+			maxAbs := float32(0)
+			for _, value := range block {
+				maxAbs = max(maxAbs, float32(math.Abs(float64(value))))
+			}
+			scale := maxAbs / 127
+			quantSum := 0
+			blockOffset := blockStart / hipQ8_1BlockSize * hipQ8_1BlockBytes
+			for index, value := range block {
+				quant := 0
+				if scale > 0 {
+					quant = int(math.RoundToEven(float64(value / scale)))
+					quant = max(-127, min(127, quant))
+				}
+				quantSum += quant
+				q8OutputData[blockOffset+8+index] = byte(int8(quant))
+			}
+			binary.LittleEndian.PutUint32(q8OutputData[blockOffset:], math.Float32bits(scale))
+			binary.LittleEndian.PutUint32(q8OutputData[blockOffset+4:], math.Float32bits(scale*float32(quantSum)))
+		}
+	}
 	return nil
 }
 

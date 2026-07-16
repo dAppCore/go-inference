@@ -2668,6 +2668,16 @@ func hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx context.Context, driver nati
 	if input.Count() != tokenCount*cfg.HiddenSize || input.SizeBytes() != uint64(input.Count()*4) {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill MLP input buffer shape mismatch", nil)
 	}
+	if cfg.GGUFQ4KGateUp.available() {
+		activated, err := hipRunGemma4Q4NativeQ4KGateUpWithDeviceInput(ctx, driver, input, cfg.GGUFQ4KGateUp, tokenCount, workspace)
+		if err != nil {
+			return nil, err
+		}
+		if workspace == nil {
+			defer activated.Close()
+		}
+		return hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, activated, cfg.DownProjection, tokenCount, workspace, "prefill native Q4_K MLP projection workspace view", view, forceBatchedProjection)
+	}
 	var err error
 	var activated *hipDeviceByteBuffer
 	closeActivated := false

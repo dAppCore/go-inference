@@ -123,8 +123,11 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_gelu_tanh_multiply`,
 		`extern "C" __global__ void rocm_moe_router`,
 		`extern "C" __global__ void rocm_moe_lazy_experts`,
+		`extern "C" __global__ void rocm_q8_1_quantize_f32`,
 		`extern "C" __global__ void rocm_gguf_q4_0_projection`,
 		`extern "C" __global__ void rocm_gguf_q4_0_gelu_tanh_gate_up`,
+		`extern "C" __global__ void rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_row8`,
+		`extern "C" __global__ void rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_batch_row8`,
 		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_gate_up`,
 		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_down`,
 		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_gate_up_pair16`,
@@ -312,6 +315,10 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_MOE_ROUTER_LAUNCH_ARGS_BYTES = %d", hipMoERouterLaunchArgsBytes),
 		core.Sprintf("ROCM_MOE_LAZY_LAUNCH_ARGS_VERSION = %d", hipMoELazyLaunchArgsVersion),
 		core.Sprintf("ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES = %d", hipMoELazyLaunchArgsBytes),
+		core.Sprintf("ROCM_Q8_1_QUANTIZE_LAUNCH_ARGS_VERSION = %d", hipQ8_1QuantizeLaunchArgsVersion),
+		core.Sprintf("ROCM_Q8_1_QUANTIZE_LAUNCH_ARGS_BYTES = %d", hipQ8_1QuantizeLaunchArgsBytes),
+		core.Sprintf("ROCM_GGUF_Q4_K_Q8_1_GATE_UP_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4KQ8_1GateUpLaunchArgsVersion),
+		core.Sprintf("ROCM_GGUF_Q4_K_Q8_1_GATE_UP_LAUNCH_ARGS_BYTES = %d", hipGGUFQ4KQ8_1GateUpLaunchArgsBytes),
 		core.Sprintf("ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4_0ProjectionLaunchArgsVersion),
 		core.Sprintf("ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES = %d", hipGGUFQ4_0ProjectionLaunchArgsBytes),
 		core.Sprintf("ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4KExpandLaunchArgsVersion),
@@ -513,6 +520,16 @@ func TestHIPKernelSource_RMSNormResidualAddNormUsesInverseRMS_Good(t *testing.T)
 	core.AssertTrue(t, strings.Contains(kernel, `residual_output[i] * norm_inv_rms * weight`), "next-layer normalization must multiply by its shared inverse RMS")
 	core.AssertTrue(t, !strings.Contains(kernel, `input[i] / rms`), "first normalization must not repeat division in its vector pass")
 	core.AssertTrue(t, !strings.Contains(kernel, `residual_output[i] / norm_rms`), "next-layer normalization must not repeat division in its vector pass")
+}
+
+func TestHIPKernelSource_RMSNormResidualAddNormEmitsQ8_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_rms_norm_residual_add_norm`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `args.q8_output_pointer`), "fused residual-add-norm must honor the optional Q8 output")
+	core.AssertTrue(t, strings.Contains(kernel, `rocm_q8_1_block *q8_output`), "fused residual-add-norm must write Q8_1 blocks directly")
+	core.AssertTrue(t, strings.Contains(kernel, `q8_output[block_index].scaled_sum`), "fused residual-add-norm must preserve the Q4_K correction sum")
 }
 
 func TestHIPKernelSource_RMSNormResidualAddUsesInverseRMS_Good(t *testing.T) {

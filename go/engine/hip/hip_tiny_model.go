@@ -2044,12 +2044,16 @@ func hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(driver nativeHIPDriver, 
 	maxQKVRows := 0
 	maxPerLayerOutputRows := 0
 	maxVocabRows := 0
+	maxNativeQ4KCols := 0
 	for _, layer := range cfg.Layers {
 		if layer.GateProjection.Rows > maxGateRows {
 			maxGateRows = layer.GateProjection.Rows
 		}
 		if layer.VocabSize > maxVocabRows {
 			maxVocabRows = layer.VocabSize
+		}
+		if layer.GGUFQ4KGateUp.available() && layer.GGUFQ4KGateUp.Cols > maxNativeQ4KCols {
+			maxNativeQ4KCols = layer.GGUFQ4KGateUp.Cols
 		}
 		if layer.PerLayerInput.hasLayerApply() && layer.PerLayerInput.InputGate.Rows > maxGateRows {
 			maxGateRows = layer.PerLayerInput.InputGate.Rows
@@ -2093,6 +2097,11 @@ func hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(driver nativeHIPDriver, 
 	}
 	if _, err := workspace.EnsureActivationOutput(driver, maxTokens*maxGateRows); err != nil {
 		return err
+	}
+	if maxNativeQ4KCols > 0 {
+		if _, err := workspace.EnsureQ8_1Input(driver, maxTokens, maxNativeQ4KCols); err != nil {
+			return err
+		}
 	}
 	if maxHiddenRows > 0 {
 		hiddenCount := maxTokens * maxHiddenRows

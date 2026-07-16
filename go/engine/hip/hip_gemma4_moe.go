@@ -17,8 +17,18 @@ import (
 const (
 	hipGGUFQ4_0ProjectionLaunchArgsVersion        uint32 = 1
 	hipGGUFQ4_0ProjectionLaunchArgsBytes                 = 64
+	hipQ8_1QuantizeLaunchArgsVersion              uint32 = 1
+	hipQ8_1QuantizeLaunchArgsBytes                       = 48
+	hipGGUFQ4KQ8_1GateUpLaunchArgsVersion         uint32 = 1
+	hipGGUFQ4KQ8_1GateUpLaunchArgsBytes                  = 72
 	hipGGUFQ4KExpandLaunchArgsVersion             uint32 = 1
 	hipGGUFQ4KExpandLaunchArgsBytes                      = 48
+	hipQ8_1BlockSize                                     = 32
+	hipQ8_1BlockBytes                                    = 40
+	hipQ8_1QuantizeBlockSize                      uint32 = 256
+	hipQ8_1QuantizeBlocksPerWorkgroup             uint32 = 8
+	hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock          uint32 = 8
+	hipGGUFQ4KQ8_1GateUpBatchTokensPerBlock       uint32 = 16
 	hipGGUFQ4_0ProjectionBlockSize                uint32 = 256
 	hipGGUFQ4_0ProjectionRowsPerBlock             uint32 = 8
 	hipGGUFQ4_0SelectedExpertsLaunchArgsVersion   uint32 = 1
@@ -53,6 +63,29 @@ type hipGGUFQ4_0ProjectionLaunchArgs struct {
 	WeightRows    int
 	InputBytes    uint64
 	WeightBytes   uint64
+	OutputBytes   uint64
+}
+
+type hipQ8_1QuantizeLaunchArgs struct {
+	InputPointer  nativeDevicePointer
+	OutputPointer nativeDevicePointer
+	Rows          int
+	Cols          int
+	InputBytes    uint64
+	OutputBytes   uint64
+}
+
+type hipGGUFQ4KQ8_1GateUpLaunchArgs struct {
+	InputPointer  nativeDevicePointer
+	GatePointer   nativeDevicePointer
+	UpPointer     nativeDevicePointer
+	OutputPointer nativeDevicePointer
+	Rows          int
+	Cols          int
+	Batch         int
+	InputBytes    uint64
+	GateBytes     uint64
+	UpBytes       uint64
 	OutputBytes   uint64
 }
 
@@ -2667,6 +2700,104 @@ func (args hipGGUFQ4_0ProjectionLaunchArgs) Binary() ([]byte, error) {
 	return args.BinaryInto(payload)
 }
 
+func (args hipQ8_1QuantizeLaunchArgs) Binary() ([]byte, error) {
+	payload := make([]byte, hipQ8_1QuantizeLaunchArgsBytes)
+	return args.BinaryInto(payload)
+}
+
+func (args hipQ8_1QuantizeLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	if args.InputPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E("rocm.hip.Q8_1QuantizeLaunch", "input and output pointers are required", nil)
+	}
+	if len(payload) < hipQ8_1QuantizeLaunchArgsBytes {
+		return nil, core.E("rocm.hip.Q8_1QuantizeLaunch", "launch arg payload buffer is too small", nil)
+	}
+	rows, err := rocmDeviceKVPositiveUint32("row count", args.Rows)
+	if err != nil {
+		return nil, err
+	}
+	cols, err := rocmDeviceKVPositiveUint32("column count", args.Cols)
+	if err != nil {
+		return nil, err
+	}
+	if cols%hipQ8_1BlockSize != 0 {
+		return nil, core.E("rocm.hip.Q8_1QuantizeLaunch", "column count must align to Q8_1 blocks", nil)
+	}
+	expectedInputBytes := uint64(rows) * uint64(cols) * 4
+	expectedOutputBytes := uint64(rows) * uint64(cols/hipQ8_1BlockSize) * hipQ8_1BlockBytes
+	if args.InputBytes != expectedInputBytes || args.OutputBytes != expectedOutputBytes {
+		return nil, core.E("rocm.hip.Q8_1QuantizeLaunch", "buffer byte count mismatch", nil)
+	}
+	payload = payload[:hipQ8_1QuantizeLaunchArgsBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint32(payload[0:], hipQ8_1QuantizeLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.InputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[24:], rows)
+	binary.LittleEndian.PutUint32(payload[28:], cols)
+	binary.LittleEndian.PutUint64(payload[32:], args.InputBytes)
+	binary.LittleEndian.PutUint64(payload[40:], args.OutputBytes)
+	return payload, nil
+}
+
+func (args hipGGUFQ4KQ8_1GateUpLaunchArgs) Binary() ([]byte, error) {
+	payload := make([]byte, hipGGUFQ4KQ8_1GateUpLaunchArgsBytes)
+	return args.BinaryInto(payload)
+}
+
+func (args hipGGUFQ4KQ8_1GateUpLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	if args.InputPointer == 0 || args.GatePointer == 0 || args.UpPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "input, gate, up, and output pointers are required", nil)
+	}
+	if len(payload) < hipGGUFQ4KQ8_1GateUpLaunchArgsBytes {
+		return nil, core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "launch arg payload buffer is too small", nil)
+	}
+	rows, err := rocmDeviceKVPositiveUint32("row count", args.Rows)
+	if err != nil {
+		return nil, err
+	}
+	cols, err := rocmDeviceKVPositiveUint32("column count", args.Cols)
+	if err != nil {
+		return nil, err
+	}
+	if cols%hipGGUFQ4KBlockSize != 0 {
+		return nil, core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "column count must align to Q4_K blocks", nil)
+	}
+	batch, err := rocmDeviceKVPositiveUint32("batch count", args.Batch)
+	if err != nil {
+		return nil, err
+	}
+	expectedInputBytes := uint64(batch) * uint64(cols/hipQ8_1BlockSize) * hipQ8_1BlockBytes
+	expectedWeightBlocks := uint64(rows) * uint64(cols/hipGGUFQ4KBlockSize)
+	expectedRawWeightBytes := expectedWeightBlocks * hipGGUFQ4KBlockBytes
+	expectedExpandedWeightBytes := expectedWeightBlocks * hipGGUFQ4KExpandedBlockBytes
+	expectedOutputBytes := uint64(batch) * uint64(rows) * 4
+	weightsMatch := args.GateBytes == args.UpBytes && (args.GateBytes == expectedRawWeightBytes || args.GateBytes == expectedExpandedWeightBytes)
+	if args.InputBytes != expectedInputBytes || !weightsMatch || args.OutputBytes != expectedOutputBytes {
+		return nil, core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "buffer byte count mismatch", nil)
+	}
+	if args.InputBytes > math.MaxUint32 || args.GateBytes > math.MaxUint32 || args.UpBytes > math.MaxUint32 || args.OutputBytes > math.MaxUint32 {
+		return nil, core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "buffer byte count exceeds uint32", nil)
+	}
+	payload = payload[:hipGGUFQ4KQ8_1GateUpLaunchArgsBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint32(payload[0:], hipGGUFQ4KQ8_1GateUpLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.InputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.GatePointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(args.UpPointer))
+	binary.LittleEndian.PutUint64(payload[32:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[40:], rows)
+	binary.LittleEndian.PutUint32(payload[44:], cols)
+	binary.LittleEndian.PutUint32(payload[48:], batch)
+	binary.LittleEndian.PutUint32(payload[56:], uint32(args.InputBytes))
+	binary.LittleEndian.PutUint32(payload[60:], uint32(args.GateBytes))
+	binary.LittleEndian.PutUint32(payload[64:], uint32(args.UpBytes))
+	binary.LittleEndian.PutUint32(payload[68:], uint32(args.OutputBytes))
+	return payload, nil
+}
+
 func (args hipGGUFQ4_0ProjectionLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
 	if args.InputPointer == 0 || args.WeightPointer == 0 || args.OutputPointer == 0 {
 		return nil, core.E("rocm.hip.GGUFQ4_0ProjectionLaunch", "input, weight, and output pointers are required", nil)
@@ -2984,6 +3115,118 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 
 func hipRunGGUFQ4_0ProjectionKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input, weight *hipDeviceByteBuffer, rows, cols, rowOffset, weightRows int, output *hipDeviceByteBuffer) error {
 	return hipRunGGUFQ4_0KernelWithDeviceInputOutput(ctx, driver, hipKernelNameGGUFQ4_0Projection, input, weight, rows, cols, rowOffset, weightRows, output, false)
+}
+
+func hipRunQ8_1QuantizeKernel(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, rows, cols int, output *hipDeviceByteBuffer) error {
+	return hipRunQ8_1QuantizeKernelWithArgs(ctx, driver, input, rows, cols, output, nil)
+}
+
+func hipRunQ8_1QuantizeKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, rows, cols int, output *hipDeviceByteBuffer, launchArgBuffer []byte) error {
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if driver == nil || !driver.Available() {
+		return core.E("rocm.hip.Q8_1QuantizeLaunch", "HIP driver is not available", nil)
+	}
+	if input == nil || output == nil || input.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E("rocm.hip.Q8_1QuantizeLaunch", "input and output device buffers are required", nil)
+	}
+	if rows <= 0 || cols <= 0 || cols%hipQ8_1BlockSize != 0 ||
+		input.Count() != rows*cols || input.SizeBytes() != uint64(rows*cols*4) ||
+		output.SizeBytes() != uint64(rows*(cols/hipQ8_1BlockSize)*hipQ8_1BlockBytes) {
+		return core.E("rocm.hip.Q8_1QuantizeLaunch", "input or output device buffer shape mismatch", nil)
+	}
+	args := hipQ8_1QuantizeLaunchArgs{
+		InputPointer:  input.Pointer(),
+		OutputPointer: output.Pointer(),
+		Rows:          rows,
+		Cols:          cols,
+		InputBytes:    input.SizeBytes(),
+		OutputBytes:   output.SizeBytes(),
+	}
+	var launchBytes []byte
+	var err error
+	if len(launchArgBuffer) >= hipQ8_1QuantizeLaunchArgsBytes {
+		launchBytes, err = args.BinaryInto(launchArgBuffer)
+	} else {
+		launchBytes, err = args.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	blocks := uint32(rows * (cols / hipQ8_1BlockSize))
+	return hipLaunchKernelContext(ctx, driver, hipKernelLaunchConfig{
+		Name:   hipKernelNameQ8_1QuantizeF32,
+		Args:   launchBytes,
+		GridX:  (blocks + hipQ8_1QuantizeBlocksPerWorkgroup - 1) / hipQ8_1QuantizeBlocksPerWorkgroup,
+		GridY:  1,
+		GridZ:  1,
+		BlockX: hipQ8_1QuantizeBlockSize,
+		BlockY: 1,
+		BlockZ: 1,
+	})
+}
+
+func hipRunGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchKernel(ctx context.Context, driver nativeHIPDriver, input, gate, up *hipDeviceByteBuffer, rows, cols, batch int, output *hipDeviceByteBuffer) error {
+	return hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometry(ctx, driver, hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8, hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock, hipGGUFQ4KQ8_1GateUpBatchTokensPerBlock, hipGGUFQ4KExpandedBlockBytes, input, gate, up, rows, cols, batch, output)
+}
+
+func hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometry(ctx context.Context, driver nativeHIPDriver, kernelName string, rowsPerBlock, tokensPerBlock uint32, weightBlockBytes uint64, input, gate, up *hipDeviceByteBuffer, rows, cols, batch int, output *hipDeviceByteBuffer) error {
+	return hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometryWithArgs(ctx, driver, kernelName, rowsPerBlock, tokensPerBlock, weightBlockBytes, input, gate, up, rows, cols, batch, output, nil)
+}
+
+func hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometryWithArgs(ctx context.Context, driver nativeHIPDriver, kernelName string, rowsPerBlock, tokensPerBlock uint32, weightBlockBytes uint64, input, gate, up *hipDeviceByteBuffer, rows, cols, batch int, output *hipDeviceByteBuffer, launchArgBuffer []byte) error {
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if driver == nil || !driver.Available() {
+		return core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "HIP driver is not available", nil)
+	}
+	if input == nil || gate == nil || up == nil || output == nil || input.Pointer() == 0 || gate.Pointer() == 0 || up.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "input, gate, up, and output device buffers are required", nil)
+	}
+	wantInputBytes := uint64(batch) * uint64(cols/hipQ8_1BlockSize) * hipQ8_1BlockBytes
+	wantWeightBytes := uint64(rows) * uint64(cols/hipGGUFQ4KBlockSize) * weightBlockBytes
+	if kernelName == "" || rowsPerBlock == 0 || tokensPerBlock == 0 || hipGGUFQ4_0ProjectionBlockSize%rowsPerBlock != 0 ||
+		rows <= 0 || cols <= 0 || batch <= 0 || cols%hipGGUFQ4KBlockSize != 0 ||
+		input.SizeBytes() != wantInputBytes || gate.SizeBytes() != wantWeightBytes || up.SizeBytes() != wantWeightBytes ||
+		output.Count() != batch*rows || output.SizeBytes() != uint64(batch)*uint64(rows)*4 {
+		return core.E("rocm.hip.GGUFQ4KQ8_1GateUpLaunch", "input, weight, or output device buffer shape mismatch", nil)
+	}
+	args := hipGGUFQ4KQ8_1GateUpLaunchArgs{
+		InputPointer:  input.Pointer(),
+		GatePointer:   gate.Pointer(),
+		UpPointer:     up.Pointer(),
+		OutputPointer: output.Pointer(),
+		Rows:          rows,
+		Cols:          cols,
+		Batch:         batch,
+		InputBytes:    input.SizeBytes(),
+		GateBytes:     gate.SizeBytes(),
+		UpBytes:       up.SizeBytes(),
+		OutputBytes:   output.SizeBytes(),
+	}
+	var launchBytes []byte
+	var err error
+	if len(launchArgBuffer) >= hipGGUFQ4KQ8_1GateUpLaunchArgsBytes {
+		launchBytes, err = args.BinaryInto(launchArgBuffer)
+	} else {
+		launchBytes, err = args.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	rowCount := uint32(rows)
+	return hipLaunchKernelContext(ctx, driver, hipKernelLaunchConfig{
+		Name:   kernelName,
+		Args:   launchBytes,
+		GridX:  (rowCount + rowsPerBlock - 1) / rowsPerBlock,
+		GridY:  (uint32(batch) + tokensPerBlock - 1) / tokensPerBlock,
+		GridZ:  1,
+		BlockX: hipGGUFQ4_0ProjectionBlockSize,
+		BlockY: 1,
+		BlockZ: 1,
+	})
 }
 
 func hipRunGGUFQ4_0GELUTanhGateUpKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input, weight *hipDeviceByteBuffer, rows, cols, rowOffset, weightRows int, output *hipDeviceByteBuffer) error {

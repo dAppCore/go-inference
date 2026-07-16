@@ -63,6 +63,93 @@ func TestHIPGemma4GGUFAffineSynthesis_Good_ReleasesSourceAllocations(t *testing.
 	core.AssertEqual(t, len(driver.allocations), len(driver.frees))
 }
 
+func TestHIPGemma4GGUFNative12BGateUpSources_Good(t *testing.T) {
+	t.Setenv(hipGemma4DenseQ4KEnv, "1")
+	q4K := func(name string, rows int) hipTensor {
+		return hipTensor{info: nativeTensorInfo{
+			Name: name, Dimensions: []uint64{3840, uint64(rows)}, Type: hipGGUFQ4KTensorType, TypeName: "Q4_K",
+		}}
+	}
+	sources := map[string]hipTensor{
+		"blk.0.ffn_gate.weight": q4K("blk.0.ffn_gate.weight", 15360),
+		"blk.0.ffn_up.weight":   q4K("blk.0.ffn_up.weight", 15360),
+		"blk.0.ffn_down.weight": q4K("blk.0.ffn_down.weight", 3840),
+		"blk.1.ffn_gate.weight": q4K("blk.1.ffn_gate.weight", 15360),
+		"blk.2.ffn_gate.weight": {info: nativeTensorInfo{Name: "blk.2.ffn_gate.weight", Dimensions: []uint64{3840, 15360}, TypeName: "Q5_K"}},
+		"blk.2.ffn_up.weight":   q4K("blk.2.ffn_up.weight", 15360),
+	}
+
+	selected := hipGemma4GGUFNative12BGateUpSourceNames(inference.ModelInfo{Architecture: "gemma4", HiddenSize: 3840}, sources)
+
+	core.AssertEqual(t, 2, len(selected))
+	core.AssertTrue(t, selected["blk.0.ffn_gate.weight"], "12B gate source must use native Q4_K")
+	core.AssertTrue(t, selected["blk.0.ffn_up.weight"], "12B up source must use native Q4_K")
+}
+
+func TestHIPGemma4GGUFNative12BGateUpSources_Bad(t *testing.T) {
+	t.Setenv(hipGemma4DenseQ4KEnv, "")
+	q4K := func(name string) hipTensor {
+		return hipTensor{info: nativeTensorInfo{
+			Name: name, Dimensions: []uint64{3840, 15360}, Type: hipGGUFQ4KTensorType, TypeName: "Q4_K",
+		}}
+	}
+	sources := map[string]hipTensor{
+		"blk.0.ffn_gate.weight": q4K("blk.0.ffn_gate.weight"),
+		"blk.0.ffn_up.weight":   q4K("blk.0.ffn_up.weight"),
+	}
+
+	selected := hipGemma4GGUFNative12BGateUpSourceNames(inference.ModelInfo{Architecture: "gemma4", HiddenSize: 3840}, sources)
+
+	core.AssertEqual(t, 0, len(selected))
+}
+
+func TestHIPGemma4GGUFExpandedQ4KSynthesis_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	payload := make([]byte, 2*hipGGUFQ4KBlockBytes)
+	pointer, err := driver.Malloc(uint64(len(payload)))
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, driver.CopyHostToDevice(pointer, payload))
+	source := hipTensor{info: nativeTensorInfo{
+		Name: "blk.0.ffn_gate.weight", Dimensions: []uint64{256, 2}, Type: hipGGUFQ4KTensorType, TypeName: "Q4_K", ByteSize: uint64(len(payload)),
+	}, pointer: pointer}
+	model := &hipLoadedModel{driver: driver, tensors: map[string]hipTensor{source.info.Name: source}}
+
+	core.RequireNoError(t, model.synthesizeGemma4GGUFExpandedQ4KTensor("language_model.model.layers.0.mlp.gate_proj", source))
+
+	expanded, ok := model.tensors["language_model.model.layers.0.mlp.gate_proj.q4_k_expanded"]
+	core.RequireTrue(t, ok)
+	core.AssertEqual(t, []uint64{256, 2}, expanded.info.Dimensions)
+	core.AssertEqual(t, "Q4_K_EXPANDED", expanded.info.TypeName)
+	core.AssertEqual(t, uint64(2*hipGGUFQ4KExpandedBlockBytes), expanded.info.ByteSize)
+	core.AssertEqual(t, 1, len(driver.launches))
+	core.AssertEqual(t, hipKernelNameGGUFQ4KExpandMetadata, driver.launches[0].Name)
+
+	core.RequireNoError(t, model.Close())
+}
+
+func TestHIPGemma4GGUFExpandedQ4KConfig_Good(t *testing.T) {
+	const (
+		rows = 15360
+		cols = 3840
+	)
+	bytes := uint64(rows * (cols / hipGGUFQ4KBlockSize) * hipGGUFQ4KExpandedBlockBytes)
+	prefix := "language_model.model.layers.0.mlp"
+	model := &hipLoadedModel{tensors: map[string]hipTensor{
+		prefix + ".gate_proj.q4_k_expanded": {info: nativeTensorInfo{Name: prefix + ".gate_proj.q4_k_expanded", Dimensions: []uint64{cols, rows}, Type: hipNativeTensorTypeQ4KExpanded, TypeName: "Q4_K_EXPANDED", ByteSize: bytes}, pointer: 11},
+		prefix + ".up_proj.q4_k_expanded":   {info: nativeTensorInfo{Name: prefix + ".up_proj.q4_k_expanded", Dimensions: []uint64{cols, rows}, Type: hipNativeTensorTypeQ4KExpanded, TypeName: "Q4_K_EXPANDED", ByteSize: bytes}, pointer: 22},
+	}}
+
+	cfg, ok, err := model.loadedGemma4Q4NativeQ4KGateUpConfig(prefix)
+	core.RequireNoError(t, err)
+	core.RequireTrue(t, ok)
+	core.AssertEqual(t, nativeDevicePointer(11), cfg.GatePointer)
+	core.AssertEqual(t, nativeDevicePointer(22), cfg.UpPointer)
+	core.AssertEqual(t, rows, cfg.Rows)
+	core.AssertEqual(t, cols, cfg.Cols)
+	core.AssertEqual(t, bytes, cfg.GateBytes)
+	core.AssertEqual(t, bytes, cfg.UpBytes)
+}
+
 func TestHIPGemma4GGUFQ4KAffineRepack_Good(t *testing.T) {
 	block := make([]byte, hipGGUFQ4KBlockBytes)
 	binary.LittleEndian.PutUint16(block[0:], rocmFloat32ToFloat16(0.5))
