@@ -17,7 +17,7 @@ discrete card is measured.
 | GPU | AMD Radeon RX 7800 XT, gfx1100, 16,368 MiB reported VRAM |
 | CPU / RAM | AMD Ryzen 9 9950X / 128 GB |
 | ROCm | 7.2.26015 |
-| go-inference | `50372990b5dde3b82612c4e92208d5d24023f90b` |
+| go-inference | `240ca410173f5a92f378f6d42ea553f26889b575` |
 | llama.cpp oracle | `c7d8722922a2599dc4d77f8808d8e6c2fde5e7a2` |
 
 ## Short-context board
@@ -25,21 +25,21 @@ discrete card is measured.
 HIP uses a two-token prompt, context 1024, and one `tg512` measured run. Model
 load is outside the timer. llama.cpp uses its warmup plus three measured
 `pp512` and `tg512` runs, flash attention, and full layer offload to `ROCm0`.
-The same-GGUF columns use the exact file in both engines. The native HIP pack
-column records the fastest already-supported Q4 representation and is not a
-numerical parity comparison against Q4_K_M.
+The same-GGUF columns use the exact file in both engines. The historical
+converted-pack column records the fastest older Q4 representation receipt and
+is not a numerical parity comparison against Q4_K_M.
 
-| target | HIP native Q4 tg512 | HIP same-GGUF tg512 | llama.cpp GGUF pp512 | llama.cpp GGUF tg512 | same-GGUF delta | decision |
+| target | HIP converted-pack Q4 tg512 (historical) | HIP same-GGUF tg512 | llama.cpp GGUF pp512 | llama.cpp GGUF tg512 | same-GGUF delta | decision |
 |---|---:|---:|---:|---:|---:|---|
 | E2B | **159.5** | 138.7 | 5,611.78 | 150.25 | -7.7% | native lane frozen above 100 tok/s |
 | E4B | 79.88 | **82.17** | 3,202.18 | 94.61 | -13.2% | active short-context gap |
-| 12B | **53.74** | 36.93 | 1,425.00 | 50.20 | -26.4% | native floor met; Q4_K path remains active |
+| 12B | **53.74** | **43.77** | 1,425.00 | 50.20 | -12.8% | portable GGUF gap narrowed; 50 tok/s floor remains active |
 | 26B-A4B | n/a | **56.80** | 806.55 | 62.25 | -8.8% | 50 tok/s floor met; deep-context row remains active |
 
-Native HIP artifacts are `mlx-community/gemma-4-e2b-it-4bit`,
-`lmstudio-community/gemma-4-E4B-it-MLX-4bit`, and
-`mlx-community/gemma-4-12b-it-4bit`. The standard 26B receipt uses GGUF host
-experts with attention and KV on the discrete card.
+The converted-pack column preserves older format-oracle receipts. Those packs
+are not the Linux delivery lane and are not used for current parity work. The
+active portable rows load the cached GGUF snapshots listed below. The standard
+26B receipt uses GGUF host experts with attention and KV on the discrete card.
 
 The llama.cpp files are pinned by Hugging Face snapshot:
 
@@ -60,6 +60,21 @@ canonical affine replacement. The duplicated 12B allocations exhausted VRAM
 on the first KV page pair. HIP now releases each source after successful
 synthesis; the same 12B GGUF completes `tg512` instead of returning
 `rocm.hip.hipMalloc: HIP returned 2`.
+
+### 12B Q4_K_M decode routing
+
+The portable 12B row improved from 36.93 tok/s to 41.90 tok/s when
+`8e34edde` stopped sending single-token mixed Q/K/V projections through batch
+kernels. The exact 15,360 by 3,840 fused gate/up geometries then measured a
+three-run mean of 43.25 tok/s for row16 and 43.75 tok/s for row8. `240ca410`
+promotes row8 as the default, and its no-override receipt is 43.77 tok/s. That
+is an 18.5% improvement over the previous board and reduces the same-GGUF gap
+to llama.cpp from 26.4% to 12.8%.
+
+The generic, row16, and row8 HIP++ kernels pass the same RX 7800 XT output
+oracle to 0.001. Internal affine kernel names describe the synthesized device
+layout produced after loading GGUF; they do not make this an MLX platform or
+an MLX model lane.
 
 ## Context growth
 
