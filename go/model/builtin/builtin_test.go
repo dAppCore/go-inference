@@ -133,6 +133,20 @@ func TestBuiltinRegistersOCRArches(t *testing.T) {
 	}
 }
 
+// TestBuiltinRegistersLlama4 pins the llama4 wiring through the blank-import:
+// both model_type spellings resolve with the Composed hook the arch registers
+// (llama4 runs host-side through the composed loader). The gap this closes was
+// real — the arch package existed with registration and tests but no builtin
+// import, so a serve binary reported "unknown model architecture" for llama4.
+func TestBuiltinRegistersLlama4(t *testing.T) {
+	for _, mt := range []string{"llama4", "llama4_text"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok || spec.Composed == nil {
+			t.Fatalf("model_type %q = registered %v composed %v, want a composed llama4 arch through builtin", mt, ok, spec.Composed != nil)
+		}
+	}
+}
+
 func TestBuiltinRegistersOpenAI(t *testing.T) {
 	for _, mt := range []string{"openai_privacy_filter", "whisper", "gpt_oss"} {
 		spec, ok := model.LookupArch(mt)

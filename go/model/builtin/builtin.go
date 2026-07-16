@@ -45,6 +45,7 @@ import (
 	_ "dappco.re/go/inference/model/arch/ibm-granite/granitemoe"  // IBM Granite sparse MoE
 	_ "dappco.re/go/inference/model/arch/jetmoe"                  // JetMoE routed FFN (MoA gap reported explicitly)
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"        // llama (dense text)
+	_ "dappco.re/go/inference/model/arch/meta-llama/llama4"       // llama4 / llama4_text — MoE Llama, composed host forward (packed zero-copy)
 	_ "dappco.re/go/inference/model/arch/microsoft/phi"           // phi / phi3
 	_ "dappco.re/go/inference/model/arch/mistralai/mistral"       // mistral
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"       // mixtral sparse MoE
