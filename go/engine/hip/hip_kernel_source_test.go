@@ -1074,6 +1074,7 @@ func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testin
 	core.AssertTrue(t, strings.Contains(gqa4Stage1, `rocm_attention_heads_batch_chunked_visible_tokens(args, query_row)`), "GQA4 stage1 must share capped K/V scans")
 	gqa8Stage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8`)
 	core.AssertTrue(t, strings.Contains(gqa8Stage1, `constexpr uint32_t group_size = 8u`), "GQA8 stage1 must own eight query heads per block")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `const int32_t packed_key = *reinterpret_cast<const int32_t *>(key_values + dim)`), "GQA8 stage1 must load adjacent q8 key values as one portable packed word")
 	core.AssertTrue(t, strings.Contains(gqa8Stage1, `quantized_dots[head] += query_values[head][dim] * quantized_key`), "GQA8 stage1 must reuse each K element across eight query heads")
 	core.AssertTrue(t, strings.Contains(gqa8Stage1, `const unsigned char packed = values[dim0 >> 1u]`), "GQA8 stage1 must load each packed V pair once")
 	core.AssertTrue(t, strings.Contains(gqa8Stage1, `rocm_attention_heads_batch_chunked_visible_tokens(args, query_row)`), "GQA8 stage1 must share capped K/V scans")

@@ -15468,6 +15468,7 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4(const 
 
 // Reuse each K/V scan across eight adjacent query heads while preserving the
 // per-head workspace layout consumed by the generic chunked stage 2 kernel.
+// Aligned q8 rows use packed word loads while retaining a scalar tail path.
 extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8(const unsigned char *packet)
 {
 	if (packet == nullptr) {
@@ -15641,10 +15642,26 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8(const 
 			for (uint32_t head = 0u; head < group_size; ++head) {
 				quantized_dots[head] = 0.0f;
 			}
-			for (uint32_t dim = lane; dim < args.dim; dim += score_lanes) {
-				const float quantized_key = static_cast<float>(key_values[dim]);
-				for (uint32_t head = 0u; head < group_size; ++head) {
-					quantized_dots[head] += query_values[head][dim] * quantized_key;
+			if ((args.dim & 3u) == 0u) {
+				for (uint32_t dim = lane << 2u; dim < args.dim; dim += score_lanes << 2u) {
+					const int32_t packed_key = *reinterpret_cast<const int32_t *>(key_values + dim);
+					const float key0 = static_cast<float>(static_cast<int8_t>(packed_key & 0xff));
+					const float key1 = static_cast<float>(static_cast<int8_t>((packed_key >> 8) & 0xff));
+					const float key2 = static_cast<float>(static_cast<int8_t>((packed_key >> 16) & 0xff));
+					const float key3 = static_cast<float>(static_cast<int8_t>((packed_key >> 24) & 0xff));
+					for (uint32_t head = 0u; head < group_size; ++head) {
+						quantized_dots[head] += query_values[head][dim] * key0;
+						quantized_dots[head] += query_values[head][dim + 1u] * key1;
+						quantized_dots[head] += query_values[head][dim + 2u] * key2;
+						quantized_dots[head] += query_values[head][dim + 3u] * key3;
+					}
+				}
+			} else {
+				for (uint32_t dim = lane; dim < args.dim; dim += score_lanes) {
+					const float quantized_key = static_cast<float>(key_values[dim]);
+					for (uint32_t head = 0u; head < group_size; ++head) {
+						quantized_dots[head] += query_values[head][dim] * quantized_key;
+					}
 				}
 			}
 			for (uint32_t head = 0u; head < group_size; ++head) {

@@ -8278,6 +8278,15 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 			blockSize:  hipGemma4Q4DeviceKVBlockSize(),
 		},
 		{
+			name:       "direct-pages-26b-global-dim512-gqa8-deep",
+			dim:        512,
+			tokenCount: hipAttentionHeadsDeepChunkMinTokens + 5,
+			headCount:  16,
+			keyHeads:   2,
+			queryCount: 1,
+			blockSize:  1,
+		},
+		{
 			name:       "descriptor-pages-12b-global-dim512-gqa2",
 			dim:        512,
 			tokenCount: hipAttentionHeadsChunkedBlockSize + 5,
