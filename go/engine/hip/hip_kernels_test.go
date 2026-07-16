@@ -1003,6 +1003,12 @@ func TestHIPKernels_MLXAffineQ4G32Projection12BDownLaunchConfig_Good(t *testing.
 	core.AssertEqual(t, hipKernelNameMLXQ4Proj, disabled.Name)
 }
 
+func TestHIPKernels_MLXAffineQ4G32Projection12BDownDefaults_Good(t *testing.T) {
+	core.AssertEqual(t, true, hipMLXQ4Projection12BDownRouteEnabledFromEnv(""))
+	core.AssertEqual(t, true, hipMLXQ4Projection12BDownRouteEnabledFromEnv("1"))
+	core.AssertEqual(t, false, hipMLXQ4Projection12BDownRouteEnabledFromEnv("0"))
+}
+
 func TestHIPKernels_MLXAffineQ4G64Projection12BDownLaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)

@@ -1988,6 +1988,81 @@ func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group64_Good(t *testing.T) {
 	testHIPHardwareMLXAffineQ4ProjectionCols2560(t, 64, 2048)
 }
 
+func TestHIPHardwareMLXAffineQ4Projection12BDownMatchesGeneric_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows         = 3840
+		cols         = 15360
+		groupSize    = 32
+		bits         = 4
+		groups       = cols / groupSize
+		packedPerRow = cols / 8
+	)
+	input := make([]float32, cols)
+	weights := make([]uint32, rows*packedPerRow)
+	scales := make([]uint16, rows*groups)
+	biases := make([]uint16, rows*groups)
+	for col := range input {
+		input[col] = float32((col%31)-15) / 128
+	}
+	for row := range rows {
+		for packed := range packedPerRow {
+			var word uint32
+			for lane := range 8 {
+				quant := uint32((row*3 + packed*5 + lane*7) & 0x0f)
+				word |= quant << (uint32(lane) * 4)
+			}
+			weights[row*packedPerRow+packed] = word
+		}
+		for group := range groups {
+			scale := float32((row+group)%7+1) / 2048
+			scales[row*groups+group] = hipFloat32ToBFloat16(scale)
+			biases[row*groups+group] = hipFloat32ToBFloat16(-3 * scale)
+		}
+	}
+	req := hipMLXQ4ProjectionRequest{
+		Input: input, Weight: weights, Scales: scales, Biases: biases,
+		Rows: rows, Cols: cols, GroupSize: groupSize, Bits: bits,
+	}
+	buffers, err := req.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer buffers.Close()
+	cfg := hipMLXQ4DeviceWeightConfig{
+		WeightPointer: buffers.Weight.Pointer(), ScalePointer: buffers.Scales.Pointer(), BiasPointer: buffers.Biases.Pointer(),
+		WeightBytes: buffers.Weight.SizeBytes(), ScaleBytes: buffers.Scales.SizeBytes(), BiasBytes: buffers.Biases.SizeBytes(),
+		Rows: rows, Cols: cols, GroupSize: groupSize, Bits: bits,
+	}
+
+	previousRoute := hipMLXQ4Projection12BDownRouteEnabled
+	t.Cleanup(func() {
+		hipMLXQ4Projection12BDownRouteEnabled = previousRoute
+	})
+	hipMLXQ4Projection12BDownRouteEnabled = false
+	core.RequireNoError(t, hipRunMLXQ4ProjectionKernelWithDeviceInputOutput(context.Background(), hipRuntime.driver, buffers.Input, cfg, buffers.Output))
+	generic, err := buffers.ReadOutput()
+	core.RequireNoError(t, err)
+
+	hipMLXQ4Projection12BDownRouteEnabled = true
+	core.RequireNoError(t, hipRunMLXQ4ProjectionKernelWithDeviceInputOutput(context.Background(), hipRuntime.driver, buffers.Input, cfg, buffers.Output))
+	exact, err := buffers.ReadOutput()
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, generic, exact, 0.001)
+}
+
 func testHIPHardwareMLXAffineQ4ProjectionCols2560(t *testing.T, groupSize, rows int) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")

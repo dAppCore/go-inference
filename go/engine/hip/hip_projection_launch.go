@@ -98,11 +98,15 @@ const (
 
 var (
 	hipMLXQ4GELUTanhMLPPersistentRouteEnabled = os.Getenv(hipMLXQ4GELUTanhMLPPersistentRouteEnv) == "1"
-	hipMLXQ4Projection12BDownRouteEnabled     = os.Getenv(hipMLXQ4Projection12BDownRouteEnv) == "1"
+	hipMLXQ4Projection12BDownRouteEnabled     = hipMLXQ4Projection12BDownRouteEnabledFromEnv(os.Getenv(hipMLXQ4Projection12BDownRouteEnv))
 	hipMLXQ4GELUTanh12BGateUpRouteEnabled     = hipMLXQ4GELUTanh12BGateUpRouteEnabledFromEnv(os.Getenv(hipMLXQ4GELUTanh12BGateUpRouteEnv))
 	hipMLXQ4GELUTanh12BGateUpGeometry         = hipMLXQ4GELUTanh12BGateUpGeometryFromEnv(os.Getenv(hipMLXQ4GELUTanh12BGateUpGeometryEnv))
 	hipMLXQ4Projection12BHeadGridBlocks       = hipExperimentalProjectionGridBlocks(hipMLXQ4Projection12BHeadGridEnv)
 )
+
+func hipMLXQ4Projection12BDownRouteEnabledFromEnv(value string) bool {
+	return value != "0"
+}
 
 func hipMLXQ4GELUTanh12BGateUpRouteEnabledFromEnv(value string) bool {
 	return value != "0"
