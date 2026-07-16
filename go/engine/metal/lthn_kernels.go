@@ -1740,6 +1740,12 @@ func topKReduceSampleUsable(topK, vocab int) bool {
 	if topK <= 0 || topK > headSampleTopKMaxK || vocab <= 0 {
 		return false
 	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		// Pre-init (hostTopKSamplePreferred is pure-host-callable): answer false WITHOUT touching
+		// the pipeline sync.Onces — resolving against a nil library would latch failure for the
+		// process lifetime and permanently disable the reduce lane after init.
+		return false
+	}
 	if (vocab+topKReduceTileRows-1)/topKReduceTileRows > topKReduceMaxTiles {
 		return false
 	}
@@ -1802,6 +1808,76 @@ func encBF16LogitsTopKReduceBF16(
 	setEncInt32(enc, int32(topK), 10)
 	dispatchThreadgroups(enc,
 		metal.MTLSize{Width: uint(tiles), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
+}
+
+// encBF16LogitsTopKReduceBF16Object is encBF16LogitsTopKReduceBF16 on an object encoder — the
+// chained/pipelined sampled tails encode through MTLComputeCommandEncoderObject.
+func encBF16LogitsTopKReduceBF16Object(
+	enc metal.MTLComputeCommandEncoderObject,
+	logits, values, indices, suppress, history metal.MTLBuffer,
+	vocab, suppressCount, historyCount, topK int,
+	repeatPenalty, softCap float32,
+) error {
+	if vocab <= 0 {
+		return core.NewError("native.encBF16LogitsTopKReduceBF16: invalid logits geometry")
+	}
+	if topK <= 0 || topK > headSampleTopKMaxK {
+		return core.NewError("native.encBF16LogitsTopKReduceBF16: topK must be in 1..64")
+	}
+	tiles := topKReduceTileCount(vocab)
+	if tiles > topKReduceMaxTiles {
+		return core.NewError("native.encBF16LogitsTopKReduceBF16: vocab exceeds the reduce merge tile budget")
+	}
+	pso, err := bf16LogitsTopKReducePipeline()
+	if err != nil {
+		return err
+	}
+	sink := encObjectSink{enc: enc}
+	sink.setPSO(pso)
+	sink.setBuf(logits, 0, 0)
+	sink.setBuf(values, 0, 1)
+	sink.setBuf(indices, 0, 2)
+	sink.setI32(int32(vocab), 3)
+	if suppress == nil {
+		suppress = logits
+	}
+	sink.setBuf(suppress, 0, 4)
+	sink.setI32(int32(suppressCount), 5)
+	if history == nil {
+		history = logits
+	}
+	sink.setBuf(history, 0, 6)
+	sink.setI32(int32(historyCount), 7)
+	sink.setF32(repeatPenalty, 8)
+	sink.setF32(softCap, 9)
+	sink.setI32(int32(topK), 10)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(tiles), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
+}
+
+// encTopKReduceMergeSampleF32Object is encTopKReduceMergeSampleF32 on an object encoder.
+func encTopKReduceMergeSampleF32Object(enc metal.MTLComputeCommandEncoderObject, values, indices, out, params metal.MTLBuffer) error {
+	if params == nil {
+		return core.NewError("native.encTopKReduceMergeSampleF32: missing params buffer")
+	}
+	pso, err := topKReduceMergeSamplePipeline()
+	if err != nil {
+		return err
+	}
+	sink := encObjectSink{enc: enc}
+	sink.setPSO(pso)
+	sink.setBuf(values, 0, 0)
+	sink.setBuf(indices, 0, 1)
+	sink.setBuf(out, 0, 2)
+	sink.setBuf(params, 0, 3)
+	sink.dispatchThreads(
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 	)
 	return nil

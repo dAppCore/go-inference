@@ -33,6 +33,12 @@ const hostTopKSampleVocabMin = 4096
 // logits-sample lane; only the 1 < K <= headSampleTopKMaxK window pays the
 // slow selection kernels.
 func hostTopKSamplePreferred(params model.SampleParams, vocab int) bool {
+	if topKReduceSampleUsable(params.TopK, vocab) {
+		// #23: the reduction-shaped device pick (112µs at 262k/k=64, ×346 over the insertion
+		// kernels this preference was measured against) beats the host lane AND rides inside the
+		// step's command buffer — which is what lets the sampled chained/pipelined tails form.
+		return false
+	}
 	return params.TopK > 1 && params.TopK <= headSampleTopKMaxK && vocab >= hostTopKSampleVocabMin
 }
 

@@ -142,6 +142,7 @@ type headHiddenScratch struct {
 }
 
 type headTopKScratch struct {
+	reduceForm            bool
 	candidateCapacity     int
 	candidateValues       metal.MTLBuffer
 	candidateIndices      metal.MTLBuffer
@@ -724,6 +725,7 @@ func (h *headEncoder) getTopKScratch(candidateCount, topK int, needLogits bool) 
 		hasNormed := s.dModelCapacity >= h.dModel && s.normed != nil
 		hasLogits := !needLogits || (s.vocabCapacity >= h.vocab && s.logits != nil)
 		if hasCandidates && hasTopK && hasNormed && hasLogits {
+			s.reduceForm = false
 			return s
 		}
 	}
@@ -735,6 +737,12 @@ func (h *headEncoder) putTopKScratch(s *headTopKScratch) {
 		h.topKScratch.Put(s)
 	}
 }
+
+// reduceForm marks a scratch whose candidates came from the reduction-shaped stage 1 (#23):
+// tiles×topK flat DESCENDING candidates — the sample wrappers then run the reduce merge with
+// n = tile count instead of the insertion merge with n = flat count. Candidates-only consumers
+// (the host SampleCandidates flows) read the flat layout identically either way.
+func (s *headTopKScratch) setReduceForm(v bool) { s.reduceForm = v }
 
 func (s *headTopKScratch) sampleParamsBuffer(params model.SampleParams, draw float32, candidateCount int) metal.MTLBuffer {
 	p := s.sampleParamsPtr
@@ -1327,7 +1335,16 @@ func (h *headEncoder) topKSampleUsable(topK int) bool {
 }
 
 func (h *headEncoder) preferFusedQ4TopK(topK int) bool {
-	return h != nil && h.quant && q4LMHeadTopKUsable(h.dModel, h.vocab, h.groupSize, h.bits, topK)
+	if h == nil || !h.quant {
+		return false
+	}
+	if topKReduceSampleUsable(topK, h.vocab) {
+		// #23: the qmv-logits + reduction pick route (qmv matvec + 112µs select) beats the fused
+		// Q4 top-k tiles (22.6ms of the same register-spill selection the reduce kernels
+		// replaced) — never prefer the fused arm when the reduce route can run.
+		return false
+	}
+	return q4LMHeadTopKUsable(h.dModel, h.vocab, h.groupSize, h.bits, topK)
 }
 
 func (h *headEncoder) sampleTopKToken(hidden []byte, params model.SampleParams, draw float32, history []int32) (token int32, ok bool, err error) {
@@ -1482,9 +1499,15 @@ func (h *headEncoder) encodeTopKSampleAtFast(enc metal.MTLComputeCommandEncoderO
 
 func (h *headEncoder) encodeTopKSample(enc metal.MTLComputeCommandEncoder, hiddenBuf metal.MTLBuffer, params model.SampleParams, draw float32, history []int32, preferFusedQ4 bool) (scratch *headTopKScratch, ok bool, err error) {
 	var candidateCount int
-	scratch, candidateCount, ok, err = h.encodeTopKCandidateRows(enc, hiddenBuf, params.TopK, params.SuppressTokens, history, params.RepeatPenalty, preferFusedQ4)
+	scratch, candidateCount, ok, err = h.encodeTopKCandidateRows(enc, hiddenBuf, params.TopK, params.SuppressTokens, history, params.RepeatPenalty, preferFusedQ4, true)
 	if !ok || err != nil {
 		return scratch, ok, err
+	}
+	if scratch.reduceForm {
+		if err = encTopKReduceMergeSampleF32(enc, scratch.candidateValues, scratch.candidateIndices, scratch.outToken, scratch.sampleParamsBuffer(params, draw, candidateCount/params.TopK)); err != nil {
+			return scratch, true, err
+		}
+		return scratch, true, nil
 	}
 	if err = encTopKMergeSampleF32(enc, scratch.candidateValues, scratch.candidateIndices, scratch.outToken, scratch.sampleParamsBuffer(params, draw, candidateCount)); err != nil {
 		return scratch, true, err
@@ -1498,9 +1521,15 @@ func (h *headEncoder) encodeTopKSampleObject(enc metal.MTLComputeCommandEncoderO
 
 func (h *headEncoder) encodeTopKSampleObjectAt(enc metal.MTLComputeCommandEncoderObject, hiddenBuf metal.MTLBuffer, hiddenOff uint, params model.SampleParams, draw float32, history []int32, preferFusedQ4 bool) (scratch *headTopKScratch, ok bool, err error) {
 	var candidateCount int
-	scratch, candidateCount, ok, err = h.encodeTopKCandidateRowsObjectAt(enc, hiddenBuf, hiddenOff, params.TopK, params.SuppressTokens, history, params.RepeatPenalty, preferFusedQ4)
+	scratch, candidateCount, ok, err = h.encodeTopKCandidateRowsObjectAt(enc, hiddenBuf, hiddenOff, params.TopK, params.SuppressTokens, history, params.RepeatPenalty, preferFusedQ4, true)
 	if !ok || err != nil {
 		return scratch, ok, err
+	}
+	if scratch.reduceForm {
+		if err = encTopKReduceMergeSampleF32Object(enc, scratch.candidateValues, scratch.candidateIndices, scratch.outToken, scratch.sampleParamsBuffer(params, draw, candidateCount/params.TopK)); err != nil {
+			return scratch, true, err
+		}
+		return scratch, true, nil
 	}
 	if err = encTopKMergeSampleF32Object(enc, scratch.candidateValues, scratch.candidateIndices, scratch.outToken, scratch.sampleParamsBuffer(params, draw, candidateCount)); err != nil {
 		return scratch, true, err
@@ -1519,7 +1548,7 @@ func (h *headEncoder) encodeTopKCandidates(enc metal.MTLComputeCommandEncoder, h
 
 func (h *headEncoder) encodeTopKCandidatesWithHistory(enc metal.MTLComputeCommandEncoder, hiddenBuf metal.MTLBuffer, topK int, suppress []int32, history []int32, repeatPenalty float32, preferFusedQ4 bool) (scratch *headTopKScratch, ok bool, err error) {
 	var candidateCount int
-	scratch, candidateCount, ok, err = h.encodeTopKCandidateRows(enc, hiddenBuf, topK, suppress, history, repeatPenalty, preferFusedQ4)
+	scratch, candidateCount, ok, err = h.encodeTopKCandidateRows(enc, hiddenBuf, topK, suppress, history, repeatPenalty, preferFusedQ4, false)
 	if !ok || err != nil {
 		return scratch, ok, err
 	}
@@ -1542,15 +1571,16 @@ func (h *headEncoder) encodeTopKCandidatesWithHistoryObject(enc metal.MTLCompute
 }
 
 func (h *headEncoder) encodeTopKCandidateRowsObject(enc metal.MTLComputeCommandEncoderObject, hiddenBuf metal.MTLBuffer, topK int, suppress []int32, history []int32, repeatPenalty float32, preferFusedQ4 bool) (scratch *headTopKScratch, candidateCount int, ok bool, err error) {
-	return h.encodeTopKCandidateRowsObjectAt(enc, hiddenBuf, 0, topK, suppress, history, repeatPenalty, preferFusedQ4)
+	return h.encodeTopKCandidateRowsObjectAt(enc, hiddenBuf, 0, topK, suppress, history, repeatPenalty, preferFusedQ4, false)
 }
 
-func (h *headEncoder) encodeTopKCandidateRowsObjectAt(enc metal.MTLComputeCommandEncoderObject, hiddenBuf metal.MTLBuffer, hiddenOff uint, topK int, suppress []int32, history []int32, repeatPenalty float32, preferFusedQ4 bool) (scratch *headTopKScratch, candidateCount int, ok bool, err error) {
+func (h *headEncoder) encodeTopKCandidateRowsObjectAt(enc metal.MTLComputeCommandEncoderObject, hiddenBuf metal.MTLBuffer, hiddenOff uint, topK int, suppress []int32, history []int32, repeatPenalty float32, preferFusedQ4, preferReduce bool) (scratch *headTopKScratch, candidateCount int, ok bool, err error) {
 	if h.finalNorm.buf == nil || h.weight.buf == nil || topK <= 0 || topK > headSampleTopKMaxK || topK > h.vocab {
 		return nil, 0, false, nil
 	}
 	needLogits := false
 	fusedQuantTopK := false
+	reduceForm := false
 	fusedCandidatesPerTile := topK
 	candidateCount = h.vocab
 	if h.quant {
@@ -1567,7 +1597,12 @@ func (h *headEncoder) encodeTopKCandidateRowsObjectAt(enc metal.MTLComputeComman
 		} else {
 			qmvUsable := qmvLogitsTopKUsable(h.dModel, h.vocab, h.groupSize, h.bits, topK)
 			if qmvUsable {
-				candidateCount = ((h.vocab + bf16LogitsArgmaxRowsPerTile - 1) / bf16LogitsArgmaxRowsPerTile) * topK
+				if preferReduce && topKReduceSampleUsable(topK, h.vocab) {
+					reduceForm = true
+					candidateCount = topKReduceTileCount(h.vocab) * topK
+				} else {
+					candidateCount = ((h.vocab + bf16LogitsArgmaxRowsPerTile - 1) / bf16LogitsArgmaxRowsPerTile) * topK
+				}
 			} else if q4Usable {
 				needLogits = false
 				fusedQuantTopK = true
@@ -1584,6 +1619,7 @@ func (h *headEncoder) encodeTopKCandidateRowsObjectAt(enc metal.MTLComputeComman
 		candidateCount = ((h.vocab + bf16LMHeadArgmaxRowsPerTile - 1) / bf16LMHeadArgmaxRowsPerTile) * bf16LMHeadArgmaxRowsPerTile
 	}
 	scratch = h.getTopKScratch(candidateCount, topK, needLogits)
+	scratch.reduceForm = reduceForm
 	normed := scratch.normed
 	suppressBuf := scratch.suppressBuffer(suppress)
 	historyBuf := scratch.historyBuffer(history)
@@ -1606,7 +1642,11 @@ func (h *headEncoder) encodeTopKCandidateRowsObjectAt(enc metal.MTLComputeComman
 				return scratch, candidateCount, true, err
 			}
 			emitQMV(sink, qmvPSO, h.weight.buf, h.weight.off, h.scales.buf, h.scales.off, h.biases.buf, h.biases.off, normed, scratch.logits, 0, h.dModel, h.vocab)
-			if err = encBF16LogitsTopKTilesBF16Object(enc, scratch.logits, scratch.candidateValues, scratch.candidateIndices, suppressBuf, historyBuf, h.vocab, len(suppress), historyCount, topK, repeatPenalty, h.softCap); err != nil {
+			if scratch.reduceForm {
+				if err = encBF16LogitsTopKReduceBF16Object(enc, scratch.logits, scratch.candidateValues, scratch.candidateIndices, suppressBuf, historyBuf, h.vocab, len(suppress), historyCount, topK, repeatPenalty, h.softCap); err != nil {
+					return scratch, candidateCount, true, err
+				}
+			} else if err = encBF16LogitsTopKTilesBF16Object(enc, scratch.logits, scratch.candidateValues, scratch.candidateIndices, suppressBuf, historyBuf, h.vocab, len(suppress), historyCount, topK, repeatPenalty, h.softCap); err != nil {
 				return scratch, candidateCount, true, err
 			}
 		}
@@ -1618,12 +1658,13 @@ func (h *headEncoder) encodeTopKCandidateRowsObjectAt(enc metal.MTLComputeComman
 	return scratch, candidateCount, true, nil
 }
 
-func (h *headEncoder) encodeTopKCandidateRows(enc metal.MTLComputeCommandEncoder, hiddenBuf metal.MTLBuffer, topK int, suppress []int32, history []int32, repeatPenalty float32, preferFusedQ4 bool) (scratch *headTopKScratch, candidateCount int, ok bool, err error) {
+func (h *headEncoder) encodeTopKCandidateRows(enc metal.MTLComputeCommandEncoder, hiddenBuf metal.MTLBuffer, topK int, suppress []int32, history []int32, repeatPenalty float32, preferFusedQ4, preferReduce bool) (scratch *headTopKScratch, candidateCount int, ok bool, err error) {
 	if h.finalNorm.buf == nil || h.weight.buf == nil || topK <= 0 || topK > headSampleTopKMaxK || topK > h.vocab {
 		return nil, 0, false, nil
 	}
 	needLogits := false
 	fusedQuantTopK := false
+	reduceForm := false
 	fusedCandidatesPerTile := topK
 	candidateCount = h.vocab
 	if h.quant {
@@ -1639,7 +1680,12 @@ func (h *headEncoder) encodeTopKCandidateRows(enc metal.MTLComputeCommandEncoder
 			qmvUsable := qmvLogitsTopKUsable(h.dModel, h.vocab, h.groupSize, h.bits, topK)
 			if qmvUsable {
 				needLogits = true
-				candidateCount = ((h.vocab + bf16LogitsArgmaxRowsPerTile - 1) / bf16LogitsArgmaxRowsPerTile) * topK
+				if preferReduce && topKReduceSampleUsable(topK, h.vocab) {
+					reduceForm = true
+					candidateCount = topKReduceTileCount(h.vocab) * topK
+				} else {
+					candidateCount = ((h.vocab + bf16LogitsArgmaxRowsPerTile - 1) / bf16LogitsArgmaxRowsPerTile) * topK
+				}
 			} else if q4Usable {
 				fusedQuantTopK = true
 				fusedCandidatesPerTile = q4LMHeadTopKCandidatesPerTile(topK)
@@ -1656,6 +1702,7 @@ func (h *headEncoder) encodeTopKCandidateRows(enc metal.MTLComputeCommandEncoder
 	}
 
 	scratch = h.getTopKScratch(candidateCount, topK, needLogits)
+	scratch.reduceForm = reduceForm
 	normed := scratch.normed
 	suppressBuf := scratch.suppressBuffer(suppress)
 	historyBuf := scratch.historyBuffer(history)

@@ -132,8 +132,14 @@ func TestHostTopKSamplePreferred(t *testing.T) {
 	if hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 32) {
 		t.Fatal("fixture vocab must not prefer host select")
 	}
-	if !hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 262144) {
-		t.Fatal("TopK=40 at 262k vocab must prefer host select")
+	if topKReduceSampleUsable(40, 262144) {
+		// #23: with the reduction-shaped device pick available, real-vocab TopK routes DEVICE —
+		// that is the flip this preference rule now encodes.
+		if hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 262144) {
+			t.Fatal("TopK=40 at 262k vocab must prefer the reduce device pick when its pipelines exist")
+		}
+	} else if !hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 262144) {
+		t.Fatal("TopK=40 at 262k vocab must prefer host select when the reduce pick is unavailable")
 	}
 	if hostTopKSamplePreferred(model.SampleParams{TopK: headSampleTopKMaxK + 1}, 262144) {
 		t.Fatal("TopK beyond the max stays on the generic host sampler")
