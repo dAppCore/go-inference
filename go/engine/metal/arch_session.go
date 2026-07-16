@@ -5987,12 +5987,16 @@ func (s *ArchSession) sampledPipelinedGPUTailCanContinue(params model.SamplePara
 
 func (s *ArchSession) generateSampledChainedGPUTail(gen []int32, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, yield func(int32) bool, cacheFinal bool, initialGenerated int, history []int32) ([]int32, []int32, error) {
 	if s.sampledPipelinedGPUTailCanContinue(params, history, nil) {
-		if cacheFinal {
-			return s.generateSampledPipelinedGPUTail(gen, maxNew, stopTokens, sampler, params, yield, initialGenerated, history)
-		}
-		if yield == nil && len(stopTokens) == 0 {
+		if !cacheFinal && yield == nil && len(stopTokens) == 0 {
 			return s.generateSampledPipelinedGPUOneShotTail(gen, maxNew, sampler, params, initialGenerated, history)
 		}
+		// The one-ahead pipeline serves STREAMING (yield + stop tokens) too — the same shape the
+		// greedy pipelined tail ships as the serve default (#23: the chained per-token wait cost
+		// ~0.77ms/token, 143 vs 171 tok/s on E2B). Safe at a stop for the same reason greedy is:
+		// each command buffer is [step of emitted token N + pick of N+1], so the trailing in-flight
+		// buffer only wastes a PICK (and one RNG draw), never a phantom KV row — the emitted stream
+		// is draw-for-draw identical to the chained loop's.
+		return s.generateSampledPipelinedGPUTail(gen, maxNew, stopTokens, sampler, params, yield, initialGenerated, history)
 	}
 	icb := s.state.icb
 	sc := s.gpuTailPLScratchBuffer(0)

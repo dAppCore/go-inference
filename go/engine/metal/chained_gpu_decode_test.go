@@ -1879,3 +1879,70 @@ func TestSampledPipelinedGPUTailPieceTimingSpan(t *testing.T) {
 		}
 	})
 }
+
+// TestSampledPipelinedGPUTailStreamingMatchesChained pins the #23 dispatch widening: a STREAMING
+// sampled generation (yield + stop tokens, cacheFinal false — the serve/generate shape that used to
+// fall back to the per-token-wait chained loop) now rides the one-ahead pipelined tail and must emit
+// tokens draw-for-draw identical to the chained loop, both on the TopK arm (the gemma4 serving
+// default shape) and with a stop token terminating mid-stream.
+func TestSampledPipelinedGPUTailStreamingMatchesChained(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 3, 256, 32, 0)
+	const maxLen, maxNew = 24, 8
+	prompt := []int32{1, 5, 3, 2}
+	params := model.SampleParams{Temperature: 0.9, TopK: 4}
+
+	oldPipe := pipelinedGPUDecodeEnabled
+	oldChainDisabled := chainedGPUInputsDisabled
+	defer func() {
+		pipelinedGPUDecodeEnabled = oldPipe
+		chainedGPUInputsDisabled = oldChainDisabled
+	}()
+	chainedGPUInputsDisabled = false
+
+	run := func(pipelined bool, stopTokens []int32) []int32 {
+		t.Helper()
+		pipelinedGPUDecodeEnabled = pipelined
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("session: %v", err)
+		}
+		if pipelined && sess.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		var streamed []int32
+		yield := func(id int32) bool {
+			streamed = append(streamed, id)
+			return true
+		}
+		gen, err := sess.GenerateSampledEach(prompt, maxNew, stopTokens, model.NewSampler(77), params, nil, yield)
+		if err != nil {
+			t.Fatalf("GenerateSampledEach(pipelined=%v): %v", pipelined, err)
+		}
+		if !idsEqual(streamed, gen) {
+			t.Fatalf("streamed %v != returned %v (pipelined=%v)", streamed, gen, pipelined)
+		}
+		return gen
+	}
+
+	chainGen := run(false, nil)
+	pipeGen := run(true, nil)
+	if !idsEqual(pipeGen, chainGen) {
+		t.Fatalf("streaming pipelined tokens = %v, want chained %v", pipeGen, chainGen)
+	}
+	if len(chainGen) < 3 {
+		t.Skipf("fixture run too short to pick a mid-stream stop (%d tokens)", len(chainGen))
+	}
+	stop := []int32{chainGen[2]} // terminate on the third token, mid-pipeline
+	chainStop := run(false, stop)
+	pipeStop := run(true, stop)
+	if !idsEqual(pipeStop, chainStop) {
+		t.Fatalf("stop-token pipelined tokens = %v, want chained %v", pipeStop, chainStop)
+	}
+	if pipeStop[len(pipeStop)-1] != stop[0] {
+		t.Fatalf("pipelined run did not terminate on the stop token: %v (stop %d)", pipeStop, stop[0])
+	}
+	t.Logf("streaming + stop-token parity held: %d tokens full, %d to stop", len(chainGen), len(chainStop))
+}
