@@ -90,16 +90,26 @@ func TestCompare_ComparePacks_ContextCancelled(t *core.T) {
 	core.AssertError(t, err)
 }
 
+// TestCompare_ValidateComparePack_Good documents that a source carrying
+// both a root and at least one weight file passes validation regardless of
+// which label ("base" or "fine-tuned") it is checked under.
 func TestCompare_ValidateComparePack_Good(t *core.T) {
-	core.AssertNoError(t, validateComparePack("base", Source{Root: "/x", WeightFiles: []string{"/x/model.safetensors"}}))
+	base := Source{Root: "/x", WeightFiles: []string{"/x/model.safetensors"}}
+	core.AssertNoError(t, validateComparePack("base", base))
+	tuned := Source{Root: "/y", WeightFiles: []string{"/y/a.safetensors", "/y/b.safetensors"}}
+	core.AssertNoError(t, validateComparePack("fine-tuned", tuned))
 }
 
 func TestCompare_ValidateComparePack_Bad(t *core.T) {
-	core.AssertError(t, validateComparePack("base", Source{}), "root is required")
+	err := validateComparePack("base", Source{})
+	core.AssertError(t, err, "root is required")
+	core.AssertError(t, err, "base")
 }
 
 func TestCompare_ValidateComparePack_Ugly(t *core.T) {
-	core.AssertError(t, validateComparePack("fine-tuned", Source{Root: "/x"}), "requires weight files")
+	err := validateComparePack("fine-tuned", Source{Root: "/x"})
+	core.AssertError(t, err, "requires weight files")
+	core.AssertError(t, err, "fine-tuned")
 }
 
 func TestCompare_CompareTensorEntries_Good(t *core.T) {
@@ -127,39 +137,81 @@ func TestCompare_CompareTensorEntries_Ugly(t *core.T) {
 	core.AssertEqual(t, CompareStatusDTypeMismatch, delta.Status)
 }
 
+// TestCompare_CompareCosine_Good documents cosine similarity for a
+// genuinely aligned pair (dot == both norms means the vectors are
+// identical) plus the both-zero convention, which is defined as identical.
 func TestCompare_CompareCosine_Good(t *core.T) {
+	core.AssertInDelta(t, 1.0, compareCosine(4, 4, 4), 1e-12)
+	core.AssertInDelta(t, 1.0, compareCosine(8, 4, 16), 1e-12) // scale-invariant: same direction, different magnitude
 	core.AssertEqual(t, 1.0, compareCosine(0, 0, 0))
 }
 
+// TestCompare_CompareCosine_Bad exercises both sides of the single-zero-norm
+// branch: similarity against a zero-magnitude vector is undefined, so 0 is
+// returned whichever operand carries the zero norm, regardless of dot sign.
 func TestCompare_CompareCosine_Bad(t *core.T) {
 	core.AssertEqual(t, 0.0, compareCosine(0, 1, 0))
+	core.AssertEqual(t, 0.0, compareCosine(5, 0, 9))
+	core.AssertEqual(t, 0.0, compareCosine(-5, 0, 9))
 }
 
+// TestCompare_CompareCosine_Ugly covers orthogonal vectors (dot == 0, both
+// norms non-zero), a genuine mid-range negative cosine needing no clamp,
+// and clamping of an out-of-[-1,1] cosine caused by floating-point drift.
 func TestCompare_CompareCosine_Ugly(t *core.T) {
 	core.AssertInDelta(t, 0, compareCosine(0, 1, 1), 1e-12)
+	core.AssertInDelta(t, -0.5, compareCosine(-2, 4, 4), 1e-12)
+	core.AssertEqual(t, -1.0, compareCosine(-100, 1, 1))
 }
 
+// TestCompare_CloneCompareLabels_Good documents Clone's independence
+// guarantee: mutating the source map after cloning must not leak into the
+// returned copy.
 func TestCompare_CloneCompareLabels_Good(t *core.T) {
-	got := cloneCompareLabels(map[string]string{"a": "b"})
+	src := map[string]string{"a": "b"}
+	got := cloneCompareLabels(src)
 	core.AssertEqual(t, map[string]string{"a": "b"}, got)
+	src["a"] = "mutated"
+	core.AssertEqual(t, "b", got["a"])
 }
 
+// TestCompare_CloneCompareLabels_Bad documents that an empty-but-non-nil
+// map normalises to nil rather than an allocated empty map — saving a
+// downstream JSON `"labels":{}` versus an omitted field.
 func TestCompare_CloneCompareLabels_Bad(t *core.T) {
-	core.AssertNil(t, cloneCompareLabels(map[string]string{}))
+	src := map[string]string{}
+	got := cloneCompareLabels(src)
+	core.AssertNil(t, got)
+	core.AssertLen(t, src, 0)
 }
 
 func TestCompare_CloneCompareLabels_Ugly(t *core.T) {
-	core.AssertNil(t, cloneCompareLabels(nil))
+	got := cloneCompareLabels(nil)
+	core.AssertNil(t, got)
+	core.AssertEqual(t, map[string]string(nil), got)
 }
 
+// TestCompare_CloneIntSlice_Good documents Clone's independence guarantee:
+// mutating the source slice after cloning must not leak into the copy.
 func TestCompare_CloneIntSlice_Good(t *core.T) {
-	core.AssertEqual(t, []int{1, 2}, cloneIntSlice([]int{1, 2}))
+	src := []int{1, 2}
+	got := cloneIntSlice(src)
+	core.AssertEqual(t, []int{1, 2}, got)
+	src[0] = 99
+	core.AssertEqual(t, 1, got[0])
 }
 
+// TestCompare_CloneIntSlice_Bad documents that an empty-but-non-nil slice
+// normalises to nil, matching cloneCompareLabels' convention.
 func TestCompare_CloneIntSlice_Bad(t *core.T) {
-	core.AssertNil(t, cloneIntSlice([]int{}))
+	src := []int{}
+	got := cloneIntSlice(src)
+	core.AssertNil(t, got)
+	core.AssertLen(t, src, 0)
 }
 
 func TestCompare_CloneIntSlice_Ugly(t *core.T) {
-	core.AssertNil(t, cloneIntSlice(nil))
+	got := cloneIntSlice(nil)
+	core.AssertNil(t, got)
+	core.AssertEqual(t, []int(nil), got)
 }

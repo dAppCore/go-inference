@@ -34,8 +34,9 @@ func TestMergeTensors_IndexWeightFiles_Good(t *core.T) {
 }
 
 func TestMergeTensors_IndexWeightFiles_Bad(t *core.T) {
-	_, err := indexWeightFiles([]string{core.PathJoin(t.TempDir(), "missing.safetensors")})
-	core.AssertError(t, err)
+	index, err := indexWeightFiles([]string{core.PathJoin(t.TempDir(), "missing.safetensors")})
+	core.AssertError(t, err, "read safetensors")
+	core.AssertNil(t, index.Tensors)
 }
 
 func TestMergeTensors_IndexWeightFiles_Ugly(t *core.T) {
@@ -49,16 +50,29 @@ func TestMergeTensors_IndexWeightFiles_Ugly(t *core.T) {
 	core.AssertError(t, err, "duplicate tensor")
 }
 
+// TestMergeTensors_ShapeElements_Good covers a 1-D, 2-D, and 3-D shape —
+// the product-of-dimensions rule generalises past the common matrix case.
 func TestMergeTensors_ShapeElements_Good(t *core.T) {
+	core.AssertEqual(t, 5, shapeElements([]int{5}))
 	core.AssertEqual(t, 6, shapeElements([]int{2, 3}))
+	core.AssertEqual(t, 24, shapeElements([]int{2, 3, 4}))
 }
 
+// TestMergeTensors_ShapeElements_Bad covers the scalar convention (empty
+// shape means 1 element) for a nil shape, an empty-but-non-nil shape, and
+// an explicit all-ones shape (same product, different representation).
 func TestMergeTensors_ShapeElements_Bad(t *core.T) {
 	core.AssertEqual(t, 1, shapeElements(nil))
+	core.AssertEqual(t, 1, shapeElements([]int{}))
+	core.AssertEqual(t, 1, shapeElements([]int{1, 1}))
 }
 
+// TestMergeTensors_ShapeElements_Ugly covers a zero-sized dimension
+// collapsing the product to 0, at three different positions in the shape.
 func TestMergeTensors_ShapeElements_Ugly(t *core.T) {
 	core.AssertEqual(t, 0, shapeElements([]int{0, 5}))
+	core.AssertEqual(t, 0, shapeElements([]int{5, 0, 3}))
+	core.AssertEqual(t, 0, shapeElements([]int{0}))
 }
 
 func TestMergeTensors_GatherTensorEntries_Good(t *core.T) {
@@ -126,8 +140,9 @@ func TestMergeTensors_MergeTensorValues_Bad(t *core.T) {
 }
 
 func TestMergeTensors_MergeTensorValues_Ugly(t *core.T) {
-	_, err := mergeTensorValues([][]float32{{1}}, Method("ties"), 0, []float64{1})
+	got, err := mergeTensorValues([][]float32{{1}}, Method("ties"), 0, []float64{1})
 	core.AssertError(t, err, "unsupported model merge method")
+	core.AssertNil(t, got)
 }
 
 func TestMergeTensors_LinearMerge_Good(t *core.T) {
@@ -137,18 +152,24 @@ func TestMergeTensors_LinearMerge_Good(t *core.T) {
 }
 
 func TestMergeTensors_LinearMerge_Bad(t *core.T) {
-	_, err := linearMerge([][]float32{{1, 2}}, []float64{0.5, 0.5})
+	got, err := linearMerge([][]float32{{1, 2}}, []float64{0.5, 0.5})
 	core.AssertErrorIs(t, err, errWeightsSourceCount)
+	core.AssertNil(t, got)
 }
 
 func TestMergeTensors_LinearMerge_Ugly(t *core.T) {
-	_, err := linearMerge([][]float32{{1, 2}, {3}}, []float64{0.5, 0.5})
+	got, err := linearMerge([][]float32{{1, 2}, {3}}, []float64{0.5, 0.5})
 	core.AssertErrorIs(t, err, errLinearLenMismatch)
+	core.AssertNil(t, got)
 }
 
+// TestMergeTensors_LinearMerge_Empty covers both a nil and an empty-but-
+// non-nil values slice — both must hit the same errNoTensors guard.
 func TestMergeTensors_LinearMerge_Empty(t *core.T) {
 	_, err := linearMerge(nil, nil)
 	core.AssertErrorIs(t, err, errNoTensors)
+	_, err2 := linearMerge([][]float32{}, []float64{})
+	core.AssertErrorIs(t, err2, errNoTensors)
 }
 
 func TestMergeTensors_SlerpMerge_Good(t *core.T) {
@@ -158,14 +179,19 @@ func TestMergeTensors_SlerpMerge_Good(t *core.T) {
 	core.AssertInDelta(t, 0.70710678, float64(got[1]), 1e-6)
 }
 
+// TestMergeTensors_SlerpMerge_Bad covers both sides of the != 2 tensor-
+// count guard: one tensor and three tensors.
 func TestMergeTensors_SlerpMerge_Bad(t *core.T) {
 	_, err := slerpMerge([][]float32{{1, 0}}, 0.5)
 	core.AssertErrorIs(t, err, errSLERPNeedTwoTensors)
+	_, err2 := slerpMerge([][]float32{{1, 0}, {0, 1}, {1, 1}}, 0.5)
+	core.AssertErrorIs(t, err2, errSLERPNeedTwoTensors)
 }
 
 func TestMergeTensors_SlerpMerge_Ugly(t *core.T) {
-	_, err := slerpMerge([][]float32{{1, 0}, {0, 1, 2}}, 0.5)
+	got, err := slerpMerge([][]float32{{1, 0}, {0, 1, 2}}, 0.5)
 	core.AssertErrorIs(t, err, errSLERPLenMismatch)
+	core.AssertNil(t, got)
 }
 
 func TestMergeTensors_SlerpMerge_Boundaries(t *core.T) {
@@ -207,13 +233,18 @@ func TestMergeTensors_NormalizedWeights_Bad(t *core.T) {
 }
 
 func TestMergeTensors_NormalizedWeights_Ugly(t *core.T) {
-	_, err := normalizedWeights([]Source{{Weight: 1}, {Weight: -1}})
+	got, err := normalizedWeights([]Source{{Weight: 1}, {Weight: -1}})
 	core.AssertErrorIs(t, err, errMergeWeightsSumZero)
+	core.AssertNil(t, got)
 }
 
+// TestMergeTensors_NormalizedWeights_NotFinite covers both non-finite
+// float64 states the guard rejects: NaN and +Inf.
 func TestMergeTensors_NormalizedWeights_NotFinite(t *core.T) {
 	_, err := normalizedWeights([]Source{{Weight: math.NaN()}, {Weight: 1}})
 	core.AssertErrorIs(t, err, errMergeWeightNotFinite)
+	_, err2 := normalizedWeights([]Source{{Weight: math.Inf(1)}, {Weight: 1}})
+	core.AssertErrorIs(t, err2, errMergeWeightNotFinite)
 }
 
 func TestMergeTensors_WriteProvenance_Good(t *core.T) {
@@ -227,10 +258,13 @@ func TestMergeTensors_WriteProvenance_Good(t *core.T) {
 	core.AssertEqual(t, []string{"a", "b"}, got.SkippedTensors)
 }
 
+// TestMergeTensors_WriteProvenance_Bad documents that a missing parent
+// directory fails the write and leaves no file behind.
 func TestMergeTensors_WriteProvenance_Bad(t *core.T) {
-	// Parent directory does not exist — WriteFile must fail.
-	err := writeProvenance(core.PathJoin(t.TempDir(), "missing-dir", "provenance.json"), Provenance{})
+	path := core.PathJoin(t.TempDir(), "missing-dir", "provenance.json")
+	err := writeProvenance(path, Provenance{})
 	core.AssertError(t, err)
+	core.AssertFalse(t, coreFileExists(path))
 }
 
 func TestMergeTensors_WriteProvenance_Ugly(t *core.T) {
