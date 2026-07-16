@@ -5,6 +5,7 @@ package qwenmoe_test
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/arch/Qwen/qwenmoe"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func ExampleConfig_Arch() {
@@ -18,4 +19,14 @@ func ExampleConfig_Arch() {
 	core.Println(err == nil, arch.Experts, arch.TopK, arch.SharedExperts)
 	// Output:
 	// true 60 4 1
+}
+
+func ExampleConfig_InferFromWeights() {
+	cfg := qwenmoe.Config{NumHiddenLayers: 1, NumAttentionHeads: 2}
+	cfg.InferFromWeights(map[string]safetensors.Tensor{
+		"model.layers.0.self_attn.q_proj.weight": {Shape: []int{16, 8}},
+		"model.embed_tokens.weight":              {Shape: []int{32, 8}},
+	})
+	core.Println(cfg.HeadDim, cfg.VocabSize)
+	// Output: 8 32
 }
