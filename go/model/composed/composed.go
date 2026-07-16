@@ -168,6 +168,51 @@ func matNTQuant(out, x []float32, qw *model.QuantWeight, M, K, N int) []float32 
 	return matNTQuantHost(out, x, qw, M, K, N)
 }
 
+// ProjBF16MatMulInto is the dense bf16 matvec seam (#26) — the BF16Weight twin of
+// ProjQuantMatMulInto: out[M,N] = x[M,K] @ wᵀ over the checkpoint's own bf16 bytes, no widening.
+// AX-8: the lib declares the hook and runs the row-widen host fallback; the backend binds the
+// device gemv. nil, or a device error, falls to matNTBF16Host.
+var ProjBF16MatMulInto func(out, x []float32, w *model.BF16Weight, M, K, N int) ([]float32, error)
+
+// matNTBF16 dispatches a dense bf16 projection: the device seam when bound, else the host
+// row-widen reference — the exact matNTQuant contract for the unquantised form.
+func matNTBF16(out, x []float32, bw *model.BF16Weight, M, K, N int) []float32 {
+	if ProjBF16MatMulInto != nil {
+		if res, err := ProjBF16MatMulInto(out, x, bw, M, K, N); err == nil {
+			return res
+		}
+	}
+	return matNTBF16Host(out, x, bw, M, K, N)
+}
+
+// matNTBF16Host widens one weight ROW at a time and dots it with each input row — never
+// materialising the whole [N,K] f32 weight (the widening this seam exists to kill). f64
+// accumulation in ascending-k order, matching matNTCols' tier; the correctness floor for
+// non-metal builds and device declines.
+func matNTBF16Host(out, x []float32, bw *model.BF16Weight, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
+	row := make([]float32, K)
+	for n := 0; n < N; n++ {
+		for k := 0; k < K; k++ {
+			u := uint32(bw.Data[(n*K+k)*2]) | uint32(bw.Data[(n*K+k)*2+1])<<8
+			row[k] = math.Float32frombits(u << 16)
+		}
+		for m := 0; m < M; m++ {
+			xr := x[m*K : m*K+K]
+			var acc float64
+			for k := 0; k < K; k++ {
+				acc += float64(xr[k]) * float64(row[k])
+			}
+			out[m*N+n] = float32(acc)
+		}
+	}
+	return out
+}
+
 // matNTQuantHost is the host reference for a packed projection: for each output column n it dequantises
 // that weight ROW (qw's row n, [K]) and dots it with each input row — never materialising the whole [N,K]
 // f32 weight (a 27B head widened is ~5 GB). It is the device seam's error fallback and the whole quant
