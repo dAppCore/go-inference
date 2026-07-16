@@ -3182,11 +3182,43 @@ func (s *ArchSession) sampleTopKCandidatesFromLogits(logits []byte, params model
 	} else {
 		s.sampleCandidateIDs = s.sampleCandidateIDs[:topK]
 	}
-	var scores [headSampleTopKMaxK]float32
-	var penaltyIDs []int32
-	if params.RepeatPenalty > 1 && len(history) > 0 {
-		penaltyIDs = s.repeatPenaltyIDsScratch(vocab, history)
+	if params.RepeatPenalty <= 1 || len(history) == 0 {
+		// Fast lane (#23): with no penalty rewriting values, selection runs the shared
+		// monotonic-key pass over the raw bf16 bits (topKSelectBF16IDs — one xor + one integer
+		// compare per element, no per-element float build), then the ≤topK candidates are
+		// insertion-sorted to the exact (value desc, id asc) order the value-space scan below
+		// produces — the deterministic contract sampleSortedBF16Candidates consumes. The
+		// penalty lane keeps the value-space scan because a penalised token's SELECTION rank
+		// depends on its rewritten value.
+		count := topKSelectBF16IDs(logits, vocab, topK, params.SuppressTokens, s.sampleCandidateIDs[:topK])
+		if count == 0 {
+			return nil, nil, true, core.NewError("native.ArchSession.sampleTopKCandidatesFromLogits: all vocab ids are suppressed")
+		}
+		ids := s.sampleCandidateIDs[:count]
+		var sortVals [headSampleTopKMaxK]float32
+		for j := 0; j < count; j++ {
+			off := int(ids[j]) * bf16Size
+			sortVals[j] = bf16ToF32(logits[off], logits[off+1])
+		}
+		for j := 1; j < count; j++ { // insertion sort, ≤ headSampleTopKMaxK elements
+			v, id := sortVals[j], ids[j]
+			m := j
+			for m > 0 && (v > sortVals[m-1] || (v == sortVals[m-1] && id < ids[m-1])) {
+				sortVals[m], ids[m] = sortVals[m-1], ids[m-1]
+				m--
+			}
+			sortVals[m], ids[m] = v, id
+		}
+		for j := 0; j < count; j++ {
+			src := int(ids[j]) * bf16Size
+			dst := j * bf16Size
+			s.sampleCandidateLogits[dst] = logits[src]
+			s.sampleCandidateLogits[dst+1] = logits[src+1]
+		}
+		return s.sampleCandidateLogits[:count*bf16Size], ids, true, nil
 	}
+	var scores [headSampleTopKMaxK]float32
+	penaltyIDs := s.repeatPenaltyIDsScratch(vocab, history)
 	penaltyPos := 0
 	count := 0
 	for id := range vocab {
