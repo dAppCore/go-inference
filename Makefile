@@ -370,10 +370,12 @@ test-hip-production:
 		GO_ROCM_MODEL_PATH="$$gguf" \
 		GO_ROCM_KERNEL_HSACO="$$hsaco" \
 		$(GO) -C "$(GO_SUBTREE)" test ./engine/hip -count=1 -v -run "^($$tests)$$" | tee "$$log"; \
+		status="$${PIPESTATUS[0]}"; \
 		if grep -q -- '--- SKIP:' "$$log"; then \
 			echo "HIP production receipt skipped a required hardware test"; \
 			exit 1; \
-		fi
+		fi; \
+		exit "$$status"
 
 # test-matrix aggregates the host suite plus every hip toolchain smoke behind
 # one command. Each leg probes its own toolchain first and skips with a
