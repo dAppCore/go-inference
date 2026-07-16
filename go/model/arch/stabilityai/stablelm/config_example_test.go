@@ -9,3 +9,10 @@ func ExampleConfig_Arch() {
 	core.Println(a.HeadDim, a.RotaryDim)
 	// Output: 4 2
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil) // no-op: StableLM declares every dim in config.json
+	core.Println(cfg.HiddenSize)
+	// Output: 8
+}
