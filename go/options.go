@@ -52,6 +52,14 @@ type GenerateConfig struct {
 	// intent; serving layers resolve it into this policy for the engine. The
 	// zero value leaves the engine's default handling in place.
 	Thinking ThinkingConfig
+	// VisionBudget requests a specific vision soft-token budget for image/video
+	// attachments — the request-level override of a vision model's configured
+	// load-time default (gemma4's processor_config.json declares 280; the model
+	// card's supported set is 70/140/280/560/1120, 1120 being the OCR budget).
+	// 0 = model default. This seam does not hard-code any family's supported
+	// set — engines/families clamp an out-of-range request to what they
+	// actually support. Ignored by architectures with no vision tower.
+	VisionBudget int
 	// Engine trace + cache-hygiene knobs (engine-neutral operational
 	// controls; a backend without the facility ignores them).
 	TraceTokenPhases             bool // per-token coarse phase timing to the engine trace log
@@ -208,6 +216,16 @@ func WithThinkingBudget(tokens int) GenerateOption {
 //	m.Generate(ctx, prompt, inference.WithThinking(inference.ThinkingConfig{Mode: inference.ThinkingHide}))
 func WithThinking(cfg ThinkingConfig) GenerateOption {
 	return func(c *GenerateConfig) { c.Thinking = cfg }
+}
+
+// WithVisionBudget requests a specific vision soft-token budget for image/video
+// attachments. 0 = model default. Engines/families clamp an out-of-range value
+// to what they actually support — this seam does not hard-code any family's
+// budget set.
+//
+//	m.Chat(ctx, msgs, inference.WithVisionBudget(1120)) // gemma4's OCR budget
+func WithVisionBudget(n int) GenerateOption {
+	return func(c *GenerateConfig) { c.VisionBudget = n }
 }
 
 // WithMetricsSink registers a request-scoped receiver for this generation's
