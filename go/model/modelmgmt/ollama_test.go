@@ -72,9 +72,12 @@ func TestOllama_ollamaUploadBlob_Good(t *core.T) {
 	core.AssertContains(t, r.Value.(string), "sha256:")
 }
 
+// TestOllama_ollamaUploadBlob_Bad covers two distinct local-read failures:
+// a missing file and a path that is a directory, not a file.
 func TestOllama_ollamaUploadBlob_Bad(t *core.T) {
 	server := ollamaBlobServer(t, http.StatusNotFound, http.StatusCreated)
 	assertResultError(t, ollamaUploadBlob(server.URL, core.JoinPath(t.TempDir(), "missing.bin")), "read")
+	assertResultError(t, ollamaUploadBlob(server.URL, t.TempDir()), "read")
 }
 
 func TestOllama_ollamaUploadBlob_Ugly(t *core.T) {
@@ -121,9 +124,15 @@ func TestOllama_OllamaCreateModel_CfgUploadFail(t *core.T) {
 	assertResultError(t, OllamaCreateModel(server.URL, "tmp-model", "base", dir), "adapter config")
 }
 
+// TestOllama_OllamaCreateModel_Unreachable covers two refused-connection
+// hosts, both asserting the wrapping message names the safetensors upload
+// step specifically — disambiguating this failure mode from the
+// "adapter config"/"decode" failures covered elsewhere in this file.
 func TestOllama_OllamaCreateModel_Unreachable(t *core.T) {
-	// A refused connection fails the blob POST before create is reached.
-	assertResultError(t, OllamaCreateModel("http://127.0.0.1:1", "tmp-model", "base", writePeftDir(t)))
+	r := OllamaCreateModel("http://127.0.0.1:1", "tmp-model", "base", writePeftDir(t))
+	assertResultError(t, r, "upload adapter safetensors")
+	core.AssertFalse(t, r.OK)
+	assertResultError(t, OllamaCreateModel("http://127.0.0.1:2", "tmp-model", "base", writePeftDir(t)), "upload adapter safetensors")
 }
 
 func TestOllama_OllamaDeleteModel_Good(t *core.T) {
@@ -148,6 +157,8 @@ func TestOllama_HFBaseModelMap_Good(t *core.T) {
 	// gemma-4-e2b is the one Gemma 4 size with a verified base HF id
 	// (engine/hip/model/gemma4.OfficialE2BTargetModelID).
 	core.AssertEqual(t, "google/gemma-4-E2B-it", HFBaseModelMap["gemma-4-e2b"])
+	core.AssertEqual(t, "google/gemma-3-1b-it", HFBaseModelMap["gemma-3-1b"])
+	core.AssertEqual(t, "google/gemma-3-27b-it", HFBaseModelMap["gemma-3-27b"])
 }
 
 func TestOllama_HFBaseModelMap_Bad(t *core.T) {

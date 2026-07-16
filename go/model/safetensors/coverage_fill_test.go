@@ -143,16 +143,34 @@ func TestSafetensors_TensorReader_ReadFloat32ChunkInto_ReadError(t *testing.T) {
 	}
 }
 
+// TestSafetensors_TensorReader_ReadFloat32ChunkInto_DecodeError drives
+// readFloat32ChunkInto's decode-mismatch branch. It really is unreachable
+// through the public constructors alone (OpenReader / NewFileReader always
+// derive bytesPerElement from DTypeByteSize, which stays in step with
+// decodeFloatDataInto's own per-dtype byte width, so a successful ReadAt
+// never yields a decode mismatch there) — but this is an internal test
+// package, so a reader opened normally can have its unexported
+// bytesPerElement desynced directly afterwards. That is exactly the failure
+// mode this test guards against: DTypeByteSize and decodeFloatDataInto
+// silently drifting out of sync for some dtype in the future.
 func TestSafetensors_TensorReader_ReadFloat32ChunkInto_DecodeError(t *testing.T) {
-	// The decode-error return in readFloat32ChunkInto is unreachable through
-	// the public constructors: OpenReader / NewFileReader set bytesPerElement
-	// from DTypeByteSize, so the raw read length (count*bytesPerElement)
-	// always equals the decoder's expected payload length (count*stride) for
-	// every one of the four supported dtypes — a successful read therefore
-	// never yields a decode mismatch. decodeFloatDataInto's own mismatch and
-	// unsupported-dtype branches are covered directly by
-	// TestSafetensors_DecodeFloatData_Bad in safetensors_test.go.
-	t.Skip("decodeFloatDataInto error from readFloat32ChunkInto is structurally unreachable")
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "mismatch.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3, 4}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	reader, err := OpenReader(index.Tensors["weight"])
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer reader.Close()
+	reader.bytesPerElement = 2 // wrong for F32 (should be 4): desyncs from decodeFloatDataInto
+
+	if _, _, _, err := reader.ReadFloat32ChunkInto(0, 4, nil, nil); err == nil {
+		t.Fatal("ReadFloat32ChunkInto with desynced bytesPerElement: expected a decode error")
+	}
 }
 
 // --- WriteRefFloat32Chunks: OpenReader error + read error + write error

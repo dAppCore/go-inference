@@ -12,11 +12,11 @@ import (
 	coreio "dappco.re/go/io"
 )
 
-// TestSafetensors_LoadMmap_Good round-trips a synthetic checkpoint through Encode → file →
+// TestSafetensorsMmap_LoadMmap_Good round-trips a synthetic checkpoint through Encode → file →
 // LoadMmap and proves the key property: each Tensor.Data is a VIEW into the page-aligned
 // mmap, not a heap copy. That view-into-an-aligned-base is exactly what the no-copy GPU
 // buffer path needs. No model load — AX-11 synthetic.
-func TestSafetensors_LoadMmap_Good(t *testing.T) {
+func TestSafetensorsMmap_LoadMmap_Good(t *testing.T) {
 	want := map[string]Tensor{
 		"a.weight": {Dtype: "F32", Shape: []int{2, 2}, Data: []byte{0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 128, 64}},
 		"b.scales": {Dtype: "BF16", Shape: []int{4}, Data: []byte{1, 2, 3, 4, 5, 6, 7, 8}},
@@ -58,18 +58,18 @@ func TestSafetensors_LoadMmap_Good(t *testing.T) {
 	t.Logf("LoadMmap: %d tensors view the %d-byte page-aligned mmap (zero-copy)", len(m.Tensors), len(m.Data))
 }
 
-// TestSafetensors_LoadMmap_Bad confirms a path that does not exist surfaces the open error
+// TestSafetensorsMmap_LoadMmap_Bad confirms a path that does not exist surfaces the open error
 // (the mmap-failure branch itself — a directory rather than a regular file — is a deeper
 // syscall fault covered by TestLoadMmapMmapError in safetensors_mmap_fault_test.go).
-func TestSafetensors_LoadMmap_Bad(t *testing.T) {
+func TestSafetensorsMmap_LoadMmap_Bad(t *testing.T) {
 	if _, err := LoadMmap(t.TempDir() + "/missing.safetensors"); err == nil {
 		t.Fatal("LoadMmap(missing file) error = nil")
 	}
 }
 
-// TestSafetensors_LoadMmap_Ugly confirms a present-but-empty file is rejected by the
+// TestSafetensorsMmap_LoadMmap_Ugly confirms a present-but-empty file is rejected by the
 // empty-file guard rather than falling through to a zero-size mmap.
-func TestSafetensors_LoadMmap_Ugly(t *testing.T) {
+func TestSafetensorsMmap_LoadMmap_Ugly(t *testing.T) {
 	path := t.TempDir() + "/empty.safetensors"
 	if err := coreio.Local.Write(path, ""); err != nil {
 		t.Fatalf("write empty: %v", err)
@@ -79,9 +79,9 @@ func TestSafetensors_LoadMmap_Ugly(t *testing.T) {
 	}
 }
 
-// TestSafetensors_Mapping_Close_Good confirms Close unmaps the file and clears Data and
+// TestSafetensorsMmap_Mapping_Close_Good confirms Close unmaps the file and clears Data and
 // Tensors, so a stale reference cannot be read after Close.
-func TestSafetensors_Mapping_Close_Good(t *testing.T) {
+func TestSafetensorsMmap_Mapping_Close_Good(t *testing.T) {
 	blob, err := Encode(map[string]Tensor{"x": {Dtype: "U8", Shape: []int{1}, Data: []byte{1}}})
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
@@ -102,12 +102,21 @@ func TestSafetensors_Mapping_Close_Good(t *testing.T) {
 	}
 }
 
-// NOTE: Mapping.Close's error path (munmap failing on a misaligned Data view) needs a real
-// syscall fault to trigger — see TestMappingCloseMunmapError in safetensors_mmap_fault_test.go.
+// TestSafetensorsMmap_Mapping_Close_Bad covers Close's error path: a Mapping holding a
+// misaligned (non-page-aligned) Data view makes the underlying munmap fail, so Close must wrap
+// and return that error rather than swallow it. badMapping (safetensors_mmap_fault_test.go)
+// gives a real syscall fault via exported fields only — no mock, no production code touched.
+func TestSafetensorsMmap_Mapping_Close_Bad(t *testing.T) {
+	m, cleanup := badMapping(t)
+	defer cleanup()
+	if err := m.Close(); err == nil {
+		t.Fatal("Mapping.Close on a misaligned Data view: expected a munmap error")
+	}
+}
 
-// TestSafetensors_Mapping_Close_Ugly confirms Close on a nil *Mapping, and a second Close
+// TestSafetensorsMmap_Mapping_Close_Ugly confirms Close on a nil *Mapping, and a second Close
 // after a real one, are both safe no-ops.
-func TestSafetensors_Mapping_Close_Ugly(t *testing.T) {
+func TestSafetensorsMmap_Mapping_Close_Ugly(t *testing.T) {
 	var nilM *Mapping
 	if err := nilM.Close(); err != nil {
 		t.Fatalf("nil Mapping Close: %v, want nil", err)

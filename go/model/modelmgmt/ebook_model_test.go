@@ -136,10 +136,13 @@ func TestEbookModel_ebookSafetensorsStats_Good(t *core.T) {
 }
 
 // Garbage must not parse as a safetensors header — it is tolerated (ok=false)
-// rather than treated as an error.
+// rather than treated as an error, and the numeric outputs stay zero-valued
+// rather than some partially-parsed garbage value.
 func TestEbookModel_ebookSafetensorsStats_Ugly(t *core.T) {
-	_, _, ok := ebookSafetensorsStats([]byte{1, 2, 3})
+	tensors, elements, ok := ebookSafetensorsStats([]byte{1, 2, 3})
 	core.AssertFalse(t, ok)
+	core.AssertEqual(t, 0, tensors)
+	core.AssertEqual(t, int64(0), elements)
 }
 
 func TestEbookModel_grouped_Good(t *core.T) {
@@ -149,8 +152,13 @@ func TestEbookModel_grouped_Good(t *core.T) {
 	}
 }
 
+// TestEbookModel_grouped_Ugly mirrors the Good case's positive values with
+// their negated counterparts — the "-" prefix is applied around the same
+// grouping logic, not a separate code path.
 func TestEbookModel_grouped_Ugly(t *core.T) {
 	core.AssertEqual(t, "-1,234", grouped(-1234))
+	core.AssertEqual(t, "-1", grouped(-1))
+	core.AssertEqual(t, "-999,888,777", grouped(-999888777))
 }
 
 // --- ModelBookOptions.GeneratorCredit ---

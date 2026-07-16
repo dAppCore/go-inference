@@ -95,7 +95,7 @@ func TestSubsetHeaderEncoded_ParityWithJSONMarshal(t *testing.T) {
 
 // --- DTypeByteSize ---
 
-func TestSafetensors_DTypeByteSize_Good(t *testing.T) {
+func TestIndex_DTypeByteSize_Good(t *testing.T) {
 	cases := []struct {
 		dtype string
 		want  int
@@ -118,7 +118,7 @@ func TestSafetensors_DTypeByteSize_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_DTypeByteSize_Bad(t *testing.T) {
+func TestIndex_DTypeByteSize_Bad(t *testing.T) {
 	// Unsupported but plausible dtypes the dense decoder cannot handle.
 	for _, dtype := range []string{"I8", "U8", "I32", "C64", "FP8"} {
 		if _, err := DTypeByteSize(dtype); err == nil {
@@ -127,7 +127,7 @@ func TestSafetensors_DTypeByteSize_Bad(t *testing.T) {
 	}
 }
 
-func TestSafetensors_DTypeByteSize_Ugly(t *testing.T) {
+func TestIndex_DTypeByteSize_Ugly(t *testing.T) {
 	// Empty string and length-edge inputs that fall through every
 	// length-branched byte compare without matching.
 	for _, dtype := range []string{"", "F", "F1", "F128", "BF8", "XXXX"} {
@@ -141,7 +141,7 @@ func TestSafetensors_DTypeByteSize_Ugly(t *testing.T) {
 // and only F32 round-trips bit-exact for arbitrary values; F16/BF16/F64
 // are checked against known bit patterns / the Float16ToFloat32 oracle) ---
 
-func TestSafetensors_DecodeFloatData_Good(t *testing.T) {
+func TestIndex_DecodeFloatData_Good(t *testing.T) {
 	t.Run("F32_bit_exact", func(t *testing.T) {
 		want := []float32{0, 1, -1, 3.14159, math.MaxFloat32, -math.SmallestNonzeroFloat32}
 		raw := make([]byte, len(want)*4)
@@ -213,7 +213,7 @@ func TestSafetensors_DecodeFloatData_Good(t *testing.T) {
 	})
 }
 
-func TestSafetensors_DecodeFloatData_Bad(t *testing.T) {
+func TestIndex_DecodeFloatData_Bad(t *testing.T) {
 	// Each dtype validates payload length == elements * width; a short
 	// payload must surface the typed sentinel for that dtype.
 	cases := []struct {
@@ -240,7 +240,7 @@ func TestSafetensors_DecodeFloatData_Bad(t *testing.T) {
 	}
 }
 
-func TestSafetensors_DecodeFloatData_Ugly(t *testing.T) {
+func TestIndex_DecodeFloatData_Ugly(t *testing.T) {
 	// Boundary element counts. elements=0 yields an empty slice with no
 	// error (zero-length payload matches). elements=1 is the smallest
 	// real decode. Negative element counts never occur in real refs
@@ -270,7 +270,7 @@ func TestSafetensors_DecodeFloatData_Ugly(t *testing.T) {
 
 // --- RefFromHeader ---
 
-func TestSafetensors_RefFromHeader_Good(t *testing.T) {
+func TestIndex_RefFromHeader_Good(t *testing.T) {
 	cases := []struct {
 		name      string
 		entry     HeaderEntry
@@ -319,7 +319,7 @@ func TestSafetensors_RefFromHeader_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_RefFromHeader_Bad(t *testing.T) {
+func TestIndex_RefFromHeader_Bad(t *testing.T) {
 	cases := []struct {
 		name  string
 		entry HeaderEntry
@@ -338,7 +338,7 @@ func TestSafetensors_RefFromHeader_Bad(t *testing.T) {
 	}
 }
 
-func TestSafetensors_RefFromHeader_Ugly(t *testing.T) {
+func TestIndex_RefFromHeader_Ugly(t *testing.T) {
 	// Non-positive shape dimensions are rejected — a zero or negative dim
 	// has no valid element count.
 	cases := []struct {
@@ -360,7 +360,7 @@ func TestSafetensors_RefFromHeader_Ugly(t *testing.T) {
 
 // --- ReadRefRaw / ReadRefValues (file-based; F32-only per flag #1) ---
 
-func TestSafetensors_ReadRefValues_Good(t *testing.T) {
+func TestIndex_ReadRefValues_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	want := []float32{1, 2, 3, 4, -5.5, 1024.25}
@@ -384,7 +384,7 @@ func TestSafetensors_ReadRefValues_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_ReadRefValues_Bad(t *testing.T) {
+func TestIndex_ReadRefValues_Bad(t *testing.T) {
 	// Ref pointing at a path that does not exist.
 	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
 	if _, err := ReadRefValues(ref); err == nil {
@@ -392,7 +392,7 @@ func TestSafetensors_ReadRefValues_Bad(t *testing.T) {
 	}
 }
 
-func TestSafetensors_ReadRefValues_Ugly(t *testing.T) {
+func TestIndex_ReadRefValues_Ugly(t *testing.T) {
 	// Single-element tensor — smallest non-empty payload.
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "single.safetensors")
@@ -410,7 +410,7 @@ func TestSafetensors_ReadRefValues_Ugly(t *testing.T) {
 	}
 }
 
-func TestSafetensors_ReadRefRaw_Good(t *testing.T) {
+func TestIndex_ReadRefRaw_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
@@ -432,7 +432,7 @@ func TestSafetensors_ReadRefRaw_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_ReadRefRaw_Bad(t *testing.T) {
+func TestIndex_ReadRefRaw_Bad(t *testing.T) {
 	// Negative ByteLen is rejected before any file open.
 	ref := TensorRef{Name: "x", Path: "irrelevant", ByteLen: -1}
 	if _, err := ReadRefRaw(ref); err == nil {
@@ -440,7 +440,7 @@ func TestSafetensors_ReadRefRaw_Bad(t *testing.T) {
 	}
 }
 
-func TestSafetensors_ReadRefRaw_Ugly(t *testing.T) {
+func TestIndex_ReadRefRaw_Ugly(t *testing.T) {
 	// Ref claims more bytes than the file holds → truncated payload.
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
@@ -456,11 +456,11 @@ func TestSafetensors_ReadRefRaw_Ugly(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ReadIndex_Good reads a well-formed two-tensor file off
+// TestIndex_ReadIndex_Good reads a well-formed two-tensor file off
 // disk and confirms the returned Index carries both tensors, sorted Names,
 // the resolved dtype and an absolute DataStart past the 8-byte length
 // prefix and the JSON header.
-func TestSafetensors_ReadIndex_Good(t *testing.T) {
+func TestIndex_ReadIndex_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{
@@ -493,10 +493,10 @@ func TestSafetensors_ReadIndex_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ReadIndex_Ugly reads the smallest legal containers: a
+// TestIndex_ReadIndex_Ugly reads the smallest legal containers: a
 // header declaring zero tensors (empty `{}`) and a header carrying only a
 // __metadata__ block. Both must yield an empty, non-nil Index with no error.
-func TestSafetensors_ReadIndex_Ugly(t *testing.T) {
+func TestIndex_ReadIndex_Ugly(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("empty_header", func(t *testing.T) {
@@ -539,12 +539,12 @@ func TestSafetensors_ReadIndex_Ugly(t *testing.T) {
 	})
 }
 
-// TestSafetensors_ReadIndex_Bad drives ReadIndex's structural failure
+// TestIndex_ReadIndex_Bad drives ReadIndex's structural failure
 // paths with real files (not fault injection): a path that does not
 // exist, a file too short to hold the 8-byte header length, and a file
 // whose declared header length runs past EOF. Each is a corruption a
 // real on-disk safetensors could carry.
-func TestSafetensors_ReadIndex_Bad(t *testing.T) {
+func TestIndex_ReadIndex_Bad(t *testing.T) {
 	dir := t.TempDir()
 
 	t.Run("missing file", func(t *testing.T) {
@@ -583,7 +583,7 @@ func TestSafetensors_ReadIndex_Bad(t *testing.T) {
 
 // --- ReadRefFloat32Chunk / TensorReader.ReadFloat32Chunk(Into) ---
 
-func TestSafetensors_ReadRefFloat32Chunk_Good(t *testing.T) {
+func TestIndex_ReadRefFloat32Chunk_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	full := []float32{0, 1, 2, 3, 4, 5, 6, 7}
@@ -610,7 +610,7 @@ func TestSafetensors_ReadRefFloat32Chunk_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_ReadRefFloat32Chunk_Bad(t *testing.T) {
+func TestIndex_ReadRefFloat32Chunk_Bad(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3, 4}})
@@ -630,7 +630,7 @@ func TestSafetensors_ReadRefFloat32Chunk_Bad(t *testing.T) {
 	}
 }
 
-func TestSafetensors_ReadRefFloat32Chunk_Ugly(t *testing.T) {
+func TestIndex_ReadRefFloat32Chunk_Ugly(t *testing.T) {
 	// Zero-count chunk at a valid offset returns an empty slice, no error.
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
@@ -648,7 +648,7 @@ func TestSafetensors_ReadRefFloat32Chunk_Ugly(t *testing.T) {
 	}
 }
 
-func TestSafetensors_TensorReader_ReadFloat32ChunkInto_Good(t *testing.T) {
+func TestIndex_TensorReader_ReadFloat32ChunkInto_Good(t *testing.T) {
 	// The scratch-aware variant must decode byte-identically to the
 	// allocating ReadFloat32Chunk, and reuse the returned buffers across
 	// calls (per the documented chunked-loop contract).
@@ -684,10 +684,10 @@ func TestSafetensors_TensorReader_ReadFloat32ChunkInto_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadFloat32ChunkInto_Bad confirms an
+// TestIndex_TensorReader_ReadFloat32ChunkInto_Bad confirms an
 // out-of-bounds window surfaces the typed sentinel and still returns the
 // scratch buffers unchanged so the caller's loop can recover them.
-func TestSafetensors_TensorReader_ReadFloat32ChunkInto_Bad(t *testing.T) {
+func TestIndex_TensorReader_ReadFloat32ChunkInto_Bad(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3, 4}})
@@ -718,11 +718,11 @@ func TestSafetensors_TensorReader_ReadFloat32ChunkInto_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadFloat32ChunkInto_Ugly drives the nil-
+// TestIndex_TensorReader_ReadFloat32ChunkInto_Ugly drives the nil-
 // scratch first call (buffers allocated fresh) and a zero-count window
 // (empty decode, no error) — the awkward but legal boundary inputs a
 // chunked loop hits on its first and final iterations.
-func TestSafetensors_TensorReader_ReadFloat32ChunkInto_Ugly(t *testing.T) {
+func TestIndex_TensorReader_ReadFloat32ChunkInto_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {7, 8, 9}})
@@ -757,10 +757,10 @@ func TestSafetensors_TensorReader_ReadFloat32ChunkInto_Ugly(t *testing.T) {
 
 // --- TensorReader.ReadFloat32Chunk (the allocating per-window read) ---
 
-// TestSafetensors_TensorReader_ReadFloat32Chunk_Good reads a middle
+// TestIndex_TensorReader_ReadFloat32Chunk_Good reads a middle
 // element window directly off a reader and confirms it equals the matching
 // slice of the full tensor.
-func TestSafetensors_TensorReader_ReadFloat32Chunk_Good(t *testing.T) {
+func TestIndex_TensorReader_ReadFloat32Chunk_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	full := []float32{0, 1, 2, 3, 4, 5, 6, 7}
@@ -790,10 +790,10 @@ func TestSafetensors_TensorReader_ReadFloat32Chunk_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadFloat32Chunk_Bad confirms both an
+// TestIndex_TensorReader_ReadFloat32Chunk_Bad confirms both an
 // over-range window and a negative offset surface the typed out-of-bounds
 // sentinel.
-func TestSafetensors_TensorReader_ReadFloat32Chunk_Bad(t *testing.T) {
+func TestIndex_TensorReader_ReadFloat32Chunk_Bad(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3, 4}})
@@ -815,10 +815,10 @@ func TestSafetensors_TensorReader_ReadFloat32Chunk_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadFloat32Chunk_Ugly reads the smallest
+// TestIndex_TensorReader_ReadFloat32Chunk_Ugly reads the smallest
 // and largest legal windows: a zero-count window (empty, no error) and the
 // full tensor in one shot.
-func TestSafetensors_TensorReader_ReadFloat32Chunk_Ugly(t *testing.T) {
+func TestIndex_TensorReader_ReadFloat32Chunk_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	full := []float32{2, 4, 6}
@@ -853,10 +853,10 @@ func TestSafetensors_TensorReader_ReadFloat32Chunk_Ugly(t *testing.T) {
 
 // --- TensorReader.Close ---
 
-// TestSafetensors_TensorReader_Close_Good confirms Close releases the
+// TestIndex_TensorReader_Close_Good confirms Close releases the
 // underlying handle: after closing, a fresh reader can re-open the same
 // path without contention and read the tensor.
-func TestSafetensors_TensorReader_Close_Good(t *testing.T) {
+func TestIndex_TensorReader_Close_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
@@ -885,11 +885,11 @@ func TestSafetensors_TensorReader_Close_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_Close_Bad confirms Close on the zero-value
+// TestIndex_TensorReader_Close_Bad confirms Close on the zero-value
 // reader (file == nil, as returned on a failed OpenReader) is a safe no-op
 // rather than a nil dereference, and that the failed-open shape really does
 // carry a nil file so the guard is exercised, not skipped.
-func TestSafetensors_TensorReader_Close_Bad(t *testing.T) {
+func TestIndex_TensorReader_Close_Bad(t *testing.T) {
 	// A failed OpenReader returns the zero TensorReader (file == nil).
 	bad := TensorRef{Name: "x", Path: "irrelevant", DType: "I32", Elements: 1, ByteLen: 4}
 	zero, err := OpenReader(bad)
@@ -905,11 +905,11 @@ func TestSafetensors_TensorReader_Close_Bad(t *testing.T) {
 	(TensorReader{}).Close()
 }
 
-// TestSafetensors_TensorReader_Close_Ugly confirms Close is idempotent in
+// TestIndex_TensorReader_Close_Ugly confirms Close is idempotent in
 // the loose sense the API allows — calling it twice does not panic. (The
 // second close returns an already-closed error internally, which Close
 // discards by contract.)
-func TestSafetensors_TensorReader_Close_Ugly(t *testing.T) {
+func TestIndex_TensorReader_Close_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {3}})
@@ -927,9 +927,9 @@ func TestSafetensors_TensorReader_Close_Ugly(t *testing.T) {
 
 // --- CloseReaders ---
 
-// TestSafetensors_CloseReaders_Good opens a batch of readers and confirms
+// TestIndex_CloseReaders_Good opens a batch of readers and confirms
 // CloseReaders releases every handle so the paths can each be re-opened.
-func TestSafetensors_CloseReaders_Good(t *testing.T) {
+func TestIndex_CloseReaders_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"a": {1, 2}, "b": {3, 4, 5}})
@@ -950,10 +950,10 @@ func TestSafetensors_CloseReaders_Good(t *testing.T) {
 	CloseReaders(again)
 }
 
-// TestSafetensors_CloseReaders_Bad confirms CloseReaders tolerates a slice
+// TestIndex_CloseReaders_Bad confirms CloseReaders tolerates a slice
 // containing zero-value readers (file == nil) without panicking — the same
 // shape OpenReaders hands back partially-filled before it bails on a bad ref.
-func TestSafetensors_CloseReaders_Bad(t *testing.T) {
+func TestIndex_CloseReaders_Bad(t *testing.T) {
 	// Mix a real reader with two zero-value ones.
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
@@ -969,11 +969,11 @@ func TestSafetensors_CloseReaders_Bad(t *testing.T) {
 	CloseReaders([]TensorReader{{}, real, {}}) // must not panic
 }
 
-// TestSafetensors_CloseReaders_Ugly confirms the degenerate inputs — a nil
+// TestIndex_CloseReaders_Ugly confirms the degenerate inputs — a nil
 // slice and an empty slice — are safe no-ops, and that closing the SAME
 // slice twice (the awkward double-close a deferred + explicit cleanup pair
 // produces) does not panic.
-func TestSafetensors_CloseReaders_Ugly(t *testing.T) {
+func TestIndex_CloseReaders_Ugly(t *testing.T) {
 	CloseReaders(nil)
 	CloseReaders([]TensorReader{})
 
@@ -994,7 +994,7 @@ func TestSafetensors_CloseReaders_Ugly(t *testing.T) {
 
 // --- OpenReader / OpenReaders / NewFileReader ---
 
-func TestSafetensors_OpenReader_Good(t *testing.T) {
+func TestIndex_OpenReader_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {7, 8, 9}})
@@ -1016,7 +1016,7 @@ func TestSafetensors_OpenReader_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_OpenReader_Bad(t *testing.T) {
+func TestIndex_OpenReader_Bad(t *testing.T) {
 	t.Run("unsupported_dtype", func(t *testing.T) {
 		ref := TensorRef{Name: "x", Path: "irrelevant", DType: "I32", Elements: 1, ByteLen: 4}
 		if _, err := OpenReader(ref); err == nil {
@@ -1031,10 +1031,10 @@ func TestSafetensors_OpenReader_Bad(t *testing.T) {
 	})
 }
 
-// TestSafetensors_OpenReader_Ugly opens a reader over a zero-element
+// TestIndex_OpenReader_Ugly opens a reader over a zero-element
 // tensor — a legal but degenerate ref (empty payload) — and confirms a
 // zero-count read returns an empty slice rather than erroring.
-func TestSafetensors_OpenReader_Ugly(t *testing.T) {
+func TestIndex_OpenReader_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "empty.safetensors")
 	// One F32 tensor with a single element; we then read a zero-width
@@ -1058,7 +1058,7 @@ func TestSafetensors_OpenReader_Ugly(t *testing.T) {
 	}
 }
 
-func TestSafetensors_OpenReaders_Good(t *testing.T) {
+func TestIndex_OpenReaders_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{
@@ -1087,7 +1087,7 @@ func TestSafetensors_OpenReaders_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_OpenReaders_Bad(t *testing.T) {
+func TestIndex_OpenReaders_Bad(t *testing.T) {
 	// A bad ref mid-list must close everything already opened and error.
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
@@ -1102,10 +1102,10 @@ func TestSafetensors_OpenReaders_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_OpenReaders_Ugly opens the degenerate empty ref list,
+// TestIndex_OpenReaders_Ugly opens the degenerate empty ref list,
 // which yields a non-nil zero-length slice and no error — the boundary a
 // caller passing an empty selection relies on.
-func TestSafetensors_OpenReaders_Ugly(t *testing.T) {
+func TestIndex_OpenReaders_Ugly(t *testing.T) {
 	readers, err := OpenReaders(nil)
 	if err != nil {
 		t.Fatalf("OpenReaders(nil): %v", err)
@@ -1119,14 +1119,14 @@ func TestSafetensors_OpenReaders_Ugly(t *testing.T) {
 	CloseReaders(readers)
 }
 
-// TestSafetensors_NewFileReader_Good exercises the documented borrow
+// TestIndex_NewFileReader_Good exercises the documented borrow
 // pattern: one open *core.OSFile is bound to a ref via NewFileReader and
 // the caller owns the handle's lifetime. NOTE — the doc comment says the
 // reader "does NOT own the file", yet TensorReader.Close() unconditionally
 // closes r.file. This is the deliberate one-type-for-owned-and-borrowed
 // shape; the documented usage (caller closes the handle once, does not
 // call reader.Close) is what this test drives.
-func TestSafetensors_NewFileReader_Good(t *testing.T) {
+func TestIndex_NewFileReader_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {2, 4, 6, 8}})
@@ -1156,7 +1156,7 @@ func TestSafetensors_NewFileReader_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_NewFileReader_Bad(t *testing.T) {
+func TestIndex_NewFileReader_Bad(t *testing.T) {
 	// Unsupported dtype is rejected before binding the handle.
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
@@ -1172,11 +1172,11 @@ func TestSafetensors_NewFileReader_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_NewFileReader_Ugly binds two refs that point into the
+// TestIndex_NewFileReader_Ugly binds two refs that point into the
 // SAME open file at different offsets — the documented handle-sharing
 // pattern (one shard, many tensors, one os.Open). Both readers must decode
 // their own window correctly off the shared *core.OSFile.
-func TestSafetensors_NewFileReader_Ugly(t *testing.T) {
+func TestIndex_NewFileReader_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"a": {1, 2}, "b": {3, 4, 5}})
@@ -1217,10 +1217,10 @@ func TestSafetensors_NewFileReader_Ugly(t *testing.T) {
 
 // --- ShardCache (NewShardCache / Reader / ReadRefValues / ReadRefRaw / Close) ---
 
-// TestSafetensors_NewShardCache_Good confirms the returned cache is
+// TestIndex_NewShardCache_Good confirms the returned cache is
 // immediately usable: Reader opens the shard once and the read matches the
 // package-level ReadRefValues for the same ref.
-func TestSafetensors_NewShardCache_Good(t *testing.T) {
+func TestIndex_NewShardCache_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3}})
@@ -1249,11 +1249,11 @@ func TestSafetensors_NewShardCache_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_NewShardCache_Bad drives a fresh cache's Reader with a ref
+// TestIndex_NewShardCache_Bad drives a fresh cache's Reader with a ref
 // pointing at a path that does not exist — the constructor itself takes no
 // arguments and cannot fail, so "bad" input surfaces the first time the
 // returned cache is asked to open something.
-func TestSafetensors_NewShardCache_Bad(t *testing.T) {
+func TestIndex_NewShardCache_Bad(t *testing.T) {
 	cache := NewShardCache()
 	defer cache.Close()
 	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
@@ -1262,18 +1262,20 @@ func TestSafetensors_NewShardCache_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_NewShardCache_Ugly confirms Close on a freshly-constructed,
+// TestIndex_NewShardCache_Ugly confirms Close on a freshly-constructed,
 // never-used cache is a safe no-op — the degenerate lifecycle a caller's
-// deferred cleanup hits whenever the load fails before any ref is read.
-func TestSafetensors_NewShardCache_Ugly(t *testing.T) {
+// deferred cleanup hits whenever the load fails before any ref is read —
+// and that a second Close after that is equally safe (idempotent cleanup).
+func TestIndex_NewShardCache_Ugly(t *testing.T) {
 	cache := NewShardCache()
 	cache.Close() // must not panic on an empty cache
+	cache.Close() // and a second time must not panic either
 }
 
-// TestSafetensors_ShardCache_Reader_Good opens two refs from the SAME shard
+// TestIndex_ShardCache_Reader_Good opens two refs from the SAME shard
 // through one cache and confirms both read correctly and the shard handle is
 // reused (exactly one cached entry) rather than reopened per ref.
-func TestSafetensors_ShardCache_Reader_Good(t *testing.T) {
+func TestIndex_ShardCache_Reader_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"a": {1, 2}, "b": {3, 4, 5}})
@@ -1311,9 +1313,9 @@ func TestSafetensors_ShardCache_Reader_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_Reader_Bad confirms a ref whose shard file does
+// TestIndex_ShardCache_Reader_Bad confirms a ref whose shard file does
 // not exist surfaces the open error and leaves nothing cached.
-func TestSafetensors_ShardCache_Reader_Bad(t *testing.T) {
+func TestIndex_ShardCache_Reader_Bad(t *testing.T) {
 	cache := NewShardCache()
 	defer cache.Close()
 	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
@@ -1325,11 +1327,11 @@ func TestSafetensors_ShardCache_Reader_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_Reader_Ugly drives an unsupported dtype against
+// TestIndex_ShardCache_Reader_Ugly drives an unsupported dtype against
 // an otherwise-valid shard: handle() succeeds and caches the shard (the
 // file genuinely opens), but NewFileReader then rejects the dtype — so the
 // cache is left holding a handle for a ref that never got a usable reader.
-func TestSafetensors_ShardCache_Reader_Ugly(t *testing.T) {
+func TestIndex_ShardCache_Reader_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
@@ -1347,9 +1349,9 @@ func TestSafetensors_ShardCache_Reader_Ugly(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_ReadRefValues_Good confirms the cache-bound
+// TestIndex_ShardCache_ReadRefValues_Good confirms the cache-bound
 // read is byte-identical to the package-level ReadRefValues for the same ref.
-func TestSafetensors_ShardCache_ReadRefValues_Good(t *testing.T) {
+func TestIndex_ShardCache_ReadRefValues_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {4, 5, 6}})
@@ -1374,9 +1376,9 @@ func TestSafetensors_ShardCache_ReadRefValues_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_ReadRefValues_Bad confirms a missing shard path
+// TestIndex_ShardCache_ReadRefValues_Bad confirms a missing shard path
 // surfaces the open error through the cache.
-func TestSafetensors_ShardCache_ReadRefValues_Bad(t *testing.T) {
+func TestIndex_ShardCache_ReadRefValues_Bad(t *testing.T) {
 	cache := NewShardCache()
 	defer cache.Close()
 	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
@@ -1385,11 +1387,11 @@ func TestSafetensors_ShardCache_ReadRefValues_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_ReadRefValues_Ugly reads the SAME ref twice
+// TestIndex_ShardCache_ReadRefValues_Ugly reads the SAME ref twice
 // through one cache — the second read must reuse the cached handle and
 // return values identical to the first, proving reuse does not corrupt
 // subsequent reads.
-func TestSafetensors_ShardCache_ReadRefValues_Ugly(t *testing.T) {
+func TestIndex_ShardCache_ReadRefValues_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {7, 8}})
@@ -1414,9 +1416,9 @@ func TestSafetensors_ShardCache_ReadRefValues_Ugly(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_ReadRefRaw_Good confirms the cache-bound raw
+// TestIndex_ShardCache_ReadRefRaw_Good confirms the cache-bound raw
 // read is byte-identical to the package-level ReadRefRaw for the same ref.
-func TestSafetensors_ShardCache_ReadRefRaw_Good(t *testing.T) {
+func TestIndex_ShardCache_ReadRefRaw_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
@@ -1441,10 +1443,10 @@ func TestSafetensors_ShardCache_ReadRefRaw_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_ReadRefRaw_Bad confirms both failure paths: a
+// TestIndex_ShardCache_ReadRefRaw_Bad confirms both failure paths: a
 // negative ByteLen is rejected before any file open, and a valid ByteLen
 // against a missing shard surfaces the handle-open error.
-func TestSafetensors_ShardCache_ReadRefRaw_Bad(t *testing.T) {
+func TestIndex_ShardCache_ReadRefRaw_Bad(t *testing.T) {
 	t.Run("negative_byte_len", func(t *testing.T) {
 		cache := NewShardCache()
 		defer cache.Close()
@@ -1463,9 +1465,9 @@ func TestSafetensors_ShardCache_ReadRefRaw_Bad(t *testing.T) {
 	})
 }
 
-// TestSafetensors_ShardCache_ReadRefRaw_Ugly confirms a ref claiming more
+// TestIndex_ShardCache_ReadRefRaw_Ugly confirms a ref claiming more
 // bytes than the shard holds surfaces a truncation error.
-func TestSafetensors_ShardCache_ReadRefRaw_Ugly(t *testing.T) {
+func TestIndex_ShardCache_ReadRefRaw_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
@@ -1483,9 +1485,9 @@ func TestSafetensors_ShardCache_ReadRefRaw_Ugly(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_Close_Good confirms Close releases every cached
+// TestIndex_ShardCache_Close_Good confirms Close releases every cached
 // handle and clears the map, so the cache holds nothing after Close.
-func TestSafetensors_ShardCache_Close_Good(t *testing.T) {
+func TestIndex_ShardCache_Close_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
@@ -1506,9 +1508,9 @@ func TestSafetensors_ShardCache_Close_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ShardCache_Close_Bad confirms Close on a cache that only
+// TestIndex_ShardCache_Close_Bad confirms Close on a cache that only
 // ever saw a failed open (nothing cached) closes zero handles without error.
-func TestSafetensors_ShardCache_Close_Bad(t *testing.T) {
+func TestIndex_ShardCache_Close_Bad(t *testing.T) {
 	cache := NewShardCache()
 	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
 	if _, err := cache.Reader(ref); err == nil {
@@ -1520,9 +1522,9 @@ func TestSafetensors_ShardCache_Close_Bad(t *testing.T) {
 	cache.Close() // must not panic closing an empty map
 }
 
-// TestSafetensors_ShardCache_Close_Ugly confirms calling Close twice is
+// TestIndex_ShardCache_Close_Ugly confirms calling Close twice is
 // safe — the second call iterates the already-cleared map and does nothing.
-func TestSafetensors_ShardCache_Close_Ugly(t *testing.T) {
+func TestIndex_ShardCache_Close_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
@@ -1540,9 +1542,9 @@ func TestSafetensors_ShardCache_Close_Ugly(t *testing.T) {
 
 // --- TensorReader.ReadValues / TensorReader.ReadRaw (open-handle equivalents) ---
 
-// TestSafetensors_TensorReader_ReadValues_Good confirms the open-handle read
+// TestIndex_TensorReader_ReadValues_Good confirms the open-handle read
 // is byte-identical to the package-level ReadRefValues for the same ref.
-func TestSafetensors_TensorReader_ReadValues_Good(t *testing.T) {
+func TestIndex_TensorReader_ReadValues_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3, 4}})
@@ -1570,10 +1572,10 @@ func TestSafetensors_TensorReader_ReadValues_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadValues_Bad closes the reader's handle
+// TestIndex_TensorReader_ReadValues_Bad closes the reader's handle
 // before reading — the ReadAt over the closed file must surface an error
 // rather than panicking or returning stale data.
-func TestSafetensors_TensorReader_ReadValues_Bad(t *testing.T) {
+func TestIndex_TensorReader_ReadValues_Bad(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
@@ -1591,9 +1593,9 @@ func TestSafetensors_TensorReader_ReadValues_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadValues_Ugly reads the smallest non-empty
+// TestIndex_TensorReader_ReadValues_Ugly reads the smallest non-empty
 // payload — a single-element tensor.
-func TestSafetensors_TensorReader_ReadValues_Ugly(t *testing.T) {
+func TestIndex_TensorReader_ReadValues_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "single.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"scalar": {9.5}})
@@ -1616,9 +1618,9 @@ func TestSafetensors_TensorReader_ReadValues_Ugly(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadRaw_Good confirms the open-handle raw
+// TestIndex_TensorReader_ReadRaw_Good confirms the open-handle raw
 // read is byte-identical to the package-level ReadRefRaw for the same ref.
-func TestSafetensors_TensorReader_ReadRaw_Good(t *testing.T) {
+func TestIndex_TensorReader_ReadRaw_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
@@ -1646,9 +1648,9 @@ func TestSafetensors_TensorReader_ReadRaw_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadRaw_Bad confirms a negative ByteLen on
+// TestIndex_TensorReader_ReadRaw_Bad confirms a negative ByteLen on
 // the bound ref is rejected before any read is attempted.
-func TestSafetensors_TensorReader_ReadRaw_Bad(t *testing.T) {
+func TestIndex_TensorReader_ReadRaw_Bad(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
@@ -1667,9 +1669,9 @@ func TestSafetensors_TensorReader_ReadRaw_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_TensorReader_ReadRaw_Ugly confirms a ref claiming more
+// TestIndex_TensorReader_ReadRaw_Ugly confirms a ref claiming more
 // bytes than the shard holds surfaces a truncation error.
-func TestSafetensors_TensorReader_ReadRaw_Ugly(t *testing.T) {
+func TestIndex_TensorReader_ReadRaw_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "dense.safetensors")
 	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
@@ -1690,7 +1692,7 @@ func TestSafetensors_TensorReader_ReadRaw_Ugly(t *testing.T) {
 
 // --- IndexFiles ---
 
-func TestSafetensors_IndexFiles_Good(t *testing.T) {
+func TestIndex_IndexFiles_Good(t *testing.T) {
 	dir := t.TempDir()
 	p1 := core.PathJoin(dir, "shard-1.safetensors")
 	p2 := core.PathJoin(dir, "shard-2.safetensors")
@@ -1716,7 +1718,7 @@ func TestSafetensors_IndexFiles_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_IndexFiles_Bad(t *testing.T) {
+func TestIndex_IndexFiles_Bad(t *testing.T) {
 	// A tensor name present in two shards is a duplicate and must error.
 	dir := t.TempDir()
 	p1 := core.PathJoin(dir, "shard-1.safetensors")
@@ -1728,7 +1730,7 @@ func TestSafetensors_IndexFiles_Bad(t *testing.T) {
 	}
 }
 
-func TestSafetensors_IndexFiles_Ugly(t *testing.T) {
+func TestIndex_IndexFiles_Ugly(t *testing.T) {
 	t.Run("empty", func(t *testing.T) {
 		// No paths → empty, non-nil index, no error.
 		index, err := IndexFiles(nil)
@@ -1757,7 +1759,7 @@ func TestSafetensors_IndexFiles_Ugly(t *testing.T) {
 // --- WriteRefFloat32Chunks (per flag #2: writes headerless raw float32-LE,
 // NOT a safetensors container — verify by reading the raw bytes back) ---
 
-func TestSafetensors_WriteRefFloat32Chunks_Good(t *testing.T) {
+func TestIndex_WriteRefFloat32Chunks_Good(t *testing.T) {
 	dir := t.TempDir()
 	src := core.PathJoin(dir, "src.safetensors")
 	want := []float32{1, 2, 3, 4, 5, 6, 7}
@@ -1798,7 +1800,7 @@ func TestSafetensors_WriteRefFloat32Chunks_Good(t *testing.T) {
 	}
 }
 
-func TestSafetensors_WriteRefFloat32Chunks_Bad(t *testing.T) {
+func TestIndex_WriteRefFloat32Chunks_Bad(t *testing.T) {
 	// A cancelled context aborts before/within the chunk loop.
 	dir := t.TempDir()
 	src := core.PathJoin(dir, "src.safetensors")
@@ -1821,11 +1823,11 @@ func TestSafetensors_WriteRefFloat32Chunks_Bad(t *testing.T) {
 	}
 }
 
-// TestSafetensors_WriteRefFloat32Chunks_Ugly drives the boundary chunk
+// TestIndex_WriteRefFloat32Chunks_Ugly drives the boundary chunk
 // sizes: chunkElements <= 0 falls back to the default (one chunk for a
 // small tensor) and a chunk size larger than the tensor also writes it in
 // a single pass. Both must produce the identical bare float32-LE blob.
-func TestSafetensors_WriteRefFloat32Chunks_Ugly(t *testing.T) {
+func TestIndex_WriteRefFloat32Chunks_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	src := core.PathJoin(dir, "src.safetensors")
 	want := []float32{1.5, -2, 3, 4.25}
@@ -1870,11 +1872,11 @@ func TestSafetensors_WriteRefFloat32Chunks_Ugly(t *testing.T) {
 // directly without re-opening a file — the entry pkg/metal callers use
 // once they have already read + length-validated the header blob) ---
 
-// TestSafetensors_ParseHeaderRefs_Good walks a hand-built header blob and
+// TestIndex_ParseHeaderRefs_Good walks a hand-built header blob and
 // confirms one TensorRef per tensor is emitted with the dataStart applied
 // to each tensor's begin offset, the dtype canonicalised, and the Names
 // returned sorted.
-func TestSafetensors_ParseHeaderRefs_Good(t *testing.T) {
+func TestIndex_ParseHeaderRefs_Good(t *testing.T) {
 	const dataStart int64 = 200
 	header := []byte(`{"beta":{"dtype":"f16","shape":[2,3],"data_offsets":[12,24]},` +
 		`"alpha":{"dtype":"F32","shape":[3],"data_offsets":[0,12]}}`)
@@ -1905,10 +1907,10 @@ func TestSafetensors_ParseHeaderRefs_Good(t *testing.T) {
 	}
 }
 
-// TestSafetensors_ParseHeaderRefs_Bad feeds structurally broken header
+// TestIndex_ParseHeaderRefs_Bad feeds structurally broken header
 // bytes — a duplicate tensor name and a non-object header — each of which
 // the walker must reject rather than emit a partial Index.
-func TestSafetensors_ParseHeaderRefs_Bad(t *testing.T) {
+func TestIndex_ParseHeaderRefs_Bad(t *testing.T) {
 	t.Run("duplicate_name", func(t *testing.T) {
 		header := []byte(`{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]},` +
 			`"w":{"dtype":"F32","shape":[1],"data_offsets":[4,8]}}`)
@@ -1924,10 +1926,10 @@ func TestSafetensors_ParseHeaderRefs_Bad(t *testing.T) {
 	})
 }
 
-// TestSafetensors_ParseHeaderRefs_Ugly walks the degenerate-but-legal
+// TestIndex_ParseHeaderRefs_Ugly walks the degenerate-but-legal
 // headers: an empty object and a metadata-only header. Both must produce
 // an empty, non-nil Index with no error (no tensors, metadata dropped).
-func TestSafetensors_ParseHeaderRefs_Ugly(t *testing.T) {
+func TestIndex_ParseHeaderRefs_Ugly(t *testing.T) {
 	t.Run("empty_object", func(t *testing.T) {
 		index, err := ParseHeaderRefs("p", []byte(`{}`), 8)
 		if err != nil {
