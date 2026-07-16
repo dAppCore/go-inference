@@ -1,0 +1,7 @@
+# go build ./pkg/<name> drops main binaries in cwd — never track them
+/budget
+/thinking
+/tools
+/quantise
+/packed-moe
+/reasoning-preservation
