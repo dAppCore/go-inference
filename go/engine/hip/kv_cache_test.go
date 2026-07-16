@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"math"
 	"testing"
 
 	core "dappco.re/go"
