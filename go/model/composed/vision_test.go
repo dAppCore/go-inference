@@ -634,3 +634,79 @@ func TestImageToPatchGrid_Bad(t *testing.T) {
 		t.Fatal("imageToPatchGrid: want an error for an image smaller than one patch, got nil")
 	}
 }
+
+// TestVisionInterpolatePosEmbed_Good pins the bilinear resample: a grid-exact
+// target passes the table through unchanged, and a 2×2 source table with
+// per-cell values [[0,1],[2,3]] lands the hand-computable blends on a 3×3
+// target — centre = the four-cell mean, corners = the edge-clamped source
+// corners (align_corners=false).
+func TestVisionInterpolatePosEmbed_Good(t *testing.T) {
+	table := []float32{0, 1, 2, 3} // 2×2 grid, hidden=1
+	same, err := visionInterpolatePosEmbed(table, 1, 2, 2)
+	if err != nil {
+		t.Fatalf("grid-exact resample: %v", err)
+	}
+	for i := range table {
+		if same[i] != table[i] {
+			t.Fatalf("grid-exact resample changed the table: [%d] %v != %v", i, same[i], table[i])
+		}
+	}
+	up, err := visionInterpolatePosEmbed(table, 1, 3, 3)
+	if err != nil {
+		t.Fatalf("3x3 resample: %v", err)
+	}
+	if got := up[4]; got != 1.5 {
+		t.Fatalf("centre = %v, want 1.5 (mean of the four source cells)", got)
+	}
+	if up[0] != 0 || up[2] != 1 || up[6] != 2 || up[8] != 3 {
+		t.Fatalf("corners = %v/%v/%v/%v, want the edge-clamped source corners 0/1/2/3", up[0], up[2], up[6], up[8])
+	}
+}
+
+// TestVisionInterpolatePosEmbed_Bad pins the refusals: non-positive dims, a
+// table length off the hidden stride, and a non-square position count.
+func TestVisionInterpolatePosEmbed_Bad(t *testing.T) {
+	if _, err := visionInterpolatePosEmbed([]float32{0, 1, 2, 3}, 0, 2, 2); err == nil {
+		t.Fatal("zero hidden must refuse")
+	}
+	if _, err := visionInterpolatePosEmbed([]float32{0, 1, 2}, 2, 2, 2); err == nil {
+		t.Fatal("length off the hidden stride must refuse")
+	}
+	if _, err := visionInterpolatePosEmbed([]float32{0, 1, 2}, 1, 2, 2); err == nil {
+		t.Fatal("non-square position count must refuse")
+	}
+}
+
+// TestVisionTowerForward_Ugly_PosEmbedInterpolation pins the forward's
+// interpolation branch: a learned table sized for a DIFFERENT grid no longer
+// fails loud — the tower forwards, and the added (resampled) positions change
+// the features vs the same tower with no table at all.
+func TestVisionTowerForward_Ugly_PosEmbedInterpolation(t *testing.T) {
+	tower := mkVisionTower(2, 2, 8, 11)
+	const gridH, gridW = 4, 4
+	tower.Cfg.LearnedPositions = true
+	tower.PosEmbed = syn(2*2*tower.Cfg.Hidden, 5) // trained 2×2, grid 4×4 → interpolates
+	patches := syn(gridH*gridW*tower.Cfg.PatchDim, 77)
+	withPos, softTokens, err := visionTowerForward(patches, gridH, gridW, tower)
+	if err != nil {
+		t.Fatalf("interpolating forward: %v", err)
+	}
+	if softTokens != (gridH/tower.Cfg.MergeSize)*(gridW/tower.Cfg.MergeSize) {
+		t.Fatalf("softTokens = %d under interpolation", softTokens)
+	}
+	tower.PosEmbed = nil
+	without, _, err := visionTowerForward(append([]float32(nil), patches...), gridH, gridW, tower)
+	if err != nil {
+		t.Fatalf("no-table forward: %v", err)
+	}
+	differs := false
+	for i := range withPos {
+		if withPos[i] != without[i] {
+			differs = true
+			break
+		}
+	}
+	if !differs {
+		t.Fatal("interpolated positions did not reach the features")
+	}
+}

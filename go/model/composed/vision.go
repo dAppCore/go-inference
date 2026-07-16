@@ -413,14 +413,19 @@ func visionTowerForward(patches []float32, gridH, gridW int, tower *visionTower)
 	}
 	h := linearForward(patches, &tower.Patch, L)
 	if len(tower.PosEmbed) > 0 {
-		// The REAL layout's learned position table is a FIXED [NumPositions,Hidden] lookup, sized for one
-		// specific training grid — a patch grid of a different size has no defined table entry to add, so
-		// this fails loud rather than silently truncating/wrapping or attempting an (unimplemented)
-		// interpolation; that is an explicitly deferred scope for this slice (see the task's divergence 4).
-		if len(tower.PosEmbed) != L*cfg.Hidden {
-			return nil, 0, core.NewError(core.Sprintf("composed.visionTowerForward: pos_embed table has %d position(s), patch grid has %d (interpolation not supported)", len(tower.PosEmbed)/cfg.Hidden, L))
+		// The REAL layout's learned position table is a FIXED [NumPositions,Hidden] lookup trained on one
+		// square grid. A grid-exact request adds the table directly; any other grid resamples it
+		// bilinearly onto (gridH × gridW) — the reference towers' F.interpolate(align_corners=false)
+		// behaviour — so arbitrary image sizes ride the same trained table.
+		pos := tower.PosEmbed
+		if len(pos) != L*cfg.Hidden {
+			var perr error
+			pos, perr = visionInterpolatePosEmbed(tower.PosEmbed, cfg.Hidden, gridH, gridW)
+			if perr != nil {
+				return nil, 0, core.E("composed.visionTowerForward", "pos_embed interpolation", perr)
+			}
 		}
-		h = addRows(h, tower.PosEmbed)
+		h = addRows(h, pos)
 	}
 	for i := range tower.Blocks {
 		if h, err = tower.Blocks[i].forward(h, L, gridW, cfg); err != nil {
@@ -494,4 +499,59 @@ func imageToPatchGrid(data []byte, cfg visionTowerCfg) (patches []float32, gridH
 		}
 	}
 	return patches, gridH, gridW, nil
+}
+
+// visionInterpolatePosEmbed resamples a learned square [side²,hidden] position
+// table onto a (dstH × dstW) patch grid with bilinear interpolation and edge
+// clamping — the reference towers' F.interpolate(mode="bilinear",
+// align_corners=false) convention — so any image grid rides the one table the
+// checkpoint trained. The source table must be square (side = √positions),
+// the real layout's convention; anything else fails loud.
+func visionInterpolatePosEmbed(table []float32, hidden, dstH, dstW int) ([]float32, error) {
+	if hidden <= 0 || dstH <= 0 || dstW <= 0 {
+		return nil, core.NewError("composed.visionInterpolatePosEmbed: hidden and grid dims must be positive")
+	}
+	if len(table)%hidden != 0 {
+		return nil, core.NewError("composed.visionInterpolatePosEmbed: table length is not a multiple of hidden")
+	}
+	positions := len(table) / hidden
+	side := isqrt(positions)
+	if side <= 0 || side*side != positions {
+		return nil, core.NewError(core.Sprintf("composed.visionInterpolatePosEmbed: %d positions is not a square grid", positions))
+	}
+	out := make([]float32, dstH*dstW*hidden)
+	sy := float64(side) / float64(dstH)
+	sx := float64(side) / float64(dstW)
+	clamp := func(v int) int {
+		if v < 0 {
+			return 0
+		}
+		if v >= side {
+			return side - 1
+		}
+		return v
+	}
+	for y := range dstH {
+		fy := (float64(y)+0.5)*sy - 0.5
+		y0 := int(math.Floor(fy))
+		ty := float32(fy - float64(y0))
+		y0c, y1c := clamp(y0), clamp(y0+1)
+		for x := range dstW {
+			fx := (float64(x)+0.5)*sx - 0.5
+			x0 := int(math.Floor(fx))
+			tx := float32(fx - float64(x0))
+			x0c, x1c := clamp(x0), clamp(x0+1)
+			r00 := table[(y0c*side+x0c)*hidden:]
+			r01 := table[(y0c*side+x1c)*hidden:]
+			r10 := table[(y1c*side+x0c)*hidden:]
+			r11 := table[(y1c*side+x1c)*hidden:]
+			dst := out[(y*dstW+x)*hidden:]
+			for h := range hidden {
+				top := r00[h] + (r01[h]-r00[h])*tx
+				bot := r10[h] + (r11[h]-r10[h])*tx
+				dst[h] = top + (bot-top)*ty
+			}
+		}
+	}
+	return out, nil
 }
