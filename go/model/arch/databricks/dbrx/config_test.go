@@ -43,3 +43,30 @@ func TestConfig_Arch_Ugly(t *testing.T) {
 		t.Fatal("empty config accepted")
 	}
 }
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{DModel: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.DModel != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// moe_top_k-exceeds-moe_num_experts guard — distinct from _Bad's all-zero
+// rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{DModel: 8, Heads: 2, Layers: 1, VocabSize: 8, Attention: AttentionConfig{KVHeads: 1}, FFN: FFNConfig{HiddenSize: 4, Experts: 2, TopK: 3}}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("moe_top_k exceeding moe_num_experts became valid after InferFromWeights")
+	}
+}

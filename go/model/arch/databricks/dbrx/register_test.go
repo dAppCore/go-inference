@@ -12,7 +12,7 @@ import (
 
 func coreJSONUnmarshal(data []byte, value any) bool { return core.JSONUnmarshal(data, value).OK }
 
-func TestNormalizeWeights_Good(t *testing.T) {
+func TestRegister_NormalizeWeights_Good(t *testing.T) {
 	// Representative entries copied from the published 29 KB INDEX only (the pack is 263 GB):
 	// https://huggingface.co/databricks/dbrx-instruct/blob/main/model.safetensors.index.json
 	cfg := Config{DModel: 8, Heads: 2, Layers: 1, Attention: AttentionConfig{KVHeads: 1}, FFN: FFNConfig{HiddenSize: 6, Experts: 2, TopK: 1}}
@@ -37,14 +37,14 @@ func TestNormalizeWeights_Good(t *testing.T) {
 	}
 }
 
-func TestNormalizeWeights_Bad(t *testing.T) {
+func TestRegister_NormalizeWeights_Bad(t *testing.T) {
 	got := NormalizeWeights(map[string]safetensors.Tensor{"transformer.blocks.0.ffn.experts.mlp.w1": {Shape: []int{3, 6, 8}}}, Config{Layers: 1, FFN: FFNConfig{Experts: 2}})
 	if _, ok := got["model.layers.0.mlp.experts.0.gate_proj.weight"]; ok {
 		t.Fatal("malformed packed experts aliased")
 	}
 }
 
-func TestNormalizeWeights_Ugly(t *testing.T) {
+func TestRegister_NormalizeWeights_Ugly(t *testing.T) {
 	if got := NormalizeWeights(nil, Config{}); len(got) != 0 {
 		t.Fatalf("empty map produced %d aliases", len(got))
 	}
