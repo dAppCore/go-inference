@@ -103,9 +103,17 @@ end-to-end, so the kernels are f32-in/f32-out (no bf16 tier needed on this lane 
   real 27B shapes, L=1 and L=4); export/prime round-trip byte-exact; **27B-4bit decode 215.75 →
   133.46 ms/token = 4.63 → 7.49 tok/s (+62%)**; real generation sane (Asimov prompt, coherent).
   Kernel receipt from S1 stands: 48 layers in one CB = 1.17 ms vs 78.7 ms host (×67).
-- **S3 — whole-layer CB.** Fold the input projections (quant qmv or f32 steel) and the out_proj +
-  FFN tail into the block's CB — one CB per gated-delta layer, x handed device-to-device. Receipt:
-  CB census/token (368 → ~64-80) + tok/s.
+- **S3 — whole-layer CB. DONE.** One packed gated-delta layer = ONE command buffer: input RMSNorm
+  → the five packed projections (affine qmv over the checkpoint codes, cast-once/project-many) →
+  the block stages → the #8-B FFN tail — x [L,D] the only upload, y the only readback (the
+  per-stage path paid 7 CBs + 6 host crossings). Built from two extractions
+  (`encResidualNormMLPQuantTail`, `encGatedDeltaBlockStages` — explicit barriers throughout, the
+  #8-B encoder discipline) + `gatedDeltaQuantLayerRun`; engagement at the composed quant branch
+  through `GatedDeltaQuantLayerDeviceTry` (same never-fall-back-mid-sequence contract). Receipts
+  (2026-07-16): session-level A/B vs the per-stage path **bit-identical (0.000e+00)** over carried
+  steps; CB census 368 → **~129**/token (quant projections 304 → 64, tails 64 → 16 — only the 16
+  attention layers remain on per-stage seams); **27B-4bit decode 133.46 → 66.42 ms/token = 7.49 →
+  15.05 tok/s (+101%; ×3.25 over the campaign baseline)**; generation sane. Full gate green.
 - **S4 — prefill T>1.** The same kernel with T=chunk (it already loops); chunk the prompt through
   the conv/norm pre-stages. Receipt: prefill t/s vs mlx-lm on the 27B. Only if the instrument says
   prefill matters after decode lands: omlx Kernel S staging.

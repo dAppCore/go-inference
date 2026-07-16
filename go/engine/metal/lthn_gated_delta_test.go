@@ -11,8 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/arch/deltanet"
+	"dappco.re/go/inference/model/composed"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 // lthn_gated_delta_test.go proves the S1 device recurrence (kernels/lthn_gated_delta.metal) against
@@ -509,4 +512,137 @@ func TestGatedDeltaBlockDeviceRun_Ugly(t *testing.T) {
 			t.Fatalf("export/prime round-trip diverged at %d: %v vs %v", i, g1[i], g2[i])
 		}
 	}
+}
+
+// --- S3: the whole quant layer CB vs the per-stage quant path, at the composed-session level ---
+
+// gdQuantTestModel builds a one-layer fully-packed gated-delta composed model (every projection +
+// the FFN carrying 4-bit affine codes) — the S3 engagement shape.
+func gdQuantTestModel(t *testing.T) *composed.ComposedModel {
+	t.Helper()
+	const D, FF, vocab = 512, 1024, 64
+	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	convDim, vDim := cfg.ConvDim(), cfg.VDim()
+	quant := func(seed, outDim, inDim int) *model.QuantWeight {
+		packed, scales, biases, err := mlxaffine.QuantizeTensor(cbSyn(outDim*inDim, seed), outDim, inDim, 4, 64)
+		if err != nil {
+			t.Fatalf("QuantizeTensor(%d,%d): %v", outDim, inDim, err)
+		}
+		return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: 4, GroupSize: 64, OutDim: outDim, InDim: inDim}
+	}
+	w := &qwen3.GatedDeltaWeights{
+		ConvWeight: cbSyn(convDim*cfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
+		ALog: cbSyn(cfg.ValueHeads, 13), DtBias: cbSyn(cfg.ValueHeads, 14), Norm: cbSyn(cfg.HeadDim, 15),
+		InProjQKVQ: quant(21, convDim, D), InProjZQ: quant(22, vDim, D),
+		InProjAQ: quant(23, cfg.ValueHeads, D), InProjBQ: quant(24, cfg.ValueHeads, D),
+		OutProjQ: quant(25, D, vDim),
+	}
+	return &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, Quantised: true,
+		Layers: []composed.Layer{{
+			InputNorm: cbSyn(D, 31), PostAttnNorm: cbSyn(D, 32),
+			MLP:   &composed.MLP{GateQ: quant(41, FF, D), UpQ: quant(42, FF, D), DownQ: quant(43, D, FF), FF: FF},
+			Mixer: composed.NewGatedDeltaMixer(w, cfg),
+		}},
+	}
+}
+
+// TestGatedDeltaQuantLayerDevice_Good is the S3 session-level A/B: the same packed model stepped
+// through the whole-layer CB (hook bound) and through the per-stage quant path (hook nil), carried
+// state and all — the hiddens must agree at f32 rounding scale every step.
+func TestGatedDeltaQuantLayerDevice_Good(t *testing.T) {
+	gdRequireKernel(t)
+	if qwen3.GatedDeltaQuantLayerDevice == nil {
+		t.Skip("quant layer hook unbound (LTHN_GD_BLOCK=0?)")
+	}
+	m := gdQuantTestModel(t)
+	saved := qwen3.GatedDeltaQuantLayerDevice
+	defer func() { qwen3.GatedDeltaQuantLayerDevice = saved }()
+
+	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
+	run := func() [][]float32 {
+		sess := composed.NewSession(m)
+		var outs [][]float32
+		for _, ids := range steps {
+			hid, err := sess.Forward(ids)
+			if err != nil {
+				t.Fatalf("Forward(%v): %v", ids, err)
+			}
+			outs = append(outs, append([]float32(nil), hid...))
+		}
+		return outs
+	}
+	qwen3.GatedDeltaQuantLayerDevice = saved
+	fused := run()
+	qwen3.GatedDeltaQuantLayerDevice = nil
+	staged := run()
+	for i := range fused {
+		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
+		t.Logf("step %d: whole-layer CB vs per-stage scaled max diff %.3e", i, rel)
+		if rel > 5e-4 {
+			t.Fatalf("step %d diverged: %.3e", i, rel)
+		}
+	}
+}
+
+// TestGatedDeltaQuantLayerDevice_Bad pins the decline shapes: a geometry the kernels cannot serve
+// (HeadDim 32 — no Dk instantiation) silently falls to the per-stage path (Forward still serves the
+// token), and the direct run rejects wrong sizes before any dispatch.
+func TestGatedDeltaQuantLayerDevice_Bad(t *testing.T) {
+	gdRequireKernel(t)
+	if qwen3.GatedDeltaQuantLayerDevice == nil {
+		t.Skip("quant layer hook unbound")
+	}
+	// HeadDim 32: convDim = 2*2*32 + 4*32 = 256, vDim = 128 — packable, but no dk32 kernel, so the
+	// layer hook must decline on its first call and the per-stage branch serves.
+	const D, FF, vocab = 256, 512, 32
+	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
+	convDim, vDim := cfg.ConvDim(), cfg.VDim()
+	w := &qwen3.GatedDeltaWeights{
+		ConvWeight: cbSyn(convDim*cfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
+		ALog: cbSyn(cfg.ValueHeads, 13), DtBias: cbSyn(cfg.ValueHeads, 14), Norm: cbSyn(cfg.HeadDim, 15),
+		InProjQKVQ: mustQuant(t, 21, convDim, D), InProjZQ: mustQuant(t, 22, vDim, D),
+		InProjAQ: mustQuant(t, 23, cfg.ValueHeads, D), InProjBQ: mustQuant(t, 24, cfg.ValueHeads, D),
+		OutProjQ: mustQuant(t, 25, D, vDim),
+	}
+	m := &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, Quantised: true,
+		Layers: []composed.Layer{{
+			InputNorm: cbSyn(D, 31), PostAttnNorm: cbSyn(D, 32),
+			MLP:   &composed.MLP{GateQ: mustQuant(t, 41, FF, D), UpQ: mustQuant(t, 42, FF, D), DownQ: mustQuant(t, 43, D, FF), FF: FF},
+			Mixer: composed.NewGatedDeltaMixer(w, cfg),
+		}},
+	}
+	sess := composed.NewSession(m)
+	if _, err := sess.Forward([]int32{1, 2}); err != nil {
+		t.Fatalf("decline path must serve the token, got %v", err)
+	}
+
+	// Direct run: size mismatch rejected before any dispatch.
+	h, err := newGatedDeltaDeviceState(2, 4, 64, 64, 4, 1)
+	if err != nil {
+		t.Fatalf("newGatedDeltaDeviceState: %v", err)
+	}
+	w64 := &qwen3.GatedDeltaWeights{
+		ConvWeight: cbSyn((2*2*64+4*64)*4, 51), ConvBias: cbSyn(2*2*64+4*64, 52),
+		ALog: cbSyn(4, 53), DtBias: cbSyn(4, 54), Norm: cbSyn(64, 55),
+		InProjQKVQ: mustQuant(t, 61, 2*2*64+4*64, 512), InProjZQ: mustQuant(t, 62, 4*64, 512),
+		InProjAQ: mustQuant(t, 63, 4, 512), InProjBQ: mustQuant(t, 64, 4, 512),
+		OutProjQ: mustQuant(t, 65, 512, 4*64),
+	}
+	y := make([]float32, 512)
+	if err := gatedDeltaQuantLayerRun(h, make([]float32, 5), cbSyn(512, 1), w64, cbSyn(512, 2),
+		mustQuant(t, 71, 1024, 512), mustQuant(t, 72, 1024, 512), mustQuant(t, 73, 512, 1024),
+		1, 512, 1024, 1e-6, nil, nil, y); err == nil {
+		t.Fatal("x size mismatch must error")
+	}
+}
+
+func mustQuant(t *testing.T, seed, outDim, inDim int) *model.QuantWeight {
+	t.Helper()
+	packed, scales, biases, err := mlxaffine.QuantizeTensor(cbSyn(outDim*inDim, seed), outDim, inDim, 4, 64)
+	if err != nil {
+		t.Fatalf("QuantizeTensor: %v", err)
+	}
+	return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: 4, GroupSize: 64, OutDim: outDim, InDim: inDim}
 }

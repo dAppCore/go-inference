@@ -132,27 +132,6 @@ func ResidualNormMLPQuantDevice(h, mixOut, normW []float32, gate, up, down *mode
 	if !quantGeometryOK(gate, FF, D) || !quantGeometryOK(up, FF, D) || !quantGeometryOK(down, D, FF) {
 		return nil, core.NewError("native.ResidualNormMLPQuantDevice: unsupported quant geometry")
 	}
-	psoAdd, err := pipelineFor("vv_Addfloat32")
-	if err != nil {
-		return nil, err
-	}
-	rmsName := "rmsfloat32"
-	if D > rmsLoopedLimit {
-		rmsName = "rms_loopedfloat32"
-	}
-	psoRMS, err := pipelineFor(rmsName)
-	if err != nil {
-		return nil, err
-	}
-	psoSig, err := pipelineFor("v_Sigmoidfloat32float32")
-	if err != nil {
-		return nil, err
-	}
-	psoMul, err := pipelineFor("vv_Multiplyfloat32")
-	if err != nil {
-		return nil, err
-	}
-
 	out := make([]float32, L*D)
 	var encErr error
 	withAutoreleasePool(func() {
@@ -174,84 +153,17 @@ func ResidualNormMLPQuantDevice(h, mixOut, normW []float32, gate, up, down *mode
 		}
 		normBuf := residentFloat32(normW)
 		nD := L * D
-		nFF := L * FF
-		rmsTG := rmsThreadgroup(D, psoRMS)
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		// hplus = h + mixOut, in place into hBuf (hplus is the RMSNorm input AND the MLP residual).
-		emitBinary(encSink{enc}, psoAdd, hBuf, 0, mixBuf, 0, hBuf, 0, nD)
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		// normed = RMSNorm(hplus, normW) — plain rsqrt(mean²+eps)·w, one threadgroup per row, f32.
-		emitRMSNormRows(encSink{enc}, psoRMS, hBuf, normBuf, sc.normed.buf, 0, 0, 0, D, eps, L, rmsTG)
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		// encProj encodes one packed [outDim,inDim] projection — cast the f32 rows to bf16, run
-		// affine_qmv per row at L==1 (the decode hot path) or the affine_qmm_t slab at L>1
-		// (prefill), and widen the bf16 result back to f32 — the unfused seam's exact dtype dance,
-		// inside the SAME encoder as the rest of the tail. xBF/dstBF are the bf16 staging buffers.
-		encProj := func(w *model.QuantWeight, x, xBF, dstBF, dst metal.MTLBuffer, outDim, inDim int) error {
-			if err := encNarrowF32ToBF16(enc, x, xBF, L*inDim); err != nil {
-				return err
-			}
-			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-			wq, ws, wb := residentBytes(w.Packed), residentBytes(w.Scales), residentBytes(w.Biases)
-			var perr error
-			if L == 1 {
-				perr = encQMVBF16At(enc, wq, ws, wb, xBF, dstBF, 0, 0, 0, 0, 0, outDim, inDim, w.GroupSize, w.Bits)
-			} else {
-				perr = encQMMTBF16At(enc, wq, ws, wb, xBF, dstBF, 0, 0, 0, 0, 0, L, outDim, inDim, w.GroupSize, w.Bits)
-			}
-			if perr != nil {
-				return perr
-			}
-			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-			return encWidenBF16ToF32(enc, dstBF, dst, L*outDim)
-		}
-		// gate and up read the same cast normed rows; cast once, project twice.
-		if encErr = encNarrowF32ToBF16(enc, sc.normed.buf, sc.nBF.buf, nD); encErr != nil {
-			endEncodingFast(enc)
-			return
-		}
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		encProjPre := func(w *model.QuantWeight, xBF, dstBF, dst metal.MTLBuffer, outDim, inDim int) error {
-			wq, ws, wb := residentBytes(w.Packed), residentBytes(w.Scales), residentBytes(w.Biases)
-			var perr error
-			if L == 1 {
-				perr = encQMVBF16At(enc, wq, ws, wb, xBF, dstBF, 0, 0, 0, 0, 0, outDim, inDim, w.GroupSize, w.Bits)
-			} else {
-				perr = encQMMTBF16At(enc, wq, ws, wb, xBF, dstBF, 0, 0, 0, 0, 0, L, outDim, inDim, w.GroupSize, w.Bits)
-			}
-			if perr != nil {
-				return perr
-			}
-			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-			return encWidenBF16ToF32(enc, dstBF, dst, L*outDim)
-		}
-		if encErr = encProjPre(gate, sc.nBF.buf, sc.gBF.buf, sc.g.buf, FF, D); encErr != nil {
-			endEncodingFast(enc)
-			return
-		}
-		if encErr = encProjPre(up, sc.nBF.buf, sc.uBF.buf, sc.u.buf, FF, D); encErr != nil {
-			endEncodingFast(enc)
-			return
-		}
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		emitUnary(encSink{enc}, psoSig, sc.g.buf, sc.s.buf, nFF) // s = sigmoid(g)
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		emitBinary(encSink{enc}, psoMul, sc.s.buf, 0, sc.g.buf, 0, sc.s.buf, 0, nFF) // s = silu(g)
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		emitBinary(encSink{enc}, psoMul, sc.s.buf, 0, sc.u.buf, 0, sc.s.buf, 0, nFF) // s = silu(g)·u
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		// down: cast the silu rows into gBF (free after its widen) and land the bf16 result in nBF
-		// (free after gate/up consumed it), widening into out.
-		if encErr = encProj(down, sc.s.buf, sc.gBF.buf, sc.nBF.buf, sc.out.buf, D, FF); encErr != nil {
-			endEncodingFast(enc)
-			return
-		}
-		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
-		// y = hplus + mlpOut, in place into out.
-		emitBinary(encSink{enc}, psoAdd, hBuf, 0, sc.out.buf, 0, sc.out.buf, 0, nD)
+		encErr = encResidualNormMLPQuantTail(enc, quantTailBufs{
+			h: hBuf, mix: mixBuf, normed: sc.normed.buf, nBF: sc.nBF.buf,
+			g: sc.g.buf, gBF: sc.gBF.buf, u: sc.u.buf, uBF: sc.uBF.buf, s: sc.s.buf, out: sc.out.buf,
+		}, normBuf, gate, up, down, L, D, FF, eps)
 		endEncodingFast(enc)
+		if encErr != nil {
+			return
+		}
 		commitCommandBufferFast(cb)
 		waitUntilCompletedFast(cb)
 		copy(out, unsafe.Slice((*float32)(unsafe.Pointer(&sc.out.bytes[0])), nD))
@@ -260,4 +172,104 @@ func ResidualNormMLPQuantDevice(h, mixOut, normW []float32, gate, up, down *mode
 		return nil, encErr
 	}
 	return out, nil
+}
+
+// quantTailBufs names the stage buffers encResidualNormMLPQuantTail writes through: h [L,D] f32
+// (modified in place — it becomes hplus, the tail's residual), mix [L,D] f32, normed/nBF the f32/
+// bf16 normed rows, g/gBF and u/uBF the gate/up stages, s the silu product, out the result [L,D].
+type quantTailBufs struct {
+	h, mix, normed, nBF, g, gBF, u, uBF, s, out metal.MTLBuffer
+}
+
+// encProjQuantF32 encodes one packed [outDim,inDim] projection over f32 rows inside a live
+// encoder: cast x to bf16, affine_qmv per row at L==1 (the decode hot path) or the affine_qmm_t
+// slab at L>1, widen back to f32 — the unfused quant seam's exact dtype dance as encoder stages.
+// xBF/dstBF are bf16 staging; barriers separate the dependent stages.
+func encProjQuantF32(enc metal.MTLComputeCommandEncoder, w *model.QuantWeight, x, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+	if err := encNarrowF32ToBF16(enc, x, xBF, L*inDim); err != nil {
+		return err
+	}
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	return encProjQuantBF16In(enc, w, xBF, dstBF, dst, L, outDim, inDim)
+}
+
+// encProjQuantBF16In is encProjQuantF32 from ALREADY-CAST bf16 rows (cast once, project many —
+// the gate/up pattern).
+func encProjQuantBF16In(enc metal.MTLComputeCommandEncoder, w *model.QuantWeight, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+	wq, ws, wb := residentBytes(w.Packed), residentBytes(w.Scales), residentBytes(w.Biases)
+	var perr error
+	if L == 1 {
+		perr = encQMVBF16At(enc, wq, ws, wb, xBF, dstBF, 0, 0, 0, 0, 0, outDim, inDim, w.GroupSize, w.Bits)
+	} else {
+		perr = encQMMTBF16At(enc, wq, ws, wb, xBF, dstBF, 0, 0, 0, 0, 0, L, outDim, inDim, w.GroupSize, w.Bits)
+	}
+	if perr != nil {
+		return perr
+	}
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	return encWidenBF16ToF32(enc, dstBF, dst, L*outDim)
+}
+
+// encResidualNormMLPQuantTail encodes the whole packed FFN tail into a live encoder:
+//
+//	hplus = h + mix (in place over h) → normed = RMSNorm(hplus, normW) → silu(normed·gateᵀ) ⊙
+//	(normed·upᵀ) → ·downᵀ → out = hplus + mlpOut
+//
+// — the body ResidualNormMLPQuantDevice runs as its own command buffer, split out so the fused
+// gated-delta LAYER command buffer (#18 S3) stacks the identical tail behind the mixer stages.
+func encResidualNormMLPQuantTail(enc metal.MTLComputeCommandEncoder, tb quantTailBufs, normW metal.MTLBuffer, gate, up, down *model.QuantWeight, L, D, FF int, eps float32) error {
+	psoAdd, err := pipelineFor("vv_Addfloat32")
+	if err != nil {
+		return err
+	}
+	rmsName := "rmsfloat32"
+	if D > rmsLoopedLimit {
+		rmsName = "rms_loopedfloat32"
+	}
+	psoRMS, err := pipelineFor(rmsName)
+	if err != nil {
+		return err
+	}
+	psoSig, err := pipelineFor("v_Sigmoidfloat32float32")
+	if err != nil {
+		return err
+	}
+	psoMul, err := pipelineFor("vv_Multiplyfloat32")
+	if err != nil {
+		return err
+	}
+	nD, nFF := L*D, L*FF
+	rmsTG := rmsThreadgroup(D, psoRMS)
+	// hplus = h + mix, in place into h (hplus is the RMSNorm input AND the MLP residual).
+	emitBinary(encSink{enc}, psoAdd, tb.h, 0, tb.mix, 0, tb.h, 0, nD)
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	emitRMSNormRows(encSink{enc}, psoRMS, tb.h, normW, tb.normed, 0, 0, 0, D, eps, L, rmsTG)
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	// gate and up read the same cast normed rows; cast once, project twice.
+	if err := encNarrowF32ToBF16(enc, tb.normed, tb.nBF, nD); err != nil {
+		return err
+	}
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	if err := encProjQuantBF16In(enc, gate, tb.nBF, tb.gBF, tb.g, L, FF, D); err != nil {
+		return err
+	}
+	if err := encProjQuantBF16In(enc, up, tb.nBF, tb.uBF, tb.u, L, FF, D); err != nil {
+		return err
+	}
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	emitUnary(encSink{enc}, psoSig, tb.g, tb.s, nFF) // s = sigmoid(g)
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	emitBinary(encSink{enc}, psoMul, tb.s, 0, tb.g, 0, tb.s, 0, nFF) // s = silu(g)
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	emitBinary(encSink{enc}, psoMul, tb.s, 0, tb.u, 0, tb.s, 0, nFF) // s = silu(g)·u
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	// down: cast the silu rows into gBF (free after its widen) and land the bf16 result in nBF
+	// (free after gate/up consumed it), widening into out.
+	if err := encProjQuantF32(enc, down, tb.s, tb.gBF, tb.nBF, tb.out, L, D, FF); err != nil {
+		return err
+	}
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+	// y = hplus + mlpOut, in place into out.
+	emitBinary(encSink{enc}, psoAdd, tb.h, 0, tb.out, 0, tb.out, 0, nD)
+	return nil
 }

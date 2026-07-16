@@ -5,6 +5,7 @@ package composed
 import (
 	"slices"
 
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 )
 
@@ -160,4 +161,29 @@ func (m *gatedDeltaMixer) forwardFromInput(qkv, z, a, b []float32, L, D int, pri
 		return nil, nil, 0, nil, err
 	}
 	return gated, m.w.OutProj, vDim, gatedDeltaState{conv: nc, delta: nd, sc: sc}, nil
+}
+
+// forwardQuantLayer runs one WHOLE packed gated-delta layer through the device layer seam
+// (qwen3.GatedDeltaQuantLayerDeviceTry): input norm, the five packed projections, the block and the
+// packed FFN tail in one command buffer, x in / y out, state device-resident. engaged=false leaves
+// the standard quant branch (per-stage seams) in charge; engaged=true with err propagates — the
+// device owns this sequence's state (see the Try contract). Called from forwardEmb's quant branch
+// for a dense packed SwiGLU at residual scale 1.
+func (m *gatedDeltaMixer) forwardQuantLayer(h, inputNorm, postNorm []float32, gate, up, down *model.QuantWeight, FF, L, D int, eps float32, prior any) (y []float32, next any, engaged bool, err error) {
+	var pc, pd []float32
+	var sc *qwen3.GatedDeltaScratch
+	if st, ok := prior.(gatedDeltaState); ok {
+		pc, pd, sc = st.conv, st.delta, st.sc
+	}
+	if sc == nil {
+		sc = &qwen3.GatedDeltaScratch{}
+	}
+	y, engaged, err = qwen3.GatedDeltaQuantLayerDeviceTry(sc, h, inputNorm, m.w, m.cfg, postNorm, gate, up, down, L, D, FF, eps, pc, pd)
+	if !engaged {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, true, err
+	}
+	return y, gatedDeltaState{sc: sc}, true, nil
 }

@@ -284,6 +284,32 @@ func GatedDeltaBlockDeviceTry(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *
 	return nil, false, nil // never engaged (first-call decline): the host path serves
 }
 
+// GatedDeltaQuantLayerDevice is the device seam for one WHOLE packed gated-delta layer — input
+// RMSNorm, the five packed projections (in_proj_qkv/z/a/b + out_proj over their checkpoint codes),
+// the gated-delta block, and the packed SwiGLU FFN tail (post-norm + gate/up/down + residuals) —
+// in ONE command buffer, x [L,D] in and y [L,D] out, recurrent state resident on sc.Device. The
+// unfused packed path pays seven command buffers per layer for the same work. Engagement requires
+// every projection packed and residualScale == 1 (the caller checks the arch; the binding checks
+// the geometry). AX-8: declared here, bound by the backend, nil ⇒ the per-stage path serves.
+var GatedDeltaQuantLayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, err error)
+
+// GatedDeltaQuantLayerDeviceTry mirrors GatedDeltaBlockDeviceTry's engagement contract for the
+// whole-layer seam: engaged=false ⇒ run the per-stage path; engaged=true with err ⇒ the device owns
+// this sequence's state — propagate, never fall back mid-sequence.
+func GatedDeltaQuantLayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, engaged bool, err error) {
+	if GatedDeltaQuantLayerDevice == nil || sc == nil {
+		return nil, false, nil
+	}
+	y, err = GatedDeltaQuantLayerDevice(sc, x, inputNorm, w, cfg, postNorm, gate, up, down, L, D, FF, eps, priorConv, priorDelta)
+	if err == nil {
+		return y, true, nil
+	}
+	if sc.Device != nil {
+		return nil, true, err
+	}
+	return nil, false, nil
+}
+
 // GatedDeltaForwardF32 is GatedDeltaForwardScratchF32 with a fresh (nil) scratch — every projection
 // allocates, the behaviour before the write-into seam. Kept for existing callers and the engine backend
 // parity tests; bit-identical to the scratch path.

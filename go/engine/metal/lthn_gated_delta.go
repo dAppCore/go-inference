@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"github.com/tmc/apple/metal"
 )
@@ -468,22 +469,6 @@ func GatedDeltaBlockDeviceRun(
 		h.prime(priorConv, priorDelta)
 	}
 	key := gatedDeltaBlockKey{L: L, Hk: h.Hk, Hv: h.Hv, Dk: h.Dk}
-	convPSO, err := gdConvPipeline(h.Dk)
-	if err != nil {
-		return err
-	}
-	ringPSO, err := gdRingPipeline()
-	if err != nil {
-		return err
-	}
-	gatesPSO, err := gdGatesPipeline()
-	if err != nil {
-		return err
-	}
-	normPSO, err := gdNormPipeline(h.Dv)
-	if err != nil {
-		return err
-	}
 	var encErr error
 	withAutoreleasePool(func() {
 		sc, gerr := getGatedDeltaBlockScratch(key)
@@ -519,75 +504,15 @@ func GatedDeltaBlockDeviceRun(
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-
-		// conv + SiLU + split + ℓ2-norm: one simdgroup per (head row, t).
-		setPSO(enc, convPSO)
-		setBuf(enc, h.ring.buf, 0, 0)
-		setBuf(enc, qkvB, 0, 1)
-		setBuf(enc, wConv, 0, 2)
-		setBuf(enc, wBias, 0, 3)
-		setBuf(enc, sc.qN.buf, 0, 4)
-		setBuf(enc, sc.kN.buf, 0, 5)
-		setBuf(enc, sc.vN.buf, 0, 6)
-		setEncInt32(enc, int32(L), 7)
-		setEncInt32(enc, int32(h.K), 8)
-		setEncInt32(enc, int32(h.Hk), 9)
-		setEncInt32(enc, int32(h.Hv), 10)
-		setEncInt32(enc, int32(hasBias), 11)
-		dispatchThreadgroups(enc,
-			metal.MTLSize{Width: 1, Height: uint(2*h.Hk + h.Hv), Depth: uint(L)},
-			metal.MTLSize{Width: 32, Height: 1, Depth: 1})
-
-		// ring advance (reads ring+qkv, writes ring; thread-per-channel column ownership).
-		setPSO(enc, ringPSO)
-		setBuf(enc, h.ring.buf, 0, 0)
-		setBuf(enc, qkvB, 0, 1)
-		setEncInt32(enc, int32(L), 2)
-		setEncInt32(enc, int32(h.K), 3)
-		setEncInt32(enc, int32(convDim), 4)
-		dispatchThreadgroups(enc,
-			metal.MTLSize{Width: uint((convDim + 255) / 256), Height: 1, Depth: 1},
-			metal.MTLSize{Width: 256, Height: 1, Depth: 1})
-
-		// α/β gate transform.
-		setPSO(enc, gatesPSO)
-		setBuf(enc, aB, 0, 0)
-		setBuf(enc, bB, 0, 1)
-		setBuf(enc, wALog, 0, 2)
-		setBuf(enc, wDt, 0, 3)
-		setBuf(enc, sc.g.buf, 0, 4)
-		setBuf(enc, sc.beta.buf, 0, 5)
-		setEncInt32(enc, int32(L*h.Hv), 6)
-		setEncInt32(enc, int32(h.Hv), 7)
-		dispatchThreadgroups(enc,
-			metal.MTLSize{Width: uint((L*h.Hv + 255) / 256), Height: 1, Depth: 1},
-			metal.MTLSize{Width: 256, Height: 1, Depth: 1})
-
-		// the recurrence (S1 kernel), state resident in-place, y into vN's twin (reuse sc.z? no —
-		// z is an input; o gets its own rows in sc.gated then the norm overwrites... o and gated
-		// share extent [L,vDim]; the norm reads o and z and writes gated, so o needs its own
-		// buffer: reuse sc.vN? vN is the recurrence's v INPUT. Give o = sc.gated, out = sc.gated:
-		// norm reads o row into registers before writing the same rows — single dispatch RMW on
-		// disjoint rows with in-register staging, safe.
-		if err := encGatedDeltaStepF32(enc, sc.qN.buf, sc.kN.buf, sc.vN.buf, sc.g.buf, sc.beta.buf,
-			h.state.buf, sc.gated.buf, 0, 0, 0, 0, 0, 0, 0, L, h.kSlots, h.Hk, h.Hv, h.Dk, h.Dv); err != nil {
+		if err := encGatedDeltaBlockStages(enc, h, gdBlockStageBufs{
+			qkv: qkvB, z: zB, a: aB, b: bB,
+			qN: sc.qN.buf, kN: sc.kN.buf, vN: sc.vN.buf, g: sc.g.buf, beta: sc.beta.buf,
+			gated: sc.gated.buf,
+		}, wConv, wBias, hasBias, wALog, wDt, wNorm, L); err != nil {
 			encErr = err
 			endEncodingFast(enc)
 			return
 		}
-
-		// gated RMSNorm(o)·SiLU(z), o and out aliased over sc.gated (in-register row staging).
-		setPSO(enc, normPSO)
-		setBuf(enc, sc.gated.buf, 0, 0)
-		setBuf(enc, zB, 0, 1)
-		setBuf(enc, wNorm, 0, 2)
-		setBuf(enc, sc.gated.buf, 0, 3)
-		setEncInt32(enc, int32(L*h.Hv), 4)
-		setBytesF32(enc, 1e-6, 5)
-		dispatchThreadgroups(enc,
-			metal.MTLSize{Width: 1, Height: uint(L * h.Hv), Depth: 1},
-			metal.MTLSize{Width: 32, Height: 1, Depth: 1})
-
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
 		waitUntilCompletedFast(cb)
@@ -634,4 +559,363 @@ func gatedDeltaDeviceStateExportHook(dev any) ([]float32, []float32, bool) {
 	}
 	conv, delta := h.export()
 	return conv, delta, true
+}
+
+// gdBlockStageBufs names the buffers the block's stage chain reads and writes: the four projection
+// outputs in, the split/normed q,k,v + the α/β gates as intermediates, and gated [L,vDim] out (the
+// recurrence's y, then gated-normed in place).
+type gdBlockStageBufs struct {
+	qkv, z, a, b        metal.MTLBuffer
+	qN, kN, vN, g, beta metal.MTLBuffer
+	gated               metal.MTLBuffer
+}
+
+// encGatedDeltaBlockStages encodes the whole post-projection gated-delta block into a live encoder:
+// conv ring + SiLU + split + ℓ2-norms → ring advance → α/β gate transform → the recurrence (state
+// resident, in place on st) → gated RMSNorm·SiLU(z), with explicit barriers between dependent
+// stages (the #8-B encoder discipline). The caller owns the command buffer — GatedDeltaBlockDeviceRun
+// wraps this as its own CB; the fused quant LAYER (#18 S3) stacks it between its projections.
+func encGatedDeltaBlockStages(
+	enc metal.MTLComputeCommandEncoder,
+	st *gatedDeltaDeviceState,
+	b gdBlockStageBufs,
+	wConv, wBias metal.MTLBuffer, hasBias int,
+	wALog, wDt, wNorm metal.MTLBuffer,
+	L int,
+) error {
+	convPSO, err := gdConvPipeline(st.Dk)
+	if err != nil {
+		return err
+	}
+	ringPSO, err := gdRingPipeline()
+	if err != nil {
+		return err
+	}
+	gatesPSO, err := gdGatesPipeline()
+	if err != nil {
+		return err
+	}
+	normPSO, err := gdNormPipeline(st.Dv)
+	if err != nil {
+		return err
+	}
+
+	// conv + SiLU + split + ℓ2-norm: one simdgroup per (head row, t).
+	setPSO(enc, convPSO)
+	setBuf(enc, st.ring.buf, 0, 0)
+	setBuf(enc, b.qkv, 0, 1)
+	setBuf(enc, wConv, 0, 2)
+	setBuf(enc, wBias, 0, 3)
+	setBuf(enc, b.qN, 0, 4)
+	setBuf(enc, b.kN, 0, 5)
+	setBuf(enc, b.vN, 0, 6)
+	setEncInt32(enc, int32(L), 7)
+	setEncInt32(enc, int32(st.K), 8)
+	setEncInt32(enc, int32(st.Hk), 9)
+	setEncInt32(enc, int32(st.Hv), 10)
+	setEncInt32(enc, int32(hasBias), 11)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: 1, Height: uint(2*st.Hk + st.Hv), Depth: uint(L)},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1})
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+
+	// ring advance (reads ring+qkv, writes ring; thread-per-channel column ownership) — after the
+	// conv consumed the old ring rows.
+	setPSO(enc, ringPSO)
+	setBuf(enc, st.ring.buf, 0, 0)
+	setBuf(enc, b.qkv, 0, 1)
+	setEncInt32(enc, int32(L), 2)
+	setEncInt32(enc, int32(st.K), 3)
+	setEncInt32(enc, int32(st.convDim), 4)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: uint((st.convDim + 255) / 256), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 256, Height: 1, Depth: 1})
+
+	// α/β gate transform (independent of the conv chain — no barrier needed before it).
+	setPSO(enc, gatesPSO)
+	setBuf(enc, b.a, 0, 0)
+	setBuf(enc, b.b, 0, 1)
+	setBuf(enc, wALog, 0, 2)
+	setBuf(enc, wDt, 0, 3)
+	setBuf(enc, b.g, 0, 4)
+	setBuf(enc, b.beta, 0, 5)
+	setEncInt32(enc, int32(L*st.Hv), 6)
+	setEncInt32(enc, int32(st.Hv), 7)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: uint((L*st.Hv + 255) / 256), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 256, Height: 1, Depth: 1})
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+
+	// the recurrence (S1 kernel): state resident in place, y into b.gated.
+	if err := encGatedDeltaStepF32(enc, b.qN, b.kN, b.vN, b.g, b.beta,
+		st.state.buf, b.gated, 0, 0, 0, 0, 0, 0, 0, L, st.kSlots, st.Hk, st.Hv, st.Dk, st.Dv); err != nil {
+		return err
+	}
+	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+
+	// gated RMSNorm(o)·SiLU(z), o and out aliased over b.gated (in-register row staging).
+	setPSO(enc, normPSO)
+	setBuf(enc, b.gated, 0, 0)
+	setBuf(enc, b.z, 0, 1)
+	setBuf(enc, wNorm, 0, 2)
+	setBuf(enc, b.gated, 0, 3)
+	setEncInt32(enc, int32(L*st.Hv), 4)
+	setBytesF32(enc, 1e-6, 5)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: 1, Height: uint(L * st.Hv), Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1})
+	return nil
+}
+
+// --- S3: the whole QUANT gated-delta LAYER in one command buffer ---
+
+// gatedDeltaQuantLayerScratch is the pooled staging for one fused layer call: the x upload / y
+// readback pair, the five projections' f32+bf16 stages, the block intermediates, and the FFN tail
+// stages — everything between is device-only.
+type gatedDeltaQuantLayerScratch struct {
+	x, normed1, qkv, z, a, b          *pinnedNoCopyBytes // input side (f32)
+	n1BF, qkvBF, zBF, aBF, bBF        *pinnedNoCopyBytes // input-side bf16 qmv stages
+	qN, kN, vN, g, beta, gated        *pinnedNoCopyBytes // block intermediates (f32)
+	gatedBF, mixBF                    *pinnedNoCopyBytes // out_proj bf16 stages
+	mix                               *pinnedNoCopyBytes // out_proj output (f32)
+	normed2, n2BF, gFF, gFFBF         *pinnedNoCopyBytes // tail stages
+	uFF, uFFBF, sFF, out              *pinnedNoCopyBytes
+}
+
+type gatedDeltaQuantLayerKey struct{ L, D, FF, Hk, Hv, Dk, K int }
+
+var gatedDeltaQuantLayerPools sync.Map // gatedDeltaQuantLayerKey -> *sync.Pool
+
+func getGatedDeltaQuantLayerScratch(key gatedDeltaQuantLayerKey) (*gatedDeltaQuantLayerScratch, error) {
+	poolAny, ok := gatedDeltaQuantLayerPools.Load(key)
+	if !ok {
+		poolAny, _ = gatedDeltaQuantLayerPools.LoadOrStore(key, &sync.Pool{})
+	}
+	pool := poolAny.(*sync.Pool)
+	if v := pool.Get(); v != nil {
+		return v.(*gatedDeltaQuantLayerScratch), nil
+	}
+	sc := &gatedDeltaQuantLayerScratch{}
+	var err error
+	alloc := func(n int) *pinnedNoCopyBytes {
+		if err != nil {
+			return nil
+		}
+		var buf *pinnedNoCopyBytes
+		buf, err = newPinnedNoCopyBytes(n)
+		return buf
+	}
+	convDim := (2*key.Hk + key.Hv) * key.Dk
+	vDim := key.Hv * key.Dk
+	L, D, FF := key.L, key.D, key.FF
+	sc.x = alloc(L * D * 4)
+	sc.normed1 = alloc(L * D * 4)
+	sc.qkv = alloc(L * convDim * 4)
+	sc.z = alloc(L * vDim * 4)
+	sc.a = alloc(L * key.Hv * 4)
+	sc.b = alloc(L * key.Hv * 4)
+	sc.n1BF = alloc(L * D * bf16Size)
+	sc.qkvBF = alloc(L * convDim * bf16Size)
+	sc.zBF = alloc(L * vDim * bf16Size)
+	sc.aBF = alloc(L * key.Hv * bf16Size)
+	sc.bBF = alloc(L * key.Hv * bf16Size)
+	sc.qN = alloc(L * key.Hk * key.Dk * 4)
+	sc.kN = alloc(L * key.Hk * key.Dk * 4)
+	sc.vN = alloc(L * vDim * 4)
+	sc.g = alloc(L * key.Hv * 4)
+	sc.beta = alloc(L * key.Hv * 4)
+	sc.gated = alloc(L * vDim * 4)
+	sc.gatedBF = alloc(L * vDim * bf16Size)
+	sc.mixBF = alloc(L * D * bf16Size)
+	sc.mix = alloc(L * D * 4)
+	sc.normed2 = alloc(L * D * 4)
+	sc.n2BF = alloc(L * max(D, FF) * bf16Size)
+	sc.gFF = alloc(L * FF * 4)
+	sc.gFFBF = alloc(L * FF * bf16Size)
+	sc.uFF = alloc(L * FF * 4)
+	sc.uFFBF = alloc(L * FF * bf16Size)
+	sc.sFF = alloc(L * FF * 4)
+	sc.out = alloc(L * D * 4)
+	if err != nil {
+		return nil, err
+	}
+	return sc, nil
+}
+
+func putGatedDeltaQuantLayerScratch(key gatedDeltaQuantLayerKey, sc *gatedDeltaQuantLayerScratch) {
+	if v, ok := gatedDeltaQuantLayerPools.Load(key); ok {
+		v.(*sync.Pool).Put(sc)
+	}
+}
+
+// gatedDeltaQuantLayerRun runs one WHOLE packed gated-delta layer in a single command buffer:
+//
+//	normed = RMSNorm(x, inputNorm) → in_proj_qkv/z/a/b (affine qmv/qmm_t over codes)
+//	→ the gated-delta block stages (conv ring + gates + recurrence + gated norm, state resident)
+//	→ out_proj (packed) → the #8-B FFN tail (residual + post-norm + packed SwiGLU + residual)
+//
+// x [L,D] is the only upload, y [L,D] the only readback — the unfused path pays SEVEN command
+// buffers (4 input projections + block + out_proj + tail) with six host crossings per layer.
+// Residuals are plain adds (the composed wiring routes here only at residualScale == 1).
+func gatedDeltaQuantLayerRun(
+	h *gatedDeltaDeviceState,
+	x, inputNorm []float32,
+	w *qwen3.GatedDeltaWeights,
+	postNorm []float32,
+	gate, up, down *model.QuantWeight,
+	L, D, FF int, eps float32,
+	priorConv, priorDelta []float32,
+	y []float32,
+) error {
+	if err := ensureInit(); err != nil {
+		return err
+	}
+	if h == nil || !gatedDeltaBlockUsable(h.Dk, h.Dv, h.Hk, h.Hv, h.K) {
+		return core.NewError("native.gatedDeltaQuantLayerRun: geometry not servable")
+	}
+	convDim, vDim := h.convDim, h.Hv*h.Dv
+	if len(x) != L*D || len(y) != L*D || len(inputNorm) != D || len(postNorm) != D ||
+		len(w.ALog) != h.Hv || len(w.DtBias) != h.Hv || len(w.Norm) != h.Dv ||
+		(w.ConvBias != nil && len(w.ConvBias) != convDim) || len(w.ConvWeight) != convDim*h.K {
+		return core.NewError("native.gatedDeltaQuantLayerRun: size mismatch")
+	}
+	if w.InProjQKVQ == nil || !quantGeometryOK(w.InProjQKVQ, convDim, D) ||
+		w.InProjZQ == nil || !quantGeometryOK(w.InProjZQ, vDim, D) ||
+		w.InProjAQ == nil || !quantGeometryOK(w.InProjAQ, h.Hv, D) ||
+		w.InProjBQ == nil || !quantGeometryOK(w.InProjBQ, h.Hv, D) ||
+		w.OutProjQ == nil || !quantGeometryOK(w.OutProjQ, D, vDim) ||
+		!quantGeometryOK(gate, FF, D) || !quantGeometryOK(up, FF, D) || !quantGeometryOK(down, D, FF) {
+		return core.NewError("native.gatedDeltaQuantLayerRun: unsupported quant geometry")
+	}
+	if !h.valid {
+		h.prime(priorConv, priorDelta)
+	}
+	rmsName := "rmsfloat32"
+	if D > rmsLoopedLimit {
+		rmsName = "rms_loopedfloat32"
+	}
+	psoRMS, err := pipelineFor(rmsName)
+	if err != nil {
+		return err
+	}
+	key := gatedDeltaQuantLayerKey{L: L, D: D, FF: FF, Hk: h.Hk, Hv: h.Hv, Dk: h.Dk, K: h.K}
+	var encErr error
+	withAutoreleasePool(func() {
+		sc, gerr := getGatedDeltaQuantLayerScratch(key)
+		if gerr != nil {
+			encErr = gerr
+			return
+		}
+		defer putGatedDeltaQuantLayerScratch(key, sc)
+		xBuf, cerr := sc.x.copyBuffer(float32Bytes(x))
+		if cerr != nil {
+			encErr = cerr
+			return
+		}
+		wConv := residentFloat32(w.ConvWeight)
+		wBias := wConv
+		hasBias := 0
+		if w.ConvBias != nil {
+			wBias = residentFloat32(w.ConvBias)
+			hasBias = 1
+		}
+		wALog := residentFloat32(w.ALog)
+		wDt := residentFloat32(w.DtBias)
+		wNorm := residentFloat32(w.Norm)
+		inNormBuf := residentFloat32(inputNorm)
+		postNormBuf := residentFloat32(postNorm)
+
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		fail := func(err error) {
+			encErr = err
+			endEncodingFast(enc)
+		}
+
+		// input RMSNorm → one bf16 cast → the four packed input projections (independent reads of
+		// the same cast rows — barriers only around the shared stages).
+		emitRMSNormRows(encSink{enc}, psoRMS, xBuf, inNormBuf, sc.normed1.buf, 0, 0, 0, D, eps, L, rmsThreadgroup(D, psoRMS))
+		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+		if err := encNarrowF32ToBF16(enc, sc.normed1.buf, sc.n1BF.buf, L*D); err != nil {
+			fail(err)
+			return
+		}
+		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+		if err := encProjQuantBF16In(enc, w.InProjQKVQ, sc.n1BF.buf, sc.qkvBF.buf, sc.qkv.buf, L, convDim, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := encProjQuantBF16In(enc, w.InProjZQ, sc.n1BF.buf, sc.zBF.buf, sc.z.buf, L, vDim, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := encProjQuantBF16In(enc, w.InProjAQ, sc.n1BF.buf, sc.aBF.buf, sc.a.buf, L, h.Hv, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := encProjQuantBF16In(enc, w.InProjBQ, sc.n1BF.buf, sc.bBF.buf, sc.b.buf, L, h.Hv, D); err != nil {
+			fail(err)
+			return
+		}
+		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+
+		// the gated-delta block stages, state resident.
+		if err := encGatedDeltaBlockStages(enc, h, gdBlockStageBufs{
+			qkv: sc.qkv.buf, z: sc.z.buf, a: sc.a.buf, b: sc.b.buf,
+			qN: sc.qN.buf, kN: sc.kN.buf, vN: sc.vN.buf, g: sc.g.buf, beta: sc.beta.buf,
+			gated: sc.gated.buf,
+		}, wConv, wBias, hasBias, wALog, wDt, wNorm, L); err != nil {
+			fail(err)
+			return
+		}
+		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+
+		// out_proj over codes: gated [L,vDim] → mix [L,D].
+		if err := encProjQuantF32(enc, w.OutProjQ, sc.gated.buf, sc.gatedBF.buf, sc.mixBF.buf, sc.mix.buf, L, D, vDim); err != nil {
+			fail(err)
+			return
+		}
+		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+
+		// the #8-B FFN tail: hplus = x + mix (in place over xBuf) → post-norm → packed SwiGLU →
+		// y = hplus + mlpOut.
+		if err := encResidualNormMLPQuantTail(enc, quantTailBufs{
+			h: xBuf, mix: sc.mix.buf, normed: sc.normed2.buf, nBF: sc.n2BF.buf,
+			g: sc.gFF.buf, gBF: sc.gFFBF.buf, u: sc.uFF.buf, uBF: sc.uFFBF.buf, s: sc.sFF.buf, out: sc.out.buf,
+		}, postNormBuf, gate, up, down, L, D, FF, eps); err != nil {
+			fail(err)
+			return
+		}
+
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+		copy(y, unsafe.Slice((*float32)(unsafe.Pointer(&sc.out.bytes[0])), L*D))
+	})
+	return encErr
+}
+
+// gatedDeltaQuantLayerDeviceHook adapts gatedDeltaQuantLayerRun to qwen3's declared layer seam —
+// same handle discipline as the block hook: stowed on sc.Device only after a fully successful run.
+func gatedDeltaQuantLayerDeviceHook(sc *qwen3.GatedDeltaScratch, x, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) ([]float32, error) {
+	if err := ensureInit(); err != nil {
+		return nil, err
+	}
+	h, _ := sc.Device.(*gatedDeltaDeviceState)
+	if h == nil {
+		if !gatedDeltaBlockUsable(cfg.HeadDim, cfg.HeadDim, cfg.KeyHeads, cfg.ValueHeads, cfg.ConvKernel) {
+			return nil, core.NewError("native.gatedDeltaQuantLayerDeviceHook: geometry not servable")
+		}
+		nh, err := newGatedDeltaDeviceState(cfg.KeyHeads, cfg.ValueHeads, cfg.HeadDim, cfg.HeadDim, cfg.ConvKernel, 1)
+		if err != nil {
+			return nil, err
+		}
+		h = nh
+	}
+	y := make([]float32, L*D)
+	if err := gatedDeltaQuantLayerRun(h, x, inputNorm, w, postNorm, gate, up, down, L, D, FF, eps, priorConv, priorDelta, y); err != nil {
+		return nil, err
+	}
+	sc.Device = h
+	return y, nil
 }

@@ -532,6 +532,24 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 		}
 
 		if s.m.Quantised {
+			// Whole-layer device fold (#18 S3): a packed gated-delta layer with a dense packed SwiGLU
+			// at residual scale 1 rides ONE command buffer — input norm, the five packed projections,
+			// the gated-delta block (state device-resident) and the FFN tail; x is the only upload, y
+			// the only readback. engaged=false (hook unbound, geometry unservable, first-call decline)
+			// leaves the per-stage quant branch below in charge.
+			if gm, isGD := layer.Mixer.(*gatedDeltaMixer); isGD && s.m.residualScale() == 1 {
+				if mlp, isDense := layer.MLP.(*MLP); isDense && mlp.GateQ != nil && mlp.UpQ != nil && mlp.DownQ != nil {
+					y, next, engaged, qerr := gm.forwardQuantLayer(h, layer.InputNorm, layer.PostAttnNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, mlp.FF, L, D, eps, s.states[li])
+					if engaged {
+						if qerr != nil {
+							return nil, qerr
+						}
+						s.states[li] = next
+						h = y
+						continue
+					}
+				}
+			}
 			// Packed checkpoint: the mixer's own Forward (its q/k/v/o or in_proj/out_proj dispatch to the
 			// quant matvec seam) then the FFN tail. The tail rides the fused packed-weight device fold
 			// (ResidualNormMLPQuantDevice — residual + norm + SwiGLU-over-codes + residual in ONE command
