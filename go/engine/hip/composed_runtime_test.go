@@ -15,7 +15,7 @@ import (
 	"dappco.re/go/inference/kv"
 	sharedmodel "dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/composed"
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )

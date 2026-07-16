@@ -10,7 +10,7 @@ import (
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	sharedmodel "dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/mamba2"
+	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/safetensors"
 )
 
