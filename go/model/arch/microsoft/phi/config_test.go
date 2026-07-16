@@ -29,7 +29,8 @@ func parseFixture(t *testing.T, name string) *Config {
 	return &cfg
 }
 
-func TestConfigArchPhi2_Good(t *testing.T) {
+// TestConfig_Arch_Good pins the Phi-2 config (dense, LayerNorm, tied head).
+func TestConfig_Arch_Good(t *testing.T) {
 	a, err := parseFixture(t, "microsoft-phi-2-config.json").Arch()
 	if err != nil {
 		t.Fatal(err)
@@ -79,14 +80,41 @@ func TestConfigArchTiedHead_Good(t *testing.T) {
 	}
 }
 
-func TestConfigArch_Bad(t *testing.T) {
+func TestConfig_Arch_Bad(t *testing.T) {
 	if _, err := (&Config{ModelType: "phi", HiddenSize: 3, NumAttentionHeads: 2, IntermediateSize: 4, NumHiddenLayers: 1, VocabSize: 8}).Arch(); err == nil {
 		t.Fatal("Arch accepted indivisible head geometry")
 	}
 }
 
-func TestConfigArch_Ugly(t *testing.T) {
+func TestConfig_Arch_Ugly(t *testing.T) {
 	if _, err := (&Config{}).Arch(); err == nil {
 		t.Fatal("Arch accepted an empty config")
+	}
+}
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// Phi-3 fused-qkv guard (equal query/kv head counts) — distinct from _Bad's
+// all-zero-fields rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{ModelType: "phi3", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 4, NumKeyValueHeads: 2, VocabSize: 12, RMSNormEps: 1e-5}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("Phi-3 unequal query/kv head counts became valid after InferFromWeights")
 	}
 }

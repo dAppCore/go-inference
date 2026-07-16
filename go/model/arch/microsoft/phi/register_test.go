@@ -66,7 +66,7 @@ func assertIndexNames(t *testing.T, fixture string, names []string) {
 	}
 }
 
-func TestNormalizePhi3Weights_Good(t *testing.T) {
+func TestRegister_NormalizePhi3Weights_Good(t *testing.T) {
 	// Varied bytes make row-order mistakes observable; no constant-filled tensor
 	// can prove that q/k/v or gate/up retain the checkpoint order.
 	qkv := safetensors.Tensor{Dtype: "F32", Shape: []int{6, 2}, Data: []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}}
@@ -88,7 +88,7 @@ func TestNormalizePhi3Weights_Good(t *testing.T) {
 	}
 }
 
-func TestNormalizePhi3Weights_Bad(t *testing.T) {
+func TestRegister_NormalizePhi3Weights_Bad(t *testing.T) {
 	name := "model.layers.0.self_attn.qkv_proj.weight"
 	in := map[string]safetensors.Tensor{name: {Dtype: "F32", Shape: []int{5, 2}, Data: make([]byte, 10)}}
 	out := NormalizePhi3Weights(in)
@@ -97,7 +97,7 @@ func TestNormalizePhi3Weights_Bad(t *testing.T) {
 	}
 }
 
-func TestNormalizePhi3Weights_Ugly(t *testing.T) {
+func TestRegister_NormalizePhi3Weights_Ugly(t *testing.T) {
 	if got := NormalizePhi3Weights(nil); len(got) != 0 {
 		t.Fatalf("nil weights normalised to %d entries", len(got))
 	}
