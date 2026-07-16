@@ -174,12 +174,46 @@ func (m *NativeTokenModel) ProjectImage(image []byte) ([]byte, int, error) {
 	if m == nil {
 		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: nil model")
 	}
-	if !m.AcceptsImageInput() {
-		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: model has no vision tower")
+	return m.projectImageWithCfg(image, m.visionFeatureCfgAt(0))
+}
+
+// ProjectImageAt is ProjectImage with a per-request soft-token budget override
+// (engine.VisionBudgetTokenModel — the OCR lane): the feature config retained
+// at load is CLONED with MaxSoftTokens = budget for this one projection, so a
+// single request can spend a higher budget (gemma4's supported set is
+// 70/140/280/560/1120; 1120·pool² patches is what the tower's position table
+// was sized for) while the loaded default and every other request stay
+// untouched. budget <= 0 is the model default — identical to ProjectImage.
+func (m *NativeTokenModel) ProjectImageAt(image []byte, budget int) ([]byte, int, error) {
+	if m == nil {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImageAt: nil model")
 	}
+	return m.projectImageWithCfg(image, m.visionFeatureCfgAt(budget))
+}
+
+// visionFeatureCfgAt resolves the feature config one projection runs under:
+// the retained load-time config for budget <= 0, else a COPY with the
+// requested soft-token budget — the retained config is never mutated, so
+// concurrent default-budget requests are unaffected.
+func (m *NativeTokenModel) visionFeatureCfgAt(budget int) *VisionImageFeatureConfig {
 	cfg := m.visionFeatureCfg
 	if cfg == nil {
 		cfg = &VisionImageFeatureConfig{} // VisionImagePatches normalises to HF defaults
+	}
+	if budget <= 0 {
+		return cfg
+	}
+	at := *cfg
+	at.MaxSoftTokens = int32(budget)
+	return &at
+}
+
+// projectImageWithCfg is the shared per-image body behind ProjectImage and
+// ProjectImageAt: preprocess under cfg, run the resident tower, return
+// features + soft-token count.
+func (m *NativeTokenModel) projectImageWithCfg(image []byte, cfg *VisionImageFeatureConfig) ([]byte, int, error) {
+	if !m.AcceptsImageInput() {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: model has no vision tower")
 	}
 	if m.unifiedVision != nil {
 		patches, positions, n, err := UnifiedVisionImagePatches(image, cfg)

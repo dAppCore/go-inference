@@ -1282,3 +1282,57 @@ func TestNativeTokenModel_PLEContractParity(t *testing.T) {
 	}
 	t.Logf("E2B/E4B PLE through the contract: model.Generate(NewQuantTokenModel) = NewArchQuantSession = %v", got)
 }
+
+// TestNativeTokenModel_VisionFeatureCfgAt_Good pins the per-request budget
+// clone: a positive budget yields a COPY carrying it (the OCR lane's 1120)
+// while the retained load-time config is untouched, so concurrent
+// default-budget projections never see another request's override.
+func TestNativeTokenModel_VisionFeatureCfgAt_Good(t *testing.T) {
+	retained := &VisionImageFeatureConfig{MaxSoftTokens: 280, PatchSize: 16, PoolingKernelSize: 3}
+	m := &NativeTokenModel{visionFeatureCfg: retained}
+	at := m.visionFeatureCfgAt(1120)
+	if at == retained {
+		t.Fatal("budget override must clone, not mutate the retained config")
+	}
+	if at.MaxSoftTokens != 1120 || at.PatchSize != 16 || at.PoolingKernelSize != 3 {
+		t.Fatalf("cloned cfg = %+v, want budget 1120 with the retained geometry", at)
+	}
+	if retained.MaxSoftTokens != 280 {
+		t.Fatalf("retained MaxSoftTokens = %d, want 280 untouched", retained.MaxSoftTokens)
+	}
+	if def := m.visionFeatureCfgAt(0); def != retained {
+		t.Fatal("budget <= 0 must return the retained config itself (the model default)")
+	}
+}
+
+// TestNativeTokenModel_VisionFeatureCfgAt_Bad pins the no-config fallback: a
+// model that shipped no processor config resolves an HF-defaults zero config
+// (normalised downstream), for both the default and an overridden budget.
+func TestNativeTokenModel_VisionFeatureCfgAt_Bad(t *testing.T) {
+	m := &NativeTokenModel{}
+	if def := m.visionFeatureCfgAt(0); def == nil {
+		t.Fatal("nil retained config must still resolve a config")
+	}
+	at := m.visionFeatureCfgAt(560)
+	if at == nil || at.MaxSoftTokens != 560 {
+		t.Fatalf("override on nil retained config = %+v, want budget 560", at)
+	}
+}
+
+// TestNativeTokenModel_ProjectImageAt_Ugly pins the entry refusals: a nil
+// model and a vision-less model refuse identically to ProjectImage, and a
+// zero budget delegates to the default path (same refusal — proving the
+// fallback wiring rather than a divergent code path).
+func TestNativeTokenModel_ProjectImageAt_Ugly(t *testing.T) {
+	var nilModel *NativeTokenModel
+	if _, _, err := nilModel.ProjectImageAt(nil, 1120); err == nil {
+		t.Fatal("nil model must refuse")
+	}
+	m := &NativeTokenModel{}
+	if _, _, err := m.ProjectImageAt([]byte{1}, 1120); err == nil {
+		t.Fatal("vision-less model must refuse the budgeted projection")
+	}
+	if _, _, err := m.ProjectImageAt([]byte{1}, 0); err == nil {
+		t.Fatal("vision-less model must refuse the default-budget projection")
+	}
+}
