@@ -836,6 +836,19 @@ func TestOptions_WithThinkingBudget_Good(t *testing.T) {
 	}
 }
 
+// TestOptions_WithVisionBudget_Good pins the vision soft-token budget
+// override: 0 is the model default (e.g. gemma4's processor_config.json
+// max_soft_tokens), a positive value requests one of the model's declared
+// budgets explicitly (1120 is gemma4's OCR budget).
+func TestOptions_WithVisionBudget_Good(t *testing.T) {
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithVisionBudget(0)}); cfg.VisionBudget != 0 {
+		t.Fatalf("WithVisionBudget(0) = %d, want 0 (model default)", cfg.VisionBudget)
+	}
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithVisionBudget(1120)}); cfg.VisionBudget != 1120 {
+		t.Fatalf("WithVisionBudget(1120) = %d, want 1120", cfg.VisionBudget)
+	}
+}
+
 // TestOptions_WithMetricsSink_Good pins the request-scoped metrics receiver:
 // the sink lands on the config and is invoked with exactly the metrics a
 // backend delivers at stream end.

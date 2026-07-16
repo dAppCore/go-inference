@@ -53,6 +53,7 @@ func TestRequest_ValidateRequest_Bad(t *testing.T) {
 	badTopP := float32(-0.1)
 	badTopK := -1
 	badMaxTokens := -1
+	badVisionBudget := -1
 	validMsgs := []ChatMessage{{Role: "user", Content: "hi"}}
 
 	cases := []struct {
@@ -66,6 +67,7 @@ func TestRequest_ValidateRequest_Bad(t *testing.T) {
 		{"top_p-out-of-range", ChatCompletionRequest{Model: "m", Messages: validMsgs, TopP: &badTopP}},
 		{"top_k-negative", ChatCompletionRequest{Model: "m", Messages: validMsgs, TopK: &badTopK}},
 		{"max_tokens-negative", ChatCompletionRequest{Model: "m", Messages: validMsgs, MaxTokens: &badMaxTokens}},
+		{"mm_processor_kwargs-max_soft_tokens-negative", ChatCompletionRequest{Model: "m", Messages: validMsgs, MMProcessorKwargs: &MMProcessorKwargs{MaxSoftTokens: &badVisionBudget}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,5 +329,115 @@ func TestOpenAI_GenerateOptions_Good_ThinkingDefaultLeavesNil(t *testing.T) {
 	cfg := inference.ApplyGenerateOpts(opts)
 	if cfg.EnableThinking != nil {
 		t.Fatalf("default → EnableThinking = %v, want nil (model default)", cfg.EnableThinking)
+	}
+}
+
+// --- VisionBudget --------------------------------------------------------
+
+// TestOpenAI_GenerateOptions_Good_VisionBudgetViaMMProcessorKwargs pins the
+// vLLM mm_processor_kwargs surface: decoded off the wire (exercises the
+// hand-rolled kwargs walker) then confirmed to reach GenerateConfig.
+func TestOpenAI_GenerateOptions_Good_VisionBudgetViaMMProcessorKwargs(t *testing.T) {
+	req, err := DecodeRequest(strings.NewReader(
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"mm_processor_kwargs":{"max_soft_tokens":1120}}`))
+	if err != nil {
+		t.Fatalf("DecodeRequest() error = %v", err)
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	if cfg := inference.ApplyGenerateOpts(opts); cfg.VisionBudget != 1120 {
+		t.Fatalf("VisionBudget = %d, want 1120", cfg.VisionBudget)
+	}
+}
+
+// TestOpenAI_GenerateOptions_Good_VisionBudgetViaImageDetail covers the
+// OpenAI-native image_url.detail mapping: "low"->70, "high"->1120; "auto" and
+// an absent detail leave the model's own configured default (0, no override).
+func TestOpenAI_GenerateOptions_Good_VisionBudgetViaImageDetail(t *testing.T) {
+	cases := []struct {
+		name   string
+		detail string
+		want   int
+	}{
+		{"low", "low", 70},
+		{"high", "high", 1120},
+		{"auto", "auto", 0},
+		{"absent", "", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ChatCompletionRequest{
+				Model:    "m",
+				Messages: []ChatMessage{{Role: "user", Content: "hi", ImageDetail: tc.detail}},
+			}
+			opts, err := GenerateOptions(req)
+			if err != nil {
+				t.Fatalf("GenerateOptions() error = %v", err)
+			}
+			if cfg := inference.ApplyGenerateOpts(opts); cfg.VisionBudget != tc.want {
+				t.Fatalf("VisionBudget = %d, want %d", cfg.VisionBudget, tc.want)
+			}
+		})
+	}
+}
+
+// TestOpenAI_GenerateOptions_Good_VisionBudgetImageDetailLastMessageWins pins
+// the multi-message resolution order: visionBudgetOverride scans from the
+// LAST message backwards, so the most recent explicit detail hint governs
+// when messages disagree.
+func TestOpenAI_GenerateOptions_Good_VisionBudgetImageDetailLastMessageWins(t *testing.T) {
+	req := ChatCompletionRequest{
+		Model: "m",
+		Messages: []ChatMessage{
+			{Role: "user", Content: "first", ImageDetail: "high"},
+			{Role: "user", Content: "second", ImageDetail: "low"},
+		},
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	if cfg := inference.ApplyGenerateOpts(opts); cfg.VisionBudget != 70 {
+		t.Fatalf("VisionBudget = %d, want 70 (the LAST message's detail hint)", cfg.VisionBudget)
+	}
+}
+
+// TestOpenAI_GenerateOptions_Good_VisionBudgetMMProcessorKwargsPrecedence
+// pins visionBudgetOverride's own precedence rule — mm_processor_kwargs.
+// max_soft_tokens must win over a conflicting image_url.detail, not the other
+// way round (mirrors TestRequest_GenerateOptions_Ugly's thinkingOverride
+// precedence pin).
+func TestOpenAI_GenerateOptions_Good_VisionBudgetMMProcessorKwargsPrecedence(t *testing.T) {
+	budget := 280
+	req := ChatCompletionRequest{
+		Model:             "m",
+		Messages:          []ChatMessage{{Role: "user", Content: "hi", ImageDetail: "high"}}, // alone -> 1120
+		MMProcessorKwargs: &MMProcessorKwargs{MaxSoftTokens: &budget},
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	if cfg := inference.ApplyGenerateOpts(opts); cfg.VisionBudget != 280 {
+		t.Fatalf("VisionBudget = %d, want 280 (mm_processor_kwargs must win over image_url.detail=high)", cfg.VisionBudget)
+	}
+}
+
+// TestOpenAI_GenerateOptions_Bad_VisionBudgetNegative pins the
+// mm_processor_kwargs.max_soft_tokens validation surfaced through
+// GenerateOptions: a negative budget is a request error, not silently
+// clamped or ignored.
+func TestOpenAI_GenerateOptions_Bad_VisionBudgetNegative(t *testing.T) {
+	budget := -1
+	req := ChatCompletionRequest{
+		Model:             "m",
+		Messages:          []ChatMessage{{Role: "user", Content: "hi"}},
+		MMProcessorKwargs: &MMProcessorKwargs{MaxSoftTokens: &budget},
+	}
+	_, err := GenerateOptions(req)
+	if err == nil || !strings.Contains(err.Error(), "mm_processor_kwargs") {
+		t.Fatalf("GenerateOptions() error = %v, want mm_processor_kwargs validation", err)
 	}
 }

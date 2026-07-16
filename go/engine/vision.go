@@ -52,6 +52,45 @@ type VisionTokenModel interface {
 	TokenEmbeddingsWithFeatures(ids []int32, imageFeatures, audioFeatures, videoFeatures []byte) ([][]byte, error)
 }
 
+// VisionBudgetTokenModel is the OPTIONAL budget-aware counterpart to
+// [VisionTokenModel.ProjectImage]: a checkpoint whose vision tower supports
+// more than one soft-token budget (gemma4's declared 70/140/280/560/1120 set)
+// implements it ALONGSIDE VisionTokenModel. chatMultimodal prefers
+// ProjectImageAt over ProjectImage whenever the loaded model implements this
+// interface AND the request carries an explicit budget
+// ([inference.GenerateConfig.VisionBudget] > 0) — the request-level override
+// OpenAI's mm_processor_kwargs.max_soft_tokens / image_url.detail resolve onto
+// in the serving layer. An engine that only supports its configured load-time
+// budget simply does not implement this interface, and every image (and video
+// frame — the same vision tower) turn rides the plain ProjectImage path
+// unchanged.
+type VisionBudgetTokenModel interface {
+	// ProjectImageAt preprocesses one raw PNG/JPEG image and runs it through
+	// the vision tower AT the given soft-token budget, returning the projected
+	// feature bytes and the number of soft tokens they occupy — the
+	// budget-aware sibling of ProjectImage. budget is always > 0 when this
+	// method is called (chatMultimodal's caller guard); an engine that cannot
+	// honour the exact requested value clamps to the nearest one it supports
+	// rather than erroring.
+	ProjectImageAt(image []byte, budget int) (features []byte, softTokens int, err error)
+}
+
+// projectImageAtBudget projects one image through v's vision tower, preferring
+// the budget-aware ProjectImageAt when v ALSO implements VisionBudgetTokenModel
+// AND the caller requested an explicit budget (budget > 0). Falls back to the
+// model-default ProjectImage otherwise — no explicit request, or an engine
+// that only supports its configured load-time budget. Shared by chatMultimodal's
+// image and video-frame splice loops: both project through the SAME vision
+// tower, so both honour the request's vision budget identically.
+func projectImageAtBudget(v VisionTokenModel, image []byte, budget int) ([]byte, int, error) {
+	if budget > 0 {
+		if vb, ok := v.(VisionBudgetTokenModel); ok {
+			return vb.ProjectImageAt(image, budget)
+		}
+	}
+	return v.ProjectImage(image)
+}
+
 // VisionSession is the optional [Session] capability to prefill token-embeddings
 // (rather than token ids) — the metal engine's *ArchSession satisfies it. An image
 // turn prefills the spliced embedding rows here instead of PrefillTokens.
@@ -156,7 +195,7 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 				// "MM:SS {boi}{video_token×N}{eoi}" join); frames are treated
 				// as 1 s apart when the caller supplies no timing.
 				for f, frame := range msg.Videos {
-					features, softTokens, err := v.ProjectImage(frame)
+					features, softTokens, err := projectImageAtBudget(v, frame, cfg.VisionBudget)
 					if err != nil {
 						m.setErr(core.E("engine.TextModel.Chat", "project video frame", err))
 						return
@@ -178,7 +217,7 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 				}
 			}
 			for _, img := range msg.Images {
-				features, softTokens, err := v.ProjectImage(img)
+				features, softTokens, err := projectImageAtBudget(v, img, cfg.VisionBudget)
 				if err != nil {
 					m.setErr(core.E("engine.TextModel.Chat", "project image", err))
 					return

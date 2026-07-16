@@ -207,6 +207,16 @@ func (r *ChatCompletionRequest) unmarshalField(data []byte, i int, key []byte) (
 		}
 		r.ChatTemplateKwargs = kw
 		return next, nil
+	case "mm_processor_kwargs":
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		kw, next, err := parseMMProcessorKwargs(data, i)
+		if err != nil {
+			return next, err
+		}
+		r.MMProcessorKwargs = kw
+		return next, nil
 	case "stream":
 		if jsonenc.IsJSONNull(data, i) {
 			return i + 4, nil
@@ -502,6 +512,68 @@ func parseChatTemplateKwargs(data []byte, i int) (*ChatTemplateKwargs, int, erro
 					return nil, n, err
 				}
 				kw.PreserveThinking = &v
+				i = n
+			}
+		default:
+			n, err := jsonenc.SkipJSONValue(data, i)
+			if err != nil {
+				return nil, n, err
+			}
+			i = n
+		}
+		i = jsonenc.SkipJSONWhitespace(data, i)
+		if i >= len(data) {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		if data[i] == ',' {
+			i++
+			continue
+		}
+		if data[i] == '}' {
+			return kw, i + 1, nil
+		}
+		return nil, i, jsonenc.ErrInvalidJSON
+	}
+}
+
+// parseMMProcessorKwargs walks an mm_processor_kwargs object, capturing the
+// fields the runtime acts on (max_soft_tokens) and skipping the rest — mirrors
+// the single-pass object walk in parseChatTemplateKwargs.
+func parseMMProcessorKwargs(data []byte, i int) (*MMProcessorKwargs, int, error) {
+	i, err := jsonenc.MatchObjectStart(data, i)
+	if err != nil {
+		return nil, i, err
+	}
+	kw := &MMProcessorKwargs{}
+	i = jsonenc.SkipJSONWhitespace(data, i)
+	if i < len(data) && data[i] == '}' {
+		return kw, i + 1, nil
+	}
+	for {
+		i = jsonenc.SkipJSONWhitespace(data, i)
+		if i >= len(data) || data[i] != '"' {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		key, next, err := jsonenc.ParseJSONStringRaw(data, i)
+		if err != nil {
+			return nil, next, err
+		}
+		i = jsonenc.SkipJSONWhitespace(data, next)
+		if i >= len(data) || data[i] != ':' {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		i = jsonenc.SkipJSONWhitespace(data, i+1)
+		switch string(key) {
+		case "max_soft_tokens":
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+			} else {
+				v, n, err := jsonenc.ParseJSONInt(data, i)
+				if err != nil {
+					return nil, n, err
+				}
+				budget := int(v)
+				kw.MaxSoftTokens = &budget
 				i = n
 			}
 		default:
