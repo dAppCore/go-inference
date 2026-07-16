@@ -17,7 +17,8 @@ import (
 
 // dequantiseInPlace rewrites a quant ComposedModel into its dense equivalent: every QuantWeight is widened
 // to f32 (mlxaffine.DequantizeTensor), its Q field cleared, and Quantised unset — so a second forward runs
-// the standard f32 path over the identical weights. In-package: it reaches the unexported mixer weights.
+// the standard f32 path over the identical weights. Handles a MoE FFN's routed + shared experts (their
+// GateQ/UpQ/DownQ) alongside the dense MLP's. In-package: it reaches the unexported mixer weights.
 func dequantiseInPlace(t *testing.T, m *ComposedModel) {
 	t.Helper()
 	deq := func(qw *model.QuantWeight) []float32 {
@@ -37,9 +38,24 @@ func dequantiseInPlace(t *testing.T, m *ComposedModel) {
 		m.Output, m.OutputQ = deq(m.OutputQ), nil
 	}
 	for li := range m.Layers {
-		if mlp, ok := m.Layers[li].MLP.(*MLP); ok && mlp.GateQ != nil {
-			mlp.Gate, mlp.Up, mlp.Down = deq(mlp.GateQ), deq(mlp.UpQ), deq(mlp.DownQ)
-			mlp.GateQ, mlp.UpQ, mlp.DownQ = nil, nil, nil
+		switch ffn := m.Layers[li].MLP.(type) {
+		case *MLP:
+			if ffn.GateQ != nil {
+				ffn.Gate, ffn.Up, ffn.Down = deq(ffn.GateQ), deq(ffn.UpQ), deq(ffn.DownQ)
+				ffn.GateQ, ffn.UpQ, ffn.DownQ = nil, nil, nil
+			}
+		case *MoEMLP:
+			for ei := range ffn.Experts {
+				e := &ffn.Experts[ei]
+				if e.GateQ != nil {
+					e.Gate, e.Up, e.Down = deq(e.GateQ), deq(e.UpQ), deq(e.DownQ)
+					e.GateQ, e.UpQ, e.DownQ = nil, nil, nil
+				}
+			}
+			if ffn.Shared != nil && ffn.Shared.GateQ != nil {
+				ffn.Shared.Gate, ffn.Shared.Up, ffn.Shared.Down = deq(ffn.Shared.GateQ), deq(ffn.Shared.UpQ), deq(ffn.Shared.DownQ)
+				ffn.Shared.GateQ, ffn.Shared.UpQ, ffn.Shared.DownQ = nil, nil, nil
+			}
 		}
 		switch mx := m.Layers[li].Mixer.(type) {
 		case *attnMixer:

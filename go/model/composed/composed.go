@@ -511,9 +511,10 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 		if s.m.Quantised {
 			// Packed checkpoint: the fused device tails (ResidualNormMLPProj*Device) take f32 weights and
 			// are a later slice, so run the plain per-projection path — the mixer's own Forward (its q/k/v/o
-			// or in_proj/out_proj dispatch to the quant matvec seam) then the host FFN tail (MLP.forward
-			// dispatches gate/up/down to the seam too). The big matmuls still hit the device quant kernels;
-			// only the tail-fusion optimisation is skipped (correctness first).
+			// or in_proj/out_proj dispatch to the quant matvec seam) then the host FFN tail: MLP.forward
+			// dispatches gate/up/down to the seam too, and a MoE FFN's routed + shared experts dispatch
+			// packed experts through it per swigluExpertQuantInto (moe.go). The big matmuls still hit the
+			// device quant kernels; only the tail-fusion optimisation is skipped (correctness first).
 			normed := rmsNormRowsPlain(h, layer.InputNorm, L, D, eps)
 			mixOut, next, err := layer.Mixer.Forward(normed, L, D, s.states[li])
 			if err != nil {

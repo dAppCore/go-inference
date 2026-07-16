@@ -23,8 +23,12 @@ import (
 // PROJECTION weights PACKED — carried as model.QuantWeight to the engine's quant matvec seam rather than
 // widened (a 27B checkpoint dequantised to f32 is ~110 GB, dead on arrival). The small tensors (norms,
 // conv kernels, delta/gating params, biases) stay host f32 as before — the mixers' state math is exact
-// host f32. The embedding table stays packed too (dequantised one row per token at gather time). Bonsai's
-// 1-bit packs are widened to 2-bit at load (RepackB1ToB2, exact) so the engine dispatches stock kernels.
+// host f32. The embedding table stays packed too (dequantised one row per token at gather time). A MoE
+// FFN's routed + shared experts (buildMoE) resolve through the SAME proj closure as the dense MLP's
+// gate/up/down, so a quant checkpoint's experts stay packed too — the dominant tensor class of a grouped
+// checkpoint (an ~8x blow-up widened), and the actual blocker for serving bigger-than-RAM sparse MoE.
+// Bonsai's 1-bit packs are widened to 2-bit at load (RepackB1ToB2, exact) so the engine dispatches stock
+// kernels.
 // This lane is TEXT-ONLY: vision_tower.* tensors are never looked up (skipped by name), so a multimodal
 // wrapper's image tower is dropped at load and image input keeps refusing through the text-only machinery.
 
@@ -240,15 +244,16 @@ func LoadComposedWithArch(tensors map[string]safetensors.Tensor, configJSON []by
 
 // LoadComposedWithArchMmap is the ZERO-COPY arch-aware build the registry (model.LoadComposedDir) uses for
 // the MoE architectures (dbrx, olmoe, qwenmoe, granitemoe, llama4). Like LoadComposedWithArch it consumes
-// the arch's neutral MoE policy, but the packed quant PROJECTION weights (attention q/k/v/o, embed, lm_head)
-// VIEW the mapped checkpoint — QuantWeight.Packed aliases the input tensors' mmap region — instead of being
-// copied to the heap, so a quant MoE checkpoint's load-time RSS drops by those packed weights. The model
-// takes ownership of the mapping through the SAME RetainMmap handshake as the base path and unmaps it on
+// the arch's neutral MoE policy, but every packed quant weight — the dense PROJECTIONS (attention q/k/v/o,
+// embed, lm_head) AND the routed + shared MoE EXPERTS (mlp.experts.E.*, mlp.shared_expert.*, resolved
+// through the same proj closure as the dense MLP's gate/up/down) — VIEWS the mapped checkpoint
+// (QuantWeight.Packed aliases the input tensors' mmap region) instead of being copied to the heap, so a
+// quant MoE checkpoint's load-time RSS drops by the packed weight — for a grouped checkpoint the experts
+// are the dominant tensor class, so this is the whole win, not a rounding error on it. The model takes
+// ownership of the mapping through the SAME RetainMmap handshake as the base path and unmaps it on
 // Close/finalize; when nothing aliases (a dense checkpoint, or an all-1-bit pack repacked to owned heap)
-// RetainMmap declines and LoadComposedDir unmaps immediately. The MoE expert weights themselves stay on the
-// dequant-to-f32 path (buildFFN routes experts through buildMoE — packed-expert MoE is a later slice), so the
-// aliased weights are the dense-projection quant weights. Use LoadComposedWithArch (copying) when the caller
-// unmaps the checkpoint right after the build.
+// RetainMmap declines and LoadComposedDir unmaps immediately. Use LoadComposedWithArch (copying) when the
+// caller unmaps the checkpoint right after the build.
 func LoadComposedWithArchMmap(tensors map[string]safetensors.Tensor, configJSON []byte, arch model.Arch) (*ComposedModel, error) {
 	return loadComposed(tensors, configJSON, &arch, true)
 }
@@ -606,8 +611,9 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), proj projFn, f
 // dense SwiGLU MLP. sp is the "…mlp." prefix.
 func buildFFN(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
 	if _, ok := get(sp + "experts.0.gate_proj.weight"); ok {
-		// MoE stays on the dequant path (quant MoE is a later slice; the dense acceptance models never reach here).
-		return buildMoE(get, f32, sp, cfg, arch, D)
+		// A quant checkpoint's experts resolve through proj — PACKED (model.QuantWeight) when the tensor
+		// carries .scales/.biases siblings, f32 otherwise — exactly like the dense MLP's gate/up/down below.
+		return buildMoE(get, proj, f32, sp, cfg, arch, D)
 	}
 	gateF, gateQ, err := proj(sp + "gate_proj.weight")
 	if err != nil {
@@ -628,23 +634,25 @@ func buildFFN(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 	return &MLP{Gate: gateF, Up: upF, Down: downF, GateQ: gateQ, UpQ: upQ, DownQ: downQ, FF: ff}, nil
 }
 
-// buildMoE loads the MoE FFN: router (mlp.gate.weight), the experts (mlp.experts.E.*), and the optional
-// shared expert (mlp.shared_expert.*). TopK = num_experts_per_tok.
-func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
+// buildMoE loads the MoE FFN: router (mlp.gate.weight — always host f32; small enough that real
+// checkpoints don't quantise it), the experts (mlp.experts.E.*) and the optional shared expert
+// (mlp.shared_expert.*), both resolved through proj — PACKED (model.QuantWeight) on a quant checkpoint,
+// f32 otherwise — exactly like the dense MLP's gate/up/down (buildFFN). TopK = num_experts_per_tok.
+func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
 	router, err := f32(sp + "gate.weight")
 	if err != nil {
 		return nil, err
 	}
 	expert := func(p string) (MoEExpert, error) {
-		g, e1 := f32(p + "gate_proj.weight")
-		u, e2 := f32(p + "up_proj.weight")
-		d, e3 := f32(p + "down_proj.weight")
+		g, gQ, e1 := proj(p + "gate_proj.weight")
+		u, uQ, e2 := proj(p + "up_proj.weight")
+		d, dQ, e3 := proj(p + "down_proj.weight")
 		for _, e := range []error{e1, e2, e3} {
 			if e != nil {
 				return MoEExpert{}, e
 			}
 		}
-		return MoEExpert{Gate: g, Up: u, Down: d}, nil
+		return MoEExpert{Gate: g, Up: u, Down: d, GateQ: gQ, UpQ: uQ, DownQ: dQ}, nil
 	}
 	var experts []MoEExpert
 	for e := 0; ; e++ {

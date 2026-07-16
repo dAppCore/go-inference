@@ -13,10 +13,20 @@ import (
 // renormalised over the selection when NormTopKProb (norm_topk_prob, the reference default), else the raw
 // full-softmax weights. An always-on shared expert (a plain SwiGLU) is added, sigmoid-gated by
 // shared_expert_gate·x when that weight is present (the reference gate) and ungated otherwise. Mirrors
-// metal's qwen3_moe combine. Host f32.
+// metal's qwen3_moe combine. Host f32; a quant checkpoint's routed + shared experts stay PACKED
+// (model.QuantWeight — the same mlx-affine representation the dense MLP/attention projections carry) and
+// dispatch through matNTQuant, composed.go's quant matvec seam, instead of being dequantised at load — a
+// grouped-int4 MoE checkpoint's experts are the dominant tensor class (routinely an ~8x blow-up widened),
+// so packed-native here is what makes a bigger-than-RAM sparse MoE servable at all.
 
-// MoEExpert is one SwiGLU expert (Gate/Up [FF,D], Down [D,FF]; FF = len(Gate)/D).
-type MoEExpert struct{ Gate, Up, Down []float32 }
+// MoEExpert is one SwiGLU expert (Gate/Up [FF,D], Down [D,FF]; FF = len(Gate)/D). GateQ/UpQ/DownQ are its
+// packed forms in a quant checkpoint (model.QuantWeight — mlx affine codes + bf16 group scales/biases);
+// nil ⇒ dense f32 in Gate/Up/Down. Exactly one representation is populated per expert (mirrors MLP's
+// GateQ/UpQ/DownQ) — moeExpertFF and the forward loop's dispatch both branch on GateQ to pick it.
+type MoEExpert struct {
+	Gate, Up, Down    []float32
+	GateQ, UpQ, DownQ *model.QuantWeight
+}
 
 // MoEMLP routes a token to TopK of its experts plus the shared expert:
 //
@@ -68,22 +78,56 @@ func swigluExpert(xt []float32, e MoEExpert, D int) []float32 {
 	return out
 }
 
+// moeExpertFF returns expert e's hidden width FF: GateQ.OutDim for a packed expert (Gate is nil, so
+// len(Gate)/D reads as 0), else len(Gate)/D for a dense one — the same derivation swigluExpertInto's FF
+// local uses inline.
+func moeExpertFF(e *MoEExpert, D int) int {
+	if e.GateQ != nil {
+		return e.GateQ.OutDim
+	}
+	return len(e.Gate) / D
+}
+
+// swigluExpertQuantInto is swigluExpertInto's packed twin: e's gate/up/down stay PACKED
+// (model.QuantWeight), dispatched through matNTQuant — the SAME quant matvec seam every other packed
+// projection in this package uses (the device hook when the native backend is bound, else
+// matNTQuantHost's per-ROW host dequant fallback), so a routed expert's packed weight is never widened to
+// a whole f32 copy (matNTQuantHost dequantises one output row — [K] — at a time). Writes the [D] result
+// into out (fully overwritten each call); the gate/up/hidden scratch is allocated per call, the same cost
+// the packed dense MLP path (MLP.forward's GateQ branch) already pays.
+//
+// matNTQuant rounds to f32 at each of the three matvec boundaries, where swigluExpertInto's hand-inlined
+// dense loop stays f64 from xt to out throughout — so a packed expert's result differs from the SAME
+// weights dequantised and run through swigluExpertInto by a few ULPs (a rounding-TIER difference, not a
+// bug: TestSwigluExpertQuantInto_MatchesDequantised pins the tolerance).
+func swigluExpertQuantInto(xt []float32, e MoEExpert, D int, out []float32) {
+	FF := e.GateQ.OutDim
+	g := matNTQuant(nil, xt, e.GateQ, 1, D, FF)
+	u := matNTQuant(nil, xt, e.UpQ, 1, D, FF)
+	h := make([]float32, FF)
+	for f := range FF {
+		h[f] = float32(silu(float64(g[f])) * float64(u[f]))
+	}
+	matNTQuant(out, h, e.DownQ, 1, FF, D)
+}
+
 func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 	nE := len(m.Experts)
 	out := make([]float32, L*D)
 	// Per-token routing scratch, hoisted out of the token loop so a multi-token decode
 	// allocates it once, not per token: the top-k index buffer, the expert hidden buffer
-	// (sized to the widest expert), and the single expert-output buffer. Each is fully
-	// overwritten per use, so reuse is byte-identical to a fresh allocation per call.
+	// (sized to the widest DENSE expert — a packed expert's own scratch is matNTQuant's, see
+	// swigluExpertQuantInto), and the single expert-output buffer. Each is fully overwritten
+	// per use, so reuse is byte-identical to a fresh allocation per call.
 	idx := make([]int, nE)
 	maxFF := 0
 	for i := range m.Experts {
-		if ff := len(m.Experts[i].Gate) / D; ff > maxFF {
+		if ff := moeExpertFF(&m.Experts[i], D); ff > maxFF {
 			maxFF = ff
 		}
 	}
 	if m.Shared != nil {
-		if ff := len(m.Shared.Gate) / D; ff > maxFF {
+		if ff := moeExpertFF(m.Shared, D); ff > maxFF {
 			maxFF = ff
 		}
 	}
@@ -100,13 +144,21 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 		ot := out[t*D : (t+1)*D]
 		for _, e := range sel {
 			w := probs[e] / denom
-			swigluExpertInto(xt, m.Experts[e], D, hbuf, eo)
+			if m.Experts[e].GateQ != nil {
+				swigluExpertQuantInto(xt, m.Experts[e], D, eo)
+			} else {
+				swigluExpertInto(xt, m.Experts[e], D, hbuf, eo)
+			}
 			for d := range D {
 				ot[d] += float32(w * float64(eo[d]))
 			}
 		}
 		if m.Shared != nil {
-			swigluExpertInto(xt, *m.Shared, D, hbuf, eo)
+			if m.Shared.GateQ != nil {
+				swigluExpertQuantInto(xt, *m.Shared, D, eo)
+			} else {
+				swigluExpertInto(xt, *m.Shared, D, hbuf, eo)
+			}
 			g := float32(1) // ungated (SharedGate nil) ⇒ σ ≡ 1, byte-identical to a direct add
 			if m.SharedGate != nil {
 				var acc float64
