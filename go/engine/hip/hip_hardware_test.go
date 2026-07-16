@@ -268,6 +268,19 @@ func TestHIPHardwareDiffusionSampleProbabilities_Good(t *testing.T) {
 		core.AssertEqual(t, wantGreedy[row], got[row].Greedy)
 		assertFloat32Near(t, wantEntropy[row], got[row].Entropy)
 	}
+
+	controlLogits, err := hipUploadGemma4Q4Float32Input(hipRuntime.driver, "diffusion sample hardware control logits", raw)
+	core.RequireNoError(t, err)
+	defer controlLogits.Close()
+	t.Setenv(hipDisableDiffusionSampleWideEnv, "1")
+	control, err := hipRunDiffusionSampleKernel(context.Background(), hipRuntime.driver, controlLogits, rows, vocab, temperature, softcap, draws)
+	core.RequireNoError(t, err)
+	controlProbabilities, err := hipReadFloat32DeviceOutput(controlLogits, "rocm.hip.DiffusionSampleHardware", "control probabilities", len(raw))
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion sample wide control", controlProbabilities, gotProbabilities, 0, 0)
+	for row := range rows {
+		core.AssertEqual(t, control[row], got[row])
+	}
 }
 
 func TestHIPHardwareDiffusionGemmaMLXMoE_Good(t *testing.T) {

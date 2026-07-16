@@ -151,6 +151,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_tile32x64`,
 		`extern "C" __global__ void rocm_diffusion_sample_probabilities`,
+		`extern "C" __global__ void rocm_diffusion_sample_probabilities_wide`,
 		`extern "C" __global__ void rocm_embedding_mean_pool`,
 		`extern "C" __global__ void rocm_rerank_cosine`,
 		`extern "C" __global__ void rocm_tiny_prefill`,
@@ -467,6 +468,17 @@ func TestHIPKernelSource_DiffusionSampleProbabilitiesKeepsLogitsOnDevice_Good(t 
 	core.AssertTrue(t, strings.Contains(kernel, `rocm_float_to_bfloat16`), "diffusion sampler must preserve host BF16 temperature shaping")
 	core.AssertTrue(t, strings.Contains(kernel, `logits[col] = probability / total`), "diffusion sampler must normalize probabilities in the logits buffer")
 	core.AssertTrue(t, strings.Contains(kernel, `rocm_shfl_float`), "diffusion sampler must sample in vocabulary order without host logits")
+}
+
+func TestHIPKernelSource_DiffusionSampleProbabilitiesWide_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_sample_probabilities_wide`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `blockDim.x != ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE`), "wide diffusion sampler must pin one wide block per row")
+	core.AssertTrue(t, strings.Contains(kernel, `__shared__ float ordered_values[ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE]`), "wide diffusion sampler must stage values in vocabulary order")
+	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE; ++source)`), "wide diffusion sampler must retain ordered reductions")
+	core.AssertTrue(t, strings.Contains(kernel, `logits[col] = probability / total`), "wide diffusion sampler must leave normalized probabilities resident")
 }
 
 func TestHIPKernelSource_AMDBuildDefaultsO3_Good(t *testing.T) {

@@ -140,6 +140,7 @@ const (
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4  = "rocm_diffusion_expected_embedding_q8_g64_dims4_rows4"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64   = "rocm_diffusion_expected_embedding_q8_g64_tile32x64"
 	hipKernelNameDiffusionSampleProbabilities               = "rocm_diffusion_sample_probabilities"
+	hipKernelNameDiffusionSampleProbabilitiesWide           = "rocm_diffusion_sample_probabilities_wide"
 	hipKernelNameEmbedMean                                  = "rocm_embedding_mean_pool"
 	hipKernelNameRerank                                     = "rocm_rerank_cosine"
 	hipKernelNameTinyPrefill                                = "rocm_tiny_prefill"

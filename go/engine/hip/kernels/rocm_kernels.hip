@@ -252,6 +252,7 @@ constexpr uint32_t ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_BYTES = 72;
 constexpr uint32_t ROCM_DIFFUSION_SAMPLE_RESULT_BYTES = 16;
 constexpr uint32_t ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE = 32;
+constexpr uint32_t ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE = 512;
 constexpr uint32_t ROCM_DIFFUSION_SAMPLE_STATUS_OK = 0x44534653u;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_F32 = 1;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_BF16 = 2;
@@ -10852,6 +10853,147 @@ extern "C" __global__ void rocm_diffusion_sample_probabilities(const unsigned ch
 		result.greedy = static_cast<int32_t>(greedy);
 		result.entropy = maximum + static_cast<float>(log(static_cast<double>(total))) - weighted / total;
 		if (valid != 0u && draw >= 0.0f && draw < 1.0f && isfinite(draw) && total > 0.0f && isfinite(total) && isfinite(result.entropy)) {
+			result.status = ROCM_DIFFUSION_SAMPLE_STATUS_OK;
+		}
+		results[row] = result;
+	}
+}
+
+extern "C" __global__ void rocm_diffusion_sample_probabilities_wide(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_diffusion_sample_launch_args &args = *reinterpret_cast<const rocm_diffusion_sample_launch_args *>(packet);
+	if (!rocm_valid_diffusion_sample_args(args) ||
+		blockDim.x != ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE ||
+		blockIdx.x >= args.rows) {
+		return;
+	}
+
+	__shared__ float ordered_values[ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE];
+	__shared__ float ordered_probabilities[ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE];
+	__shared__ uint32_t ordered_indices[ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE];
+	__shared__ uint32_t ordered_valid[ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE];
+	__shared__ float shared_maximum;
+	__shared__ float shared_total;
+	__shared__ float shared_weighted;
+	__shared__ uint32_t shared_greedy;
+	__shared__ uint32_t shared_valid;
+
+	const uint32_t lane = threadIdx.x;
+	const uint32_t row = blockIdx.x;
+	float *logits = reinterpret_cast<float *>(static_cast<uintptr_t>(args.logits_pointer)) + static_cast<uint64_t>(row) * args.vocab_size;
+	const float *draws = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.draws_pointer));
+	rocm_diffusion_sample_result *results = reinterpret_cast<rocm_diffusion_sample_result *>(static_cast<uintptr_t>(args.output_pointer));
+	const float temperature = rocm_float_from_bits(args.temperature_bits);
+	const float softcap = rocm_float_from_bits(args.softcap_bits);
+
+	float local_maximum = -FLT_MAX;
+	uint32_t local_greedy = args.vocab_size;
+	uint32_t local_valid = 1u;
+	for (uint32_t col = lane; col < args.vocab_size; col += ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE) {
+		float value = logits[col];
+		if (softcap > 0.0f) {
+			value = tanhf(value / softcap) * softcap;
+		}
+		value = rocm_bfloat16_to_float(rocm_float_to_bfloat16(value / temperature));
+		logits[col] = value;
+		if (!isfinite(value)) {
+			local_valid = 0u;
+		}
+		if (value > local_maximum || (value == local_maximum && col < local_greedy)) {
+			local_maximum = value;
+			local_greedy = col;
+		}
+	}
+	ordered_values[lane] = local_maximum;
+	ordered_indices[lane] = local_greedy;
+	ordered_valid[lane] = local_valid;
+	__syncthreads();
+	if (lane == 0u) {
+		float maximum = -FLT_MAX;
+		uint32_t greedy = args.vocab_size;
+		uint32_t valid = 1u;
+		for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE; ++source) {
+			const float candidate = ordered_values[source];
+			const uint32_t candidate_index = ordered_indices[source];
+			valid &= ordered_valid[source];
+			if (candidate_index < args.vocab_size &&
+				(candidate > maximum || (candidate == maximum && candidate_index < greedy))) {
+				maximum = candidate;
+				greedy = candidate_index;
+			}
+		}
+		shared_maximum = maximum;
+		shared_greedy = greedy;
+		shared_valid = valid;
+	}
+	__syncthreads();
+	const float maximum = shared_maximum;
+
+	float total = 0.0f;
+	float weighted = 0.0f;
+	for (uint32_t base = 0; base < args.vocab_size; base += ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE) {
+		const uint32_t col = base + lane;
+		const float value = col < args.vocab_size ? logits[col] : 0.0f;
+		const float probability = col < args.vocab_size ? expf(value - maximum) : 0.0f;
+		if (col < args.vocab_size) {
+			logits[col] = probability;
+		}
+		ordered_values[lane] = value;
+		ordered_probabilities[lane] = probability;
+		__syncthreads();
+		if (lane == 0u) {
+			for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE && base + source < args.vocab_size; ++source) {
+				const float ordered_probability = ordered_probabilities[source];
+				total += ordered_probability;
+				weighted += ordered_probability * ordered_values[source];
+			}
+		}
+		__syncthreads();
+	}
+	if (lane == 0u) {
+		shared_total = total;
+		shared_weighted = weighted;
+	}
+	__syncthreads();
+	total = shared_total;
+	weighted = shared_weighted;
+
+	const float draw = draws[row];
+	const float target = draw * total;
+	float accumulated = 0.0f;
+	uint32_t sampled = args.vocab_size - 1u;
+	uint32_t found = 0u;
+	for (uint32_t base = 0; base < args.vocab_size; base += ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE) {
+		const uint32_t col = base + lane;
+		const float probability = col < args.vocab_size ? logits[col] : 0.0f;
+		if (col < args.vocab_size) {
+			logits[col] = probability / total;
+		}
+		ordered_probabilities[lane] = probability;
+		__syncthreads();
+		if (lane == 0u) {
+			for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE && base + source < args.vocab_size; ++source) {
+				if (found == 0u) {
+					accumulated += ordered_probabilities[source];
+					if (accumulated >= target) {
+						sampled = base + source;
+						found = 1u;
+					}
+				}
+			}
+		}
+		__syncthreads();
+	}
+
+	if (lane == 0u) {
+		rocm_diffusion_sample_result result = {};
+		result.sampled = static_cast<int32_t>(sampled);
+		result.greedy = static_cast<int32_t>(shared_greedy);
+		result.entropy = maximum + static_cast<float>(log(static_cast<double>(total))) - weighted / total;
+		if (shared_valid != 0u && draw >= 0.0f && draw < 1.0f && isfinite(draw) && total > 0.0f && isfinite(total) && isfinite(result.entropy)) {
 			result.status = ROCM_DIFFUSION_SAMPLE_STATUS_OK;
 		}
 		results[row] = result;

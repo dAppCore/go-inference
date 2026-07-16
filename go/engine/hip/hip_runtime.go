@@ -411,6 +411,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4,
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64,
 	hipKernelNameDiffusionSampleProbabilities,
+	hipKernelNameDiffusionSampleProbabilitiesWide,
 }
 
 func hipPrewarmGemma4Q4KernelFunctions(driver nativeHIPDriver) {

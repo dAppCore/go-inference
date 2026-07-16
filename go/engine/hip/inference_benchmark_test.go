@@ -942,6 +942,7 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameAttentionHeadsBatchChunkedStage1GQA4, "kernel_attention_batch_chunked_stage1_gqa4")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage1GQA8, "kernel_attention_batch_chunked_stage1_gqa8")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage2, "kernel_attention_batch_chunked_stage2")
+	report(hipKernelNameDiffusionSampleProbabilitiesWide, "kernel_diffusion_sample_probabilities_wide")
 	report(hipKernelNameAttentionHeadsChunkedStage1, "kernel_attention_decode_chunked_stage1")
 	report(hipKernelNameAttentionHeadsChunkedStage2, "kernel_attention_decode_chunked_stage2")
 	report(hipKernelNameKVEncodeTokenValueNorm, "kernel_rocm_kv_encode_token_value_norm")
