@@ -22,3 +22,13 @@ Notes baked into gemma4.json:
   gains (creative text measured 8-20% acceptance on the same pair, i.e. MTP
   roughly break-even there). Bench a workload by shifting the prompt in a
   config copy.
+- QAT rows decode SLOWER than plain 4bit by design, not by engine defect: the
+  mlx-community `qat-4bit` checkpoints are mixed-precision — every
+  `mlp.{gate,up,down}_proj` carries a per-tensor 8-bit override (config.json
+  `quantization`), attention/embed/head stay 4-bit, group size 64 throughout.
+  Decode is weight-bandwidth-bound, so the extra bytes ARE the slowdown:
+  E2B 4.33 vs 3.55 GB (+22%) → measured −16%, E4B 6.80 vs 5.15 GB (+32%) →
+  −21%, 31B 28.8 vs 18.4 GB (+57%) → −32% — each at or slightly better than
+  the pure byte-ratio prediction (−18/−24/−36%), which is the receipt that the
+  q8 tensors ride the fast qmv path. Pick QAT for quality, plain 4bit for
+  speed; a grid row comparing them measures checkpoint mass, not the engine.
