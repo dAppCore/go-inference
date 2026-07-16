@@ -739,3 +739,91 @@ func TestGatedDeltaBF16LayerDevice_Bad(t *testing.T) {
 		t.Fatal("empty weights must error")
 	}
 }
+
+// TestAttnBF16FoldDevice_Good is the attention fold's session A/B: a two-layer [gated-delta,
+// attention] dense bf16 model stepped with every fold hook bound vs the per-stage bf16 path —
+// carried KV cache and recurrent state included.
+func TestAttnBF16FoldDevice_Good(t *testing.T) {
+	gdRequireKernel(t)
+	if composed.AttnBF16FrontDevice == nil || composed.AttnBF16TailDevice == nil {
+		t.Skip("attention fold hooks unbound (LTHN_BF16_SEAM=0?)")
+	}
+	const D, FF, vocab = 512, 1024, 64
+	gcfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	convDim, vDim := gcfg.ConvDim(), gcfg.VDim()
+	bw := func(seed, outDim, inDim int) *model.BF16Weight {
+		return &model.BF16Weight{Data: f32sToBF16Bytes(cbSyn(outDim*inDim, seed)), OutDim: outDim, InDim: inDim}
+	}
+	gw := &qwen3.GatedDeltaWeights{
+		ConvWeight: cbSyn(convDim*gcfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
+		ALog: cbSyn(gcfg.ValueHeads, 13), DtBias: cbSyn(gcfg.ValueHeads, 14), Norm: cbSyn(gcfg.HeadDim, 15),
+		InProjQKVB: bw(21, convDim, D), InProjZB: bw(22, vDim, D),
+		InProjAB: bw(23, gcfg.ValueHeads, D), InProjBB: bw(24, gcfg.ValueHeads, D),
+		OutProjB: bw(25, D, vDim),
+	}
+	const AH, AKVH, AHD = 4, 2, 128 // heads*hd == D
+	m := &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, BF16Resident: true,
+		Layers: []composed.Layer{
+			{
+				InputNorm: cbSyn(D, 31), PostAttnNorm: cbSyn(D, 32),
+				MLP:   &composed.MLP{GateB: bw(41, FF, D), UpB: bw(42, FF, D), DownB: bw(43, D, FF), FF: FF},
+				Mixer: composed.NewGatedDeltaMixer(gw, gcfg),
+			},
+			{
+				InputNorm: cbSyn(D, 51), PostAttnNorm: cbSyn(D, 52),
+				MLP: &composed.MLP{GateB: bw(61, FF, D), UpB: bw(62, FF, D), DownB: bw(63, D, FF), FF: FF},
+				Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+					QProjB: bw(71, AH*AHD, D), KProjB: bw(72, AKVH*AHD, D), VProjB: bw(73, AKVH*AHD, D),
+					OProjB: bw(74, D, AH*AHD), QNorm: cbSyn(AHD, 75), KNorm: cbSyn(AHD, 76),
+				}, composed.AttnConfig{Heads: AH, KVHeads: AKVH, HeadDim: AHD, RotaryDim: AHD, RopeTheta: 1e6, NormEps: 1e-6}),
+			},
+		},
+	}
+	savedF, savedT := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
+	savedL := qwen3.GatedDeltaBF16LayerDevice
+	defer func() {
+		composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
+		qwen3.GatedDeltaBF16LayerDevice = savedL
+	}()
+
+	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
+	run := func() [][]float32 {
+		sess := composed.NewSession(m)
+		var outs [][]float32
+		for _, ids := range steps {
+			hid, err := sess.Forward(ids)
+			if err != nil {
+				t.Fatalf("Forward(%v): %v", ids, err)
+			}
+			outs = append(outs, append([]float32(nil), hid...))
+		}
+		return outs
+	}
+	composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
+	qwen3.GatedDeltaBF16LayerDevice = savedL
+	fused := run()
+	composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = nil, nil
+	qwen3.GatedDeltaBF16LayerDevice = nil
+	staged := run()
+	for i := range fused {
+		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
+		t.Logf("step %d: attn+gd folds vs per-stage scaled max diff %.3e", i, rel)
+		if rel > 5e-4 {
+			t.Fatalf("step %d diverged: %.3e", i, rel)
+		}
+	}
+}
+
+// TestAttnBF16FoldDevice_Bad pins the fold's rejections: geometry mismatches error before any
+// dispatch on both seams.
+func TestAttnBF16FoldDevice_Bad(t *testing.T) {
+	gdRequireKernel(t)
+	bw := &model.BF16Weight{Data: make([]byte, 8*4*2), OutDim: 8, InDim: 4}
+	if _, _, _, err := AttnBF16FrontDevice(make([]float32, 3), make([]float32, 4), bw, bw, bw, 1, 4, 8, 8, 1e-6); err == nil {
+		t.Fatal("x size mismatch must error")
+	}
+	if _, err := AttnBF16TailDevice(make([]float32, 4), make([]float32, 8), bw, make([]float32, 4), bw, bw, bw, 1, 4, 8, 8, 1e-6); err == nil {
+		t.Fatal("tail geometry mismatch must error")
+	}
+}

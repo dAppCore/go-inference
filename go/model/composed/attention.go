@@ -171,6 +171,59 @@ func applyRotaryHalf(x []float32, pos, rotaryDim int, theta float64) {
 	}
 }
 
+// AttnBF16FrontDevice is the attention fold's FRONT seam (#26): input RMSNorm + the three raw-bf16
+// q/k/v projections in ONE command buffer, q/k/v returned for the host attention core. AX-8: the
+// lib declares, the backend binds; nil ⇒ the per-stage path serves.
+var AttnBF16FrontDevice func(x, inputNorm []float32, qw, kw, vw *model.BF16Weight, L, D, qCols, kvCols int, eps float32) (q, k, v []float32, err error)
+
+// AttnBF16TailDevice is the fold's TAIL seam: o_proj + the FFN tail (residual + post-norm + bf16
+// SwiGLU + residual) in ONE command buffer. Stateless — the KV cache advanced in the host core —
+// so a decline here falls back to the host tail with no state hazard.
+var AttnBF16TailDevice func(h, attnOut []float32, ow *model.BF16Weight, postNorm []float32, gate, up, down *model.BF16Weight, L, D, mixCols, FF int, eps float32) (y []float32, err error)
+
+// forwardBF16Layer runs one WHOLE dense bf16 attention layer through the fold seams — [front CB]
+// → host rope/cache/SDPA → [tail CB] — engaging only when both seams are bound and every
+// projection carries its bf16 form. engaged=false leaves the per-stage path in charge. A front
+// failure declines cleanly (no state touched); a tail failure completes on the host path (the
+// cache already advanced, and the tail is stateless).
+func (m *attnMixer) forwardBF16Layer(h, inputNorm, postNorm []float32, mlp *MLP, L, D int, eps float32, prior any) (y []float32, next any, engaged bool, err error) {
+	if AttnBF16FrontDevice == nil || AttnBF16TailDevice == nil ||
+		m.w.QProjB == nil || m.w.KProjB == nil || m.w.VProjB == nil || m.w.OProjB == nil ||
+		mlp.GateB == nil || mlp.UpB == nil || mlp.DownB == nil {
+		return nil, nil, false, nil
+	}
+	cfg := m.cfg
+	qCols := cfg.Heads * cfg.HeadDim
+	if cfg.OutputGate {
+		qCols = 2 * cfg.Heads * cfg.HeadDim
+	}
+	kvCols := cfg.KVHeads * cfg.HeadDim
+	qRaw, k, v, ferr := AttnBF16FrontDevice(h, inputNorm, m.w.QProjB, m.w.KProjB, m.w.VProjB, L, D, qCols, kvCols, eps)
+	if ferr != nil {
+		return nil, nil, false, nil // nothing touched — the per-stage path serves this token
+	}
+	var st attnState
+	if p, ok := prior.(attnState); ok {
+		st = p
+	}
+	sc := st.sc
+	if sc == nil {
+		sc = &attnScratch{}
+	}
+	attnOut, _, mixCols, nextState, cerr := m.continueFromQKV(qRaw, k, v, L, D, st, sc)
+	if cerr != nil {
+		return nil, nil, true, cerr
+	}
+	if yDev, terr := AttnBF16TailDevice(h, attnOut, m.w.OProjB, postNorm, mlp.GateB, mlp.UpB, mlp.DownB, L, D, mixCols, mlp.FF, eps); terr == nil {
+		return yDev, nextState, true, nil
+	}
+	// Tail decline: complete on the host — o_proj through the bf16 seam, then the host tail.
+	ns := nextState.(attnState)
+	ns.sc.o = matNTBF16(ns.sc.o, attnOut, m.w.OProjB, L, mixCols, D)
+	y = tailHost(append([]float32(nil), h...), ns.sc.o, postNorm, mlp, L, D, eps, 1)
+	return y, nextState, true, nil
+}
+
 // Forward runs attention over hidden [L,D], appending the new K/V to the cache and attending causally over
 // all cached tokens, then applies o_proj. Returns out [L,D] and the grown cache. It is forwardNoProj (which
 // stops one GEMM short) plus the o_proj into the session-owned scratch — the projection is split out so the

@@ -632,6 +632,22 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 					}
 				}
 			}
+			// Attention fold (#26): a dense bf16 attention layer rides [norm+q/k/v CB] → host
+			// rope/cache/SDPA → [o_proj+FFN-tail CB] — two round-trips where the per-stage path
+			// pays seven. engaged=false falls through to the per-stage branch below.
+			if am, isAttn := layer.Mixer.(*attnMixer); isAttn && s.m.residualScale() == 1 && !s.m.LayerNorm {
+				if mlp, isDense := layer.MLP.(*MLP); isDense {
+					y, next, engaged, aerr := am.forwardBF16Layer(h, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+					if engaged {
+						if aerr != nil {
+							return nil, aerr
+						}
+						s.states[li] = next
+						h = y
+						continue
+					}
+				}
+			}
 			// Packed checkpoint: the mixer's own Forward (its q/k/v/o or in_proj/out_proj dispatch to the
 			// quant matvec seam) then the FFN tail. The tail rides the fused packed-weight device fold
 			// (ResidualNormMLPQuantDevice — residual + norm + SwiGLU-over-codes + residual in ONE command
