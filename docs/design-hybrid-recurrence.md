@@ -76,10 +76,17 @@ end-to-end, so the kernels are f32-in/f32-out (no bf16 tier needed on this lane 
 
 ## Slices (each lands with its receipt; lethean-perf discipline)
 
-- **S0 — instrument.** Per-stage census of one decode token on the composed lane (stage timers +
-  CB count): projections / conv / recurrence / gated-norm / attention layers / FFN tails. Receipt:
-  the baseline table naming where the 294 ms goes. (Sanity-check against the gap report's 368
-  CBs/token.)
+- **S0 — instrument. DONE.** `TestComposedDecodeProfileReal` (engine/metal) decodes 24 real
+  tokens for `-cpuprofile`; `TestComposedDecodeRoundTripCensus` counts CBs. Baseline receipt
+  (27B-4bit, M3 Ultra, 2026-07-16): **215.75 ms/token = 4.63 tok/s** (3.41 in the gap report —
+  #8-B's fused quant tail already moved it). CB census: **368/token = 304 per-projection quant
+  seams** (48 gd × 5 [qkv,z,a,b,out] + 16 attn × 4 [q,k,v,o], exact) **+ 64 fused quant tails**
+  (#8-B, one per layer). CPU profile over the run: objc round-trip machinery ~1.9 s
+  (`runtime.cgocall` — CB submit/wait/copy), quant-seam cum ~1.5 s (`MatMulQuantF32NTInto`,
+  incl. per-call f32→bf16 upload converts), host recurrence ~1.1 s (`GatedDeltaRuleF32`),
+  alloc/copy churn ~1.7 s (`madvise`/`memmove`/`memclr`/`tensorF32`). No single wall — the
+  architecture is the wall, confirming the port shape: device-resident state + one CB per layer
+  attacks all four lines at once.
 - **S1 — the recurrence kernel.** `lthn_gated_delta_step` in `lthn_kernels`: mlx-lm shape +
   snapshot slots + scale-on-output, scalar-g, f32. Parity vs `deltanet.GatedDeltaRuleF32` (host
   pre-norms q/k so both sides see identical inputs; tolerance-gated — f32 state vs the host's f64
