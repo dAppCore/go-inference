@@ -222,6 +222,57 @@ func TestStructured_Repair_Ugly(t *testing.T) {
 	}
 }
 
+// TestStructured_ParseWithRepair_Good pins a multi-round repair: the
+// reprompter serves one more bad payload before a good one lands, so
+// ParseWithRepair keeps going past a single retry rather than giving up
+// after the first repair attempt.
+func TestStructured_ParseWithRepair_Good(t *testing.T) {
+	rp := &fakeReprompter{payloads: []string{`still not json`, `{"name":"Grace","age":85}`}}
+	var p person
+	err := ParseWithRepair(`bad`, &p, rp, 4)
+	if err != nil {
+		t.Fatalf("ParseWithRepair multi-round recovery: unexpected error: %v", err)
+	}
+	if p.Name != "Grace" || p.Age != 85 {
+		t.Fatalf("ParseWithRepair multi-round coercion: got %+v, want {Grace 85}", p)
+	}
+	if rp.calls != 2 {
+		t.Fatalf("ParseWithRepair multi-round: expected 2 reprompt calls, got %d", rp.calls)
+	}
+}
+
+// TestStructured_ParseWithRepair_Bad pins the wrong-shape-forever case: the
+// reprompter successfully reaches the model every time, but each payload is
+// well-formed JSON with the wrong field type (a shape error, not a syntax
+// error) — ParseWithRepair still exhausts its budget and returns it.
+func TestStructured_ParseWithRepair_Bad(t *testing.T) {
+	rp := &fakeReprompter{payloads: []string{`{"name":"Ada","age":"not a number"}`, `{"name":"Ada","age":"still not a number"}`}}
+	var p person
+	err := ParseWithRepair(`{"name":"Ada","age":"nope"}`, &p, rp, 3)
+	if err == nil {
+		t.Fatal("ParseWithRepair wrong-shape-forever: expected error, got nil")
+	}
+	if rp.calls != 2 {
+		t.Fatalf("ParseWithRepair wrong-shape-forever: expected 2 reprompt calls, got %d", rp.calls)
+	}
+}
+
+// TestStructured_ParseWithRepair_Ugly pins maxAttempts=1 with a non-nil
+// reprompter: the repair loop (attempt < maxAttempts, starting at 1) never
+// runs, so a configured reprompter is still never called — maxAttempts=1
+// behaves exactly like reprompt==nil, not like "one repair round".
+func TestStructured_ParseWithRepair_Ugly(t *testing.T) {
+	rp := &fakeReprompter{payloads: []string{`{"name":"Unused","age":1}`}}
+	var p person
+	err := ParseWithRepair(`bad`, &p, rp, 1)
+	if err == nil {
+		t.Fatal("ParseWithRepair maxAttempts=1: expected error, got nil")
+	}
+	if rp.calls != 0 {
+		t.Fatalf("ParseWithRepair maxAttempts=1: expected 0 reprompt calls (no repair round fits), got %d", rp.calls)
+	}
+}
+
 // --- ValidateWithRepair ---------------------------------------------------
 
 func TestStructured_ValidateWithRepair_Good(t *testing.T) {
