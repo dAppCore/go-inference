@@ -335,7 +335,7 @@ func hipRunAdamWUpdateKernel(ctx context.Context, driver nativeHIPDriver, req hi
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return buffers.ReadBack(req.State)

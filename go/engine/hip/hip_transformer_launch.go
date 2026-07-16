@@ -34,7 +34,7 @@ const (
 	hipRoPEHeadsLaunchArgsBytes                                      = 64
 	hipGreedyLaunchArgsVersion                                uint32 = 1
 	hipGreedyLaunchArgsBytes                                         = 64
-	hipSoftcapGreedyLaunchArgsVersion                         uint32 = 1
+	hipSoftcapGreedyLaunchArgsVersion                         uint32 = 2
 	hipSoftcapGreedyLaunchArgsBytes                                  = 64
 	hipGreedyResultBytes                                             = 8
 	hipAttentionLaunchArgsVersion                             uint32 = 1
@@ -54,7 +54,7 @@ const (
 	hipAttentionHeadsBatchChunkedLaunchArgsVersion            uint32 = 2
 	hipAttentionHeadsBatchChunkedLaunchArgsBytes                     = 136
 	hipAttentionHeadsChunkedBlockSize                                = 512
-	hipAttentionHeadsChunkSize                                       = 64
+	hipAttentionHeadsDefaultChunkSize                                = 64
 	hipAttentionKVSourceContiguous                            uint32 = 0
 	hipAttentionKVSourceDevice                                uint32 = 1
 	hipVectorAddLaunchArgsVersion                             uint32 = 1
@@ -338,12 +338,14 @@ type hipGreedySampleLaunchArgs struct {
 }
 
 type hipSoftcapGreedySampleLaunchArgs struct {
-	LogitsPointer nativeDevicePointer
-	OutputPointer nativeDevicePointer
-	Count         int
-	LogitsBytes   uint64
-	OutputBytes   uint64
-	Softcap       float32
+	LogitsPointer   nativeDevicePointer
+	OutputPointer   nativeDevicePointer
+	Count           int
+	LogitsBytes     uint64
+	OutputBytes     uint64
+	Softcap         float32
+	SuppressPointer nativeDevicePointer
+	SuppressCount   int
 }
 
 type hipGreedySampleResult struct {
@@ -438,6 +440,8 @@ type hipAttentionHeadsBatchCausalLaunchArgs struct {
 	DescriptorBytes   uint64
 	SharedMemBytes    uint64
 	WindowSize        int
+	VisibleCapPointer nativeDevicePointer
+	VisibleCapBytes   uint64
 }
 
 type hipAttentionHeadsLaneBatchLaunchArgs struct {
@@ -520,6 +524,7 @@ type hipAttentionHeadsBatchChunkedLaunchArgs struct {
 	PartialPointer    nativeDevicePointer
 	StatsPointer      nativeDevicePointer
 	OutputPointer     nativeDevicePointer
+	VisibleCapPointer nativeDevicePointer
 	Dim               int
 	TokenCount        int
 	HeadCount         int
@@ -533,6 +538,7 @@ type hipAttentionHeadsBatchChunkedLaunchArgs struct {
 	PartialBytes      uint64
 	StatsBytes        uint64
 	OutputBytes       uint64
+	VisibleCapBytes   uint64
 	Scale             float32
 	WindowSize        int
 	ChunkStartToken   int
@@ -2124,6 +2130,24 @@ func (args hipSoftcapGreedySampleLaunchArgs) BinaryInto(payload []byte) ([]byte,
 	if args.Softcap < 0 || math.IsNaN(float64(args.Softcap)) || math.IsInf(float64(args.Softcap), 0) {
 		return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "softcap must be non-negative and finite", nil)
 	}
+	var suppressCount uint32
+	if args.SuppressCount < 0 {
+		return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token count must be non-negative", nil)
+	}
+	if args.SuppressCount > 0 {
+		if args.SuppressPointer == 0 {
+			return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token pointer is required", nil)
+		}
+		if args.SuppressCount >= args.Count {
+			return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token count must be smaller than logits count", nil)
+		}
+		suppressCount, err = rocmDeviceKVPositiveUint32("suppress token count", args.SuppressCount)
+		if err != nil {
+			return nil, err
+		}
+	} else if args.SuppressPointer != 0 {
+		return nil, core.E("rocm.hip.SoftcapGreedyLaunch", "suppress token count is required with a suppress pointer", nil)
+	}
 	if cap(payload) < hipSoftcapGreedyLaunchArgsBytes {
 		payload = hipBorrowLaunchPacket(hipSoftcapGreedyLaunchArgsBytes)
 	} else {
@@ -2138,6 +2162,8 @@ func (args hipSoftcapGreedySampleLaunchArgs) BinaryInto(payload []byte) ([]byte,
 	binary.LittleEndian.PutUint32(payload[28:], logitsBytes)
 	binary.LittleEndian.PutUint32(payload[32:], uint32(args.OutputBytes))
 	binary.LittleEndian.PutUint32(payload[36:], math.Float32bits(args.Softcap))
+	binary.LittleEndian.PutUint64(payload[40:], uint64(args.SuppressPointer))
+	binary.LittleEndian.PutUint32(payload[48:], suppressCount)
 	return payload, nil
 }
 
@@ -2595,6 +2621,13 @@ func (args hipAttentionHeadsBatchCausalLaunchArgs) BinaryInto(payload []byte) ([
 	if uint64(queryStartToken)+uint64(queryCount) > uint64(tokenCount) {
 		return nil, core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "causal query window exceeds token count", nil)
 	}
+	if args.VisibleCapPointer == 0 {
+		if args.VisibleCapBytes != 0 {
+			return nil, core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "visible-token cap bytes require a cap pointer", nil)
+		}
+	} else if args.VisibleCapBytes != uint64(queryCount)*4 {
+		return nil, core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "visible-token cap byte count mismatch", nil)
+	}
 	queryElements := uint64(dim) * uint64(headCount) * uint64(queryCount)
 	queryBytes, err := hipExactUint32Bytes("query", args.QueryBytes, queryElements*4)
 	if err != nil {
@@ -2664,6 +2697,8 @@ func (args hipAttentionHeadsBatchCausalLaunchArgs) BinaryInto(payload []byte) ([
 	binary.LittleEndian.PutUint64(payload[112:], args.SharedMemBytes)
 	binary.LittleEndian.PutUint32(payload[120:], windowSize)
 	binary.LittleEndian.PutUint32(payload[124:], keyHeads)
+	binary.LittleEndian.PutUint64(payload[128:], uint64(args.VisibleCapPointer))
+	binary.LittleEndian.PutUint64(payload[136:], args.VisibleCapBytes)
 	return payload, nil
 }
 
@@ -3087,6 +3122,13 @@ func (args hipAttentionHeadsBatchChunkedLaunchArgs) BinaryInto(payload []byte) (
 	if uint64(queryStartToken)+uint64(queryCount) > uint64(tokenCount) {
 		return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "causal query window exceeds token count", nil)
 	}
+	if args.VisibleCapPointer == 0 {
+		if args.VisibleCapBytes != 0 {
+			return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "visible-token cap bytes require a cap pointer", nil)
+		}
+	} else if args.VisibleCapBytes != uint64(queryCount)*4 {
+		return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "visible-token cap byte count mismatch", nil)
+	}
 	chunkSize, err := rocmDeviceKVPositiveUint32("attention chunk size", args.ChunkSize)
 	if err != nil {
 		return nil, err
@@ -3096,6 +3138,9 @@ func (args hipAttentionHeadsBatchChunkedLaunchArgs) BinaryInto(payload []byte) (
 		return nil, err
 	}
 	chunkEndToken := int(queryStartToken) + int(queryCount)
+	if args.VisibleCapPointer != 0 {
+		chunkEndToken = int(tokenCount)
+	}
 	if chunkEndToken > int(tokenCount) {
 		chunkEndToken = int(tokenCount)
 	}
@@ -3157,6 +3202,8 @@ func (args hipAttentionHeadsBatchChunkedLaunchArgs) BinaryInto(payload []byte) (
 	binary.LittleEndian.PutUint32(payload[104:], windowSize)
 	binary.LittleEndian.PutUint32(payload[108:], chunkStartToken)
 	binary.LittleEndian.PutUint32(payload[112:], keyHeads)
+	binary.LittleEndian.PutUint32(payload[116:], uint32(args.VisibleCapBytes))
+	binary.LittleEndian.PutUint64(payload[120:], uint64(args.VisibleCapPointer))
 	return payload, nil
 }
 

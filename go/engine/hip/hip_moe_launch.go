@@ -13,12 +13,24 @@ import (
 )
 
 const (
-	hipMoERouterLaunchArgsVersion uint32 = 1
-	hipMoERouterLaunchArgsBytes          = 64
-	hipMoERouterLaunchStatusOK    uint32 = 0x4d4f4552
-	hipMoERouterBlockSize         uint32 = 256
-	hipMoELazyLaunchArgsVersion   uint32 = 1
-	hipMoELazyLaunchArgsBytes            = 64
+	hipMoERouterLaunchArgsVersion          uint32 = 1
+	hipMoERouterLaunchArgsBytes                   = 64
+	hipMoERouterLaunchStatusOK             uint32 = 0x4d4f4552
+	hipMoERouterBlockSize                  uint32 = 256
+	hipMoELazyLaunchArgsVersion            uint32 = 1
+	hipMoELazyLaunchArgsBytes                     = 64
+	hipMoEBatchRouteRowsLaunchArgsVersion  uint32 = 1
+	hipMoEBatchRouteRowsLaunchArgsBytes           = 72
+	hipMoEBatchReduceLaunchArgsVersion     uint32 = 1
+	hipMoEBatchReduceLaunchArgsBytes              = 56
+	hipMoEBatchRouteMetadataBytes                 = 16
+	hipMoEBatchRouteBlockSize              uint32 = 256
+	hipMoEMLXAffineRoutesLaunchArgsVersion uint32 = 1
+	hipMoEMLXAffineRoutesLaunchArgsBytes          = 80
+	hipMoEMLXAffineRouteChunkBytes                = 152
+	hipMoEMLXAffineRoutesPerChunk                 = 8
+	hipMoEMLXAffineRouteRowsPerBlock              = 8
+	hipMoEMLXAffineRoutesFlagGateUp        uint32 = 1
 )
 
 type hipMoERouterRequest struct {
@@ -82,6 +94,484 @@ type hipMoELazyExpertLaunchArgs struct {
 
 type hipMoELazyExpertResult struct {
 	Resident []bool
+}
+
+type hipMoEBatchRouteRowsLaunchArgs struct {
+	InputPointer    nativeDevicePointer
+	MetadataPointer nativeDevicePointer
+	OutputPointer   nativeDevicePointer
+	RouteCount      int
+	RowWidth        int
+	InputRows       int
+	OutputRows      int
+	InputBytes      uint64
+	MetadataBytes   uint64
+	OutputBytes     uint64
+}
+
+type hipMoEBatchReduceLaunchArgs struct {
+	InputPointer  nativeDevicePointer
+	OutputPointer nativeDevicePointer
+	Rows          int
+	TopK          int
+	RowWidth      int
+	InputBytes    uint64
+	OutputBytes   uint64
+}
+
+type hipMoEMLXAffineRouteChunk struct {
+	GateUpWeightPointer nativeDevicePointer
+	GateUpScalePointer  nativeDevicePointer
+	GateUpBiasPointer   nativeDevicePointer
+	DownWeightPointer   nativeDevicePointer
+	DownScalePointer    nativeDevicePointer
+	DownBiasPointer     nativeDevicePointer
+	RouteCount          int
+	TokenRows           [hipMoEMLXAffineRoutesPerChunk]int
+	PairIndices         [hipMoEMLXAffineRoutesPerChunk]int
+	RouteWeights        [hipMoEMLXAffineRoutesPerChunk]float32
+}
+
+type hipMoEMLXAffineRoutesLaunchArgs struct {
+	InputPointer  nativeDevicePointer
+	ChunkPointer  nativeDevicePointer
+	OutputPointer nativeDevicePointer
+	Rows          int
+	Cols          int
+	InputRows     int
+	PairCount     int
+	ChunkCount    int
+	GroupSize     int
+	Bits          int
+	InputBytes    uint64
+	ChunkBytes    uint64
+	OutputBytes   uint64
+	GateUp        bool
+}
+
+func (chunk hipMoEMLXAffineRouteChunk) Binary() ([]byte, error) {
+	return chunk.BinaryInto(make([]byte, hipMoEMLXAffineRouteChunkBytes))
+}
+
+func (chunk hipMoEMLXAffineRouteChunk) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "rocm.hip.MoEMLXAffineRouteChunk"
+	if len(payload) < hipMoEMLXAffineRouteChunkBytes {
+		return nil, core.E(operation, "route chunk payload buffer is too small", nil)
+	}
+	if chunk.GateUpWeightPointer == 0 || chunk.GateUpScalePointer == 0 || chunk.GateUpBiasPointer == 0 ||
+		chunk.DownWeightPointer == 0 || chunk.DownScalePointer == 0 || chunk.DownBiasPointer == 0 {
+		return nil, core.E(operation, "gate/up and down projection pointers are required", nil)
+	}
+	if chunk.RouteCount <= 0 || chunk.RouteCount > hipMoEMLXAffineRoutesPerChunk {
+		return nil, core.E(operation, "route count must fit one route chunk", nil)
+	}
+	payload = payload[:hipMoEMLXAffineRouteChunkBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint64(payload[0:], uint64(chunk.GateUpWeightPointer))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(chunk.GateUpScalePointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(chunk.GateUpBiasPointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(chunk.DownWeightPointer))
+	binary.LittleEndian.PutUint64(payload[32:], uint64(chunk.DownScalePointer))
+	binary.LittleEndian.PutUint64(payload[40:], uint64(chunk.DownBiasPointer))
+	binary.LittleEndian.PutUint32(payload[48:], uint32(chunk.RouteCount))
+	for index := 0; index < chunk.RouteCount; index++ {
+		if chunk.TokenRows[index] < 0 || uint64(chunk.TokenRows[index]) > uint64(^uint32(0)) ||
+			chunk.PairIndices[index] < 0 || uint64(chunk.PairIndices[index]) > uint64(^uint32(0)) {
+			return nil, core.E(operation, "token row or pair index exceeds uint32", nil)
+		}
+		weight := chunk.RouteWeights[index]
+		if math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+			return nil, core.E(operation, "route weights must be finite", nil)
+		}
+		binary.LittleEndian.PutUint32(payload[56+index*4:], uint32(chunk.TokenRows[index]))
+		binary.LittleEndian.PutUint32(payload[88+index*4:], uint32(chunk.PairIndices[index]))
+		binary.LittleEndian.PutUint32(payload[120+index*4:], math.Float32bits(weight))
+	}
+	return payload, nil
+}
+
+func hipMoEMLXAffineRouteChunksBinaryInto(chunks []hipMoEMLXAffineRouteChunk, payload []byte) ([]byte, error) {
+	const operation = "rocm.hip.MoEMLXAffineRouteChunks"
+	if len(chunks) == 0 {
+		return nil, core.E(operation, "at least one route chunk is required", nil)
+	}
+	if len(chunks) > int(^uint32(0))/hipMoEMLXAffineRouteChunkBytes {
+		return nil, core.E(operation, "route chunk byte count exceeds uint32", nil)
+	}
+	want := len(chunks) * hipMoEMLXAffineRouteChunkBytes
+	if len(payload) < want {
+		return nil, core.E(operation, "route chunk payload buffer is too small", nil)
+	}
+	payload = payload[:want]
+	for index, chunk := range chunks {
+		if _, err := chunk.BinaryInto(payload[index*hipMoEMLXAffineRouteChunkBytes:]); err != nil {
+			return nil, core.E(operation, core.Sprintf("encode route chunk %d", index), err)
+		}
+	}
+	return payload, nil
+}
+
+func (args hipMoEMLXAffineRoutesLaunchArgs) Binary() ([]byte, error) {
+	return args.BinaryInto(make([]byte, hipMoEMLXAffineRoutesLaunchArgsBytes))
+}
+
+func (args hipMoEMLXAffineRoutesLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "rocm.hip.MoEMLXAffineRoutesLaunch"
+	if len(payload) < hipMoEMLXAffineRoutesLaunchArgsBytes {
+		return nil, core.E(operation, "launch arg payload buffer is too small", nil)
+	}
+	if args.InputPointer == 0 || args.ChunkPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E(operation, "input, route chunk, and output pointers are required", nil)
+	}
+	rows, err := rocmDeviceKVPositiveUint32("MoE affine route rows", args.Rows)
+	if err != nil {
+		return nil, err
+	}
+	cols, err := rocmDeviceKVPositiveUint32("MoE affine route cols", args.Cols)
+	if err != nil {
+		return nil, err
+	}
+	inputRows, err := rocmDeviceKVPositiveUint32("MoE affine route input rows", args.InputRows)
+	if err != nil {
+		return nil, err
+	}
+	pairCount, err := rocmDeviceKVPositiveUint32("MoE affine route pair count", args.PairCount)
+	if err != nil {
+		return nil, err
+	}
+	chunkCount, err := rocmDeviceKVPositiveUint32("MoE affine route chunk count", args.ChunkCount)
+	if err != nil {
+		return nil, err
+	}
+	groupSize, err := rocmDeviceKVPositiveUint32("MoE affine route group size", args.GroupSize)
+	if err != nil {
+		return nil, err
+	}
+	bits, err := rocmDeviceKVPositiveUint32("MoE affine route bits", args.Bits)
+	if err != nil {
+		return nil, err
+	}
+	if !hipMLXAffineSupportedBits(args.Bits) || args.GroupSize > args.Cols || args.Cols%args.GroupSize != 0 || (args.Cols*args.Bits)%32 != 0 {
+		return nil, core.E(operation, "MLX affine route quantization geometry is invalid", nil)
+	}
+	wantInputBytes, err := hipMoEByteProduct(operation, "input", uint64(inputRows), uint64(cols), 4)
+	if err != nil {
+		return nil, err
+	}
+	wantChunkBytes, err := hipMoEByteProduct(operation, "route chunk", uint64(chunkCount), hipMoEMLXAffineRouteChunkBytes)
+	if err != nil {
+		return nil, err
+	}
+	wantOutputBytes, err := hipMoEByteProduct(operation, "output", uint64(pairCount), uint64(rows), 4)
+	if err != nil {
+		return nil, err
+	}
+	if args.InputBytes != wantInputBytes || args.ChunkBytes != wantChunkBytes || args.OutputBytes != wantOutputBytes {
+		return nil, core.E(operation, "input, route chunk, or output byte count mismatch", nil)
+	}
+	for label, value := range map[string]uint64{
+		"input bytes": args.InputBytes, "route chunk bytes": args.ChunkBytes, "output bytes": args.OutputBytes,
+	} {
+		if err := hipProjectionUint32Bytes(operation, label, value); err != nil {
+			return nil, err
+		}
+	}
+	flags := uint32(0)
+	if args.GateUp {
+		flags = hipMoEMLXAffineRoutesFlagGateUp
+	}
+	payload = payload[:hipMoEMLXAffineRoutesLaunchArgsBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint32(payload[0:], hipMoEMLXAffineRoutesLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.InputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.ChunkPointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[32:], rows)
+	binary.LittleEndian.PutUint32(payload[36:], cols)
+	binary.LittleEndian.PutUint32(payload[40:], inputRows)
+	binary.LittleEndian.PutUint32(payload[44:], pairCount)
+	binary.LittleEndian.PutUint32(payload[48:], chunkCount)
+	binary.LittleEndian.PutUint32(payload[52:], groupSize)
+	binary.LittleEndian.PutUint32(payload[56:], bits)
+	binary.LittleEndian.PutUint32(payload[60:], uint32(args.InputBytes))
+	binary.LittleEndian.PutUint32(payload[64:], uint32(args.ChunkBytes))
+	binary.LittleEndian.PutUint32(payload[68:], uint32(args.OutputBytes))
+	binary.LittleEndian.PutUint32(payload[72:], flags)
+	return payload, nil
+}
+
+func hipMoEByteProduct(operation, label string, factors ...uint64) (uint64, error) {
+	value := uint64(1)
+	for _, factor := range factors {
+		if factor != 0 && value > ^uint64(0)/factor {
+			return 0, core.E(operation, label+" byte count overflows", nil)
+		}
+		value *= factor
+	}
+	return value, nil
+}
+
+func hipRunMoEMLXAffineRoutesKernel(ctx context.Context, driver nativeHIPDriver, input, chunks *hipDeviceByteBuffer, rows, cols, inputRows, pairCount, chunkCount, groupSize, bits int, gateUp bool, output *hipDeviceByteBuffer) error {
+	return hipRunMoEMLXAffineRoutesKernelWithArgs(ctx, driver, input, chunks, rows, cols, inputRows, pairCount, chunkCount, groupSize, bits, gateUp, output, nil)
+}
+
+func hipRunMoEMLXAffineRoutesKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input, chunks *hipDeviceByteBuffer, rows, cols, inputRows, pairCount, chunkCount, groupSize, bits int, gateUp bool, output *hipDeviceByteBuffer, packet []byte) error {
+	const operation = "rocm.hip.MoEMLXAffineRoutesLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if input == nil || chunks == nil || output == nil || input.Pointer() == 0 || chunks.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E(operation, "input, route chunk, and output buffers are required", nil)
+	}
+	if rows <= 0 || cols <= 0 || inputRows <= 0 || pairCount <= 0 || chunkCount <= 0 ||
+		input.Count() != inputRows*cols || input.SizeBytes() != uint64(inputRows*cols*4) ||
+		chunks.SizeBytes() != uint64(chunkCount*hipMoEMLXAffineRouteChunkBytes) ||
+		output.Count() != pairCount*rows || output.SizeBytes() != uint64(pairCount*rows*4) {
+		return core.E(operation, "MLX affine route buffer shape mismatch", nil)
+	}
+	launch := hipMoEMLXAffineRoutesLaunchArgs{
+		InputPointer: input.Pointer(), ChunkPointer: chunks.Pointer(), OutputPointer: output.Pointer(),
+		Rows: rows, Cols: cols, InputRows: inputRows, PairCount: pairCount, ChunkCount: chunkCount,
+		GroupSize: groupSize, Bits: bits, InputBytes: input.SizeBytes(), ChunkBytes: chunks.SizeBytes(),
+		OutputBytes: output.SizeBytes(), GateUp: gateUp,
+	}
+	var args []byte
+	var err error
+	if len(packet) >= hipMoEMLXAffineRoutesLaunchArgsBytes {
+		args, err = launch.BinaryInto(packet)
+	} else {
+		args, err = launch.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	gridX := (uint64(rows) + hipMoEMLXAffineRouteRowsPerBlock - 1) / hipMoEMLXAffineRouteRowsPerBlock
+	if gridX == 0 || gridX > uint64(^uint32(0)) || uint64(chunkCount) > uint64(^uint32(0)) {
+		return core.E(operation, "MLX affine route grid exceeds uint32", nil)
+	}
+	return hipLaunchKernelContext(ctx, driver, hipKernelLaunchConfig{
+		Name: hipKernelNameMoEMLXAffineRoutes, Args: args,
+		GridX: uint32(gridX), GridY: uint32(chunkCount), GridZ: 1,
+		BlockX: hipMoEBatchRouteBlockSize, BlockY: 1, BlockZ: 1,
+	})
+}
+
+func (args hipMoEBatchRouteRowsLaunchArgs) Binary() ([]byte, error) {
+	return args.BinaryInto(make([]byte, hipMoEBatchRouteRowsLaunchArgsBytes))
+}
+
+func (args hipMoEBatchRouteRowsLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "rocm.hip.MoEBatchRouteRowsLaunch"
+	if len(payload) < hipMoEBatchRouteRowsLaunchArgsBytes {
+		return nil, core.E(operation, "launch arg payload buffer is too small", nil)
+	}
+	if args.InputPointer == 0 || args.MetadataPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E(operation, "input, metadata, and output pointers are required", nil)
+	}
+	routeCount, err := rocmDeviceKVPositiveUint32("MoE batch route count", args.RouteCount)
+	if err != nil {
+		return nil, err
+	}
+	rowWidth, err := rocmDeviceKVPositiveUint32("MoE batch route row width", args.RowWidth)
+	if err != nil {
+		return nil, err
+	}
+	inputRows, err := rocmDeviceKVPositiveUint32("MoE batch route input rows", args.InputRows)
+	if err != nil {
+		return nil, err
+	}
+	outputRows, err := rocmDeviceKVPositiveUint32("MoE batch route output rows", args.OutputRows)
+	if err != nil {
+		return nil, err
+	}
+	wantInputBytes := uint64(inputRows) * uint64(rowWidth) * 4
+	wantMetadataBytes := uint64(routeCount) * hipMoEBatchRouteMetadataBytes
+	wantOutputBytes := uint64(outputRows) * uint64(rowWidth) * 4
+	if args.InputBytes != wantInputBytes || args.MetadataBytes != wantMetadataBytes || args.OutputBytes != wantOutputBytes {
+		return nil, core.E(operation, "input, metadata, or output byte count mismatch", nil)
+	}
+	payload = payload[:hipMoEBatchRouteRowsLaunchArgsBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint32(payload[0:], hipMoEBatchRouteRowsLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.InputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.MetadataPointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[32:], routeCount)
+	binary.LittleEndian.PutUint32(payload[36:], rowWidth)
+	binary.LittleEndian.PutUint32(payload[40:], inputRows)
+	binary.LittleEndian.PutUint32(payload[44:], outputRows)
+	binary.LittleEndian.PutUint64(payload[48:], args.InputBytes)
+	binary.LittleEndian.PutUint64(payload[56:], args.MetadataBytes)
+	binary.LittleEndian.PutUint64(payload[64:], args.OutputBytes)
+	return payload, nil
+}
+
+func (args hipMoEBatchReduceLaunchArgs) Binary() ([]byte, error) {
+	return args.BinaryInto(make([]byte, hipMoEBatchReduceLaunchArgsBytes))
+}
+
+func (args hipMoEBatchReduceLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "rocm.hip.MoEBatchReduceRoutesLaunch"
+	if len(payload) < hipMoEBatchReduceLaunchArgsBytes {
+		return nil, core.E(operation, "launch arg payload buffer is too small", nil)
+	}
+	if args.InputPointer == 0 || args.OutputPointer == 0 {
+		return nil, core.E(operation, "input and output pointers are required", nil)
+	}
+	rows, err := rocmDeviceKVPositiveUint32("MoE batch reduce rows", args.Rows)
+	if err != nil {
+		return nil, err
+	}
+	topK, err := rocmDeviceKVPositiveUint32("MoE batch reduce top-k", args.TopK)
+	if err != nil {
+		return nil, err
+	}
+	rowWidth, err := rocmDeviceKVPositiveUint32("MoE batch reduce row width", args.RowWidth)
+	if err != nil {
+		return nil, err
+	}
+	wantInputBytes := uint64(rows) * uint64(topK) * uint64(rowWidth) * 4
+	wantOutputBytes := uint64(rows) * uint64(rowWidth) * 4
+	if args.InputBytes != wantInputBytes || args.OutputBytes != wantOutputBytes {
+		return nil, core.E(operation, "input or output byte count mismatch", nil)
+	}
+	payload = payload[:hipMoEBatchReduceLaunchArgsBytes]
+	clear(payload)
+	binary.LittleEndian.PutUint32(payload[0:], hipMoEBatchReduceLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.InputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint32(payload[24:], rows)
+	binary.LittleEndian.PutUint32(payload[28:], topK)
+	binary.LittleEndian.PutUint32(payload[32:], rowWidth)
+	binary.LittleEndian.PutUint64(payload[40:], args.InputBytes)
+	binary.LittleEndian.PutUint64(payload[48:], args.OutputBytes)
+	return payload, nil
+}
+
+func hipRunMoEBatchGatherRowsKernel(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, sourceRows int, output *hipDeviceByteBuffer) error {
+	return hipRunMoEBatchGatherRowsKernelWithArgs(ctx, driver, input, metadata, routeCount, rowWidth, sourceRows, output, nil)
+}
+
+func hipRunMoEBatchGatherRowsKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, sourceRows int, output *hipDeviceByteBuffer, packet []byte) error {
+	const operation = "rocm.hip.MoEBatchGatherRowsLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if input == nil || metadata == nil || output == nil || input.Pointer() == 0 || metadata.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E(operation, "input, metadata, and output buffers are required", nil)
+	}
+	if routeCount <= 0 || rowWidth <= 0 || sourceRows <= 0 ||
+		input.Count() != sourceRows*rowWidth || input.SizeBytes() != uint64(sourceRows*rowWidth*4) ||
+		metadata.SizeBytes() != uint64(routeCount*hipMoEBatchRouteMetadataBytes) ||
+		output.Count() != routeCount*rowWidth || output.SizeBytes() != uint64(routeCount*rowWidth*4) {
+		return core.E(operation, "batch gather buffer shape mismatch", nil)
+	}
+	launchArgs := hipMoEBatchRouteRowsLaunchArgs{
+		InputPointer: input.Pointer(), MetadataPointer: metadata.Pointer(), OutputPointer: output.Pointer(),
+		RouteCount: routeCount, RowWidth: rowWidth, InputRows: sourceRows, OutputRows: routeCount,
+		InputBytes: input.SizeBytes(), MetadataBytes: metadata.SizeBytes(), OutputBytes: output.SizeBytes(),
+	}
+	var args []byte
+	var err error
+	if len(packet) >= hipMoEBatchRouteRowsLaunchArgsBytes {
+		args, err = launchArgs.BinaryInto(packet)
+	} else {
+		args, err = launchArgs.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchMoEBatchRouteKernel(driver, hipKernelNameMoEBatchGatherRows, args, routeCount, rowWidth)
+}
+
+func hipRunMoEBatchScatterRoutesKernel(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, pairCount int, output *hipDeviceByteBuffer) error {
+	return hipRunMoEBatchScatterRoutesKernelWithArgs(ctx, driver, input, metadata, routeCount, rowWidth, pairCount, output, nil)
+}
+
+func hipRunMoEBatchScatterRoutesKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input, metadata *hipDeviceByteBuffer, routeCount, rowWidth, pairCount int, output *hipDeviceByteBuffer, packet []byte) error {
+	const operation = "rocm.hip.MoEBatchScatterRoutesLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if input == nil || metadata == nil || output == nil || input.Pointer() == 0 || metadata.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E(operation, "input, metadata, and output buffers are required", nil)
+	}
+	if routeCount <= 0 || rowWidth <= 0 || pairCount <= 0 ||
+		input.Count() != routeCount*rowWidth || input.SizeBytes() != uint64(routeCount*rowWidth*4) ||
+		metadata.SizeBytes() != uint64(routeCount*hipMoEBatchRouteMetadataBytes) ||
+		output.Count() != pairCount*rowWidth || output.SizeBytes() != uint64(pairCount*rowWidth*4) {
+		return core.E(operation, "batch scatter buffer shape mismatch", nil)
+	}
+	launchArgs := hipMoEBatchRouteRowsLaunchArgs{
+		InputPointer: input.Pointer(), MetadataPointer: metadata.Pointer(), OutputPointer: output.Pointer(),
+		RouteCount: routeCount, RowWidth: rowWidth, InputRows: routeCount, OutputRows: pairCount,
+		InputBytes: input.SizeBytes(), MetadataBytes: metadata.SizeBytes(), OutputBytes: output.SizeBytes(),
+	}
+	var args []byte
+	var err error
+	if len(packet) >= hipMoEBatchRouteRowsLaunchArgsBytes {
+		args, err = launchArgs.BinaryInto(packet)
+	} else {
+		args, err = launchArgs.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchMoEBatchRouteKernel(driver, hipKernelNameMoEBatchScatterRoutes, args, routeCount, rowWidth)
+}
+
+func hipRunMoEBatchReduceRoutesKernel(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, rows, topK, rowWidth int, output *hipDeviceByteBuffer) error {
+	return hipRunMoEBatchReduceRoutesKernelWithArgs(ctx, driver, input, rows, topK, rowWidth, output, nil)
+}
+
+func hipRunMoEBatchReduceRoutesKernelWithArgs(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, rows, topK, rowWidth int, output *hipDeviceByteBuffer, packet []byte) error {
+	const operation = "rocm.hip.MoEBatchReduceRoutesLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if input == nil || output == nil || input.Pointer() == 0 || output.Pointer() == 0 {
+		return core.E(operation, "input and output buffers are required", nil)
+	}
+	if rows <= 0 || topK <= 0 || rowWidth <= 0 ||
+		input.Count() != rows*topK*rowWidth || input.SizeBytes() != uint64(rows*topK*rowWidth*4) ||
+		output.Count() != rows*rowWidth || output.SizeBytes() != uint64(rows*rowWidth*4) {
+		return core.E(operation, "batch route reduction buffer shape mismatch", nil)
+	}
+	launchArgs := hipMoEBatchReduceLaunchArgs{
+		InputPointer: input.Pointer(), OutputPointer: output.Pointer(),
+		Rows: rows, TopK: topK, RowWidth: rowWidth,
+		InputBytes: input.SizeBytes(), OutputBytes: output.SizeBytes(),
+	}
+	var args []byte
+	var err error
+	if len(packet) >= hipMoEBatchReduceLaunchArgsBytes {
+		args, err = launchArgs.BinaryInto(packet)
+	} else {
+		args, err = launchArgs.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchMoEBatchRouteKernel(driver, hipKernelNameMoEBatchReduceRoutes, args, rows, rowWidth)
+}
+
+func hipLaunchMoEBatchRouteKernel(driver nativeHIPDriver, name string, args []byte, rows, rowWidth int) error {
+	if rows <= 0 || rowWidth <= 0 {
+		return core.E("rocm.hip.MoEBatchRouteLaunch", "route kernel geometry must be positive", nil)
+	}
+	workItems := uint64(rows) * uint64(rowWidth)
+	grid := (workItems + uint64(hipMoEBatchRouteBlockSize) - 1) / uint64(hipMoEBatchRouteBlockSize)
+	if grid == 0 || grid > uint64(^uint32(0)) {
+		return core.E("rocm.hip.MoEBatchRouteLaunch", "route kernel grid exceeds uint32", nil)
+	}
+	return hipLaunchKernel(driver, hipKernelLaunchConfig{
+		Name: name, Args: args,
+		GridX: uint32(grid), GridY: 1, GridZ: 1,
+		BlockX: hipMoEBatchRouteBlockSize, BlockY: 1, BlockZ: 1,
+	})
 }
 
 func (req hipMoERouterRequest) validate() error {
@@ -368,7 +858,7 @@ func hipRunMoERouterKernel(ctx context.Context, driver nativeHIPDriver, req hipM
 	if err != nil {
 		return hipMoERouterResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipMoERouterResult{}, err
 	}
 	return buffers.ReadOutput()
@@ -433,7 +923,7 @@ func hipRunMoERouterKernelWithDeviceInputWorkspace(ctx context.Context, driver n
 	if err != nil {
 		return hipMoERouterResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipMoERouterResult{}, err
 	}
 	if workspace != nil {
@@ -619,7 +1109,7 @@ func hipRunMoELazyExpertKernel(ctx context.Context, driver nativeHIPDriver, req 
 	if err != nil {
 		return hipMoELazyExpertResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipMoELazyExpertResult{}, err
 	}
 	return buffers.ReadOutput()

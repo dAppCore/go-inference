@@ -19,6 +19,7 @@ import (
 	"dappco.re/go/inference/engine/hip/internal/gguf"
 	rocmmodel "dappco.re/go/inference/engine/hip/model"
 	modelgemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
+	evalprofile "dappco.re/go/inference/eval/profile"
 	"dappco.re/go/inference/model/quant/codebook"
 	"dappco.re/go/inference/model/quant/jang"
 )
@@ -420,7 +421,9 @@ func (b *rocmBackend) InspectModelPack(ctx context.Context, path string) (*infer
 	appendROCmInspectionCapability(inspection, inference.SupportedCapability(inference.CapabilityMemoryPlanning, inference.CapabilityGroupRuntime))
 	appendROCmInspectionCapability(inspection, inference.SupportedCapability(inference.CapabilityKVCachePlanning, inference.CapabilityGroupRuntime))
 	applyROCmGemma4ModelPackInspectionCapabilities(inspection)
-	inspection.Notes = append(inspection.Notes, "native ROCm decode kernels are not linked yet")
+	if normalizeROCmArchitecture(inspection.Model.Architecture) != "diffusion_gemma" {
+		inspection.Notes = append(inspection.Notes, "native ROCm decode kernels are not linked yet")
+	}
 	return inspection, nil
 }
 
@@ -793,8 +796,12 @@ func applyROCmMultimodalConfigLabels(inspection *inference.ModelPackInspection, 
 		labels["gemma4_multimodal"] = "true"
 	}
 	if hasVision {
-		labels["vision_runtime"] = hipKernelStatusNotLinked
-		labels["vision_projector_runtime"] = hipKernelStatusNotLinked
+		visionRuntime := hipKernelStatusNotLinked
+		if isROCmGemma4Architecture(architecture) {
+			visionRuntime = hipKernelStatusLinked
+		}
+		labels["vision_runtime"] = visionRuntime
+		labels["vision_projector_runtime"] = visionRuntime
 		switch {
 		case isROCmGemma4Architecture(architecture):
 			labels["vision_reference"] = "go_mlx_gemma4_vision"
@@ -830,11 +837,20 @@ func applyROCmMultimodalConfigLabels(inspection *inference.ModelPackInspection, 
 			}
 			applyROCmVisionTowerLabels(labels, cfg.VisionConfig)
 		}
-		inspection.Notes = append(inspection.Notes, "multimodal vision metadata is recognised; native ROCm vision tower and projector kernels are pending")
+		if isROCmGemma4Architecture(architecture) {
+			inspection.Notes = append(inspection.Notes, "Gemma4 vision tower and projector are auto-attached from the model pack")
+		} else {
+			inspection.Notes = append(inspection.Notes, "multimodal vision metadata is recognised; native ROCm vision tower and projector kernels are pending")
+		}
 	}
 	if hasAudio {
-		labels["audio_runtime"] = hipKernelStatusNotLinked
-		labels["audio_projector_runtime"] = hipKernelStatusNotLinked
+		audioRuntime := hipKernelStatusNotLinked
+		if isROCmGemma4Architecture(architecture) {
+			audioRuntime = hipKernelStatusLinked
+		}
+		labels["audio_runtime"] = audioRuntime
+		labels["audio_projector_runtime"] = audioRuntime
+		labels["audio_frontend_runtime"] = audioRuntime
 		if isROCmGemma4Architecture(architecture) {
 			labels["audio_reference"] = "go_mlx_gemma4_audio"
 		} else {
@@ -860,7 +876,11 @@ func applyROCmMultimodalConfigLabels(inspection *inference.ModelPackInspection, 
 			}
 			applyROCMAudioTowerLabels(labels, cfg.AudioConfig)
 		}
-		inspection.Notes = append(inspection.Notes, "multimodal audio metadata is recognised; native ROCm audio front-end, tower, and projector kernels are pending")
+		if isROCmGemma4Architecture(architecture) {
+			inspection.Notes = append(inspection.Notes, "Gemma4 audio frontend, tower, and projector are auto-attached from the model pack")
+		} else {
+			inspection.Notes = append(inspection.Notes, "multimodal audio metadata is recognised; native ROCm audio front-end, tower, and projector kernels are pending")
+		}
 	}
 }
 
@@ -870,9 +890,10 @@ func applyROCmDiffusionGemmaConfigLabels(inspection *inference.ModelPackInspecti
 	}
 	labels := inspection.Labels
 	labels["block_diffusion_model"] = "true"
-	labels["diffusion_runtime"] = hipKernelStatusNotLinked
-	labels["diffusion_sampler_runtime"] = hipKernelStatusNotLinked
-	labels["diffusion_trunk_runtime"] = "model_pack_metadata"
+	labels["diffusion_runtime"] = hipKernelStatusLinked
+	labels["diffusion_sampler_runtime"] = hipKernelStatusLinked
+	labels["diffusion_trunk_runtime"] = hipKernelStatusLinked
+	labels["diffusion_execution_status"] = "ready"
 	labels["diffusion_reference"] = "go_mlx_diffusion_gemma"
 	labels["diffusion_fallback"] = "refused"
 	labels["reactive_diffusion_fallback"] = "refused"
@@ -880,7 +901,15 @@ func applyROCmDiffusionGemmaConfigLabels(inspection *inference.ModelPackInspecti
 		labels["diffusion_canvas_length"] = core.Sprintf("%d", canvasLength)
 	}
 	modelgemma4.ApplyDiffusionPolicyLabels(labels, rocmGemma4DiffusionPolicyFromProbe(cfg))
-	inspection.Notes = append(inspection.Notes, "DiffusionGemma block-diffusion metadata is recognised; native ROCm canvas denoising sampler is not linked yet")
+	capability := inference.ExperimentalCapability(inference.CapabilityGenerate, inference.CapabilityGroupModel, "DiffusionGemma block-diffusion generation is linked through the native HIP denoising session")
+	capability.Labels = map[string]string{
+		"generation_mode":            "block_diffusion",
+		"diffusion_runtime":          hipKernelStatusLinked,
+		"diffusion_sampler_runtime":  hipKernelStatusLinked,
+		"diffusion_execution_status": "ready",
+	}
+	appendROCmInspectionCapability(inspection, capability)
+	inspection.Notes = append(inspection.Notes, "DiffusionGemma block-diffusion metadata and native ROCm canvas denoising sampler are linked")
 }
 
 func applyROCmVisionTowerLabels(labels map[string]string, cfg rocmModelPackVisionConfigProbe) {
@@ -1553,6 +1582,7 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		}
 		tensors = append(tensors, weightTensors...)
 	}
+	tensors = canonicalizeROCmNativeTensorNames(inspection.Model.Architecture, tensors)
 	sequenceMixerPlan, err := sequenceMixerLoadPlanFromInspection(inspection, tensors)
 	if err != nil {
 		return "", nativeLoadConfig{}, core.E("rocm.safetensorsNativeLoadConfig", "build sequence mixer load plan", err)
@@ -1574,7 +1604,38 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		Tensors:            tensors,
 		TiedWordEmbeddings: inspection.Labels["tied_word_embeddings"] == "true",
 	}
-	if isROCmGemma4Architecture(inspection.Model.Architecture) {
+	declaredVision := cfg.Gemma4TextConfig.Vision
+	declaredAudio := cfg.Gemma4TextConfig.Audio
+	hasAudioTower := rocmNativeTensorPlanHasAudioTower(tensors)
+	cfg.Gemma4TextConfig.Vision = declaredVision && rocmNativeTensorPlanHasVision(tensors)
+	cfg.Gemma4TextConfig.Audio = declaredAudio && rocmNativeTensorPlanHasAudio(tensors)
+	if declaredVision && !cfg.Gemma4TextConfig.Vision {
+		cfg.ModelLabels["vision_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["vision_projector_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["vision_payload"] = "absent"
+	}
+	if declaredAudio && !cfg.Gemma4TextConfig.Audio {
+		cfg.ModelLabels["audio_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["audio_projector_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["audio_frontend_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["audio_payload"] = "absent"
+	}
+	// Gemma4 checkpoints may carry their text model and media towers in the
+	// same safetensors pack. Keep the pack root as the default tower source;
+	// explicit ROCm load paths and environment overrides are applied later.
+	if cfg.Gemma4TextConfig.Vision || cfg.Gemma4TextConfig.Audio {
+		mediaRoot, rootErr := rocmModelPackRoot(path)
+		if rootErr != nil {
+			return "", nativeLoadConfig{}, core.E("rocm.safetensorsNativeLoadConfig", "resolve attached media root", rootErr)
+		}
+		if cfg.Gemma4TextConfig.Vision {
+			cfg.VisionModelPath = mediaRoot
+		}
+		if cfg.Gemma4TextConfig.Audio && hasAudioTower {
+			cfg.AudioModelPath = mediaRoot
+		}
+	}
+	if isROCmGemma4BackboneArchitecture(inspection.Model.Architecture) {
 		cfg.Gemma4Architecture, err = resolveGemma4ModelPackArchitectureDeclaration(path)
 		if err != nil {
 			return "", nativeLoadConfig{}, core.E("rocm.safetensorsNativeLoadConfig", "resolve shared Gemma4 architecture", err)
@@ -1584,6 +1645,54 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		cfg.DataOffset = tensors[0].DataOffset
 	}
 	return loadPath, cfg, nil
+}
+
+func canonicalizeROCmNativeTensorNames(architecture string, tensors []nativeTensorInfo) []nativeTensorInfo {
+	out := append([]nativeTensorInfo(nil), tensors...)
+	if normalizeROCmArchitecture(architecture) != "diffusion_gemma" {
+		return out
+	}
+	for index := range out {
+		if canonical, ok := evalprofile.CanonicalWeightName("diffusion_gemma", out[index].Name); ok && canonical != "" {
+			if strings.HasPrefix(canonical, "model.") {
+				canonical = "language_model." + canonical
+			}
+			out[index].Name = canonical
+		}
+	}
+	return out
+}
+
+func rocmNativeTensorPlanHasVision(tensors []nativeTensorInfo) bool {
+	for _, tensor := range tensors {
+		name := strings.ToLower(tensor.Name)
+		if strings.Contains(name, "vision_embedder.") ||
+			strings.Contains(name, "embed_vision.") ||
+			strings.Contains(name, "vision_tower.") ||
+			strings.Contains(name, "vision_model.") {
+			return true
+		}
+	}
+	return false
+}
+
+func rocmNativeTensorPlanHasAudio(tensors []nativeTensorInfo) bool {
+	for _, tensor := range tensors {
+		name := strings.ToLower(tensor.Name)
+		if strings.Contains(name, "audio_tower.") || strings.Contains(name, "embed_audio.") {
+			return true
+		}
+	}
+	return false
+}
+
+func rocmNativeTensorPlanHasAudioTower(tensors []nativeTensorInfo) bool {
+	for _, tensor := range tensors {
+		if strings.Contains(strings.ToLower(tensor.Name), "audio_tower.") {
+			return true
+		}
+	}
+	return false
 }
 
 func rocmModelPackRoot(path string) (string, error) {
@@ -2154,13 +2263,25 @@ func applyROCmArchitectureInspection(inspection *inference.ModelPackInspection, 
 	}
 	inspection.Supported = inspection.Format != "missing" && weightMetadataValid && architectureDetected && architectureOK && quantizationOK
 	if isROCmMoEArchitecture(inspection.Model.Architecture) || inspection.Labels["moe_experts"] != "" || inspection.Labels["gemma4_enable_moe_block"] == "true" {
-		inspection.Labels["moe_text_runtime"] = hipKernelStatusNotLinked
+		gemma4Linked := isROCmGemma4BackboneArchitecture(inspection.Model.Architecture)
+		moeRuntime := hipKernelStatusNotLinked
+		if gemma4Linked {
+			moeRuntime = hipKernelStatusLinked
+		}
+		inspection.Labels["moe_text_runtime"] = moeRuntime
 		inspection.Labels["moe_text_decode_family"] = rocmMoETextDecodeFamily(inspection.Model.Architecture)
-		inspection.Labels["moe_selected_expert_dispatch"] = hipKernelStatusNotLinked
-		inspection.Capabilities = append(inspection.Capabilities,
-			rocmFixtureKernelCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "MoE architecture metadata is recognised and the HIP router fixture kernel is linked; model integration is pending"),
-			rocmFixtureKernelCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "MoE lazy expert residency is required for 16GB-class ROCm devices and the HIP residency fixture kernel is linked; expert paging integration is pending"),
-		)
+		inspection.Labels["moe_selected_expert_dispatch"] = moeRuntime
+		if gemma4Linked {
+			routing := inference.ExperimentalCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "Gemma4 top-k routing and selected-expert dispatch are linked in the native HIP decoder")
+			routing.Labels = map[string]string{"moe_text_runtime": moeRuntime, "moe_selected_expert_dispatch": moeRuntime}
+			lazy := inference.ExperimentalCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "Gemma4 expert tensors can remain host-resident and materialize through the bounded HIP expert cache")
+			lazy.Labels = map[string]string{"moe_expert_residency": "host_cached", "moe_text_runtime": moeRuntime}
+			appendROCmInspectionCapability(inspection, routing)
+			appendROCmInspectionCapability(inspection, lazy)
+		} else {
+			appendROCmInspectionCapability(inspection, rocmFixtureKernelCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "MoE architecture metadata is recognised and the HIP router fixture kernel is linked; model integration is pending"))
+			appendROCmInspectionCapability(inspection, rocmFixtureKernelCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "MoE lazy expert residency is required for 16GB-class ROCm devices and the HIP residency fixture kernel is linked; expert paging integration is pending"))
+		}
 	}
 	if !architectureOK {
 		inspection.Notes = append(inspection.Notes, "architecture is not in the native ROCm allow-list yet")

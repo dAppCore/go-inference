@@ -61,6 +61,11 @@ type Config struct {
 
 // Loaded is the neutral vision payload a backend can upload/build.
 type Loaded struct {
+	// PatchProjection is the patch-embedding projection as a full (possibly
+	// affine-quant) Linear — Weight aliases PatchEmbedding on f32 packs, while
+	// quantised packs carry codes + group scales here that the raw bytes
+	// cannot express (the hip lane's quantised-vision load consumes this).
+	PatchProjection    Linear
 	PatchEmbedding     []byte
 	PatchConvWeight    []byte
 	PositionEmbeddings []byte

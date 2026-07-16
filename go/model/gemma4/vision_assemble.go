@@ -32,36 +32,48 @@ func visionWeight(weights map[string]safetensors.Tensor, names ...string) []byte
 	return nil
 }
 
-func visionPatchProjection(weights map[string]safetensors.Tensor, cfg *Gemma4VisionConfig) ([]byte, []byte) {
-	t, ok := model.WeightAny(weights,
-		"patch_embedder.input_proj.weight",
-		"patch_embedder.input_proj.linear.weight",
-		"embeddings.patch_embedding.weight",
-		"patch_embedding.weight",
-	)
-	if !ok {
-		return nil, nil
+func visionPatchProjection(weights map[string]safetensors.Tensor, cfg *Gemma4VisionConfig) (vision.Linear, []byte) {
+	channels := 3
+	patchSize := 0
+	if cfg != nil {
+		channels = int(cfg.NumChannels)
+		patchSize = int(cfg.PatchSize)
 	}
-	shape := t.Shape
-	if len(shape) != 4 {
-		if len(shape) == 2 {
-			return t.Data, t.Data
-		}
-		return t.Data, nil
-	}
-	channels := int(cfg.NumChannels)
 	if channels <= 0 {
 		channels = 3
 	}
-	if shape[3] == channels {
-		return t.Data, t.Data
-	}
-	if shape[1] == channels {
-		if out := transposeVisionPatchConvChannelsFirst(t); out != nil {
-			return out, out
+	patchDim := channels * patchSize * patchSize
+	for _, prefix := range []string{"patch_embedder.input_proj", "embeddings.patch_embedding", "patch_embedding"} {
+		for _, candidate := range []string{prefix, prefix + ".linear"} {
+			tensor, ok := weights[candidate+".weight"]
+			if !ok {
+				continue
+			}
+			linear := model.LoadLinear(weights, candidate, patchDim, "affine")
+			if linear == nil {
+				continue
+			}
+			loaded := loadedVisionLinear(linear)
+			shape := tensor.Shape
+			if len(shape) != 4 {
+				if len(shape) == 2 {
+					return loaded, loaded.Weight
+				}
+				return loaded, nil
+			}
+			if shape[3] == channels {
+				return loaded, loaded.Weight
+			}
+			if shape[1] == channels {
+				if out := transposeVisionPatchConvChannelsFirst(tensor); out != nil {
+					loaded.Weight = out
+					return loaded, out
+				}
+			}
+			return loaded, loaded.Weight
 		}
 	}
-	return t.Data, t.Data
+	return vision.Linear{}, nil
 }
 
 func transposeVisionPatchConvChannelsFirst(t safetensors.Tensor) []byte {
@@ -136,20 +148,30 @@ func visionLinearWithInputDim(weights map[string]safetensors.Tensor, inDim int, 
 			if lin == nil {
 				continue
 			}
-			return vision.Linear{
-				Weight:    lin.Weight,
-				Scales:    lin.Scales,
-				Biases:    lin.Biases,
-				Bias:      lin.Bias,
-				OutDim:    lin.OutDim,
-				InDim:     lin.InDim,
-				GroupSize: lin.GroupSize,
-				Bits:      lin.Bits,
-				Kind:      lin.Kind,
-			}
+			return loadedVisionLinear(lin)
 		}
 	}
 	return vision.Linear{}
+}
+
+// loadedVisionLinear converts a model.Linear into the vision payload's Linear —
+// the one conversion both the per-layer loads and the quantised patch
+// projection share.
+func loadedVisionLinear(linear *model.Linear) vision.Linear {
+	if linear == nil {
+		return vision.Linear{}
+	}
+	return vision.Linear{
+		Weight:    linear.Weight,
+		Scales:    linear.Scales,
+		Biases:    linear.Biases,
+		Bias:      linear.Bias,
+		OutDim:    linear.OutDim,
+		InDim:     linear.InDim,
+		GroupSize: linear.GroupSize,
+		Bits:      linear.Bits,
+		Kind:      linear.Kind,
+	}
 }
 
 // AssembleVision gathers the gemma4 vision tower (when the pack carries one) into a vision.Loaded, with the
@@ -165,13 +187,14 @@ func AssembleVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextCo
 	visionCfg = inferGemma4VisionConfig(weights, normalizeGemma4VisionConfig(visionCfg))
 
 	patch, patchConv := visionPatchProjection(weights, visionCfg)
-	if patch == nil {
+	if len(patch.Weight) == 0 {
 		return nil, core.E("gemma4.AssembleVision", "missing patch embedding weight", nil)
 	}
 	positionTable, positionSlots := visionPositionEmbeddingTable(weights)
 
 	v := &vision.Loaded{
-		PatchEmbedding:     patch,
+		PatchProjection:    patch,
+		PatchEmbedding:     patch.Weight,
 		PatchConvWeight:    patchConv,
 		PositionEmbeddings: positionTable,
 		PostLayernorm:      visionWeight(weights, "post_layernorm.weight", "post_layer_norm.weight", "encoder.post_layernorm.weight", "vision_model.post_layernorm.weight"),
@@ -183,6 +206,11 @@ func AssembleVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextCo
 	if v.Cfg.PositionEmbeddingSize == 0 {
 		v.Cfg.PositionEmbeddingSize = positionSlots
 	}
+	visionHidden := int(visionCfg.HiddenSize)
+	qDim := int(visionCfg.NumAttentionHeads * visionCfg.HeadDim)
+	if qDim <= 0 {
+		qDim = visionHidden
+	}
 	for i := range v.Layers {
 		p := core.Sprintf("encoder.layers.%d", i)
 		L := &v.Layers[i]
@@ -190,20 +218,23 @@ func AssembleVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextCo
 		L.PostAttnNorm = visionWeight(weights, p+".post_attention_layernorm.weight", p+".post_attention_layernorm.linear.weight")
 		L.PreFFNorm = visionWeight(weights, p+".pre_feedforward_layernorm.weight", p+".layer_norm2.weight")
 		L.PostFFNorm = visionWeight(weights, p+".post_feedforward_layernorm.weight", p+".post_feedforward_layernorm.linear.weight")
-		L.Q = visionLinear(weights, p+".self_attn.q_proj", p+".attention.q_proj")
-		L.K = visionLinear(weights, p+".self_attn.k_proj", p+".attention.k_proj")
-		L.V = visionLinear(weights, p+".self_attn.v_proj", p+".attention.v_proj")
-		L.O = visionLinear(weights, p+".self_attn.o_proj", p+".attention.out_proj", p+".attention.o_proj")
+		L.Q = visionLinearWithInputDim(weights, visionHidden, p+".self_attn.q_proj", p+".attention.q_proj")
+		L.K = visionLinearWithInputDim(weights, visionHidden, p+".self_attn.k_proj", p+".attention.k_proj")
+		L.V = visionLinearWithInputDim(weights, visionHidden, p+".self_attn.v_proj", p+".attention.v_proj")
+		L.O = visionLinearWithInputDim(weights, qDim, p+".self_attn.o_proj", p+".attention.out_proj", p+".attention.o_proj")
 		L.QNorm = visionWeight(weights, p+".self_attn.q_norm.weight")
 		L.KNorm = visionWeight(weights, p+".self_attn.k_norm.weight")
-		L.Gate = visionLinear(weights, p+".mlp.gate_proj", p+".mlp.fc1")
-		L.Up = visionLinear(weights, p+".mlp.up_proj")
-		L.Down = visionLinear(weights, p+".mlp.down_proj", p+".mlp.fc2")
+		L.Gate = visionLinearWithInputDim(weights, visionHidden, p+".mlp.gate_proj", p+".mlp.fc1")
+		L.Up = visionLinearWithInputDim(weights, visionHidden, p+".mlp.up_proj")
+		ffDim := L.Gate.OutDim
+		if ffDim <= 0 {
+			ffDim = int(visionCfg.IntermediateSize)
+		}
+		L.Down = visionLinearWithInputDim(weights, ffDim, p+".mlp.down_proj", p+".mlp.fc2")
 		if err := validateLoadedVisionLayer(L, i); err != nil {
 			return nil, err
 		}
 	}
-	visionHidden := int(visionCfg.HiddenSize)
 	v.Projector.Projection = visionLinearWithInputDim(weights, visionHidden, "embed_vision.embedding_projection", "multi_modal_projector.embedding_projection", "multi_modal_projector.proj", "multi_modal_projector")
 	v.Projector.Linear1 = visionLinearWithInputDim(weights, visionHidden, "multi_modal_projector.linear_1", "multi_modal_projector.fc1")
 	linear2In := v.Projector.Linear1.OutDim

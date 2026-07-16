@@ -13,20 +13,24 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	servingscheduler "dappco.re/go/inference/serving/scheduler"
 )
 
 // SchedulerConfig controls the package-first ROCm scheduler wrapper.
 type SchedulerConfig struct {
-	QueueSize    int
-	OutputBuffer int
+	QueueSize     int // queued requests before backpressure rejects a submission
+	OutputBuffer  int // per-request streamed-token buffer
+	MaxConcurrent int // active lane cap when the model supports batched stepping
 }
 
-// ScheduledModel wraps a TextModel with bounded queueing and request
-// cancellation. It does not add kernels; it owns request lifecycle only.
+// ScheduledModel wraps a TextModel with request lifecycle ownership. Models
+// with an available batch-step surface run through the shared continuous
+// scheduler; other models retain the bounded single-worker path.
 type ScheduledModel struct {
 	model        inference.TextModel
 	queue        chan *scheduledWork
 	outputBuffer int
+	continuous   *servingscheduler.Model
 	nextID       atomic.Uint64
 
 	mu       sync.Mutex
@@ -47,7 +51,8 @@ type scheduledWork struct {
 	enqueued time.Time
 }
 
-// NewScheduledModel wraps model with a bounded single-worker scheduler.
+// NewScheduledModel selects continuous lane scheduling when the loaded model
+// can open a real lane set; otherwise it uses the bounded single-worker path.
 func NewScheduledModel(model inference.TextModel, cfg SchedulerConfig) (*ScheduledModel, error) {
 	if model == nil {
 		return nil, core.E("rocm.NewScheduledModel", "model is nil", nil)
@@ -58,12 +63,30 @@ func NewScheduledModel(model inference.TextModel, cfg SchedulerConfig) (*Schedul
 	if cfg.OutputBuffer <= 0 {
 		cfg.OutputBuffer = 1
 	}
+	if cfg.MaxConcurrent <= 0 {
+		cfg.MaxConcurrent = defaultHIPLaneSetMaxLanes
+	}
 	scheduled := &ScheduledModel{
 		model:        model,
-		queue:        make(chan *scheduledWork, cfg.QueueSize),
 		outputBuffer: cfg.OutputBuffer,
 		cancel:       map[string]context.CancelFunc{},
 	}
+	if batchStep, batchCapable := inference.As[inference.BatchStepModel](model); batchCapable && batchStep.BatchStepAvailable() {
+		if _, tokenizable := inference.As[inference.TokenizerModel](model); tokenizable {
+			continuous, err := servingscheduler.New(model, servingscheduler.Config{
+				Mode:          servingscheduler.ModeInterleave,
+				MaxConcurrent: cfg.MaxConcurrent,
+				MaxQueue:      cfg.QueueSize,
+				StreamBuffer:  cfg.OutputBuffer,
+			})
+			if err != nil {
+				return nil, err
+			}
+			scheduled.continuous = continuous
+			return scheduled, nil
+		}
+	}
+	scheduled.queue = make(chan *scheduledWork, cfg.QueueSize)
 	go scheduled.run()
 	return scheduled, nil
 }
@@ -77,7 +100,7 @@ func (m *ScheduledModel) Schedule(ctx context.Context, req inference.ScheduledRe
 		m.setErr(err)
 		return inference.RequestHandle{}, nil, err
 	}
-	if m.queue == nil || m.cancel == nil {
+	if m.continuous == nil && (m.queue == nil || m.cancel == nil) {
 		err := core.E("rocm.Schedule", "scheduler is not initialized", nil)
 		m.setErr(err)
 		return inference.RequestHandle{}, nil, err
@@ -101,6 +124,13 @@ func (m *ScheduledModel) Schedule(ctx context.Context, req inference.ScheduledRe
 	if err := m.validateScheduledGemma4Context(&req); err != nil {
 		m.setErr(err)
 		return inference.RequestHandle{}, nil, err
+	}
+	if m.continuous != nil {
+		handle, stream, err := m.continuous.Schedule(ctx, req)
+		if err != nil {
+			m.setErr(err)
+		}
+		return handle, stream, err
 	}
 	reqCtx, cancel := context.WithCancel(ctx)
 	work := &scheduledWork{
@@ -174,6 +204,13 @@ func (m *ScheduledModel) CancelRequest(ctx context.Context, id string) (inferenc
 		return inference.RequestCancelResult{}, err
 	}
 	m.setErr(nil)
+	if m.continuous != nil {
+		result, err := m.continuous.CancelRequest(ctx, id)
+		if err != nil {
+			m.setErr(err)
+		}
+		return result, err
+	}
 	m.mu.Lock()
 	cancel := m.cancel[id]
 	m.mu.Unlock()
@@ -199,6 +236,9 @@ func (m *ScheduledModel) SetProbeSink(sink inference.ProbeSink) {
 	m.mu.Lock()
 	m.sink = sink
 	m.mu.Unlock()
+	if m.continuous != nil {
+		m.continuous.SetProbeSink(sink)
+	}
 	if probeable, ok := m.model.(inference.ProbeableModel); ok {
 		probeable.SetProbeSink(sink)
 	}
@@ -387,6 +427,9 @@ func (m *ScheduledModel) Metrics() inference.GenerateMetrics {
 	if m == nil || m.model == nil {
 		return inference.GenerateMetrics{}
 	}
+	if m.continuous != nil {
+		return m.continuous.Metrics()
+	}
 	return m.model.Metrics()
 }
 
@@ -399,6 +442,9 @@ func (m *ScheduledModel) Err() core.Result {
 	m.mu.Unlock()
 	if err != nil {
 		return core.Fail(err)
+	}
+	if m.continuous != nil {
+		return m.continuous.Err()
 	}
 	if m.model == nil {
 		return core.Ok(nil)
@@ -418,7 +464,14 @@ func (m *ScheduledModel) Close() core.Result {
 		}
 		queue := m.queue
 		model := m.model
+		continuous := m.continuous
 		m.mu.Unlock()
+		if continuous != nil {
+			if result := continuous.Close(); !result.OK {
+				m.closeErr, _ = result.Value.(error)
+			}
+			return
+		}
 		if queue != nil {
 			close(queue)
 		}

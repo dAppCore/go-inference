@@ -259,7 +259,3 @@ func hipFloat16ToFloat32(value uint16) float32 {
 		return math.Float32frombits(sign | uint32(exponent-15+127)<<23 | fraction<<13)
 	}
 }
-
-func hipBFloat16ToFloat32(value uint16) float32 {
-	return math.Float32frombits(uint32(value) << 16)
-}

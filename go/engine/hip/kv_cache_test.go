@@ -3158,18 +3158,6 @@ func benchmarkROCmKVVectors(tokens, keyWidth, valueWidth int) ([]float32, []floa
 	return keys, values
 }
 
-func assertFloat32SlicesNear(t *testing.T, want, got []float32, tolerance float32) {
-	t.Helper()
-	if len(got) != len(want) {
-		t.Fatalf("slice len = %d, want %d: %+v", len(got), len(want), got)
-	}
-	for i := range want {
-		if math.Abs(float64(want[i]-got[i])) > float64(tolerance) {
-			t.Fatalf("slice[%d] = %f, want %f within %f; got %+v", i, got[i], want[i], tolerance, got)
-		}
-	}
-}
-
 func mustHIPFloat32Payload(t *testing.T, values []float32) []byte {
 	t.Helper()
 	payload, err := hipFloat32Payload(values)

@@ -33,6 +33,7 @@ func (attention Gemma4AttentionClass) Hybrid() bool {
 
 type Gemma4EngineFeatures struct {
 	MLXAffineDecode             bool `json:"mlx_affine_decode,omitempty"`
+	DenseBF16Decode             bool `json:"dense_bf16_decode,omitempty"`
 	TextGenerate                bool `json:"text_generate,omitempty"`
 	DirectGreedyToken           bool `json:"direct_greedy_token,omitempty"`
 	NativeMLPMatVec             bool `json:"native_mlp_matvec,omitempty"`
@@ -148,6 +149,7 @@ func applyROCmPortableGemma4ModelPackSupportLabels(inspection *inference.ModelPa
 		effectiveSupport.GenerateStatus = Gemma4GenerateLoadOnly
 		inspection.Labels["gemma4_source_format"] = "gguf"
 	}
+	sizeSupport.RunnableOnCard = sizeSupport.RunnableOnCard && effectiveSupport.GenerateStatus != Gemma4GeneratePlannedOnly
 	inspection.Labels["gemma4_pack_supported"] = "true"
 	inspection.Labels["gemma4_runtime"] = effectiveSupport.Runtime
 	inspection.Labels["gemma4_generate_status"] = effectiveSupport.GenerateStatus
@@ -220,7 +222,7 @@ func applyROCmPortableGemma4ModelPackSupportCapability(inspection *inference.Mod
 	}
 	switch support.GenerateStatus {
 	case Gemma4GenerateLinked:
-		capability := inference.ExperimentalCapability(inference.CapabilityGenerate, inference.CapabilityGroupModel, "Gemma4 "+size+" "+mode+" model-pack metadata matches the linked MLX-affine generation path")
+		capability := inference.ExperimentalCapability(inference.CapabilityGenerate, inference.CapabilityGroupModel, "Gemma4 "+size+" "+mode+" model-pack metadata matches the linked native generation path")
 		capability.Labels = labels
 		rocmApplyGemma4CapabilitySupportLabels(&capability, model)
 		appendROCmInspectionCapability(inspection, capability)
@@ -309,10 +311,20 @@ func Gemma4EngineFeaturesForIdentity(identity inference.ModelIdentity) Gemma4Eng
 	}
 	features := rocmGemma4EngineFeaturesForModel(identity)
 	if rocmGemma4SupportMatrixGenerateLinked(identity) {
-		features.MLXAffineDecode = true
+		denseBF16 := gemma4EngineDenseBF16Linked(identity)
+		if denseBF16 {
+			features.DenseBF16Decode = true
+		} else {
+			features.MLXAffineDecode = true
+		}
 		features.TextGenerate = true
 		features.DeviceKVState = true
 		features = rocmGemma4LinkedGenerationEngineFeatures(features)
+		if denseBF16 {
+			features.DirectGreedyToken = false
+			features.NativeQ6BitstreamMatVec = false
+			features.AsyncDecodePrefetch = false
+		}
 	} else {
 		features.NativeQ6BitstreamMatVec = false
 	}
@@ -320,7 +332,13 @@ func Gemma4EngineFeaturesForIdentity(identity inference.ModelIdentity) Gemma4Eng
 }
 
 func (features Gemma4EngineFeatures) GenerateLinked() bool {
-	return features.MLXAffineDecode && features.TextGenerate
+	return (features.MLXAffineDecode || features.DenseBF16Decode) && features.TextGenerate
+}
+
+func gemma4EngineDenseBF16Linked(identity inference.ModelIdentity) bool {
+	size := rocmGemma4ModelPackSize(identity, identity.Path)
+	mode := rocmGemma4ModelPackQuantModeForPath(identity, identity.Path)
+	return rocmGemma4NormalizeSizeQuantMode(size, mode) == "bf16"
 }
 
 func Gemma4DeclaredFeaturesForIdentity(identity inference.ModelIdentity) Gemma4DeclaredFeatures {
@@ -334,6 +352,7 @@ func rocmApplyGemma4EngineFeatureLabels(labels map[string]string, features Gemma
 	labels["engine_model_context_window"] = strconv.FormatBool(features.ModelContextWindow)
 	labels["engine_text_generate"] = strconv.FormatBool(features.TextGenerate)
 	labels["engine_mlx_affine_decode"] = strconv.FormatBool(features.MLXAffineDecode)
+	labels["engine_dense_bf16_decode"] = strconv.FormatBool(features.DenseBF16Decode)
 	labels["engine_device_kv_state"] = strconv.FormatBool(features.DeviceKVState)
 	labels["engine_direct_greedy_token"] = strconv.FormatBool(features.DirectGreedyToken)
 	labels["engine_native_mlp_matvec"] = strconv.FormatBool(features.NativeMLPMatVec)
@@ -409,6 +428,7 @@ func rocmApplyGemma4SizeQuantSupportLabels(labels map[string]string, model infer
 		sizeSupport.RunnableOnCard = qatEntry.RunnableOnCard
 		labels["gemma4_qat_collection"] = qatEntry.CollectionID
 	}
+	sizeSupport.RunnableOnCard = sizeSupport.RunnableOnCard && support.GenerateStatus != Gemma4GeneratePlannedOnly
 	labels["gemma4_pack_supported"] = "true"
 	labels["gemma4_runtime"] = support.Runtime
 	labels["gemma4_generate_status"] = support.GenerateStatus

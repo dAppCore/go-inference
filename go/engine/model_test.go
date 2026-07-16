@@ -83,6 +83,7 @@ type fakeSession struct {
 
 	prefillCalls [][]int32
 	appendCalls  [][]int32
+	captureOpts  kv.CaptureOptions
 	restoreSnap  *kv.Snapshot
 	closeCalls   int
 	sampledCalls int
@@ -153,7 +154,8 @@ func (f *fakeSession) GenerateSampledFromCacheEach(maxNew int, stopTokens []int3
 	return out, nil
 }
 
-func (f *fakeSession) CaptureKVWithOptions(kv.CaptureOptions) (*kv.Snapshot, error) {
+func (f *fakeSession) CaptureKVWithOptions(opts kv.CaptureOptions) (*kv.Snapshot, error) {
+	f.captureOpts = opts
 	if f.captureErr != nil {
 		return nil, f.captureErr
 	}

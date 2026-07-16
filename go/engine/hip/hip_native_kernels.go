@@ -55,3 +55,18 @@ func (kernels hipNativeProjectionKernelSet) Project(ctx context.Context, model *
 	}
 	return hipRunProjectionKernel(ctx, model.driver, req)
 }
+
+func (kernels hipNativeProjectionKernelSet) OpenROCmDiffusionSession(ctx context.Context, model *hipLoadedModel) (ROCmDiffusionSession, error) {
+	const op = "rocm.hip.OpenROCmDiffusionSession"
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	session, err := newHIPROCmNativeDiffusionSession(model)
+	if err != nil {
+		return nil, core.E(op, "open native DiffusionGemma session", err)
+	}
+	return session, nil
+}

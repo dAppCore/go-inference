@@ -97,16 +97,15 @@ func (b *rocmBackend) PlanReactiveSequenceMixer(ctx context.Context, modelPath s
 			)
 			return report, nil
 		}
-		report.Status = "ready_for_native_load"
-		report.ExecutionStatus = "load_plan_ready_runner_pending"
+		report.Status = "ready"
+		report.ExecutionStatus = "portable_composed_runner_ready"
 		report.TensorBindingReady = true
 		report.ComposedStackReady = true
 		report.Labels["sequence_mixer_report_status"] = report.Status
 		report.Labels["sequence_mixer_tensor_binding"] = "ready"
 		report.Labels["sequence_mixer_composed_stack"] = "ready"
 		report.Notes = append(report.Notes,
-			"ROCm validated the go-mlx composed loader contract and can carry this plan into native load.",
-			"Generic composed HIP forward execution is still pending; existing hand-written ROCm model paths remain the execution lane.",
+			"ROCm validated the composed loader contract and can route this model through the portable incremental session runner.",
 		)
 	case "invalid":
 		report.Status = "invalid"
@@ -131,7 +130,7 @@ func baseReactiveSequenceMixerReport(modelPath string, inspection *inference.Mod
 		"production_requires_env_gate": "false",
 		"production_requires_cli_flag": "false",
 		"sequence_mixer_report":        "true",
-		"sequence_mixer_runner_status": "hip_composed_runner_pending",
+		"sequence_mixer_runner_status": "portable_composed_session_model",
 	}
 	var model inference.ModelIdentity
 	if inspection != nil {
@@ -154,7 +153,7 @@ func baseReactiveSequenceMixerReport(modelPath string, inspection *inference.Mod
 		Registry:        cloneSequenceMixerFamilies(DefaultSequenceMixerFamilies()),
 		Status:          "unknown",
 		ExecutionStatus: "unknown",
-		RunnerReady:     false,
+		RunnerReady:     true,
 		Labels:          labels,
 	}
 }

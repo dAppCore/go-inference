@@ -66,6 +66,58 @@ func (cache *rocmKVCache) rawBlock(block rocmKVCacheBlock) ([]byte, error) {
 	return payload, nil
 }
 
+func (cache *rocmKVCache) rawRange(tokenStart, tokenCount int) ([][]byte, error) {
+	if cache == nil {
+		return nil, core.E("rocm.KVCache.RawRange", "cache is nil", nil)
+	}
+	if tokenStart < 0 || tokenCount <= 0 {
+		return nil, core.E("rocm.KVCache.RawRange", "token range must be positive", nil)
+	}
+	end := tokenStart + tokenCount
+	if end <= tokenStart || end > cache.TokenCount() {
+		return nil, core.E("rocm.KVCache.RawRange", "token range exceeds cache", nil)
+	}
+	payloads := make([][]byte, 0, (tokenCount+cache.blockSize-1)/cache.blockSize)
+	cursor := tokenStart
+	for _, block := range cache.blocks {
+		blockEnd := block.tokenStart + block.tokenCount
+		if blockEnd <= cursor || block.tokenStart >= end {
+			continue
+		}
+		if block.tokenStart > cursor {
+			return nil, core.E("rocm.KVCache.RawRange", "cache block range is not contiguous", nil)
+		}
+		overlapEnd := min(blockEnd, end)
+		startRow := cursor - block.tokenStart
+		endRow := overlapEnd - block.tokenStart
+		key, err := block.key.sliceRows(block.keyWidth, startRow, endRow)
+		if err != nil {
+			return nil, core.E("rocm.KVCache.RawRange", "slice key rows", err)
+		}
+		value, err := block.value.sliceRows(block.valueWidth, startRow, endRow)
+		if err != nil {
+			return nil, core.E("rocm.KVCache.RawRange", "slice value rows", err)
+		}
+		payload, err := cache.rawBlock(rocmKVCacheBlock{
+			tokenStart: cursor,
+			tokenCount: overlapEnd - cursor,
+			keyWidth:   block.keyWidth,
+			valueWidth: block.valueWidth,
+			key:        key,
+			value:      value,
+		})
+		if err != nil {
+			return nil, err
+		}
+		payloads = append(payloads, payload)
+		cursor = overlapEnd
+		if cursor == end {
+			return payloads, nil
+		}
+	}
+	return nil, core.E("rocm.KVCache.RawRange", "cache block range is not available", nil)
+}
+
 func rocmKVCacheBlockFromRawPayload(payload []byte) (rocmKVCacheBlock, error) {
 	meta, keyPayload, valuePayload, err := rocmKVBlockRawPayloadParts(payload)
 	if err != nil {

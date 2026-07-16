@@ -12,12 +12,36 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine/hip/internal/gguf"
+	modelgemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
 )
 
 func linkedGemma4TestLabels(size, mode string) map[string]string {
 	return map[string]string{
 		"gemma4_size":       size,
 		"gemma4_quant_mode": mode,
+	}
+}
+
+func TestGemma4ProductionSelectionPromotes26BA4BQ4_Good(t *testing.T) {
+	size, ok := Gemma4SizeQuantSupportBySize("26B-A4B")
+	if !ok || !size.RunnableOnCard {
+		t.Fatalf("26B-A4B size support = %+v/%v, want runnable through host-resident experts", size, ok)
+	}
+	q4, ok := Gemma4QuantModeSupportBySize("26B-A4B", "q4")
+	if !ok || q4.Runtime != Gemma4RuntimeMLXAffine || q4.GenerateStatus != Gemma4GenerateLinked {
+		t.Fatalf("26B-A4B q4 support = %+v/%v, want linked MLX-affine generation", q4, ok)
+	}
+	q6, ok := Gemma4QuantModeSupportBySize("26B-A4B", "q6-status")
+	if !ok || q6.GenerateStatus != Gemma4GeneratePlannedOnly {
+		t.Fatalf("26B-A4B q6 support = %+v/%v, want unpromoted status-only lane", q6, ok)
+	}
+	pack, ok := ProductionQuantizationPackByName("26b-a4b-4bit")
+	if !ok || pack.QuantMode != "q4" || !pack.RunnableOnCard || pack.GenerateStatus != Gemma4GenerateLinked {
+		t.Fatalf("26B-A4B q4 production pack = %+v/%v, want runnable linked lane", pack, ok)
+	}
+	qat, ok := modelgemma4.QATCollectionEntryFor("26B-A4B", "q4", false)
+	if !ok || !qat.RunnableOnCard || qat.GenerateStatus != Gemma4GenerateLinked {
+		t.Fatalf("26B-A4B QAT q4 = %+v/%v, want runnable linked lane", qat, ok)
 	}
 }
 
@@ -109,15 +133,19 @@ func TestGemma4EngineFeaturesForIdentityUsesLabels(t *testing.T) {
 		t.Fatalf("Gemma4 GGUF identity features = %+v, want native HIP generation", gguf)
 	}
 
-	for name, identity := range map[string]inference.ModelIdentity{
-		"bf16": {
-			Architecture: "gemma4_text",
-			QuantBits:    16,
-			Labels: map[string]string{
-				"gemma4_size":       "E2B",
-				"gemma4_quant_mode": "bf16",
-			},
+	bf16 := Gemma4EngineFeaturesForIdentity(inference.ModelIdentity{
+		Architecture: "gemma4_text",
+		QuantBits:    16,
+		Labels: map[string]string{
+			"gemma4_size":       "E2B",
+			"gemma4_quant_mode": "bf16",
 		},
+	})
+	if !bf16.GenerateLinked() || !bf16.DenseBF16Decode || bf16.MLXAffineDecode || bf16.DirectGreedyToken || bf16.NativeQ6BitstreamMatVec || bf16.AsyncDecodePrefetch || !bf16.DeviceKVState || !bf16.ModelContextWindow {
+		t.Fatalf("Gemma4 E2B BF16 identity features = %+v, want linked generation", bf16)
+	}
+
+	for name, identity := range map[string]inference.ModelIdentity{
 		"status_only": {
 			Architecture: "gemma4_text",
 			QuantBits:    6,
@@ -658,6 +686,96 @@ func TestHipLoadedGemma4Q4GenerateLinkedAcceptsIntegratedMoEGGUF(t *testing.T) {
 	core.AssertEqual(t, true, hipLoadedGemma4Q4GenerateLinked(model))
 }
 
+func TestHipLoadedGemma4Q4GenerateLinkedAcceptsIntegratedMoEMLXAffine_Good(t *testing.T) {
+	const (
+		hidden    = 64
+		experts   = 2
+		expertFF  = 32
+		groupSize = 32
+	)
+	prefix := "language_model.model.layers.0"
+	model := &hipLoadedModel{
+		driver:    &fakeHIPDriver{available: true},
+		modelPath: "/models/diffusiongemma-26b-a4b-4bit",
+		modelInfo: inference.ModelInfo{Architecture: "diffusion_gemma", QuantBits: 4, QuantGroup: groupSize, NumLayers: 1, HiddenSize: hidden},
+		gemma4TextConfig: nativeGemma4TextConfig{
+			EnableMoEBlock: true, NumExperts: experts, TopKExperts: 1, MoEIntermediateSize: expertFF,
+		},
+		modelLabels: map[string]string{
+			"gemma4_source_format": "safetensors",
+		},
+		tensors: map[string]hipTensor{
+			prefix + ".router.proj.weight": {
+				pointer: 1, info: nativeTensorInfo{TypeName: "U32", Dimensions: []uint64{experts, hidden * 8 / 32}, ByteSize: experts * hidden * 8 / 8},
+			},
+			prefix + ".router.proj.scales": {
+				pointer: 2, info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{experts, hidden / groupSize}, ByteSize: experts * (hidden / groupSize) * 2},
+			},
+			prefix + ".router.proj.biases": {
+				pointer: 3, info: nativeTensorInfo{TypeName: "BF16", Dimensions: []uint64{experts, hidden / groupSize}, ByteSize: experts * (hidden / groupSize) * 2},
+			},
+		},
+		hostTensors: map[string]nativeTensorInfo{},
+	}
+	addHost := func(name, typeName string, dimensions []uint64, elementBytes int) {
+		count := 1
+		for _, dimension := range dimensions {
+			count *= int(dimension)
+		}
+		model.hostTensors[name] = nativeTensorInfo{
+			Name: name, TypeName: typeName, Dimensions: dimensions,
+			SourcePath: "/models/model-00001-of-00004.safetensors", ByteSize: uint64(count * elementBytes),
+		}
+	}
+	gateUp := prefix + ".experts.gate_up_proj"
+	addHost(gateUp+".weight", "U32", []uint64{experts, 2 * expertFF, hidden * 4 / 32}, 4)
+	addHost(gateUp+".scales", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2)
+	addHost(gateUp+".biases", "BF16", []uint64{experts, 2 * expertFF, hidden / groupSize}, 2)
+	down := prefix + ".experts.down_proj"
+	addHost(down+".weight", "U32", []uint64{experts, hidden, expertFF * 4 / 32}, 4)
+	addHost(down+".scales", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2)
+	addHost(down+".biases", "BF16", []uint64{experts, hidden, expertFF / groupSize}, 2)
+
+	core.AssertEqual(t, true, hipLoadedGemma4Q4GenerateLinked(model))
+}
+
+func TestROCmCapabilityReportGemma4MoEUsesProductionIntegration_Good(t *testing.T) {
+	labels := linkedGemma4TestLabels("26B-A4B", "q4")
+	labels["gemma4_source_format"] = "gguf"
+	labels["gemma4_enable_moe_block"] = "true"
+	labels["gemma4_num_experts"] = "16"
+	labels["gemma4_top_k_experts"] = "4"
+	identity := inference.ModelIdentity{
+		Path:         "/models/gemma-4-26b-a4b-q4_k_m.gguf",
+		Architecture: "gemma4",
+		QuantBits:    4,
+		NumLayers:    30,
+		HiddenSize:   2816,
+		Labels:       labels,
+	}
+	report := rocmCapabilityReport(nativeDeviceInfo{}, identity, inference.AdapterIdentity{}, true, defaultHIPKernelStatus(), rocmCapabilityReportOption{Gemma4Q4GenerateLinked: true})
+	for id, wantKernel := range map[inference.CapabilityID]string{
+		inference.CapabilityMoERouting:     hipKernelNameMoERouter,
+		inference.CapabilityMoELazyExperts: "adaptive_lru",
+	} {
+		capability, ok := report.Capability(id)
+		if !ok {
+			t.Fatalf("capability %s is missing", id)
+		}
+		if capability.Labels["production_integration"] != hipKernelStatusLinked ||
+			capability.Labels["model_scope"] != "gemma4_moe_gguf" ||
+			capability.Labels["runtime_status"] != string(inference.FeatureRuntimeExperimental) {
+			t.Fatalf("capability %s = %+v, want linked Gemma4 MoE production integration", id, capability)
+		}
+		if id == inference.CapabilityMoERouting && capability.Labels["kernel_name"] != wantKernel {
+			t.Fatalf("MoE routing labels = %+v, want kernel %q", capability.Labels, wantKernel)
+		}
+		if id == inference.CapabilityMoELazyExperts && capability.Labels["expert_residency"] != wantKernel {
+			t.Fatalf("MoE residency labels = %+v, want %q", capability.Labels, wantKernel)
+		}
+	}
+}
+
 func TestHipLoadedGemma4Q4GenerateLinkedUsesEngineProfile(t *testing.T) {
 	info := inference.ModelInfo{Architecture: "gemma4_text", QuantBits: 6, NumLayers: 26, HiddenSize: 2304}
 	model := &hipLoadedModel{
@@ -891,7 +1009,7 @@ func TestPlanModelFitGemma4UsesSizeQuantMatrix(t *testing.T) {
 		wantStatus  string
 	}{
 		{
-			name: "bf16_load_only",
+			name: "bf16_linked",
 			model: inference.ModelIdentity{
 				Architecture:  "gemma4_text",
 				QuantBits:     16,
@@ -905,7 +1023,7 @@ func TestPlanModelFitGemma4UsesSizeQuantMatrix(t *testing.T) {
 			},
 			wantFit:     true,
 			wantQuantOK: true,
-			wantStatus:  Gemma4GenerateLoadOnly,
+			wantStatus:  Gemma4GenerateLinked,
 		},
 		{
 			name: "status_only",
@@ -966,7 +1084,7 @@ func TestPlanModelFitGemma4InfersPathOnlyQuantMatrix(t *testing.T) {
 		{name: "e4b_q4", path: "/models/lmstudio-community-gemma-4-e4b-it-4bit", hiddenSize: 2304, layers: 26, wantQuantType: "q4", wantQuantBits: 4, wantQuantGroup: 64, wantMode: "q4", wantStatus: Gemma4GenerateLinked, wantQuantOK: true, wantTrainingOK: true},
 		{name: "e4b_mxfp8", path: "/models/lmstudio-community-gemma-4-e4b-it-mxfp8", hiddenSize: 2304, layers: 26, wantQuantType: "mxfp8", wantQuantBits: 8, wantQuantGroup: 32, wantMode: "mxfp8", wantStatus: Gemma4GeneratePlannedOnly},
 		{name: "e4b_mxfp4", path: "/models/lmstudio-community-gemma-4-e4b-it-mxfp4", hiddenSize: 2304, layers: 26, wantQuantType: "mxfp4", wantQuantBits: 4, wantQuantGroup: 32, wantMode: "mxfp4", wantStatus: Gemma4GeneratePlannedOnly},
-		{name: "e4b_bf16", path: "/models/lmstudio-community-gemma-4-e4b-it-bf16", hiddenSize: 2304, layers: 26, wantQuantType: "bf16", wantQuantBits: 16, wantMode: "bf16", wantStatus: Gemma4GenerateLoadOnly, wantQuantOK: true},
+		{name: "e4b_bf16", path: "/models/lmstudio-community-gemma-4-e4b-it-bf16", hiddenSize: 2304, layers: 26, wantQuantType: "bf16", wantQuantBits: 16, wantMode: "bf16", wantStatus: Gemma4GenerateLinked, wantQuantOK: true},
 		{name: "12b_q6", path: "/models/lmstudio-community-gemma-4-12b-it-6bit", hiddenSize: 3840, layers: 48, wantQuantType: "q6", wantQuantBits: 6, wantQuantGroup: 64, wantMode: "q6", wantStatus: Gemma4GenerateLinked, wantQuantOK: true, wantTrainingOK: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1383,6 +1501,44 @@ func TestLoadModelWithConfigForwardsDeviceKVMode(t *testing.T) {
 		report.Model.Labels["engine_profile_reactive"] != "true" ||
 		report.Model.Labels["gemma4_source_format"] != "gguf" {
 		t.Fatalf("capability model labels = %+v, want ROCm load config and registry labels without hipLoadedModel", report.Model.Labels)
+	}
+}
+
+func TestLoadModelWithConfigForwardsAudioModelPath(t *testing.T) {
+	runtime := &fakeNativeRuntime{available: true}
+	const audioPath = "/models/gemma-4-e2b-it-4bit"
+	model, err := newROCmBackendWithRuntime(runtime).LoadModelWithConfig(
+		writeGemma4ModelPackGGUF(t),
+		ROCmLoadConfig{AudioModelPath: audioPath},
+	)
+	if err != nil {
+		t.Fatalf("LoadModelWithConfig Gemma4 audio: %v", err)
+	}
+	defer model.Close()
+	if runtime.loadConfig.AudioModelPath != audioPath {
+		t.Fatalf("load config audio path = %q, want %q", runtime.loadConfig.AudioModelPath, audioPath)
+	}
+	if !(ROCmLoadConfig{AudioModelPath: audioPath}).active() {
+		t.Fatal("audio-only ROCm load config must be active")
+	}
+}
+
+func TestLoadModelWithConfigForwardsVisionModelPath(t *testing.T) {
+	runtime := &fakeNativeRuntime{available: true}
+	const visionPath = "/models/gemma-4-12b-it-4bit"
+	model, err := newROCmBackendWithRuntime(runtime).LoadModelWithConfig(
+		writeGemma4ModelPackGGUF(t),
+		ROCmLoadConfig{VisionModelPath: visionPath},
+	)
+	if err != nil {
+		t.Fatalf("LoadModelWithConfig Gemma4 vision: %v", err)
+	}
+	defer model.Close()
+	if runtime.loadConfig.VisionModelPath != visionPath {
+		t.Fatalf("load config vision path = %q, want %q", runtime.loadConfig.VisionModelPath, visionPath)
+	}
+	if !(ROCmLoadConfig{VisionModelPath: visionPath}).active() {
+		t.Fatal("vision-only ROCm load config must be active")
 	}
 }
 

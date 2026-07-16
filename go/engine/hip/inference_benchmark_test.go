@@ -28,6 +28,8 @@ import (
 
 const inferenceBenchmarkKernelRouteMetricsEnv = "GO_ROCM_BENCH_KERNEL_ROUTE_METRICS"
 const inferenceBenchmarkCopySizeMetricLimitEnv = "GO_ROCM_BENCH_COPY_SIZE_LIMIT"
+const inferenceBenchmarkDiffusionCanvasLengthEnv = "GO_ROCM_BENCH_DIFFUSION_CANVAS_LENGTH"
+const inferenceBenchmarkDiffusionMaxStepsEnv = "GO_ROCM_BENCH_DIFFUSION_MAX_STEPS"
 
 const (
 	inferenceBenchmarkGemma4RetainedDepthRunEnv          = "GO_ROCM_RUN_RETAINED_DEPTH_BENCHMARK"
@@ -547,6 +549,42 @@ func (driver *inferenceBenchmarkHIPKernelCountingDriver) MemsetAsync(pointer nat
 }
 
 func (driver *inferenceBenchmarkHIPKernelCountingDriver) LaunchKernel(config hipKernelLaunchConfig) error {
+	blocks, shapeKey := inferenceBenchmarkHIPKernelLaunchShape(config)
+	if err := hipLaunchKernel(driver.nativeHIPDriver, config); err != nil {
+		return err
+	}
+	driver.mu.Lock()
+	driver.recordKernelLaunchLocked(config.Name, blocks, shapeKey)
+	driver.mu.Unlock()
+	return nil
+}
+
+func (driver *inferenceBenchmarkHIPKernelCountingDriver) LaunchKernelBatch(configs []hipKernelLaunchConfig) error {
+	if launcher, ok := driver.nativeHIPDriver.(nativeHIPKernelBatchLauncher); ok {
+		if err := launcher.LaunchKernelBatch(configs); err != nil {
+			return err
+		}
+		driver.mu.Lock()
+		for index := range configs {
+			blocks, shapeKey := inferenceBenchmarkHIPKernelLaunchShape(configs[index])
+			driver.recordKernelLaunchLocked(configs[index].Name, blocks, shapeKey)
+		}
+		driver.mu.Unlock()
+		return nil
+	}
+	for index := range configs {
+		blocks, shapeKey := inferenceBenchmarkHIPKernelLaunchShape(configs[index])
+		if err := hipLaunchKernel(driver.nativeHIPDriver, configs[index]); err != nil {
+			return err
+		}
+		driver.mu.Lock()
+		driver.recordKernelLaunchLocked(configs[index].Name, blocks, shapeKey)
+		driver.mu.Unlock()
+	}
+	return nil
+}
+
+func inferenceBenchmarkHIPKernelLaunchShape(config hipKernelLaunchConfig) (uint64, inferenceBenchmarkHIPKernelShapeKey) {
 	blocks := uint64(config.GridX)
 	if config.GridY > 0 {
 		blocks *= uint64(config.GridY)
@@ -565,22 +603,20 @@ func (driver *inferenceBenchmarkHIPKernelCountingDriver) LaunchKernel(config hip
 		sharedMemBytes: config.SharedMemBytes,
 	}
 	shapeKey.tensorRows, shapeKey.tensorCols, shapeKey.tensorGroup, shapeKey.tensorBatch = inferenceBenchmarkHIPKernelTensorShape(config)
-	if err := hipLaunchKernel(driver.nativeHIPDriver, config); err != nil {
-		return err
-	}
-	driver.mu.Lock()
-	stats := driver.kernel[config.Name]
+	return blocks, shapeKey
+}
+
+func (driver *inferenceBenchmarkHIPKernelCountingDriver) recordKernelLaunchLocked(name string, blocks uint64, shapeKey inferenceBenchmarkHIPKernelShapeKey) {
+	stats := driver.kernel[name]
 	stats.Launches++
 	stats.Blocks += blocks
-	driver.kernel[config.Name] = stats
+	driver.kernel[name] = stats
 	shapeStats := driver.shape[shapeKey]
 	shapeStats.Launches++
 	shapeStats.Blocks += blocks
 	driver.shape[shapeKey] = shapeStats
 	driver.total.Launches++
 	driver.total.Blocks += blocks
-	driver.mu.Unlock()
-	return nil
 }
 
 func (driver *inferenceBenchmarkHIPKernelCountingDriver) ResetKernelStats() {
@@ -903,6 +939,7 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameAttentionHeadsBatchCausal, "kernel_attention_batch_causal")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage1, "kernel_attention_batch_chunked_stage1")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, "kernel_attention_batch_chunked_stage1_gqa2")
+	report(hipKernelNameAttentionHeadsBatchChunkedStage1GQA4, "kernel_attention_batch_chunked_stage1_gqa4")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage2, "kernel_attention_batch_chunked_stage2")
 	report(hipKernelNameAttentionHeadsChunkedStage1, "kernel_attention_decode_chunked_stage1")
 	report(hipKernelNameAttentionHeadsChunkedStage2, "kernel_attention_decode_chunked_stage2")
@@ -910,6 +947,7 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameKVDescriptorAppend, "kernel_rocm_kv_descriptor_append")
 	report(hipKernelNameMLXQ4Proj, "kernel_mlx_q4_projection")
 	report(hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, "kernel_mlx_q4_projection_q4_g32_rows3840_cols15360")
+	report(hipKernelNameMLXQ4ProjQ8G64Row8, "kernel_mlx_q4_projection_q8_g64_row8")
 	report(hipKernelNameMLXQ4ProjCols256, "kernel_mlx_q4_projection_cols256")
 	report(hipKernelNameMLXQ4ProjQ6G16Row16, "kernel_mlx_q4_projection_q6_g16_row16")
 	report(hipKernelNameMLXQ4ProjQ6Row16, "kernel_mlx_q4_projection_q6_row16")
@@ -932,9 +970,12 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16")
 	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840")
 	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8")
+	report(hipKernelNameMLXQ4GELUTanhMulQ8G64Row8, "kernel_mlx_q4_gelu_tanh_multiply_q8_g64_row8")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64")
+	report(hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8, "kernel_mlx_q4_gelu_tanh_multiply_batch_q4_g64_cols2816_row8")
+	report(hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32, "kernel_mlx_q4_gelu_tanh_multiply_batch_q8_g64_rows2112_cols2816_row16_tokens32_shared")
 	report(hipKernelNameMLXQ4GELUTanhProj, "kernel_mlx_q4_gelu_tanh_projection")
 	report(hipKernelNameMLXQ4GELUTanhProjQ6Row16, "kernel_mlx_q4_gelu_tanh_projection_q6_row16")
 	inferenceBenchmarkReportHIPDriverTrafficMetrics(b, driver)
@@ -1454,20 +1495,20 @@ func inferenceBenchmarkHIPKernelShapeLabel(entry inferenceBenchmarkHIPKernelShap
 func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows, cols, group, batch uint32) {
 	args := config.Args
 	switch config.Name {
-	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6G16Row16, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
+	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16, hipKernelNameMLXQ4ProjQ8G64Row8, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6G16Row16, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 56), 0
 	case hipKernelNameMLXQ4ProjGreedyBatch, hipKernelNameMLXQ4ProjGreedyBatchQ6Row64:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 64)
-	case hipKernelNameMLXQ4ProjBatch, hipKernelNameMLXQ4ProjBatchQ6Row16:
+	case hipKernelNameMLXQ4ProjBatch, hipKernelNameMLXQ4ProjBatchQ4G64Tokens16, hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared, hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared, hipKernelNameMLXQ4ProjBatchQ8G64Row32Tokens64Shared, hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared, hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Aligned, hipKernelNameMLXQ4ProjBatchQ6Row16:
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 56)
 	case hipKernelNameMLXQ4TripleProj, hipKernelNameMLXQ4TripleProjQ6Row16, hipKernelNameMLXQ4TripleProjQ6Row64, hipKernelNameMLXQ4PairProj:
 		firstRows := inferenceBenchmarkU32At(args, 96)
 		secondRows := inferenceBenchmarkU32At(args, 100)
 		thirdRows := inferenceBenchmarkU32At(args, 104)
 		return firstRows + secondRows + thirdRows, inferenceBenchmarkU32At(args, 108), inferenceBenchmarkU32At(args, 112), 0
-	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
+	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ8G64Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), 0
-	case hipKernelNameMLXQ4GELUTanhMulBatch:
+	case hipKernelNameMLXQ4GELUTanhMulBatch, hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 120)
 	case hipKernelNameMLXQ4GELUTanhProj, hipKernelNameMLXQ4GELUTanhProjQ6Row16:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 64), 0
@@ -1479,7 +1520,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		return inferenceBenchmarkU32At(args, 36), inferenceBenchmarkU32At(args, 32), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 40)
 	case hipKernelNameAttentionHeadsChunkedStage1, hipKernelNameAttentionHeadsChunkedStage2:
 		return inferenceBenchmarkU32At(args, 64), inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 60), 0
-	case hipKernelNameAttentionHeadsBatchChunkedStage1, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, hipKernelNameAttentionHeadsBatchChunkedStage2:
+	case hipKernelNameAttentionHeadsBatchChunkedStage1, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, hipKernelNameAttentionHeadsBatchChunkedStage1GQA4, hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 60)
 	default:
 		return 0, 0, 0, 0
@@ -1551,6 +1592,37 @@ func (inferenceBenchmarkHIPKernelCountingStubDriver) CopyDeviceToHost(nativeDevi
 
 func (inferenceBenchmarkHIPKernelCountingStubDriver) LaunchKernel(hipKernelLaunchConfig) error {
 	return nil
+}
+
+type inferenceBenchmarkHIPKernelBatchCountingStubDriver struct {
+	inferenceBenchmarkHIPKernelCountingStubDriver
+	batches [][]hipKernelLaunchConfig
+}
+
+func (driver *inferenceBenchmarkHIPKernelBatchCountingStubDriver) LaunchKernelBatch(configs []hipKernelLaunchConfig) error {
+	driver.batches = append(driver.batches, append([]hipKernelLaunchConfig(nil), configs...))
+	return nil
+}
+
+func TestInferenceBenchmarkHIPKernelCountingDriver_LaunchKernelBatch_Good(t *testing.T) {
+	underlying := &inferenceBenchmarkHIPKernelBatchCountingStubDriver{}
+	driver := newInferenceBenchmarkHIPKernelCountingDriver(underlying)
+	configs := []hipKernelLaunchConfig{
+		{Name: "first", Args: []byte{1}, GridX: 2, GridY: 3, GridZ: 1, BlockX: 1, BlockY: 1, BlockZ: 1},
+		{Name: "second", Args: []byte{2}, GridX: 4, GridY: 1, GridZ: 1, BlockX: 1, BlockY: 1, BlockZ: 1},
+	}
+	if err := driver.LaunchKernelBatch(configs); err != nil {
+		t.Fatalf("LaunchKernelBatch: %v", err)
+	}
+	if len(underlying.batches) != 1 || len(underlying.batches[0]) != 2 {
+		t.Fatalf("underlying batches = %v, want one two-kernel batch", underlying.batches)
+	}
+	if got := driver.KernelStats("first"); got.Launches != 1 || got.Blocks != 6 {
+		t.Fatalf("first kernel stats = %+v, want 1 launch and 6 blocks", got)
+	}
+	if got := driver.KernelStats("second"); got.Launches != 1 || got.Blocks != 4 {
+		t.Fatalf("second kernel stats = %+v, want 1 launch and 4 blocks", got)
+	}
 }
 
 func TestInferenceBenchmarkHIPKernelCountingDriver_Good(t *testing.T) {
@@ -2516,6 +2588,111 @@ func TestInferenceBenchmarkHIPKernelTensorShape_AttentionUsesChunkCount(t *testi
 	}
 }
 
+func TestInferenceBenchmarkHIPKernelTensorShape_SpecializedAffineBatchProjections(t *testing.T) {
+	args, err := benchmarkHIPMLXQ4ProjectionBatchLaunchArgs(4096, 2816, 256, 64, 8).Binary()
+	if err != nil {
+		t.Fatalf("q8 batch projection args: %v", err)
+	}
+	defer hipReleaseLaunchPacket(args)
+
+	for _, name := range []string{
+		hipKernelNameMLXQ4ProjBatchQ4G64Tokens16,
+		hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared,
+		hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row32Tokens64Shared,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Aligned,
+	} {
+		rows, cols, group, batch := inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{Name: name, Args: args})
+		if rows != 4096 || cols != 2816 || group != 64 || batch != 256 {
+			t.Fatalf("%s shape = %dx%d qg%d batch%d, want 4096x2816 qg64 batch256", name, rows, cols, group, batch)
+		}
+	}
+}
+
+func TestInferenceBenchmarkHIPKernelTensorShape_SpecializedAffineBatchGELUTanh(t *testing.T) {
+	const rows, cols, groupSize, batch = 704, 2816, 64, 16
+	const weightBytes = rows * cols / 2
+	const affineBytes = rows * (cols / groupSize) * 2
+	args, err := (hipMLXQ4GELUTanhMulBatchLaunchArgs{
+		InputPointer:      1,
+		GateWeightPointer: 2,
+		GateScalePointer:  3,
+		GateBiasPointer:   4,
+		UpWeightPointer:   5,
+		UpScalePointer:    6,
+		UpBiasPointer:     7,
+		OutputPointer:     8,
+		Rows:              rows,
+		Cols:              cols,
+		GroupSize:         groupSize,
+		Bits:              4,
+		InputBytes:        batch * cols * 4,
+		GateWeightBytes:   weightBytes,
+		GateScaleBytes:    affineBytes,
+		GateBiasBytes:     affineBytes,
+		UpWeightBytes:     weightBytes,
+		UpScaleBytes:      affineBytes,
+		UpBiasBytes:       affineBytes,
+		OutputBytes:       batch * rows * 4,
+		Batch:             batch,
+	}).Binary()
+	if err != nil {
+		t.Fatalf("q4 batch GELU args: %v", err)
+	}
+	defer hipReleaseLaunchPacket(args)
+
+	gotRows, gotCols, gotGroup, gotBatch := inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{
+		Name: hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8,
+		Args: args,
+	})
+	if gotRows != rows || gotCols != cols || gotGroup != groupSize || gotBatch != batch {
+		t.Fatalf("q4 batch GELU shape = %dx%d qg%d batch%d, want %dx%d qg%d batch%d", gotRows, gotCols, gotGroup, gotBatch, rows, cols, groupSize, batch)
+	}
+
+	const q8Rows, q8Batch = 2112, 256
+	const q8WeightBytes = q8Rows * cols
+	const q8AffineBytes = q8Rows * (cols / groupSize) * 2
+	q8Args, err := (hipMLXQ4GELUTanhMulBatchLaunchArgs{
+		InputPointer:      1,
+		GateWeightPointer: 2,
+		GateScalePointer:  3,
+		GateBiasPointer:   4,
+		UpWeightPointer:   5,
+		UpScalePointer:    6,
+		UpBiasPointer:     7,
+		OutputPointer:     8,
+		Rows:              q8Rows,
+		Cols:              cols,
+		GroupSize:         groupSize,
+		Bits:              8,
+		InputBytes:        q8Batch * cols * 4,
+		GateWeightBytes:   q8WeightBytes,
+		GateScaleBytes:    q8AffineBytes,
+		GateBiasBytes:     q8AffineBytes,
+		UpWeightBytes:     q8WeightBytes,
+		UpScaleBytes:      q8AffineBytes,
+		UpBiasBytes:       q8AffineBytes,
+		OutputBytes:       q8Batch * q8Rows * 4,
+		Batch:             q8Batch,
+	}).Binary()
+	if err != nil {
+		t.Fatalf("q8 batch GELU args: %v", err)
+	}
+	defer hipReleaseLaunchPacket(q8Args)
+
+	gotRows, gotCols, gotGroup, gotBatch = inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{
+		Name: hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32,
+		Args: q8Args,
+	})
+	if gotRows != q8Rows || gotCols != cols || gotGroup != groupSize || gotBatch != q8Batch {
+		t.Fatalf("q8 batch GELU shape = %dx%d qg%d batch%d, want %dx%d qg%d batch%d", gotRows, gotCols, gotGroup, gotBatch, q8Rows, cols, groupSize, q8Batch)
+	}
+}
+
 func TestInferenceBenchmarkHIPKernelTensorShape_Experimental12BProjectionKernels(t *testing.T) {
 	projectionArgs, err := (hipMLXQ4ProjectionLaunchArgs{
 		InputPointer:  1,
@@ -2644,6 +2821,134 @@ func BenchmarkInferenceBenchmarkTopHIPKernelShapeEntries_SixtyFourShapes(b *test
 
 func BenchmarkInferenceGemma4Q4Generate(b *testing.B) {
 	benchmarkInferenceGemma4Q4Generate(b)
+}
+
+func BenchmarkInferenceDiffusionGemmaGenerate(b *testing.B) {
+	if os.Getenv("GO_ROCM_RUN_BENCHMARKS") != "1" {
+		b.Skip("set GO_ROCM_RUN_BENCHMARKS=1 to run ROCm inference benchmarks")
+	}
+	modelPath := inferenceBenchmarkGemma4ProductionModelPath()
+	if modelPath == "" {
+		b.Skip("set GO_ROCM_PRODUCTION_MODEL_PATH or GO_ROCM_MODEL_PATH to a local DiffusionGemma MLX affine model pack")
+	}
+	contextLen, err := inferenceBenchmarkPositiveEnv("GO_ROCM_BENCH_CONTEXT_LEN", 1024)
+	if err != nil {
+		b.Fatal(err)
+	}
+	maxTokens, err := inferenceBenchmarkPositiveEnv("GO_ROCM_BENCH_TOKENS", 512)
+	if err != nil {
+		b.Fatal(err)
+	}
+	promptCount, err := inferenceBenchmarkPositiveEnv("GO_ROCM_BENCH_PROMPT_TOKEN_COUNT", 2)
+	if err != nil {
+		b.Fatal(err)
+	}
+	if promptCount+maxTokens > contextLen {
+		b.Fatalf("diffusion prompt tokens %d plus generated tokens %d exceed context window %d", promptCount, maxTokens, contextLen)
+	}
+	promptIDs, err := inferenceBenchmarkPromptTokenIDs(os.Getenv("GO_ROCM_BENCH_PROMPT_TOKEN_IDS"))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	nativeRuntime, kernelCounter := inferenceBenchmarkNativeRuntimeAndKernelCounter()
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(nativeRuntime).LoadModel(modelPath, inference.WithContextLen(contextLen)))
+	if err != nil {
+		b.Fatalf("LoadModel(%q): %v", modelPath, err)
+	}
+	defer inferenceBenchmarkCloseModel(b, model)
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		b.Fatalf("LoadModel(%q) returned %T, want *rocmModel", modelPath, model)
+	}
+	if normalizeROCmArchitecture(rocmLoaded.modelInfo.Architecture) != "diffusion_gemma" {
+		b.Fatalf("LoadModel(%q) architecture = %q, want diffusion_gemma", modelPath, rocmLoaded.modelInfo.Architecture)
+	}
+	if !rocmLoaded.BlockDiffusionCapable() {
+		b.Fatalf("LoadModel(%q) has no linked HIP block-diffusion session", modelPath)
+	}
+	if canvasLength, set, overrideErr := inferenceBenchmarkOptionalPositiveEnv(inferenceBenchmarkDiffusionCanvasLengthEnv); overrideErr != nil {
+		b.Fatal(overrideErr)
+	} else if set {
+		rocmLoaded.modelLabels["diffusion_canvas_length"] = strconv.Itoa(canvasLength)
+	}
+	if maxSteps, set, overrideErr := inferenceBenchmarkOptionalPositiveEnv(inferenceBenchmarkDiffusionMaxStepsEnv); overrideErr != nil {
+		b.Fatal(overrideErr)
+	} else if set {
+		rocmLoaded.modelLabels["diffusion_default_max_steps"] = strconv.Itoa(maxSteps)
+	}
+	prompt, err := inferenceBenchmarkDiffusionPromptTokens(promptCount, promptIDs, rocmLoaded.modelInfo.VocabSize)
+	if err != nil {
+		b.Fatal(err)
+	}
+	inferenceBenchmarkReportGemma4ProductionQuant(b, rocmLoaded.modelInfo, modelPath)
+	nativeLoaded, _ := rocmLoaded.native.(*hipLoadedModel)
+	expertCacheBefore, _, _ := inferenceBenchmarkGemma4ExpertCacheSnapshot(nativeLoaded)
+	if kernelCounter != nil {
+		kernelCounter.ResetKernelStats()
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	started := time.Now()
+	var emittedTokens int
+	var canvases int
+	var steps int
+	var prefillDur time.Duration
+	var denoiseDur time.Duration
+	var commitDur time.Duration
+	var diffusionDur time.Duration
+	for i := 0; i < b.N; i++ {
+		generated := 0
+		metrics, generateErr := rocmLoaded.GenerateBlockDiffusionTokens(context.Background(), prompt, ROCmBlockDiffusionOptions{
+			MaxTokens: maxTokens,
+			Seed:      1,
+			SeedSet:   true,
+		}, func(token int32) bool {
+			if token < 0 || int(token) >= rocmLoaded.modelInfo.VocabSize {
+				return false
+			}
+			generated++
+			return true
+		})
+		if generateErr != nil {
+			b.Fatalf("GenerateBlockDiffusionTokens: %v", generateErr)
+		}
+		if generated != maxTokens || metrics.EmittedTokens != maxTokens {
+			b.Fatalf("GenerateBlockDiffusionTokens emitted callback=%d metrics=%d, want %d", generated, metrics.EmittedTokens, maxTokens)
+		}
+		emittedTokens += generated
+		canvases += metrics.Canvases
+		steps += metrics.TotalSteps
+		prefillDur += metrics.PrefillDur
+		denoiseDur += metrics.DenoiseDur
+		commitDur += metrics.CommitDur
+		diffusionDur += metrics.TotalDur
+	}
+	elapsed := time.Since(started)
+	b.StopTimer()
+	operations := float64(b.N)
+	if elapsed > 0 {
+		b.ReportMetric(float64(emittedTokens)/elapsed.Seconds(), "tok/s")
+	}
+	b.ReportMetric(float64(emittedTokens), "tokens")
+	b.ReportMetric(float64(maxTokens), "max_tokens/op")
+	b.ReportMetric(float64(promptCount), "prompt_tokens/op")
+	b.ReportMetric(float64(contextLen), "context_len")
+	b.ReportMetric(float64(canvases)/operations, "canvases/op")
+	b.ReportMetric(float64(steps)/operations, "steps/op")
+	b.ReportMetric(float64(prefillDur)/float64(time.Millisecond)/operations, "prefill_ms/op")
+	b.ReportMetric(float64(denoiseDur)/float64(time.Millisecond)/operations, "denoise_ms/op")
+	b.ReportMetric(float64(commitDur)/float64(time.Millisecond)/operations, "commit_ms/op")
+	b.ReportMetric(float64(diffusionDur)/float64(time.Millisecond)/operations, "diffusion_ms/op")
+	expertCacheAfter, expertCacheResidentBytes, expertCacheResidentEntries := inferenceBenchmarkGemma4ExpertCacheSnapshot(nativeLoaded)
+	b.ReportMetric(float64(expertCacheAfter.Hits-expertCacheBefore.Hits)/operations, "expert_cache_hits/op")
+	b.ReportMetric(float64(expertCacheAfter.Misses-expertCacheBefore.Misses)/operations, "expert_cache_misses/op")
+	b.ReportMetric(float64(expertCacheAfter.Evictions-expertCacheBefore.Evictions)/operations, "expert_cache_evictions/op")
+	b.ReportMetric(float64(expertCacheAfter.H2DBytes-expertCacheBefore.H2DBytes)/operations, "expert_cache_h2d_bytes/op")
+	b.ReportMetric(float64(expertCacheResidentEntries), "expert_cache_resident_entries")
+	b.ReportMetric(float64(expertCacheResidentBytes), "expert_cache_resident_bytes")
+	inferenceBenchmarkReportHIPKernelRouteMetrics(b, kernelCounter)
 }
 
 func BenchmarkInferenceGemma4Q4Generate_Ladder(b *testing.B) {
@@ -4586,6 +4891,7 @@ func inferenceBenchmarkIsAttentionKernelName(name string) bool {
 		hipKernelNameAttentionHeadsBatchCausal,
 		hipKernelNameAttentionHeadsBatchChunkedStage1,
 		hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
+		hipKernelNameAttentionHeadsBatchChunkedStage1GQA4,
 		hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return true
 	default:
@@ -4630,6 +4936,7 @@ func inferenceBenchmarkSelectedHIPKernelNames() []string {
 		hipKernelNameAttentionHeadsBatchCausal,
 		hipKernelNameAttentionHeadsBatchChunkedStage1,
 		hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
+		hipKernelNameAttentionHeadsBatchChunkedStage1GQA4,
 		hipKernelNameAttentionHeadsBatchChunkedStage2,
 		hipKernelNameRMSNormRoPEHeads,
 		hipKernelNameRMSNormRoPEHeadsBatch,
@@ -5268,6 +5575,7 @@ func inferenceBenchmarkLoadGemma4Q4ModelWithKernelCounter(b *testing.B, contextL
 		b.Fatalf("loadedGemma4Q4ForwardConfig(%d): %v", layerCount, err)
 	}
 	inferenceBenchmarkReportGemma4LMHeadAffine(b, cfg.Layers[0].LMHeadProjection)
+	inferenceBenchmarkReportGemma4LayerAffine(b, cfg.Layers[0])
 	return model, loaded, cfg, kernelCounter
 }
 
@@ -5313,6 +5621,25 @@ func inferenceBenchmarkReportGemma4LMHeadAffine(b *testing.B, projection hipMLXQ
 	b.ReportMetric(float64(projection.GroupSize), "lm_head_affine_group")
 	b.ReportMetric(float64(projection.Rows), "lm_head_affine_rows")
 	b.ReportMetric(float64(projection.Cols), "lm_head_affine_cols")
+}
+
+func inferenceBenchmarkReportGemma4LayerAffine(b *testing.B, layer hipGemma4Q4Layer0Config) {
+	b.Helper()
+	for _, projection := range []struct {
+		name   string
+		config hipMLXQ4DeviceWeightConfig
+	}{
+		{name: "query", config: layer.QueryProjection},
+		{name: "key", config: layer.KeyProjection},
+		{name: "value", config: layer.ValueProjection},
+		{name: "output", config: layer.OutputProjection},
+		{name: "gate", config: layer.GateProjection},
+		{name: "up", config: layer.UpProjection},
+		{name: "down", config: layer.DownProjection},
+	} {
+		config := projection.config
+		b.Logf("layer0_%s_affine bits=%d group=%d rows=%d cols=%d", projection.name, config.Bits, config.GroupSize, config.Rows, config.Cols)
+	}
 }
 
 func inferenceBenchmarkReportGemma4ProductionQuantPack(b *testing.B, pack ProductionQuantizationPackSupport) {
@@ -6058,6 +6385,27 @@ func inferenceBenchmarkTokenPrompt(count int, ids []int) string {
 		builder.WriteString(strconv.Itoa(ids[i%len(ids)]))
 	}
 	return builder.String()
+}
+
+func inferenceBenchmarkDiffusionPromptTokens(count int, ids []int, vocab int) ([]int32, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("diffusion benchmark prompt token count must be positive")
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("diffusion benchmark prompt token IDs are empty")
+	}
+	if vocab <= 0 {
+		return nil, fmt.Errorf("diffusion benchmark vocabulary must be positive")
+	}
+	prompt := make([]int32, count)
+	for index := range prompt {
+		id := ids[index%len(ids)]
+		if id < 0 || id >= vocab {
+			return nil, fmt.Errorf("diffusion benchmark prompt token ID %d is outside vocabulary [0,%d)", id, vocab)
+		}
+		prompt[index] = int32(id)
+	}
+	return prompt, nil
 }
 
 func inferenceBenchmarkGemma4SweepConfigFromEnv(getenv func(string) string) (inferenceBenchmarkGemma4SweepConfig, error) {
@@ -6896,6 +7244,32 @@ func TestInferenceBenchmarkPromptFromEnv_BadTokenID(t *testing.T) {
 
 	if _, err := inferenceBenchmarkPromptFromEnv(); err == nil {
 		t.Fatalf("inferenceBenchmarkPromptFromEnv succeeded, want empty token ID error")
+	}
+}
+
+func TestInferenceBenchmarkDiffusionPromptTokens_Good(t *testing.T) {
+	got, err := inferenceBenchmarkDiffusionPromptTokens(5, []int{2, 10979}, 262144)
+	if err != nil {
+		t.Fatalf("inferenceBenchmarkDiffusionPromptTokens: %v", err)
+	}
+	want := []int32{2, 10979, 2, 10979, 2}
+	if !slices.Equal(got, want) {
+		t.Fatalf("diffusion prompt tokens = %v, want %v", got, want)
+	}
+}
+
+func TestInferenceBenchmarkDiffusionPromptTokens_Bad(t *testing.T) {
+	if _, err := inferenceBenchmarkDiffusionPromptTokens(2, []int{2, 16}, 16); err == nil || !strings.Contains(err.Error(), "outside vocabulary") {
+		t.Fatalf("diffusion prompt token error = %v, want vocabulary rejection", err)
+	}
+}
+
+func TestInferenceBenchmarkDiffusionPromptTokens_Ugly(t *testing.T) {
+	if _, err := inferenceBenchmarkDiffusionPromptTokens(0, []int{2}, 16); err == nil || !strings.Contains(err.Error(), "count must be positive") {
+		t.Fatalf("diffusion prompt count error = %v, want positive-count rejection", err)
+	}
+	if _, err := inferenceBenchmarkDiffusionPromptTokens(2, nil, 16); err == nil || !strings.Contains(err.Error(), "token IDs are empty") {
+		t.Fatalf("diffusion prompt IDs error = %v, want empty-ID rejection", err)
 	}
 }
 

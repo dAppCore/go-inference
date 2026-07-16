@@ -801,12 +801,6 @@ func hipNativeTensorInfoCanRepackAsAffine(info nativeTensorInfo) bool {
 		hipNativeTensorInfoIsF32(info)
 }
 
-func hipFloat32ToBFloat16(value float32) uint16 {
-	bits := math.Float32bits(value)
-	bits += 0x7fff + ((bits >> 16) & 1)
-	return uint16(bits >> 16)
-}
-
 func hipGemma4CanonicalAffineBaseForGGUFWeightName(name string) (string, bool) {
 	switch name {
 	case "token_embd.weight":

@@ -41,6 +41,24 @@ type LoadedMoE struct {
 	ExpGate, ExpUp, ExpGateUp, ExpDown                          *Linear // experts.switch_glu.*
 }
 
+// The vision payload types moved to model/vision during the 2026-07-15 vision
+// extraction (vision.Linear / vision.Layer / vision.Projector / vision.Config /
+// vision.Loaded / vision.UnifiedConfig / vision.Unified — field-for-field the
+// same shapes). The hip lane — validated only on the AMD box — still spells
+// the model.LoadedVision* names, so these aliases keep it compiling until its
+// mechanical rename lands there. New code uses the model/vision types.
+//
+// Deprecated: use the model/vision types.
+type (
+	LoadedVisionLinear        = vision.Linear
+	LoadedVisionLayer         = vision.Layer
+	LoadedVisionProjector     = vision.Projector
+	LoadedVisionConfig        = vision.Config
+	LoadedVision              = vision.Loaded
+	LoadedUnifiedVisionConfig = vision.UnifiedConfig
+	LoadedUnifiedVision       = vision.Unified
+)
+
 // LoadedAudioClipBound is one optional per-linear activation clamp.
 type LoadedAudioClipBound struct {
 	Min, Max float32

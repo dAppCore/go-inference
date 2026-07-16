@@ -83,6 +83,7 @@ var supportedNativeArchitectures = map[string]struct{}{
 	"hybrid":              {},
 	"kimi":                {},
 	"llama":               {},
+	"mamba2":              {},
 	"minimax":             {},
 	"minimax_m2":          {},
 	"mistral":             {},
@@ -530,10 +531,10 @@ func ArchitectureProfileGeneration(id string) bool {
 		return profile.Generation
 	}
 	switch id {
-	case "bert", "bert_rerank", "composed", "hybrid",
-		"deltanet", "gla", "gsa", "mamba2", "mla", "moba", "nsa", "retnet", "rwkv7",
+	case "bert", "bert_rerank",
+		"deltanet", "gla", "gsa", "mla", "moba", "nsa", "retnet", "rwkv7",
 		"deepseek", "deepseek_r1", "gpt-oss", "kimi", "minimax_m2",
-		"mixtral", "qwen3_6", "qwen3_6_moe", "qwen3_moe":
+		"mixtral", "qwen3_moe":
 		return false
 	default:
 		return true
@@ -872,15 +873,17 @@ func ArchitectureProfileNotes(id string) []string {
 	case "bert_rerank":
 		return []string{"native staged cross-encoder loader; scorer kernels pending"}
 	case "composed", "hybrid":
-		return []string{"config-composed sequence-mixer loader contract is registered; generic HIP composed runner remains pending"}
-	case "deltanet", "gla", "gsa", "mamba2", "mla", "moba", "nsa", "retnet", "rwkv7":
+		return []string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"}
+	case "mamba2":
+		return []string{"portable recurrent Mamba2 runner is linked; projection hooks remain available for HIP++ acceleration"}
+	case "deltanet", "gla", "gsa", "mla", "moba", "nsa", "retnet", "rwkv7":
 		return []string{"go-mlx metal model family recognised for reactive route parity; ROCm runtime loader remains metadata-only"}
 	case "diffusion_gemma":
 		return []string{"block-diffusion Gemma model; trunk metadata is recognised and diffusion sampler is routed through the diffuse command"}
 	case "qwen3_6":
-		return []string{"native staged hybrid linear-attention config/tokenizer loader; standalone generation smoke remains pending"}
+		return []string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"}
 	case "qwen3_6_moe":
-		return []string{"native staged hybrid linear-attention and sparse-expert config/tokenizer loader; standalone generation smoke remains pending"}
+		return []string{"portable composed MoE incremental runner is linked; projection hooks remain available for HIP++ acceleration"}
 	case "qwen3_moe", "mixtral", "deepseek", "deepseek_r1", "gpt-oss", "kimi", "minimax_m2":
 		return []string{"native staged sparse/MoE config-tokenizer path; model-integrated expert decode remains pending"}
 	default:

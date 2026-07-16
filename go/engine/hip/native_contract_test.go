@@ -29,6 +29,52 @@ func TestNativeContract_RocmBackendImplementsSharedPlanner_Good(t *testing.T) {
 	var _ inference.ModelPackInspector = (*rocmBackend)(nil)
 }
 
+func TestCanonicalizeROCmNativeTensorNames_DiffusionGemma_Good(t *testing.T) {
+	tensors := []nativeTensorInfo{
+		{Name: "model.decoder.language_model.model.embed_tokens.weight"},
+		{Name: "model.decoder.language_model.model.layers.0.self_attn.q_proj.weight"},
+		{Name: "model.decoder.embed_tokens.weight"},
+		{Name: "model.decoder.layers.0.experts.gate_up_proj.weight"},
+		{Name: "model.decoder.norm.weight"},
+		{Name: "model.decoder.self_conditioning.pre_norm.weight"},
+		{Name: "model.encoder.language_model.layers.0.layer_scalar"},
+	}
+
+	got := canonicalizeROCmNativeTensorNames("diffusion_gemma", tensors)
+	want := []string{
+		"language_model.model.embed_tokens.weight",
+		"language_model.model.layers.0.self_attn.q_proj.weight",
+		"language_model.model.embed_tokens.weight",
+		"language_model.model.layers.0.experts.gate_up_proj.weight",
+		"language_model.model.norm.weight",
+		"self_conditioning.pre_norm.weight",
+		"model.encoder.language_model.layers.0.layer_scalar",
+	}
+	for index := range want {
+		if got[index].Name != want[index] {
+			t.Fatalf("tensor %d name = %q, want %q", index, got[index].Name, want[index])
+		}
+	}
+}
+
+func TestNativeContract_DiffusionGemmaInfersMoEFromExpertGeometry_Good(t *testing.T) {
+	cfg := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{
+		ModelType: "diffusion_gemma",
+		TextConfig: rocmModelPackTextConfigProbe{
+			ModelType:           "diffusion_gemma_text",
+			NumHiddenLayers:     30,
+			NumExperts:          128,
+			TopKExperts:         8,
+			MoEIntermediateSize: 704,
+		},
+	})
+
+	core.AssertEqual(t, true, cfg.EnableMoEBlock)
+	core.AssertEqual(t, 128, cfg.NumExperts)
+	core.AssertEqual(t, 8, cfg.TopKExperts)
+	core.AssertEqual(t, 704, cfg.MoEIntermediateSize)
+}
+
 func TestNativeContract_RocmModelImplementsSharedContracts_Good(t *testing.T) {
 	var _ inference.TokenizerModel = (*rocmModel)(nil)
 	var _ inference.AdapterModel = (*rocmModel)(nil)
@@ -824,7 +870,7 @@ func TestNativeContract_RocmGemma4Q4ExperimentalGenerateCapability_Good(t *testi
 		generate.Labels["production_quant_pack_sizes"] != "E2B,E4B,12B,26B-A4B,31B" ||
 		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "E4B:q6") ||
 		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "12B:q6") ||
-		!strings.Contains(generate.Labels["production_quant_load_only_packs"], "E2B:bf16") ||
+		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "E2B:bf16") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E4B:mxfp4") ||
 		generate.Labels["production_quant_active_weight_read_bytes_per_token"] == "" ||
 		generate.Labels["decode_layers"] != "35" ||
@@ -1133,7 +1179,7 @@ func TestNativeContract_RocmGemma4Q6CapabilityLabels_Good(t *testing.T) {
 		generate.Labels["production_quant_model"] != ProductionLaneCurrentModelID ||
 		generate.Labels["production_quant_min_visible_tokens_per_sec"] != "100" ||
 		generate.Labels["production_quant_runnable_pack_count"] != "14" ||
-		!strings.Contains(generate.Labels["production_quant_load_only_packs"], "E4B:bf16") ||
+		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "E4B:bf16") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E2B:mxfp8") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E4B:mxfp8") {
 		t.Fatalf("generate capability = %+v ok=%v, want Gemma4 q6 MLX affine labels", generate, ok)
@@ -1607,11 +1653,15 @@ func TestNativeContract_LoadModelBadEmptyAdapterPathDoesNotLoadNativeModel_Bad(t
 	core.AssertEqual(t, "", runtime.loadPath)
 }
 
-func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *testing.T) {
+func TestNativeContract_LoadModelSafetensorsGemma4AutoAttachesMedia_Good(t *testing.T) {
 	dir := t.TempDir()
 	writeNativeContractFile(t, core.PathJoin(dir, "config.json"), `{
 		"architectures":["Gemma4ForConditionalGeneration"],
 		"model_type":"gemma4",
+		"image_token_id":4,
+		"audio_token_id":5,
+		"vision_config":{"model_type":"gemma4_vision","hidden_size":8},
+		"audio_config":{"model_type":"gemma4_audio","hidden_size":8},
 		"tie_word_embeddings":true,
 		"quantization_config":{"bits":6,"group_size":64,"mode":"affine"},
 		"text_config":{
@@ -1628,8 +1678,8 @@ func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *test
 			"vocab_size":8
 		}
 	}`)
-	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[96,608]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[608,1120]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1120,1632]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1632,2144]}}`
-	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 2144)
+	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[96,608]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[608,1120]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1120,1632]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1632,2144]},"vision_embedder.patch_dense.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2144,2146]},"audio_tower.output_proj.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2146,2148]}}`
+	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 2148)
 	runtime := &fakeNativeRuntime{
 		available: true,
 		device:    nativeDeviceInfo{Name: "AMD Radeon RX 7800 XT", MemoryBytes: 16 * memoryGiB, FreeBytes: 12 * memoryGiB, Driver: "hip-test"},
@@ -1653,8 +1703,17 @@ func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *test
 		runtime.loadConfig.ModelInfo.QuantGroup != 64 {
 		t.Fatalf("load config model = %+v, want Gemma4 text_config identity", runtime.loadConfig.ModelInfo)
 	}
-	if !runtime.loadConfig.TiedWordEmbeddings || runtime.loadConfig.ContextSize != 128 || len(runtime.loadConfig.Tensors) != 6 {
+	if !runtime.loadConfig.TiedWordEmbeddings || runtime.loadConfig.ContextSize != 128 || len(runtime.loadConfig.Tensors) != 8 {
 		t.Fatalf("load config = %+v, want tied Gemma4 safetensors tensor plan", runtime.loadConfig)
+	}
+	if runtime.loadConfig.VisionModelPath != dir || runtime.loadConfig.AudioModelPath != dir {
+		t.Fatalf("attached media paths = vision %q audio %q, want same-checkpoint root %q", runtime.loadConfig.VisionModelPath, runtime.loadConfig.AudioModelPath, dir)
+	}
+	if runtime.loadConfig.ModelLabels["vision_runtime"] != hipKernelStatusLinked ||
+		runtime.loadConfig.ModelLabels["vision_projector_runtime"] != hipKernelStatusLinked ||
+		runtime.loadConfig.ModelLabels["audio_runtime"] != hipKernelStatusLinked ||
+		runtime.loadConfig.ModelLabels["audio_projector_runtime"] != hipKernelStatusLinked {
+		t.Fatalf("media runtime labels = %+v, want linked same-checkpoint vision and audio", runtime.loadConfig.ModelLabels)
 	}
 	if !runtime.loadConfig.Gemma4Architecture.Matched() {
 		t.Fatalf("shared architecture = %+v, want matched Gemma4 declaration", runtime.loadConfig.Gemma4Architecture)
@@ -1667,6 +1726,42 @@ func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *test
 			t.Fatalf("tensor = %+v, want safetensors source path and per-tensor data offset", tensor)
 		}
 	}
+}
+
+func TestNativeContract_LoadModelSafetensorsGemma4UnifiedAudioDoesNotAttachConformer_Good(t *testing.T) {
+	dir := t.TempDir()
+	writeNativeContractFile(t, core.PathJoin(dir, "config.json"), `{
+		"architectures":["Gemma4UnifiedForConditionalGeneration"],
+		"model_type":"gemma4_unified",
+		"image_token_id":4,
+		"audio_token_id":5,
+		"vision_config":{"model_type":"gemma4_unified_vision","hidden_size":8},
+		"audio_config":{"model_type":"gemma4_unified_audio","hidden_size":8,"audio_samples_per_token":4},
+		"tie_word_embeddings":true,
+		"quantization_config":{"bits":4,"group_size":64,"mode":"affine"},
+		"text_config":{
+			"model_type":"gemma4_unified_text",
+			"hidden_size":16,
+			"num_hidden_layers":1,
+			"intermediate_size":32,
+			"num_attention_heads":2,
+			"num_key_value_heads":1,
+			"head_dim":8,
+			"sliding_window":512,
+			"max_position_embeddings":8192,
+			"layer_types":["full_attention"],
+			"vocab_size":8
+		}
+	}`)
+	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[96,608]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[608,1120]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1120,1632]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1632,2144]},"vision_embedder.patch_dense.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2144,2146]},"embed_audio.embedding_projection.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2146,2148]}}`
+	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 2148)
+
+	_, cfg, err := (&rocmBackend{}).safetensorsNativeLoadConfig(context.Background(), dir, inference.LoadConfig{ContextLen: 128})
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, dir, cfg.VisionModelPath)
+	core.AssertEqual(t, "", cfg.AudioModelPath)
+	core.AssertEqual(t, true, cfg.Gemma4TextConfig.Audio)
 }
 
 func TestNativeContract_LoadModelSafetensorsGemma4PropagatesTextRuntimeConfig_Good(t *testing.T) {
@@ -1862,6 +1957,42 @@ func TestNativeContract_Gemma4NativeConfigDeclaresMultimodalTowers_Good(t *testi
 	textOnly := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{ModelType: "gemma4"})
 	core.AssertEqual(t, false, textOnly.Vision)
 	core.AssertEqual(t, false, textOnly.Audio)
+
+	assistant := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{
+		ModelType:    "gemma4_assistant",
+		ImageTokenID: 258880,
+		AudioTokenID: 258881,
+	})
+	core.AssertEqual(t, false, assistant.Vision)
+	core.AssertEqual(t, false, assistant.Audio)
+}
+
+func TestNativeContract_DiffusionGemmaDoesNotAttachDecoderUnusedVision_Good(t *testing.T) {
+	cfg := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{
+		ModelType:    "diffusion_gemma",
+		ImageTokenID: 258880,
+		VisionConfig: rocmModelPackVisionConfigProbe{
+			ModelType:       "gemma4_vision",
+			HiddenSize:      1152,
+			NumHiddenLayers: 27,
+		},
+	})
+
+	core.AssertEqual(t, false, cfg.Vision)
+	core.AssertEqual(t, false, Gemma4DeclaredFeaturesOfNativeConfig(cfg).Vision)
+}
+
+func TestNativeContract_SamePackMediaRequiresTowerTensors_Ugly(t *testing.T) {
+	textOnly := []nativeTensorInfo{{Name: "language_model.model.embed_tokens.weight"}}
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasVision(textOnly))
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasAudio(textOnly))
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasAudioTower(textOnly))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasVision(append(textOnly, nativeTensorInfo{Name: "vision_embedder.patch_dense.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasVision(append(textOnly, nativeTensorInfo{Name: "model.vision_tower.embeddings.patch_embedding.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasAudio(append(textOnly, nativeTensorInfo{Name: "embed_audio.embedding_projection.weight"})))
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasAudioTower(append(textOnly, nativeTensorInfo{Name: "embed_audio.embedding_projection.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasAudio(append(textOnly, nativeTensorInfo{Name: "audio_tower.output_proj.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasAudioTower(append(textOnly, nativeTensorInfo{Name: "audio_tower.output_proj.weight"})))
 }
 
 func TestNativeContract_Gemma4LayerTypesDefaultPatternForcesFinalFull_Good(t *testing.T) {
@@ -2653,6 +2784,32 @@ func TestNativeContract_AudioServeCapability_Bad(t *testing.T) {
 		t.Fatal("audio turn Err() = nil without the neutral capability")
 	} else {
 		core.AssertContains(t, err.Error(), "does not accept audio input")
+	}
+}
+
+func TestNativeContract_VisionServeCapability_Good(t *testing.T) {
+	native := &fakeNativeVisionTowerModel{fakeNativeModel: &fakeNativeModel{tokens: []inference.Token{{ID: 7, Text: "seen"}}}, accepts: true}
+	model := &rocmModel{modelType: "gemma4", modelInfo: inference.ModelInfo{Architecture: "gemma4"}, contextLength: 4096, native: native}
+	messages := []inference.Message{{Role: "user", Images: [][]byte{{0x89, 'P', 'N', 'G'}}}}
+
+	if !model.AcceptsImages() {
+		t.Fatal("AcceptsImages() = false for loaded vision-capable HIP runtime")
+	}
+	core.AssertEqual(t, []string{"seen"}, collectTokenText(model.Chat(context.Background(), messages)))
+	core.AssertEqual(t, 1, native.towerInvocations)
+}
+
+func TestNativeContract_VisionServeCapability_Bad(t *testing.T) {
+	model := &rocmModel{modelType: "gemma4", modelInfo: inference.ModelInfo{Architecture: "gemma4"}, native: &fakeNativeModel{}}
+	messages := []inference.Message{{Role: "user", Content: "describe", Videos: [][]byte{{'f', 'r', 'a', 'm', 'e'}}}}
+
+	for range model.Chat(context.Background(), messages) {
+		t.Fatal("vision turn yielded a token without the neutral capability")
+	}
+	if err := resultError(model.Err()); err == nil {
+		t.Fatal("vision turn Err() = nil without the neutral capability")
+	} else {
+		core.AssertContains(t, err.Error(), "does not accept image or video input")
 	}
 }
 
@@ -5273,6 +5430,25 @@ type fakeNativeAudioTowerModel struct {
 	*fakeNativeModel
 	accepts          bool
 	towerInvocations int
+}
+
+type fakeNativeVisionTowerModel struct {
+	*fakeNativeModel
+	accepts          bool
+	towerInvocations int
+}
+
+func (model *fakeNativeVisionTowerModel) AcceptsImageInput() bool {
+	return model != nil && model.accepts
+}
+
+func (model *fakeNativeVisionTowerModel) Chat(ctx context.Context, messages []inference.Message, cfg inference.GenerateConfig) (iter.Seq[inference.Token], func() error) {
+	for i := range messages {
+		if len(messages[i].Images) > 0 || len(messages[i].Videos) > 0 {
+			model.towerInvocations++
+		}
+	}
+	return model.fakeNativeModel.Chat(ctx, messages, cfg)
 }
 
 func (model *fakeNativeAudioTowerModel) AcceptsAudioInput() bool {

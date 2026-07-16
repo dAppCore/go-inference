@@ -50,6 +50,22 @@ func TestHIPSmallDecode_Good_QwenGemmaSmoke(t *testing.T) {
 	}
 }
 
+func TestHIPRMSNormResidualAddNormBlockSize_E4B_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(512), hipRMSNormResidualAddNormBlockSize(2560))
+}
+
+func TestHIPRMSNormResidualAddNormBlockSize_Default_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(256), hipRMSNormResidualAddNormBlockSize(1536))
+}
+
+func TestHIPRMSNormResidualAddBlockSize_E4B_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(512), hipRMSNormResidualAddBlockSize(2560))
+}
+
+func TestHIPRMSNormResidualAddBlockSize_Default_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(256), hipRMSNormResidualAddBlockSize(1536))
+}
+
 func TestHIPGemma4Q4Layer0_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	cfg, cleanup := hipGemma4Q4Layer0FixtureConfig(t, driver)
@@ -570,6 +586,33 @@ func TestHIPGemma4Q4GenerateTokenSeq_UsesBatchedPrefill_Good(t *testing.T) {
 	}
 	wantGreedySlots := hipProjectionGreedyRoundFirstSlabSlots(hipProjectionGreedyReserveSlots + 4)
 	core.AssertEqual(t, 1, countUint64Value(driver.allocations[allocStart:], uint64(wantGreedySlots*hipMLXQ4ProjectionBestBytes)))
+
+	engineConfig.BidirectionalSpanTokens = [2]int32{1, 0}
+	start = len(driver.launches)
+	stream, streamErr = hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), &hipLoadedModel{driver: driver}, cfg, []int32{0, 1, 1, 0}, inference.GenerateConfig{MaxTokens: 1}, engineConfig)
+	generated = nil
+	for token := range stream {
+		generated = append(generated, token)
+	}
+	core.RequireNoError(t, streamErr())
+	core.AssertEqual(t, 1, len(generated))
+	launches = driver.launches[start:]
+	core.AssertEqual(t, len(cfg.Layers), countLaunchName(launches, hipKernelNameAttentionHeadsBatchCapped))
+
+	engineConfig.BidirectionalSpanTokens = [2]int32{}
+
+	engineConfig.DisableBatchedPrefill = true
+	start = len(driver.launches)
+	stream, streamErr = hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), &hipLoadedModel{driver: driver}, cfg, []int32{0, 1, 0}, inference.GenerateConfig{MaxTokens: 2}, engineConfig)
+	generated = nil
+	for token := range stream {
+		generated = append(generated, token)
+	}
+	core.RequireNoError(t, streamErr())
+	core.AssertEqual(t, 2, len(generated))
+	launches = driver.launches[start:]
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameAttentionHeadsBatchCausal))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4ProjBatch))
 }
 
 func TestHIPGemma4Q4GenerateTokenSeq_MoEDisablesBatchedPrefill_Good(t *testing.T) {
@@ -874,6 +917,36 @@ func TestHIPGemma4Q4PrefillPlanInto_ReusesScratch_Good(t *testing.T) {
 	core.AssertEqual(t, 1, single.LenBatches())
 	core.AssertEqual(t, 0, len(single.Batches))
 	core.AssertEqual(t, 0, len(returned))
+}
+
+func TestHIPGemma4Q4PrefillPlanBidirectionalSpans_Good(t *testing.T) {
+	tokens := []int32{1, 22, 22, 22, 2, 23, 23, 3}
+	spans := hipGemma4Q4BidirectionalTokenSpans(tokens, [2]int32{22, 23})
+	core.AssertEqual(t, [][2]int{{1, 4}, {5, 7}}, spans)
+
+	plan, _, err := hipGemma4Q4PlanPromptPrefillBidirectionalInto(tokens, 5, 3, spans, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 4, plan.LenBatches())
+
+	wantRanges := [][2]int{{0, 1}, {1, 4}, {4, 7}, {7, 8}}
+	wantCaps := [][]int32{nil, {9, 9, 9}, {10, 12, 12}, nil}
+	for index := range wantRanges {
+		batch := plan.Batch(index)
+		core.AssertEqual(t, wantRanges[index][0], batch.Start)
+		core.AssertEqual(t, wantRanges[index][1], batch.End)
+		core.AssertEqual(t, wantCaps[index], batch.AttentionCaps)
+	}
+	core.AssertEqual(t, 0, plan.Batch(plan.LenBatches()-1).OutputRow)
+}
+
+func TestHIPGemma4Q4PrefillPlanBidirectionalSpans_Ugly(t *testing.T) {
+	tokens := []int32{22, 22, 22, 22, 7}
+	spans := hipGemma4Q4BidirectionalTokenSpans(tokens, [2]int32{22, 23})
+	plan, _, err := hipGemma4Q4PlanPromptPrefillBidirectionalInto(tokens, 0, 2, spans, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, plan.LenBatches())
+	core.AssertEqual(t, 4, len(plan.Batch(0).Tokens))
+	core.AssertEqual(t, []int32{4, 4, 4, 4}, plan.Batch(0).AttentionCaps)
 }
 
 func BenchmarkHIPGemma4Q4PlanPromptPrefill_29K(b *testing.B) {
@@ -2119,7 +2192,7 @@ func TestHIPGemma4Q4PrefillLayerBodyBatchWorkspaceReusesProjectionOutput_Good(t 
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameVectorAdd))
 }
 
-func TestHIPGemma4Q4PrefillLayerBodyBatchWithPerLayerInput_BatchOneFusesPostMLPResidualAddInputGate_Good(t *testing.T) {
+func TestHIPGemma4Q4PrefillLayerBodyBatchWithPerLayerInput_BatchOneMaterializesPostMLPResidualOnce_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	cfg, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
 	defer cleanup()
@@ -2160,10 +2233,10 @@ func TestHIPGemma4Q4PrefillLayerBodyBatchWithPerLayerInput_BatchOneFusesPostMLPR
 	core.AssertEqual(t, cfg.HiddenSize, body.PerLayerProjection.Count())
 	core.AssertEqual(t, cfg.HiddenSize, body.FinalHidden.Count())
 	launches := driver.launches[start:]
-	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormResidualAddGELUTanhProj))
-	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4GELUTanhProj))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameRMSNormResidualAddGELUTanhProj))
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameMLXQ4GELUTanhProj))
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4GELUTanhProjBatch))
-	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormResidualAdd))
+	core.AssertEqual(t, 2, countLaunchName(launches, hipKernelNameRMSNormResidualAdd))
 }
 
 func TestHIPGemma4Q4PrefillResidualSmallBatchUsesFusedKernels_Good(t *testing.T) {
@@ -2424,6 +2497,82 @@ func TestHIPGemma4Q4PrefillForwardBatch_Good(t *testing.T) {
 	core.AssertEqual(t, 6, countLaunchName(launches, hipKernelNameVectorAdd))
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameRMSNorm))
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4ProjGreedy))
+}
+
+func TestHIPGemma4Q4PrefillForwardBatchInitialHidden_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup()
+	tokens := []int32{0, 1}
+	cfg := hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+
+	initialValues := make([]float32, len(tokens)*layer.HiddenSize)
+	for index := range initialValues {
+		initialValues[index] = float32(index + 1)
+	}
+	initialPayload, err := hipFloat32Payload(initialValues)
+	core.RequireNoError(t, err)
+	initialHidden, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "prefill initial hidden fixture", initialPayload, len(initialValues))
+	core.RequireNoError(t, err)
+	defer initialHidden.Close()
+
+	perLayerValues := make([]float32, len(tokens)*layer.PerLayerInput.InputSize)
+	perLayerPayload, err := hipFloat32Payload(perLayerValues)
+	core.RequireNoError(t, err)
+	perLayerInput, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "prefill initial hidden per-layer input fixture", perLayerPayload, len(perLayerValues))
+	core.RequireNoError(t, err)
+	defer perLayerInput.Close()
+
+	start := len(driver.launches)
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(
+		context.Background(), driver, cfg, tokens, 0, 1e-6, rocmKVCacheModeKQ8VQ4,
+		nil, nil, []*hipDeviceByteBuffer{perLayerInput}, nil, -1, nil, nil,
+		defaultHIPGemma4Q4EngineConfig(), initialHidden, nil,
+	)
+	core.RequireNoError(t, err)
+	defer forward.Close()
+	core.AssertEqual(t, initialHidden.Pointer(), forward.Embedding.Pointer())
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameEmbedLookup))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameVectorScale))
+}
+
+func TestHIPGemma4Q4PrefillForwardBatchBidirectionalCaps_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup()
+	tokens := []int32{22, 22}
+	cfg := hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+
+	initialValues := make([]float32, len(tokens)*layer.HiddenSize)
+	for index := range initialValues {
+		initialValues[index] = float32(index + 1)
+	}
+	initialPayload, err := hipFloat32Payload(initialValues)
+	core.RequireNoError(t, err)
+	initialHidden, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "bidir initial hidden", initialPayload, len(initialPayload)/4)
+	core.RequireNoError(t, err)
+	defer initialHidden.Close()
+	perLayerPayload, err := hipFloat32Payload(make([]float32, len(tokens)*layer.PerLayerInput.InputSize))
+	core.RequireNoError(t, err)
+	perLayerInput, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "bidir per-layer input", perLayerPayload, len(perLayerPayload)/4)
+	core.RequireNoError(t, err)
+	defer perLayerInput.Close()
+	rowCaps, err := hipUploadTokenIDs(driver, []int32{2, 2})
+	core.RequireNoError(t, err)
+	defer rowCaps.Close()
+
+	start := len(driver.launches)
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(
+		context.Background(), driver, cfg, tokens, 0, 1e-6, rocmKVCacheModeKQ8VQ4,
+		nil, nil, []*hipDeviceByteBuffer{perLayerInput}, nil, -1, nil, nil,
+		defaultHIPGemma4Q4EngineConfig(), initialHidden, rowCaps,
+	)
+	core.RequireNoError(t, err)
+	defer forward.Close()
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameAttentionHeadsBatchCapped))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameAttentionHeadsBatchCausal))
 }
 
 func TestHIPGemma4Q4PrefillForwardBatchWithPrior_Good(t *testing.T) {
@@ -2800,9 +2949,12 @@ func TestHIPGemma4Q4PrefillAttentionSharedQueryDeepUsesGQA2ChunkedKernel_Good(t 
 func testHIPGemma4Q4PrefillAttentionSharedQueryDeepUsesChunkedKernels(t *testing.T, enableGQA2 bool, expectedStage1 string) {
 	t.Helper()
 	previous := hipAttentionHeadsBatchChunkedGQA2Enabled
+	previousGQA4 := hipAttentionHeadsBatchChunkedGQA4Enabled
 	hipAttentionHeadsBatchChunkedGQA2Enabled = enableGQA2
+	hipAttentionHeadsBatchChunkedGQA4Enabled = false
 	t.Cleanup(func() {
 		hipAttentionHeadsBatchChunkedGQA2Enabled = previous
+		hipAttentionHeadsBatchChunkedGQA4Enabled = previousGQA4
 	})
 	const (
 		dim             = 512
@@ -2892,7 +3044,105 @@ func TestHIPAttentionHeadsBatchChunkedGQA2Eligible_Good(t *testing.T) {
 	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA2Eligible(4, 3), "invalid GQA topology must stay on v2")
 
 	hipAttentionHeadsBatchChunkedGQA2Enabled = false
-	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA2Eligible(16, 1), "disabled experimental route must stay on v2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA2Eligible(16, 1), "disabled route must stay on v2")
+}
+
+func TestHIPAttentionHeadsIncrementalGQA2Eligible_Good(t *testing.T) {
+	previous := hipAttentionHeadsIncrementalGQA2Enabled
+	previousBatch := hipAttentionHeadsBatchChunkedGQA2Enabled
+	hipAttentionHeadsIncrementalGQA2Enabled = true
+	hipAttentionHeadsBatchChunkedGQA2Enabled = true
+	t.Cleanup(func() {
+		hipAttentionHeadsIncrementalGQA2Enabled = previous
+		hipAttentionHeadsBatchChunkedGQA2Enabled = previousBatch
+	})
+
+	core.AssertTrue(t, hipAttentionHeadsIncrementalGQA2Eligible(4, 2), "two query heads per KV head must share the incremental scan")
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(8, 2), "wider GQA groups must stay on their existing route")
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(2, 2), "MHA must stay on its existing route")
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(4, 3), "invalid GQA topology must stay on its existing route")
+
+	hipAttentionHeadsIncrementalGQA2Enabled = false
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(4, 2), "disabled incremental GQA2 must stay on its existing route")
+	hipAttentionHeadsIncrementalGQA2Enabled = true
+	hipAttentionHeadsBatchChunkedGQA2Enabled = false
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(4, 2), "disabled shared GQA2 kernel must stay on its existing route")
+}
+
+func TestHIPAttentionHeadsBatchChunkedGQA4Eligible_Good(t *testing.T) {
+	previous := hipAttentionHeadsBatchChunkedGQA4Enabled
+	hipAttentionHeadsBatchChunkedGQA4Enabled = true
+	t.Cleanup(func() {
+		hipAttentionHeadsBatchChunkedGQA4Enabled = previous
+	})
+
+	core.AssertTrue(t, hipAttentionHeadsBatchChunkedGQA4Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks), "eight query heads sharing one KV head must group by four")
+	core.AssertTrue(t, hipAttentionHeadsBatchChunkedGQA4Eligible(16, 4, hipAttentionHeadsBatchChunkedGQA4MinChunks), "four query heads per KV head must group by four")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks-1), "short scans must stay on GQA2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(12, 4, hipAttentionHeadsBatchChunkedGQA4MinChunks), "three query heads per KV head must stay on GQA2 or v2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(4, 2, hipAttentionHeadsBatchChunkedGQA4MinChunks), "two query heads per KV head must stay on GQA2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(4, 3, hipAttentionHeadsBatchChunkedGQA4MinChunks), "invalid GQA topology must stay on v2")
+
+	hipAttentionHeadsBatchChunkedGQA4Enabled = false
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks), "disabled route must stay on GQA2 or v2")
+}
+
+func TestHIPAttentionHeadsConfiguredChunkSize_Good(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  int
+	}{
+		{value: "32", want: 32},
+		{value: "64", want: 64},
+		{value: "128", want: 128},
+		{value: "256", want: 256},
+		{value: "512", want: 512},
+	} {
+		core.AssertEqual(t, test.want, hipAttentionHeadsConfiguredChunkSize(test.value))
+	}
+}
+
+func TestHIPAttentionHeadsConfiguredChunkSize_Bad(t *testing.T) {
+	for _, value := range []string{"0", "63", "96", "513", "invalid"} {
+		core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsConfiguredChunkSize(value))
+	}
+}
+
+func TestHIPAttentionHeadsConfiguredChunkSize_Ugly(t *testing.T) {
+	core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsConfiguredChunkSize(""))
+}
+
+func TestHIPAttentionHeadsChunkSizeForRequest_Good(t *testing.T) {
+	previousExplicit := hipAttentionHeadsChunkSizeExplicit
+	previousSize := hipAttentionHeadsChunkSize
+	hipAttentionHeadsChunkSizeExplicit = false
+	hipAttentionHeadsChunkSize = hipAttentionHeadsDefaultChunkSize
+	t.Cleanup(func() {
+		hipAttentionHeadsChunkSizeExplicit = previousExplicit
+		hipAttentionHeadsChunkSize = previousSize
+	})
+	req := hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens, WindowSize: 0}
+	core.AssertEqual(t, hipAttentionHeadsDeepChunkSize, hipAttentionHeadsChunkSizeForRequest(req))
+}
+
+func TestHIPAttentionHeadsChunkSizeForRequest_Bad(t *testing.T) {
+	previousExplicit := hipAttentionHeadsChunkSizeExplicit
+	hipAttentionHeadsChunkSizeExplicit = false
+	t.Cleanup(func() { hipAttentionHeadsChunkSizeExplicit = previousExplicit })
+	core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsChunkSizeForRequest(hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens - 1}))
+	core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsChunkSizeForRequest(hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens, WindowSize: 512}))
+}
+
+func TestHIPAttentionHeadsChunkSizeForRequest_Ugly(t *testing.T) {
+	previousExplicit := hipAttentionHeadsChunkSizeExplicit
+	previousSize := hipAttentionHeadsChunkSize
+	hipAttentionHeadsChunkSizeExplicit = true
+	hipAttentionHeadsChunkSize = 32
+	t.Cleanup(func() {
+		hipAttentionHeadsChunkSizeExplicit = previousExplicit
+		hipAttentionHeadsChunkSize = previousSize
+	})
+	core.AssertEqual(t, 32, hipAttentionHeadsChunkSizeForRequest(hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens, WindowSize: 0}))
 }
 
 func hipGemma4Q4PrefillForwardTestPerLayerInputs(t *testing.T, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, label string) []*hipDeviceByteBuffer {
@@ -3816,6 +4066,118 @@ func TestHIPGemma4Q4PerLayerInputConfigScalesCached_Good(t *testing.T) {
 	core.AssertEqual(t, float32(0), cfg.ModelProjectionScale)
 }
 
+func TestHIPGemma4Q4PerLayerInputQuantizedModelProjection_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layer0, cleanup0 := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup0()
+	layer1, cleanup1 := hipGemma4Q4FixtureConfig(t, driver, 1, 4, 2, 8)
+	defer cleanup1()
+	layers, cleanupPerLayer := hipGemma4Q4GlobalPerLayerInputFixture(t, driver, []hipGemma4Q4Layer0Config{layer0, layer1})
+	defer cleanupPerLayer()
+
+	rows := layer0.HiddenSize * len(layers)
+	cols := layer0.HiddenSize
+	groupSize := layer0.GroupSize
+	uploadU32 := func(label string, count int) *hipDeviceByteBuffer {
+		payload, err := hipUint32Payload(make([]uint32, count))
+		core.RequireNoError(t, err)
+		buffer, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, label, payload, count)
+		core.RequireNoError(t, err)
+		return buffer
+	}
+	uploadU16 := func(label string, count int) *hipDeviceByteBuffer {
+		payload, err := hipUint16Payload(make([]uint16, count))
+		core.RequireNoError(t, err)
+		buffer, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, label, payload, count)
+		core.RequireNoError(t, err)
+		return buffer
+	}
+	weights := uploadU32("quantized per-layer model projection weights", rows*(cols/8))
+	defer weights.Close()
+	scales := uploadU16("quantized per-layer model projection scales", rows*(cols/groupSize))
+	defer scales.Close()
+	biases := uploadU16("quantized per-layer model projection biases", rows*(cols/groupSize))
+	defer biases.Close()
+	projection := hipMLXQ4DeviceWeightConfig{
+		WeightPointer: weights.Pointer(),
+		ScalePointer:  scales.Pointer(),
+		BiasPointer:   biases.Pointer(),
+		WeightBytes:   weights.SizeBytes(),
+		ScaleBytes:    scales.SizeBytes(),
+		BiasBytes:     biases.SizeBytes(),
+		Rows:          rows,
+		Cols:          cols,
+		GroupSize:     groupSize,
+		Bits:          4,
+	}
+	for index := range layers {
+		layers[index].PerLayerInput.ModelProjection = hipBF16DeviceWeightConfig{}
+		layers[index].PerLayerInput.ModelProjectionQ4 = projection
+		layers[index].finalizeScales()
+		core.RequireNoError(t, layers[index].validatePerLayerInput())
+	}
+
+	assertQuantizedProjectionLaunch := func(start int) {
+		t.Helper()
+		quantized := 0
+		dense := 0
+		for _, launch := range driver.launches[start:] {
+			switch launch.Name {
+			case hipKernelNameMLXQ4Proj:
+				quantized++
+			case hipKernelNameProjection:
+				dense++
+			}
+		}
+		core.AssertEqual(t, 1, quantized)
+		core.AssertEqual(t, 0, dense)
+	}
+
+	start := len(driver.launches)
+	hostSet, err := hipRunGemma4Q4PerLayerInputSet(context.Background(), driver, layers[0].PerLayerInput, 0, make([]float32, cols), 1e-6)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, len(layers), len(hostSet))
+	assertQuantizedProjectionLaunch(start)
+
+	hiddenPayload, err := hipFloat32Payload(make([]float32, cols))
+	core.RequireNoError(t, err)
+	hidden, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "quantized per-layer hidden", hiddenPayload, cols)
+	core.RequireNoError(t, err)
+	defer hidden.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+	start = len(driver.launches)
+	deviceSet, err := hipRunGemma4Q4PerLayerInputConfigDeviceSet(context.Background(), driver, layers[0].PerLayerInput, 0, nil, hidden, 1e-6, workspace)
+	core.RequireNoError(t, err)
+	defer deviceSet.Close()
+	core.AssertEqual(t, len(layers), deviceSet.LayerCount())
+	assertQuantizedProjectionLaunch(start)
+
+	tokens := []int32{0, 1}
+	hiddenBatchPayload, err := hipFloat32Payload(make([]float32, cols*len(tokens)))
+	core.RequireNoError(t, err)
+	hiddenBatch, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "quantized per-layer hidden batch", hiddenBatchPayload, cols*len(tokens))
+	core.RequireNoError(t, err)
+	defer hiddenBatch.Close()
+	start = len(driver.launches)
+	prefillSet, err := hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatchWorkspace(context.Background(), driver, hipGemma4Q4ForwardConfig{Layers: layers}, tokens, hiddenBatch, 1e-6, workspace)
+	core.RequireNoError(t, err)
+	defer prefillSet.Close()
+	core.AssertEqual(t, len(layers), prefillSet.LayerCount())
+	quantizedBatch := 0
+	denseBatch := 0
+	for _, launch := range driver.launches[start:] {
+		switch launch.Name {
+		case hipKernelNameMLXQ4ProjBatch:
+			quantizedBatch++
+		case hipKernelNameProjectionBatch:
+			denseBatch++
+		}
+	}
+	core.AssertEqual(t, 1, quantizedBatch)
+	core.AssertEqual(t, 0, denseBatch)
+}
+
 func TestHIPGemma4Q4PerLayerInputConfigDeviceSetWorkspaceScalesProjectionInPlace_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	layer0, cleanup0 := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
@@ -3964,6 +4326,18 @@ func TestHIPGemma4Q4LoadedGGUFFullAttentionInfersKEqVFromMissingV_Good(t *testin
 	core.AssertEqual(t, true, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "full_attention"))
 	core.AssertEqual(t, false, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "sliding_attention"))
 	model.tensors["blk.5.attn_v.weight"] = hipTensor{pointer: 2}
+	core.AssertEqual(t, false, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "full_attention"))
+}
+
+func TestHIPGemma4Q4LoadedSafetensorsFullAttentionInfersKEqVFromMissingV_Good(t *testing.T) {
+	const prefix = "language_model.model.layers.5"
+	model := &hipLoadedModel{tensors: map[string]hipTensor{
+		prefix + ".self_attn.k_proj.weight": {pointer: 1},
+	}}
+
+	core.AssertEqual(t, true, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "full_attention"))
+	core.AssertEqual(t, false, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "sliding_attention"))
+	model.tensors[prefix+".self_attn.v_proj.weight"] = hipTensor{pointer: 2}
 	core.AssertEqual(t, false, model.loadedGemma4Q4LayerAttentionKEqV(prefix, "full_attention"))
 }
 
@@ -4525,6 +4899,8 @@ func TestHIPGemma4Q4DecoderLayerAttentionKEqVUsesPairProjection_Good(t *testing.
 	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameMLXQ4PairProj))
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4TripleProj))
 	core.AssertEqual(t, 2, countLaunchName(launches, hipKernelNameMLXQ4Proj))
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormRoPEHeadsPair))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameRMSNormRoPEHeads))
 	core.AssertEqual(t, 1, countKVEncodeTokenLaunches(launches))
 	queryRoPE := &workspace.RMSRoPEOutputView
 	if queryRoPE.Pointer() == 0 || queryRoPE.Count() != cfg.QueryProjection.Rows {
@@ -4543,6 +4919,63 @@ func TestHIPGemma4Q4DecoderLayerAttentionKEqVUsesPairProjection_Good(t *testing.
 	if countDeviceAttentionLaunches(launches) == 0 {
 		t.Fatalf("Gemma4 q4 K=V decoder layer launched no descriptor-backed attention kernels")
 	}
+}
+
+func TestHIPGemma4Q4DecoderLayerPairsQKRoPE_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	cfg, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup()
+	cfg.LayerType = "full_attention"
+	cfg.SlidingWindow = 0
+	cfg.RoPERotaryDim = cfg.HeadDim / 2
+	cfg.PerLayerInput = hipGemma4Q4PerLayerInputConfig{}
+	input, err := hipUploadGemma4Q4Float32Input(driver, "Gemma4 q4 paired Q/K RoPE decoder input", []float32{1, 2, 3, 4, 5, 6, 7, 8})
+	core.RequireNoError(t, err)
+	defer input.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+
+	launchStart := len(driver.launches)
+	layer, err := hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(context.Background(), driver, cfg, nil, input, hipGemma4Q4DecoderLayerRequest{
+		Position:           3,
+		Epsilon:            1e-6,
+		DeviceKVAttention:  true,
+		DeviceKVMode:       rocmKVCacheModeKQ8VQ4,
+		KeepDeviceKV:       true,
+		OmitHostKV:         true,
+		OmitDebugTensors:   true,
+		ReturnDeviceHidden: true,
+		AttentionWorkspace: workspace,
+	}, true)
+	core.RequireNoError(t, err)
+	if layer.DeviceLayerValid {
+		defer layer.DeviceLayer.Close()
+	}
+	if layer.DeviceFinalHidden != nil && !layer.DeviceFinalHiddenBorrowed {
+		defer layer.DeviceFinalHidden.Close()
+	}
+	if layer.DeviceNextLayerInput != nil && !layer.DeviceNextLayerInputBorrowed {
+		defer layer.DeviceNextLayerInput.Close()
+	}
+
+	launches := driver.launches[launchStart:]
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameMLXQ4TripleProj))
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormRoPEHeadsPair))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameRMSNormRoPEHeads))
+	var pairLaunch *hipKernelLaunchConfig
+	for index := range launches {
+		if launches[index].Name == hipKernelNameRMSNormRoPEHeadsPair {
+			pairLaunch = &launches[index]
+			break
+		}
+	}
+	if pairLaunch == nil {
+		t.Fatal("Gemma4 q4 decoder layer launched no paired Q/K RMSNorm RoPE kernel")
+	}
+	core.AssertEqual(t, uint32(cfg.QueryHeads+firstPositiveInt(cfg.KeyHeads, 1)), pairLaunch.GridX)
+	core.AssertEqual(t, uint32(cfg.HeadDim), binary.LittleEndian.Uint32(pairLaunch.Args[56:]))
+	core.AssertEqual(t, uint32(cfg.HeadDim), binary.LittleEndian.Uint32(pairLaunch.Args[124:]))
+	core.AssertEqual(t, uint32(cfg.RoPERotaryDim), binary.LittleEndian.Uint32(pairLaunch.Args[128:]))
 }
 
 func TestHIPGemma4Q4DecoderLayerOmitHostKVRejectsHostSharedFallback_Good(t *testing.T) {
@@ -6524,6 +6957,81 @@ func TestHIPAttentionHeadsBatchChunkedEligibilityReason_Good(t *testing.T) {
 	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityTokenCountMismatch, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, workspace))
 }
 
+func TestHIPAttentionHeadsBatchChunkedEligibilityReason_VisibleCaps_Good(t *testing.T) {
+	const (
+		tokenCount = 672
+		queryCount = 8
+	)
+	cache := &rocmDeviceKVCache{
+		mode:       rocmKVCacheModeKQ8VQ4,
+		blockSize:  1,
+		pages:      []rocmDeviceKVPage{{tokenStart: 0, tokenCount: tokenCount, keyWidth: 4096, valueWidth: 4096}},
+		tokenCount: tokenCount,
+	}
+	caps := &hipDeviceTokenBuffer{pointer: 1, count: queryCount, sizeBytes: queryCount * 4}
+	req := hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:         cache,
+		DescriptorTable:  &rocmDeviceKVDescriptorTable{},
+		VisibleTokenCaps: caps,
+		Dim:              512,
+		TokenCount:       tokenCount,
+		HeadCount:        16,
+		KeyHeads:         8,
+		QueryCount:       queryCount,
+		QueryStartToken:  tokenCount - 256,
+	}
+
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityEligible, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+}
+
+func TestHIPAttentionHeadsBatchChunkedEligibilityReason_SlidingWindowCrossover_Good(t *testing.T) {
+	cache := &rocmDeviceKVCache{
+		mode:       rocmKVCacheModeKQ8VQ4,
+		blockSize:  1,
+		pages:      []rocmDeviceKVPage{{tokenStart: 0, tokenCount: 129, keyWidth: 256, valueWidth: 256}},
+		tokenCount: 129,
+	}
+	req := hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        cache,
+		DescriptorTable: &rocmDeviceKVDescriptorTable{},
+		Dim:             256,
+		TokenCount:      129,
+		HeadCount:       8,
+		KeyHeads:        1,
+		QueryCount:      1,
+		QueryStartToken: 128,
+		WindowSize:      512,
+	}
+
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityEligible, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+	req.TokenCount = 128
+	req.QueryStartToken = 127
+	cache.tokenCount = 128
+	cache.pages[0].tokenCount = 128
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityBelowTokenThreshold, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+}
+
+func TestHIPAttentionHeadsBatchChunkedEligibilityReason_HeadDim512Crossover_Good(t *testing.T) {
+	cache := &rocmDeviceKVCache{
+		mode:       rocmKVCacheModeKQ8VQ4,
+		blockSize:  1,
+		pages:      []rocmDeviceKVPage{{tokenStart: 0, tokenCount: 129, keyWidth: 512, valueWidth: 512}},
+		tokenCount: 129,
+	}
+	req := hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        cache,
+		DescriptorTable: &rocmDeviceKVDescriptorTable{},
+		Dim:             512,
+		TokenCount:      129,
+		HeadCount:       8,
+		KeyHeads:        1,
+		QueryCount:      1,
+		QueryStartToken: 128,
+	}
+
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityEligible, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+}
+
 func BenchmarkHIPDeviceByteBufferPool_ReusedSize(b *testing.B) {
 	driver := &fakeHIPDriver{available: true}
 	const sizeBytes uint64 = 4096
@@ -7081,8 +7589,8 @@ func benchmarkHIPAttentionHeadsChunkedLaunchArgs() hipAttentionHeadsChunkedLaunc
 		dim        = 256
 		tokenCount = 4096
 		headCount  = 8
-		chunkSize  = hipAttentionHeadsChunkSize
 	)
+	chunkSize := hipAttentionHeadsChunkSize
 	chunkCount := (tokenCount + chunkSize - 1) / chunkSize
 	queryElements := dim * headCount
 	return hipAttentionHeadsChunkedLaunchArgs{
@@ -7111,8 +7619,8 @@ func benchmarkHIPAttentionHeadsBatchChunkedLaunchArgs() hipAttentionHeadsBatchCh
 		tokenCount = 4096
 		headCount  = 8
 		queryCount = 16
-		chunkSize  = hipAttentionHeadsChunkSize
 	)
+	chunkSize := hipAttentionHeadsChunkSize
 	chunkCount := (tokenCount + chunkSize - 1) / chunkSize
 	queryElements := dim * headCount * queryCount
 	return hipAttentionHeadsBatchChunkedLaunchArgs{

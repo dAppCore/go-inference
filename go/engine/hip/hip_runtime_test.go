@@ -16,6 +16,39 @@ import (
 	"dappco.re/go/inference"
 )
 
+func TestHIPRuntime_ApplyChatTemplateUsesQwenChatML_Good(t *testing.T) {
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "qwen3_6"}}
+	messages := []inference.Message{
+		{Role: "system", Content: "Be terse."},
+		{Role: "user", Content: "Hi"},
+	}
+
+	prompt, err := model.ApplyChatTemplate(messages)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t,
+		"<|im_start|>system\nBe terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+		prompt,
+	)
+}
+
+func TestHIPRuntime_ApplyChatTemplateHonorsQwenThinking_Bad(t *testing.T) {
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "qwen3_6"}}
+	enabled := true
+	prompt, err := model.applyChatTemplateWithGenerateConfig(
+		[]inference.Message{{Role: "user", Content: "Hi"}},
+		inference.GenerateConfig{EnableThinking: &enabled},
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n", prompt)
+}
+
+func TestHIPRuntime_ApplyChatTemplateKeepsUnknownFallback_Ugly(t *testing.T) {
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "unknown"}}
+	prompt, err := model.ApplyChatTemplate([]inference.Message{{Role: "user", Content: "Hi"}})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "user: Hi\n", prompt)
+}
+
 func TestHIPRuntime_LoadModelAllocatesAndCopiesGGUFTensors_Good(t *testing.T) {
 	variant := "Good"
 	core.AssertNotEmpty(t, variant)
@@ -64,12 +97,72 @@ func TestHIPGemma4HostResidentExpertTensor_Good(t *testing.T) {
 	}
 	expert := nativeTensorInfo{Name: "blk.0.ffn_gate_up_exps.weight", Dimensions: []uint64{2816, 1408, 128}}
 	core.AssertEqual(t, true, hipGemma4HostResidentExpertTensor(moe, expert))
-	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{Name: "blk.0.ffn_down_exps.scale", Dimensions: []uint64{128}}))
-	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{Name: "blk.0.ffn_gate.weight", Dimensions: []uint64{2816, 2112}}))
 	moe.Gemma4TextConfig.EnableMoEBlock = false
 	core.AssertEqual(t, true, hipGemma4HostResidentExpertTensor(moe, expert))
+
+	for _, architecture := range []string{"gemma4", "diffusion_gemma"} {
+		moe.ModelInfo.Architecture = architecture
+		for _, name := range []string{
+			"language_model.model.layers.0.experts.gate_up_proj.weight",
+			"language_model.model.layers.0.experts.gate_up_proj.scales",
+			"language_model.model.layers.0.experts.gate_up_proj.biases",
+			"language_model.model.layers.0.experts.down_proj.weight",
+			"language_model.model.layers.0.experts.down_proj.scales",
+			"language_model.model.layers.0.experts.down_proj.biases",
+		} {
+			core.AssertEqual(t, true, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+				Name:       name,
+				Dimensions: []uint64{2816, 1408, 128},
+			}))
+		}
+	}
+}
+
+func TestHIPGemma4HostResidentExpertTensor_Bad(t *testing.T) {
+	moe := nativeLoadConfig{ModelInfo: inference.ModelInfo{Architecture: "gemma4"}}
+	for _, name := range []string{
+		"language_model.model.layers.0.experts.gate_up_proj.scale",
+		"language_model.model.layers.0.experts.gate_up_proj.weight.extra",
+		"language_model.model.layers.0.experts.gate_up_proj.weightish",
+		"language_model.model.layers.0.mlp.gate_up_proj.weight",
+		"language_model.model.layers.0.experts.down_proj.bias",
+	} {
+		core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+			Name:       name,
+			Dimensions: []uint64{2816, 1408, 128},
+		}))
+	}
 	moe.ModelInfo.Architecture = "qwen3_moe"
-	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, expert))
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "language_model.model.layers.0.experts.gate_up_proj.weight",
+		Dimensions: []uint64{2816, 1408, 128},
+	}))
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "blk.0.ffn_down_exps.scale",
+		Dimensions: []uint64{128},
+	}))
+}
+
+func TestHIPGemma4HostResidentExpertTensor_Ugly(t *testing.T) {
+	moe := nativeLoadConfig{ModelInfo: inference.ModelInfo{Architecture: "diffusion_gemma"}}
+	for _, dimensions := range [][]uint64{
+		nil,
+		{2816, 1408},
+		{2816, 1408, 128, 1},
+	} {
+		core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+			Name:       "language_model.model.layers.0.experts.gate_up_proj.weight",
+			Dimensions: dimensions,
+		}))
+	}
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "",
+		Dimensions: []uint64{2816, 1408, 128},
+	}))
+	core.AssertEqual(t, false, hipGemma4HostResidentExpertTensor(moe, nativeTensorInfo{
+		Name:       "blk.0.ffn_gate.weight",
+		Dimensions: []uint64{2816, 2112},
+	}))
 }
 
 func TestHIPRuntime_LoadModelCarriesDeviceKVMode_Good(t *testing.T) {
@@ -90,6 +183,16 @@ func TestHIPRuntime_LoadModelCarriesDeviceKVMode_Good(t *testing.T) {
 	if loaded.gemma4Q4EngineConfig().DeviceKVMode != rocmKVCacheModeQ8 {
 		t.Fatalf("loaded Gemma4 q4 engine config = %+v, want q8 device KV mode", loaded.gemma4Q4EngineConfig())
 	}
+}
+
+func TestHIPRuntime_Gemma4EngineConfigCarriesBidirectionalSpans_Good(t *testing.T) {
+	loaded := &hipLoadedModel{gemma4Q4Config: hipGemma4Q4EngineConfig{
+		DeviceKVMode:            rocmKVCacheModeQ8,
+		BidirectionalSpanTokens: [2]int32{22, 23},
+	}}
+	cfg := loaded.gemma4Q4EngineConfig()
+	core.AssertEqual(t, rocmKVCacheModeQ8, cfg.DeviceKVMode)
+	core.AssertEqual(t, [2]int32{22, 23}, cfg.BidirectionalSpanTokens)
 }
 
 func TestHIPRuntime_LoadModelClonesSequenceMixerPlan_Good(t *testing.T) {
@@ -2557,6 +2660,23 @@ func TestHIPRuntime_Validate_GoodProjectionShapes(t *testing.T) {
 	core.AssertNoError(t, err)
 }
 
+func TestHIPRuntime_Validate_GoodMLXAffinePerModuleBits(t *testing.T) {
+	const (
+		vocab      = 4
+		hidden     = 2816
+		packedCols = hidden * 8 / 32
+	)
+	err := validateHIPLoadConfig(nativeLoadConfig{
+		ModelInfo: inference.ModelInfo{Architecture: "diffusion_gemma", VocabSize: vocab, HiddenSize: hidden, QuantBits: 4, QuantGroup: 64},
+		Tensors: []nativeTensorInfo{
+			{Name: "language_model.model.embed_tokens.weight", Type: 26, TypeName: "U32", Dimensions: []uint64{vocab, packedCols}, ByteSize: vocab * packedCols * 4},
+			{Name: "language_model.lm_head.weight", Type: 26, TypeName: "U32", Dimensions: []uint64{vocab, packedCols}, ByteSize: vocab * packedCols * 4},
+		},
+	})
+
+	core.AssertNoError(t, err)
+}
+
 func TestHIPRuntime_Validate_BadProjectionRank(t *testing.T) {
 	err := validateHIPLoadConfig(nativeLoadConfig{
 		ModelInfo: inference.ModelInfo{Architecture: "qwen3", VocabSize: 4, HiddenSize: 2},
@@ -2734,6 +2854,9 @@ type fakeHIPDriver struct {
 	skipLaunchRecording      bool
 	skipDriverRecording      bool
 	releaseLaunchPackets     bool
+	maxLiveBytes             uint64
+	liveBytes                uint64
+	allocationBytes          map[nativeDevicePointer]uint64
 }
 
 func (driver *fakeHIPDriver) Available() bool { return driver.available }
@@ -2744,6 +2867,9 @@ func (driver *fakeHIPDriver) Malloc(size uint64) (nativeDevicePointer, error) {
 	if !driver.skipDriverRecording {
 		driver.allocations = append(driver.allocations, size)
 	}
+	if driver.maxLiveBytes > 0 && driver.liveBytes+size > driver.maxLiveBytes {
+		return 0, core.E("rocm.hip.hipMalloc", "HIP returned 2", nil)
+	}
 	if driver.nextPointer == 0 {
 		driver.nextPointer = 0x1000
 	}
@@ -2752,12 +2878,25 @@ func (driver *fakeHIPDriver) Malloc(size uint64) (nativeDevicePointer, error) {
 	if driver.memory == nil {
 		driver.memory = map[nativeDevicePointer][]byte{}
 	}
+	if driver.allocationBytes == nil {
+		driver.allocationBytes = map[nativeDevicePointer]uint64{}
+	}
 	driver.memory[pointer] = make([]byte, int(size))
+	driver.allocationBytes[pointer] = size
+	driver.liveBytes += size
 	return pointer, nil
 }
 func (driver *fakeHIPDriver) Free(pointer nativeDevicePointer) error {
 	if !driver.skipDriverRecording {
 		driver.frees = append(driver.frees, pointer)
+	}
+	if size := driver.allocationBytes[pointer]; size > 0 {
+		if driver.liveBytes >= size {
+			driver.liveBytes -= size
+		} else {
+			driver.liveBytes = 0
+		}
+		delete(driver.allocationBytes, pointer)
 	}
 	delete(driver.memory, pointer)
 	return nil
@@ -2870,6 +3009,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchMLXQ4Projection(config.Args)
 	case hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360:
 		return driver.launchMLXQ4Projection(config.Args)
+	case hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16:
+		return driver.launchMLXQ4Projection(config.Args)
 	case hipKernelNameMLXQ4ProjCols256:
 		return driver.launchMLXQ4Projection(config.Args)
 	case hipKernelNameMLXQ4ProjQ6G16Row16:
@@ -2922,6 +3063,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
 	case hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8:
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
+	case hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8:
+		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
 	case hipKernelNameMLXQ4GELUTanhMLPQ4G32Cols1536Persistent:
 		return driver.launchMLXQ4GELUTanhMLPPersistent(config.Args)
 	case hipKernelNameMLXQ4GELUTanhMulQ6Cols1536:
@@ -2930,7 +3073,7 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
 	case hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return driver.launchMLXQ4GELUTanhMultiply(config.Args)
-	case hipKernelNameMLXQ4GELUTanhMulBatch:
+	case hipKernelNameMLXQ4GELUTanhMulBatch, hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32:
 		return driver.launchMLXQ4GELUTanhMultiplyBatch(config.Args)
 	case hipKernelNameMLXQ4GELUTanhProj:
 		return driver.launchMLXQ4GELUTanhProjection(config.Args)
@@ -2972,6 +3115,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchAttentionHeads(config.Args)
 	case hipKernelNameAttentionHeadsBatchCausal:
 		return driver.launchAttentionHeadsBatchCausal(config.Args)
+	case hipKernelNameAttentionHeadsBatchCapped:
+		return driver.launchAttentionHeadsBatchCausal(config.Args)
 	case hipKernelNameAttentionHeadsLaneBatch:
 		return driver.launchAttentionHeadsLaneBatch(config.Args)
 	case hipKernelNameAttentionHeadsBatchCausalQueryRMSRoPE:
@@ -2979,6 +3124,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 	case hipKernelNameAttentionHeadsBatchChunkedStage1:
 		return driver.launchAttentionHeadsBatchChunked(config.Args, false)
 	case hipKernelNameAttentionHeadsBatchChunkedStage1GQA2:
+		return driver.launchAttentionHeadsBatchChunked(config.Args, false)
+	case hipKernelNameAttentionHeadsBatchChunkedStage1GQA4:
 		return driver.launchAttentionHeadsBatchChunked(config.Args, false)
 	case hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return driver.launchAttentionHeadsBatchChunked(config.Args, true)
@@ -2998,6 +3145,12 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchMoERouter(config.Args)
 	case hipKernelNameMoELazy:
 		return driver.launchMoELazyExperts(config.Args)
+	case hipKernelNameMoEBatchGatherRows:
+		return driver.launchMoEBatchRouteRows(config.Args, true)
+	case hipKernelNameMoEBatchScatterRoutes:
+		return driver.launchMoEBatchRouteRows(config.Args, false)
+	case hipKernelNameMoEBatchReduceRoutes:
+		return driver.launchMoEBatchReduceRoutes(config.Args)
 	case hipKernelNameJANGTQ:
 		return driver.launchJANGTQProjection(config.Args)
 	case hipKernelNameCodebook:
@@ -3286,6 +3439,100 @@ func (driver *fakeHIPDriver) launchMoERouter(args []byte) error {
 			return core.E("rocm.hip.FakeLaunch", "MoE router status buffer is missing", nil)
 		}
 		binary.LittleEndian.PutUint32(status[offset:], hipMoERouterLaunchStatusOK)
+	}
+	return nil
+}
+
+func (driver *fakeHIPDriver) launchMoEBatchRouteRows(args []byte, gather bool) error {
+	if len(args) != hipMoEBatchRouteRowsLaunchArgsBytes ||
+		binary.LittleEndian.Uint32(args[0:]) != hipMoEBatchRouteRowsLaunchArgsVersion ||
+		binary.LittleEndian.Uint32(args[4:]) != uint32(hipMoEBatchRouteRowsLaunchArgsBytes) {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route rows launch header mismatch", nil)
+	}
+	inputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[8:]))
+	metadataPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[16:]))
+	outputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[24:]))
+	routeCount := int(binary.LittleEndian.Uint32(args[32:]))
+	rowWidth := int(binary.LittleEndian.Uint32(args[36:]))
+	inputRows := int(binary.LittleEndian.Uint32(args[40:]))
+	outputRows := int(binary.LittleEndian.Uint32(args[44:]))
+	inputBytes := int(binary.LittleEndian.Uint64(args[48:]))
+	metadataBytes := int(binary.LittleEndian.Uint64(args[56:]))
+	outputBytes := int(binary.LittleEndian.Uint64(args[64:]))
+	if routeCount <= 0 || rowWidth <= 0 || inputRows <= 0 || outputRows <= 0 ||
+		inputBytes != inputRows*rowWidth*4 || metadataBytes != routeCount*hipMoEBatchRouteMetadataBytes || outputBytes != outputRows*rowWidth*4 {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route rows shape metadata mismatch", nil)
+	}
+	input, inputOffset, ok := driver.memoryForPointer(inputPointer, inputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route input buffer is missing", nil)
+	}
+	metadata, metadataOffset, ok := driver.memoryForPointer(metadataPointer, metadataBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route metadata buffer is missing", nil)
+	}
+	output, outputOffset, ok := driver.memoryForPointer(outputPointer, outputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch route output buffer is missing", nil)
+	}
+	for route := 0; route < routeCount; route++ {
+		metadataBase := metadataOffset + route*hipMoEBatchRouteMetadataBytes
+		row := int(binary.LittleEndian.Uint32(metadata[metadataBase:]))
+		pair := int(binary.LittleEndian.Uint32(metadata[metadataBase+4:]))
+		weight := math.Float32frombits(binary.LittleEndian.Uint32(metadata[metadataBase+8:]))
+		if (gather && (row < 0 || row >= inputRows)) || (!gather && (pair < 0 || pair >= outputRows)) || math.IsNaN(float64(weight)) || math.IsInf(float64(weight), 0) {
+			return core.E("rocm.hip.FakeLaunch", "MoE batch route metadata is invalid", nil)
+		}
+		for column := 0; column < rowWidth; column++ {
+			if gather {
+				source := inputOffset + (row*rowWidth+column)*4
+				target := outputOffset + (route*rowWidth+column)*4
+				copy(output[target:target+4], input[source:source+4])
+				continue
+			}
+			source := inputOffset + (route*rowWidth+column)*4
+			target := outputOffset + (pair*rowWidth+column)*4
+			value := math.Float32frombits(binary.LittleEndian.Uint32(input[source:])) * weight
+			binary.LittleEndian.PutUint32(output[target:], math.Float32bits(value))
+		}
+	}
+	return nil
+}
+
+func (driver *fakeHIPDriver) launchMoEBatchReduceRoutes(args []byte) error {
+	if len(args) != hipMoEBatchReduceLaunchArgsBytes ||
+		binary.LittleEndian.Uint32(args[0:]) != hipMoEBatchReduceLaunchArgsVersion ||
+		binary.LittleEndian.Uint32(args[4:]) != uint32(hipMoEBatchReduceLaunchArgsBytes) {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce launch header mismatch", nil)
+	}
+	inputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[8:]))
+	outputPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[16:]))
+	rows := int(binary.LittleEndian.Uint32(args[24:]))
+	topK := int(binary.LittleEndian.Uint32(args[28:]))
+	rowWidth := int(binary.LittleEndian.Uint32(args[32:]))
+	inputBytes := int(binary.LittleEndian.Uint64(args[40:]))
+	outputBytes := int(binary.LittleEndian.Uint64(args[48:]))
+	if rows <= 0 || topK <= 0 || rowWidth <= 0 || inputBytes != rows*topK*rowWidth*4 || outputBytes != rows*rowWidth*4 {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce shape metadata mismatch", nil)
+	}
+	input, inputOffset, ok := driver.memoryForPointer(inputPointer, inputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce input buffer is missing", nil)
+	}
+	output, outputOffset, ok := driver.memoryForPointer(outputPointer, outputBytes)
+	if !ok {
+		return core.E("rocm.hip.FakeLaunch", "MoE batch reduce output buffer is missing", nil)
+	}
+	for row := 0; row < rows; row++ {
+		for column := 0; column < rowWidth; column++ {
+			sum := float32(0)
+			for rank := 0; rank < topK; rank++ {
+				source := inputOffset + ((row*topK+rank)*rowWidth+column)*4
+				sum += math.Float32frombits(binary.LittleEndian.Uint32(input[source:]))
+			}
+			target := outputOffset + (row*rowWidth+column)*4
+			binary.LittleEndian.PutUint32(output[target:], math.Float32bits(sum))
+		}
 	}
 	return nil
 }
@@ -6900,8 +7147,11 @@ func (driver *fakeHIPDriver) launchSoftcapGreedySample(args []byte) error {
 	logitsBytes := int(binary.LittleEndian.Uint32(args[28:]))
 	outputBytes := int(binary.LittleEndian.Uint32(args[32:]))
 	softcap := math.Float32frombits(binary.LittleEndian.Uint32(args[36:]))
+	suppressPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[40:]))
+	suppressCount := int(binary.LittleEndian.Uint32(args[48:]))
 	if count <= 0 || logitsBytes != count*4 || outputBytes != hipGreedyResultBytes ||
-		softcap < 0 || math.IsNaN(float64(softcap)) || math.IsInf(float64(softcap), 0) {
+		softcap < 0 || math.IsNaN(float64(softcap)) || math.IsInf(float64(softcap), 0) ||
+		(suppressCount > 0 && (suppressPointer == 0 || suppressCount >= count)) {
 		return core.E("rocm.hip.FakeLaunch", "softcap greedy shape metadata mismatch", nil)
 	}
 	logitsData, logitsOffset, ok := driver.memoryForPointer(logitsPointer, logitsBytes)
@@ -6916,7 +7166,18 @@ func (driver *fakeHIPDriver) launchSoftcapGreedySample(args []byte) error {
 	if err != nil {
 		return err
 	}
-	index, score, err := hipReferenceGreedySample(logits)
+	var suppressTokens []int32
+	if suppressCount > 0 {
+		suppressData, suppressOffset, ok := driver.memoryForPointer(suppressPointer, suppressCount*4)
+		if !ok {
+			return core.E("rocm.hip.FakeLaunch", "softcap greedy suppress buffer is missing", nil)
+		}
+		suppressTokens = make([]int32, suppressCount)
+		for index := range suppressTokens {
+			suppressTokens[index] = int32(binary.LittleEndian.Uint32(suppressData[suppressOffset+index*4:]))
+		}
+	}
+	index, score, err := hipReferenceGreedySampleSuppress(logits, suppressTokens)
 	if err != nil {
 		return err
 	}
@@ -7207,12 +7468,17 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchCausal(args []byte) error 
 	descriptorBytes := int(binary.LittleEndian.Uint64(args[104:]))
 	windowSize := int(binary.LittleEndian.Uint32(args[120:]))
 	keyHeads := int(binary.LittleEndian.Uint32(args[124:]))
+	visibleCapPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[128:]))
+	visibleCapBytes := int(binary.LittleEndian.Uint64(args[136:]))
 	if dim <= 0 || tokenCount <= 0 || headCount <= 0 || queryCount <= 0 ||
 		keyHeads <= 0 || keyHeads > headCount || headCount%keyHeads != 0 ||
 		queryStartToken < 0 || windowSize < 0 || uint64(queryStartToken)+uint64(queryCount) > uint64(tokenCount) ||
 		queryBytes != queryCount*headCount*dim*4 ||
 		outputBytes != queryCount*headCount*dim*4 {
 		return core.E("rocm.hip.FakeLaunch", "attention heads batch causal shape metadata mismatch", nil)
+	}
+	if (visibleCapPointer == 0) != (visibleCapBytes == 0) || (visibleCapPointer != 0 && visibleCapBytes != queryCount*4) {
+		return core.E("rocm.hip.FakeLaunch", "attention heads batch visible cap metadata mismatch", nil)
 	}
 	useSharedWeights := weightPointer == 0
 	if useSharedWeights {
@@ -7244,7 +7510,18 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchCausal(args []byte) error 
 	}
 	var keyFlat []float32
 	var valueFlat []float32
+	var visibleCaps []int32
 	var err error
+	if visibleCapPointer != 0 {
+		capData, capOffset, ok := driver.memoryForPointer(visibleCapPointer, visibleCapBytes)
+		if !ok {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch visible cap buffer is missing", nil)
+		}
+		visibleCaps = make([]int32, queryCount)
+		for index := range visibleCaps {
+			visibleCaps[index] = int32(binary.LittleEndian.Uint32(capData[capOffset+index*4:]))
+		}
+	}
 	switch kvSource {
 	case hipAttentionKVSourceContiguous:
 		if keyBytes != dim*tokenCount*keyHeads*4 || valueBytes != dim*tokenCount*keyHeads*4 {
@@ -7279,6 +7556,12 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchCausal(args []byte) error 
 	}
 	for queryIndex := 0; queryIndex < queryCount; queryIndex++ {
 		visibleTokens := queryStartToken + queryIndex + 1
+		if len(visibleCaps) > 0 {
+			visibleTokens = int(visibleCaps[queryIndex])
+		}
+		if visibleTokens <= 0 || visibleTokens > tokenCount {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch visible cap is out of range", nil)
+		}
 		windowStart := 0
 		if windowSize > 0 && visibleTokens > windowSize {
 			windowStart = visibleTokens - windowSize
@@ -7693,7 +7976,12 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchChunked(args []byte, write
 	windowSize := int(binary.LittleEndian.Uint32(args[104:]))
 	chunkStartToken := int(binary.LittleEndian.Uint32(args[108:]))
 	keyHeads := int(binary.LittleEndian.Uint32(args[112:]))
+	visibleCapBytes := int(binary.LittleEndian.Uint32(args[116:]))
+	visibleCapPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[120:]))
 	activeEnd := queryStartToken + queryCount
+	if visibleCapPointer != 0 {
+		activeEnd = tokenCount
+	}
 	if activeEnd > tokenCount {
 		activeEnd = tokenCount
 	}
@@ -7707,7 +7995,9 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchChunked(args []byte, write
 		queryBytes != queryCount*headCount*dim*4 ||
 		partialBytes != queryCount*headCount*chunkCount*dim*4 ||
 		statsBytes != queryCount*headCount*chunkCount*2*4 ||
-		outputBytes != queryCount*headCount*dim*4 {
+		outputBytes != queryCount*headCount*dim*4 ||
+		(visibleCapPointer == 0 && visibleCapBytes != 0) ||
+		(visibleCapPointer != 0 && visibleCapBytes != queryCount*4) {
 		return core.E("rocm.hip.FakeLaunch", "attention heads batch chunked shape metadata mismatch", nil)
 	}
 	if scale < 0 || math.IsNaN(float64(scale)) || math.IsInf(float64(scale), 0) {
@@ -7730,12 +8020,29 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchChunked(args []byte, write
 	if !writeOutput {
 		return nil
 	}
+	var visibleCaps []int32
+	if visibleCapPointer != 0 {
+		visibleCapData, visibleCapOffset, ok := driver.memoryForPointer(visibleCapPointer, visibleCapBytes)
+		if !ok {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch chunked visible-token cap buffer is missing", nil)
+		}
+		visibleCaps = make([]int32, queryCount)
+		for index := range visibleCaps {
+			visibleCaps[index] = int32(binary.LittleEndian.Uint32(visibleCapData[visibleCapOffset+index*4:]))
+		}
+	}
 	keyFlat, valueFlat, err := driver.readDeviceKVDescriptorForAttention(descriptorPointer, descriptorBytes, tokenCount, keyHeads*dim)
 	if err != nil {
 		return err
 	}
 	for queryIndex := 0; queryIndex < queryCount; queryIndex++ {
 		visibleTokens := queryStartToken + queryIndex + 1
+		if visibleCaps != nil {
+			visibleTokens = int(visibleCaps[queryIndex])
+		}
+		if visibleTokens <= 0 || visibleTokens > tokenCount {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch chunked visible-token cap is invalid", nil)
+		}
 		windowStart := 0
 		if windowSize > 0 && visibleTokens > windowSize {
 			windowStart = visibleTokens - windowSize

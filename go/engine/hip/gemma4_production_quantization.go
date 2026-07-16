@@ -15,8 +15,8 @@ type ProductionQuantizationPackSupport = modelgemma4.ProductionQuantizationPackS
 // DefaultProductionQuantizationPackSupport returns every Gemma 4 pack type ROCm
 // recognises for product selection, benchmark selection, or R&D validation.
 // q6/q8/q4 remain the app-facing E2B ladder; E4B and 12B entries are explicit
-// larger local targets, while 26B-A4B and 31B stay metadata/status-only on the
-// pinned card.
+// larger local targets. The 26B-A4B Q4 host-offload lane is linked; its wider
+// quantizations and all 31B packs remain metadata/status-only on the pinned card.
 func DefaultProductionQuantizationPackSupport() []ProductionQuantizationPackSupport {
 	return modelgemma4.DefaultProductionQuantizationPackSupport()
 }
