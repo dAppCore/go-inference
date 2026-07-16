@@ -93,6 +93,12 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 	if draftBlock <= 0 {
 		draftBlock = 5
 	}
+	// Family dispatch: a composed/hybrid TARGET (Qwen 3.5/3.6 — gated-delta recurrent state, no
+	// shareable KV streams) cannot be an ArchSession, so its pairing binds through the composed arm.
+	// The route stays ONE: same loader shape, same TextModel surfaces, different physics underneath.
+	if spec, ok := model.LookupArch(probeModelType(targetPath)); ok && spec.Composed != nil {
+		return loadComposedSpeculativePair(targetPath, draftPath, draftBlock, opts...)
+	}
 	target, err := LoadDir(targetPath, maxLen)
 	if err != nil {
 		return nil, core.E("native.LoadSpeculativePair", "load target checkpoint", err)

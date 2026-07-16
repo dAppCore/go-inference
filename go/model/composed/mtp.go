@@ -292,18 +292,35 @@ type SpeculativeMetrics struct {
 }
 
 // GenerateSpeculative greedily decodes up to maxNew tokens from prompt using the MTP head to propose and
-// the base to verify. The emitted sequence is byte-identical to ComposedSession.Generate(prompt, maxNew,
-// eosID) on the same base — every committed token is the base's own greedy token (an accepted draft equals
-// it; a rejected draft is replaced by it; a fully-accepted block adds the base's next greedy token as the
-// bonus), so speculation changes only which tokens the drafter got RIGHT, never the output. draftBlock ≤ 0
-// falls back to the pair's default (the checkpoint's trained block_size when declared).
+// the base to verify, collecting the emitted tokens. See GenerateSpeculativeEach for the contract; this
+// wrapper exists for callers (and the fixture receipts) that want the whole sequence.
 func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, draftBlock int) ([]int32, SpeculativeMetrics, error) {
+	out := make([]int32, 0, max(maxNew, 0))
+	m, err := p.GenerateSpeculativeEach(prompt, maxNew, eosID, draftBlock, func(id int32) bool {
+		out = append(out, id)
+		return true
+	})
+	return out, m, err
+}
+
+// GenerateSpeculativeEach greedily decodes up to maxNew tokens from prompt using the MTP head to propose
+// and the base to verify, yielding each committed token as it commits (the serve path's streaming seam —
+// yield returning false stops generation, exactly like maxNew). The emitted sequence is byte-identical to
+// ComposedSession.Generate(prompt, maxNew, eosID) on the same base — every committed token is the base's
+// own greedy token (an accepted draft equals it; a rejected draft is replaced by it; a fully-accepted
+// block adds the base's next greedy token as the bonus), so speculation changes only which tokens the
+// drafter got RIGHT, never the output. draftBlock ≤ 0 falls back to the pair's default (the checkpoint's
+// trained block_size when declared).
+func (p *SpeculativePair) GenerateSpeculativeEach(prompt []int32, maxNew, eosID, draftBlock int, yield func(int32) bool) (SpeculativeMetrics, error) {
 	var metrics SpeculativeMetrics
 	if p == nil || p.Base == nil || p.drafter == nil {
-		return nil, metrics, core.NewError("composed.mtp: GenerateSpeculative requires a validated pair")
+		return metrics, core.NewError("composed.mtp: GenerateSpeculative requires a validated pair")
 	}
 	if len(prompt) == 0 || maxNew <= 0 {
-		return nil, metrics, core.NewError("composed.mtp: GenerateSpeculative empty prompt or maxNew<=0")
+		return metrics, core.NewError("composed.mtp: GenerateSpeculative empty prompt or maxNew<=0")
+	}
+	if yield == nil {
+		return metrics, core.NewError("composed.mtp: GenerateSpeculativeEach requires a yield")
 	}
 	if draftBlock <= 0 {
 		draftBlock = p.DefaultDraftBlock
@@ -316,10 +333,10 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 	sess := NewSession(base)
 	hidden, err := sess.forward(prompt)
 	if err != nil {
-		return nil, metrics, err
+		return metrics, err
 	}
 	if err := p.drafter.reset(prompt, hidden); err != nil {
-		return nil, metrics, err
+		return metrics, err
 	}
 	// boundary is the base hidden at the live decode edge — the hidden that PRODUCES the next greedy
 	// token. It is owned here (copied out of the forward's buffer) because the drafter consumes it
@@ -327,9 +344,9 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 	boundary := append([]float32(nil), hidden[(len(prompt)-1)*D:]...)
 	g := argmaxF32(sess.headLogits(boundary)) // the base's canonical next token at this boundary
 	if p.BlockVerify {
-		return p.generateBlockVerify(sess, boundary, g, maxNew, eosID, draftBlock)
+		return p.generateBlockVerify(sess, boundary, g, maxNew, eosID, draftBlock, yield)
 	}
-	out := make([]int32, 0, maxNew)
+	emitted := 0
 	// specctl adapts the draft length to recent acceptance (cold-start optimistic at Max), the same policy
 	// the metal MTP loop (mtp_draftlen.go) runs — reused, not re-rolled.
 	ctrl := specctl.New(specctl.Controller{Min: 1, Max: draftBlock, Window: 8})
@@ -337,10 +354,13 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 	// commit emits id (the base's canonical greedy at the current boundary), feeds the drafter the
 	// TRAINED pair — id with the boundary hidden that PRODUCED it — then advances the base one
 	// ordinary decode forward to the new boundary. It reports whether generation must stop (maxNew
-	// reached or eos); on stop the base is not advanced.
+	// reached, eos, or the consumer declining); on stop the base is not advanced.
 	commit := func(id int32) (bool, error) {
-		out = append(out, id)
-		if len(out) >= maxNew {
+		emitted++
+		if !yield(id) {
+			return true, nil
+		}
+		if emitted >= maxNew {
 			return true, nil
 		}
 		if eosID >= 0 && int(id) == eosID {
@@ -358,13 +378,13 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 		return false, nil
 	}
 
-	for len(out) < maxNew {
+	for emitted < maxNew {
 		k := ctrl.NextLength()
 		// Draft the continuation AFTER g, seeded by the boundary pair (g, the hidden that produced
 		// g) — the drafter consumes the pair speculatively; its live state advances only on commit.
 		drafts, derr := p.drafter.draftBlock(g, boundary, k)
 		if derr != nil {
-			return out, metrics, derr
+			return metrics, derr
 		}
 		metrics.DraftCalls++
 		metrics.ProposedTokens += len(drafts)
@@ -376,7 +396,7 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 			// Drafts of a finished generation were never verified; they bought nothing — rejected.
 			metrics.RejectedTokens += len(drafts)
 			finishMetrics(&metrics)
-			return out, metrics, cerr
+			return metrics, cerr
 		}
 		g = argmaxF32(sess.headLogits(boundary))
 
@@ -391,7 +411,7 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 				metrics.AcceptedTokens += accepted
 				metrics.RejectedTokens += len(drafts) - accepted
 				finishMetrics(&metrics)
-				return out, metrics, cerr
+				return metrics, cerr
 			}
 			g = argmaxF32(sess.headLogits(boundary)) // next canonical greedy, for the next comparison
 		}
@@ -400,7 +420,7 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 		ctrl.Record(len(drafts), accepted)
 	}
 	finishMetrics(&metrics)
-	return out, metrics, nil
+	return metrics, nil
 }
 
 // generateBlockVerify is GenerateSpeculative's batched verify lane (BlockVerify): each round runs the
@@ -412,17 +432,21 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 // derives from always comes from the state actually kept. The drafter is fed the committed pairs from
 // those same kept rows (the trained shape). Round cost: 1 forward on full accept, 2 on reject —
 // against len(committed) sequential steps on the per-token lane.
-func (p *SpeculativePair) generateBlockVerify(sess *ComposedSession, boundary []float32, g int32, maxNew, eosID, draftBlock int) ([]int32, SpeculativeMetrics, error) {
+func (p *SpeculativePair) generateBlockVerify(sess *ComposedSession, boundary []float32, g int32, maxNew, eosID, draftBlock int, yield func(int32) bool) (SpeculativeMetrics, error) {
 	var metrics SpeculativeMetrics
 	D := p.Base.D
-	out := make([]int32, 0, maxNew)
+	emitted := 0
 	ctrl := specctl.New(specctl.Controller{Min: 1, Max: draftBlock, Window: 8})
-	// emit appends committed tokens, honouring maxNew and eos; true = generation must stop. A stop
-	// mid-list leaves the session state unused, so callers return without repairing it.
+	// emit yields committed tokens, honouring maxNew, eos and the consumer declining; true =
+	// generation must stop. A stop mid-list leaves the session state unused, so callers return
+	// without repairing it.
 	emit := func(ids []int32) bool {
 		for _, id := range ids {
-			out = append(out, id)
-			if len(out) >= maxNew {
+			emitted++
+			if !yield(id) {
+				return true
+			}
+			if emitted >= maxNew {
 				return true
 			}
 			if eosID >= 0 && int(id) == eosID {
@@ -431,11 +455,11 @@ func (p *SpeculativePair) generateBlockVerify(sess *ComposedSession, boundary []
 		}
 		return false
 	}
-	for len(out) < maxNew {
+	for emitted < maxNew {
 		k := ctrl.NextLength()
 		drafts, derr := p.drafter.draftBlock(g, boundary, k)
 		if derr != nil {
-			return out, metrics, derr
+			return metrics, derr
 		}
 		metrics.DraftCalls++
 		metrics.ProposedTokens += len(drafts)
@@ -445,7 +469,7 @@ func (p *SpeculativePair) generateBlockVerify(sess *ComposedSession, boundary []
 		snap := sess.Snapshot()
 		verifyRows, ferr := sess.forward(block) // ONE batched verify forward: k+1 rows
 		if ferr != nil {
-			return out, metrics, ferr
+			return metrics, ferr
 		}
 		metrics.TargetVerifyCalls++
 		// Greedy-chain walk: verifyRows[i] is the hidden after block[i]; its argmax is the base's
@@ -478,10 +502,10 @@ func (p *SpeculativePair) generateBlockVerify(sess *ComposedSession, boundary []
 			// Full accept: state already holds exactly the committed tokens — keep it.
 			if emit(committed) {
 				finishMetrics(&metrics)
-				return out, metrics, nil
+				return metrics, nil
 			}
 			if oerr := observe(verifyRows); oerr != nil {
-				return out, metrics, oerr
+				return metrics, oerr
 			}
 			boundary = append(boundary[:0], verifyRows[(len(block)-1)*D:]...)
 			g = argmaxF32(sess.headLogits(boundary)) // the bonus: next round's commit
@@ -489,23 +513,23 @@ func (p *SpeculativePair) generateBlockVerify(sess *ComposedSession, boundary []
 		}
 		if emit(committed) {
 			finishMetrics(&metrics)
-			return out, metrics, nil
+			return metrics, nil
 		}
 		// Reject: roll the recurrent state back and re-forward ONLY the committed prefix.
 		sess.Restore(snap)
 		keptRows, rerr := sess.forward(committed)
 		if rerr != nil {
-			return out, metrics, rerr
+			return metrics, rerr
 		}
 		metrics.TargetVerifyCalls++
 		if oerr := observe(keptRows); oerr != nil {
-			return out, metrics, oerr
+			return metrics, oerr
 		}
 		boundary = append(boundary[:0], keptRows[(len(committed)-1)*D:]...)
 		g = argmaxF32(sess.headLogits(boundary)) // the replacement, derived from the kept state
 	}
 	finishMetrics(&metrics)
-	return out, metrics, nil
+	return metrics, nil
 }
 
 // mtpDefaultDraftBlock is the composed pairing's fallback draft block when neither the caller nor the
