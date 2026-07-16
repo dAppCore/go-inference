@@ -49,6 +49,18 @@ type ComposedHookCounts struct {
 	GatedDeltaLayerFold ComposedHookPhaseCounts
 	AttnFrontFold       ComposedHookPhaseCounts
 	AttnTailFold        ComposedHookPhaseCounts
+	// AttnFullLayerFold counts the device-KV whole-attention-layer seam (AttnBF16FullLayerDevice /
+	// AttnQuantFullLayerDevice, #26 device-KV): the whole layer — norm, q/k/v, rope, SDPA over the
+	// resident cache, o_proj, FFN tail — in ONE command buffer, superseding AttnFrontFold/
+	// AttnTailFold's two-CB split. A hit here with AttnFrontFold/AttnTailFold at zero means the
+	// device-KV path served every attention layer directly.
+	AttnFullLayerFold ComposedHookPhaseCounts
+	// ChainedForward counts ComposedChainBeginDevice: one hit = one WHOLE-TOKEN forward that rode
+	// the chain (#26 whole-token chain, bf16 or quant) — every layer's encode landed on ONE retained
+	// command buffer, one upload, one wait. A chained forward engages NONE of the per-layer/per-fold
+	// hooks above (they are superseded wholesale), so this is the census's top-level signal: a hit
+	// here with every other counter at zero means the chain served the token, not the host.
+	ChainedForward ComposedHookPhaseCounts
 }
 
 const (
@@ -68,6 +80,8 @@ const (
 	hookGatedDeltaLayerFold
 	hookAttnFrontFold
 	hookAttnTailFold
+	hookAttnFullLayerFold
+	hookChainedForward
 	hookCount
 )
 
@@ -113,6 +127,8 @@ func (g *ComposedHookReceiptGuard) Snapshot() ComposedHookCounts {
 		GatedDeltaLayerFold: phase(hookGatedDeltaLayerFold),
 		AttnFrontFold:       phase(hookAttnFrontFold),
 		AttnTailFold:        phase(hookAttnTailFold),
+		AttnFullLayerFold:   phase(hookAttnFullLayerFold),
+		ChainedForward:      phase(hookChainedForward),
 	}
 }
 
@@ -130,6 +146,8 @@ func EnableComposedHookReceipts() *ComposedHookReceiptGuard {
 	gdLayerQ, gdLayerB := qwen3.GatedDeltaQuantLayerDevice, qwen3.GatedDeltaBF16LayerDevice
 	attnFrontQ, attnTailQ := composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice
 	attnFrontB, attnTailB := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
+	attnFullQ, attnFullB := composed.AttnQuantFullLayerDevice, composed.AttnBF16FullLayerDevice
+	chainBegin := composed.ComposedChainBeginDevice
 	g.restore = func() {
 		composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice = proj, mlp, aqkv, gdInput
 		composed.ResidualNormMLPDevice, composed.ResidualNormMLPProjDevice = resTail, projTail
@@ -140,6 +158,8 @@ func EnableComposedHookReceipts() *ComposedHookReceiptGuard {
 		qwen3.GatedDeltaQuantLayerDevice, qwen3.GatedDeltaBF16LayerDevice = gdLayerQ, gdLayerB
 		composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = attnFrontQ, attnTailQ
 		composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = attnFrontB, attnTailB
+		composed.AttnQuantFullLayerDevice, composed.AttnBF16FullLayerDevice = attnFullQ, attnFullB
+		composed.ComposedChainBeginDevice = chainBegin
 	}
 	if proj != nil {
 		composed.ProjMatMulInto = func(out, x, w []float32, M, K, N int) ([]float32, error) {
@@ -266,6 +286,24 @@ func (g *ComposedHookReceiptGuard) wrapFoldHooks() {
 		composed.AttnBF16TailDevice = func(h, attnOut []float32, ow *model.BF16Weight, postNorm []float32, gate, up, down *model.BF16Weight, L, D, mixCols, FF int, eps float32) ([]float32, error) {
 			g.hit(hookAttnTailFold, L)
 			return tb(h, attnOut, ow, postNorm, gate, up, down, L, D, mixCols, FF, eps)
+		}
+	}
+	if fq := composed.AttnQuantFullLayerDevice; fq != nil {
+		composed.AttnQuantFullLayerDevice = func(dev any, x, inputNorm []float32, qw, kw, vw, ow *model.QuantWeight, qNormW, kNormW, postNorm []float32, gate, up, down *model.QuantWeight, priorK, priorV []float32, L, D, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) ([]float32, any, error) {
+			g.hit(hookAttnFullLayerFold, L)
+			return fq(dev, x, inputNorm, qw, kw, vw, ow, qNormW, kNormW, postNorm, gate, up, down, priorK, priorV, L, D, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF, eps, theta)
+		}
+	}
+	if fb := composed.AttnBF16FullLayerDevice; fb != nil {
+		composed.AttnBF16FullLayerDevice = func(dev any, x, inputNorm []float32, qw, kw, vw, ow *model.BF16Weight, qNormW, kNormW, postNorm []float32, gate, up, down *model.BF16Weight, priorK, priorV []float32, L, D, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) ([]float32, any, error) {
+			g.hit(hookAttnFullLayerFold, L)
+			return fb(dev, x, inputNorm, qw, kw, vw, ow, qNormW, kNormW, postNorm, gate, up, down, priorK, priorV, L, D, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF, eps, theta)
+		}
+	}
+	if cb := composed.ComposedChainBeginDevice; cb != nil {
+		composed.ComposedChainBeginDevice = func(h []float32, L, D int) (any, error) {
+			g.hit(hookChainedForward, L)
+			return cb(h, L, D)
 		}
 	}
 }

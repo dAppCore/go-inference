@@ -574,9 +574,11 @@ type pendingRWKV7Input struct{ r, w, k, v, a, b []float32 }
 var ComposedChainBeginDevice func(h []float32, L, D int) (ctx any, err error)
 var ComposedChainEndDevice func(ctx any) (y []float32, err error)
 
-// chainableBF16 reports whether EVERY layer of this model can ride the chained device path — the
-// all-or-nothing v1 gate (mixed models keep the per-layer folds).
-func (s *ComposedSession) chainableBF16() bool {
+// chainable reports whether EVERY layer of this model can ride the chained device path — the
+// all-or-nothing v1 gate (mixed models keep the per-layer folds). Form-agnostic (#26 QUANT): each
+// layer qualifies by carrying EITHER its bf16 form OR its packed form ready for the chain step —
+// a model may mix bf16-resident and quantised layers, so long as every layer is one or the other.
+func (s *ComposedSession) chainable() bool {
 	if ComposedChainBeginDevice == nil || ComposedChainEndDevice == nil || s.m.residualScale() != 1 || s.m.LayerNorm {
 		return false
 	}
@@ -588,11 +590,11 @@ func (s *ComposedSession) chainableBF16() bool {
 		}
 		switch mx := layer.Mixer.(type) {
 		case *gatedDeltaMixer:
-			if !mx.chainableBF16(mlp) {
+			if !mx.chainableBF16(mlp) && !mx.chainableQuant(mlp) {
 				return false
 			}
 		case *attnMixer:
-			if !mx.chainableBF16(mlp) {
+			if !mx.chainableBF16(mlp) && !mx.chainableQuant(mlp) {
 				return false
 			}
 		default:
@@ -602,9 +604,11 @@ func (s *ComposedSession) chainableBF16() bool {
 	return true
 }
 
-// forwardChainBF16 runs the whole stack as ONE chained device forward: one upload, one wait. Any
-// error mid-chain aborts the forward — the device owns every layer's state by then.
-func (s *ComposedSession) forwardChainBF16(h []float32, L int) ([]float32, error) {
+// forwardChain runs the whole stack as ONE chained device forward: one upload, one wait. Each
+// layer dispatches to its bf16 or packed chain step depending on which weight form it carries
+// (chainable already proved every layer is ready in one form or the other). Any error mid-chain
+// aborts the forward — the device owns every layer's state by then.
+func (s *ComposedSession) forwardChain(h []float32, L int) ([]float32, error) {
 	D, eps := s.m.D, s.m.Eps
 	ctx, err := ComposedChainBeginDevice(h, L, D)
 	if err != nil {
@@ -615,13 +619,25 @@ func (s *ComposedSession) forwardChainBF16(h []float32, L int) ([]float32, error
 		mlp := layer.MLP.(*MLP)
 		switch mx := layer.Mixer.(type) {
 		case *gatedDeltaMixer:
-			next, cerr := mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+			var next any
+			var cerr error
+			if mx.chainableBF16(mlp) {
+				next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+			} else {
+				next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+			}
 			if cerr != nil {
 				return nil, cerr
 			}
 			s.states[li] = next
 		case *attnMixer:
-			next, cerr := mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+			var next any
+			var cerr error
+			if mx.chainableBF16(mlp) {
+				next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+			} else {
+				next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+			}
 			if cerr != nil {
 				return nil, cerr
 			}
@@ -641,8 +657,8 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 	// folded into the PREVIOUS layer's proj-fused tail command buffer, the symmetric collapse to the
 	// o_proj fuse below. At most one is ever set (a layer has exactly one mixer kind); both nil ⇒ this
 	// layer computes its input norm + projections fresh (always true for layer 0 — no predecessor tail).
-	if s.m.BF16Resident && s.chainableBF16() {
-		return s.forwardChainBF16(h, L)
+	if (s.m.BF16Resident || s.m.Quantised) && s.chainable() {
+		return s.forwardChain(h, L)
 	}
 
 	var pendingAttn *pendingAttnQKV

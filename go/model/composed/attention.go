@@ -208,6 +208,50 @@ func (m *attnMixer) forwardQuantLayer(h, inputNorm, postNorm []float32, mlp *MLP
 		qCols = 2 * cfg.Heads * cfg.HeadDim
 	}
 	kvCols := cfg.KVHeads * cfg.HeadDim
+
+	// Device-KV full-layer path: the whole layer in one CB over the resident cache — the quant
+	// twin of forwardBF16Layer's engagement. Same state contract: a first-call decline (dev still
+	// nil) falls to the two-CB fold; once the handle exists the device owns this sequence KV —
+	// propagate, never fall back.
+	if AttnQuantFullLayerDevice != nil && !cfg.ALiBi && cfg.QKVClip == 0 &&
+		cfg.QKNormalization != model.QKLayerNorm && cfg.RotaryDim%2 == 0 {
+		var st attnState
+		if p, ok := prior.(attnState); ok {
+			st = p
+		}
+		sc := st.sc
+		if sc == nil {
+			sc = &attnScratch{}
+		}
+		qkNorm := 0
+		switch {
+		case cfg.QKNormalization == model.QKL2Norm:
+			qkNorm = 2
+		case len(m.w.QNorm) > 0 && len(m.w.KNorm) > 0:
+			qkNorm = 1
+		}
+		gatedI := 0
+		if cfg.OutputGate {
+			gatedI = 1
+		}
+		theta := cfg.RopeTheta
+		if theta == 0 {
+			theta = 1e6
+		}
+		y, devOut, ferr := AttnQuantFullLayerDevice(sc.Device, h, inputNorm,
+			m.w.QProjQ, m.w.KProjQ, m.w.VProjQ, m.w.OProjQ, m.w.QNorm, m.w.KNorm, postNorm,
+			mlp.GateQ, mlp.UpQ, mlp.DownQ, st.k, st.v,
+			L, D, cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim, st.n, cfg.SlidingWindow, gatedI, qkNorm, mlp.FF, eps, theta)
+		if ferr == nil {
+			sc.Device = devOut
+			return y, attnState{n: st.n + L, sc: sc}, true, nil
+		}
+		if sc.Device != nil {
+			return nil, nil, true, ferr
+		}
+		// first-call decline: the two-CB fold below serves
+	}
+
 	qRaw, k, v, ferr := AttnQuantFrontDevice(h, inputNorm, m.w.QProjQ, m.w.KProjQ, m.w.VProjQ, L, D, qCols, kvCols, eps)
 	if ferr != nil {
 		return nil, nil, false, nil // nothing touched — the per-stage path serves this token
@@ -239,6 +283,12 @@ func (m *attnMixer) forwardQuantLayer(h, inputNorm, postNorm []float32, mlp *MLP
 // first call; primed from priorK/priorV when pos0 > 0). AX-8: declared here, bound by the backend.
 var AttnBF16FullLayerDevice func(dev any, x, inputNorm []float32, qw, kw, vw, ow *model.BF16Weight, qNormW, kNormW, postNorm []float32, gate, up, down *model.BF16Weight, priorK, priorV []float32, L, D, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) (y []float32, devOut any, err error)
 
+// AttnQuantFullLayerDevice is AttnBF16FullLayerDevice's PACKED-weight twin (#26 QUANT device-KV):
+// the same whole-layer fold over a quant checkpoint's codes — norm, q/k/v, rope+norm prep, SDPA
+// over the RESIDENT KV cache, sigma-gate, o_proj and the packed FFN tail in ONE command buffer.
+// Identical contract to the bf16 form. AX-8: declared here, bound by the backend.
+var AttnQuantFullLayerDevice func(dev any, x, inputNorm []float32, qw, kw, vw, ow *model.QuantWeight, qNormW, kNormW, postNorm []float32, gate, up, down *model.QuantWeight, priorK, priorV []float32, L, D, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) (y []float32, devOut any, err error)
+
 // AttnKVExportDevice reads a resident KV handle back into host slices — the snapshot/clone seam.
 var AttnKVExportDevice func(dev any) (k, v []float32, n int, ok bool)
 
@@ -246,11 +296,24 @@ var AttnKVExportDevice func(dev any) (k, v []float32, n int, ok bool)
 // context — AttnBF16FullLayerDevice without its own command buffer.
 var AttnBF16ChainLayerDevice func(ctx, dev any, inputNorm []float32, qw, kw, vw, ow *model.BF16Weight, qNormW, kNormW, postNorm []float32, gate, up, down *model.BF16Weight, priorK, priorV []float32, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) (devOut any, err error)
 
+// AttnQuantChainLayerDevice is AttnBF16ChainLayerDevice's PACKED-weight twin — one dense
+// device-KV attention layer over a quant checkpoint's codes, encoded onto an open chain context.
+var AttnQuantChainLayerDevice func(ctx, dev any, inputNorm []float32, qw, kw, vw, ow *model.QuantWeight, qNormW, kNormW, postNorm []float32, gate, up, down *model.QuantWeight, priorK, priorV []float32, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) (devOut any, err error)
+
+// AttnChainGeometryOK reports whether the device attention core can actually serve this layer's
+// geometry — attnMixer.chainableBF16/chainableQuant's cheap, side-effect-free pre-flight probe,
+// the attention twin of qwen3.GatedDeltaChainGeometryOK (see that doc for why the session must
+// verify this BEFORE committing to the chain rather than discovering it via a failed chain step).
+// Never consulted when nil: a nil probe is treated as "not verifiable" and declines the chain. AX-8:
+// declared here, bound by the backend alongside the chain-layer hooks.
+var AttnChainGeometryOK func(cfg AttnConfig) bool
+
 // chainableBF16 reports whether this attention layer can ride the chained device path — the same
 // conditions the full-layer arm checks, decided without touching state.
 func (m *attnMixer) chainableBF16(mlp *MLP) bool {
 	cfg := m.cfg
-	return AttnBF16ChainLayerDevice != nil && !cfg.ALiBi && cfg.QKVClip == 0 &&
+	return AttnBF16ChainLayerDevice != nil && AttnChainGeometryOK != nil && AttnChainGeometryOK(cfg) &&
+		!cfg.ALiBi && cfg.QKVClip == 0 &&
 		cfg.QKNormalization != model.QKLayerNorm && cfg.RotaryDim%2 == 0 &&
 		m.w.QProjB != nil && m.w.KProjB != nil && m.w.VProjB != nil && m.w.OProjB != nil &&
 		mlp != nil && mlp.GateB != nil && mlp.UpB != nil && mlp.DownB != nil
@@ -286,6 +349,56 @@ func (m *attnMixer) chainBF16Layer(ctx any, inputNorm, postNorm []float32, mlp *
 	devOut, ferr := AttnBF16ChainLayerDevice(ctx, sc.Device, inputNorm,
 		m.w.QProjB, m.w.KProjB, m.w.VProjB, m.w.OProjB, m.w.QNorm, m.w.KNorm, postNorm,
 		mlp.GateB, mlp.UpB, mlp.DownB, st.k, st.v,
+		cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim, st.n, cfg.SlidingWindow, gatedI, qkNorm, mlp.FF, eps, theta)
+	if ferr != nil {
+		return nil, ferr
+	}
+	sc.Device = devOut
+	return attnState{n: st.n + L, sc: sc}, nil
+}
+
+// chainableQuant reports whether this attention layer can ride the chained device path over its
+// packed weights — the quant twin of chainableBF16, same conditions decided without touching
+// state.
+func (m *attnMixer) chainableQuant(mlp *MLP) bool {
+	cfg := m.cfg
+	return AttnQuantChainLayerDevice != nil && AttnChainGeometryOK != nil && AttnChainGeometryOK(cfg) &&
+		!cfg.ALiBi && cfg.QKVClip == 0 &&
+		cfg.QKNormalization != model.QKLayerNorm && cfg.RotaryDim%2 == 0 &&
+		m.w.QProjQ != nil && m.w.KProjQ != nil && m.w.VProjQ != nil && m.w.OProjQ != nil &&
+		mlp != nil && mlp.GateQ != nil && mlp.UpQ != nil && mlp.DownQ != nil
+}
+
+// chainQuantLayer encodes this attention layer onto the chain over packed weights and returns
+// the advanced state — the quant twin of chainBF16Layer.
+func (m *attnMixer) chainQuantLayer(ctx any, inputNorm, postNorm []float32, mlp *MLP, L, D int, eps float32, prior any) (next any, err error) {
+	cfg := m.cfg
+	var st attnState
+	if p, ok := prior.(attnState); ok {
+		st = p
+	}
+	sc := st.sc
+	if sc == nil {
+		sc = &attnScratch{}
+	}
+	qkNorm := 0
+	switch {
+	case cfg.QKNormalization == model.QKL2Norm:
+		qkNorm = 2
+	case len(m.w.QNorm) > 0 && len(m.w.KNorm) > 0:
+		qkNorm = 1
+	}
+	gatedI := 0
+	if cfg.OutputGate {
+		gatedI = 1
+	}
+	theta := cfg.RopeTheta
+	if theta == 0 {
+		theta = 1e6
+	}
+	devOut, ferr := AttnQuantChainLayerDevice(ctx, sc.Device, inputNorm,
+		m.w.QProjQ, m.w.KProjQ, m.w.VProjQ, m.w.OProjQ, m.w.QNorm, m.w.KNorm, postNorm,
+		mlp.GateQ, mlp.UpQ, mlp.DownQ, st.k, st.v,
 		cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim, st.n, cfg.SlidingWindow, gatedI, qkNorm, mlp.FF, eps, theta)
 	if ferr != nil {
 		return nil, ferr

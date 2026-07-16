@@ -188,6 +188,7 @@ func (m *gatedDeltaMixer) forwardBF16Layer(h, inputNorm, postNorm []float32, gat
 // chainableBF16 reports whether this gated-delta layer can ride the chained device path.
 func (m *gatedDeltaMixer) chainableBF16(mlp *MLP) bool {
 	return qwen3.GatedDeltaBF16ChainLayerDevice != nil &&
+		qwen3.GatedDeltaChainGeometryOK != nil && qwen3.GatedDeltaChainGeometryOK(m.cfg) &&
 		m.w.InProjQKVB != nil && m.w.InProjAB != nil && m.w.InProjBB != nil && m.w.InProjZB != nil && m.w.OutProjB != nil &&
 		mlp != nil && mlp.GateB != nil && mlp.UpB != nil && mlp.DownB != nil
 }
@@ -203,6 +204,32 @@ func (m *gatedDeltaMixer) chainBF16Layer(ctx any, inputNorm, postNorm []float32,
 		sc = &qwen3.GatedDeltaScratch{}
 	}
 	if cerr := qwen3.GatedDeltaBF16ChainLayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, mlp.GateB, mlp.UpB, mlp.DownB, pc, pd, mlp.FF, eps); cerr != nil {
+		return nil, cerr
+	}
+	return gatedDeltaState{sc: sc}, nil
+}
+
+// chainableQuant reports whether this gated-delta layer can ride the chained device path over
+// its packed weights — the quant twin of chainableBF16.
+func (m *gatedDeltaMixer) chainableQuant(mlp *MLP) bool {
+	return qwen3.GatedDeltaQuantChainLayerDevice != nil &&
+		qwen3.GatedDeltaChainGeometryOK != nil && qwen3.GatedDeltaChainGeometryOK(m.cfg) &&
+		m.w.InProjQKVQ != nil && m.w.InProjAQ != nil && m.w.InProjBQ != nil && m.w.InProjZQ != nil && m.w.OutProjQ != nil &&
+		mlp != nil && mlp.GateQ != nil && mlp.UpQ != nil && mlp.DownQ != nil
+}
+
+// chainQuantLayer encodes this gated-delta layer onto the chain over packed weights and returns
+// the advanced state — the quant twin of chainBF16Layer.
+func (m *gatedDeltaMixer) chainQuantLayer(ctx any, inputNorm, postNorm []float32, mlp *MLP, eps float32, prior any) (next any, err error) {
+	var pc, pd []float32
+	var sc *qwen3.GatedDeltaScratch
+	if st, ok := prior.(gatedDeltaState); ok {
+		pc, pd, sc = st.conv, st.delta, st.sc
+	}
+	if sc == nil {
+		sc = &qwen3.GatedDeltaScratch{}
+	}
+	if cerr := qwen3.GatedDeltaQuantChainLayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, pc, pd, mlp.FF, eps); cerr != nil {
 		return nil, cerr
 	}
 	return gatedDeltaState{sc: sc}, nil
