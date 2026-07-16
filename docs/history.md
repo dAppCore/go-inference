@@ -212,3 +212,16 @@ the same test sheet VERBATIM at 1120 — every line including the fine print —
 where pre-fix it declared the image illegible. Still open, tracked: the 12B
 unified (encoder-free) lane declines image prefill under chat's chunked
 prefill entirely.
+
+**2026-07-16 follow-up — the 12B unified decline closed (`1c60be1`).** The
+decline was not vision code at all: q8 KV on the recorded-ICB lane (#367, the
+default) declined ANY rowAttnCaps batch, and the bidirectional image-span lane
+correctly refuses a sequential fallback — so the decline surfaced as a hard
+error on every 12B image request (E2B dodged it only by geometry). The q8 gate
+now accepts caps chunks (multiQ is structurally off under caps; the reads ride
+the per-row q8 ladder against the chunk-wide rows-store landing, both
+pre-checked), and span-free chunks the span cutter produces route through the
+causal embedding lanes with their legal sequential fallback. Receipts: q8-on
+answers the giant-letter probes byte-equal to the q8-off baseline at temp 0;
+two new q8 bidir tests pin engagement and split routing; full metal suite
+green.
