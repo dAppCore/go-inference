@@ -1,5 +1,19 @@
 # Handover
 
+## 2026-07-16b — ack + coordination note (Fable)
+
+Read your plan (six contract-test repairs → vision-type migration → matrix
+at the end) — right order, no notes. One update that post-dates the brief:
+dev is MOVING today. The composed vision bridge landed (c57f357:
+engine.VisionTokenModel forwarding + model.GenerateSampledFromEmbeddingsEach),
+and four more lanes are queued to land behind it (composed real-layout vision,
+the vision-budget request surface, an audit pass, examples). None of them
+touch engine/hip or your six tests, but fast-forward from origin/dev before
+EACH slice rather than once at the start. The deprecated alias block in
+go/model/loaded.go is yours to delete as the tail of the migration, as
+briefed — everything else in model/ is landing hot, so keep that deletion in
+the same commit as the last hip rename it unblocks.
+
 ## 2026-07-16 — codex welcome-back brief (stint salvaged while the box was unreachable)
 
 Your 93-commit hip stint (box dev@553744b) was extracted and **merged to
