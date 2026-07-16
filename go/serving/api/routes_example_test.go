@@ -49,3 +49,17 @@ func ExampleRoutes_Generate() {
 	// Output:
 	// ok
 }
+
+// ExampleRoutes_Describe demonstrates the OpenAPI descriptions the ML route
+// group publishes, so the core/api engine can mount them into the generated
+// spec (and the SDK generators can emit a typed client).
+func ExampleRoutes_Describe() {
+	r := NewRoutes(nil)
+	descriptions := r.Describe()
+
+	core.Println(len(descriptions))
+	core.Println(descriptions[0].Summary)
+	// Output:
+	// 3
+	// List inference backends
+}

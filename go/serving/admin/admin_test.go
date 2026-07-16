@@ -3,10 +3,13 @@
 package admin
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	core "dappco.re/go"
@@ -567,6 +570,120 @@ func TestResolveModelNameToPath_RejectsTraversal_Bad(t *testing.T) {
 	for _, name := range []string{"../etc", "a/b", ".hidden"} {
 		if _, err := resolveModelNameToPath(name); err == nil {
 			t.Errorf("name %q should be rejected", name)
+		}
+	}
+}
+
+// --- NewMux ---
+
+// TestAdmin_NewMux_Good proves a fully-wired Config mounts the real reload
+// handler (not the 501 placeholder) — POST /v1/admin/serve/reload reaches
+// reloadHandler and rejects an empty body for a normal validation reason
+// (missing model/model_path), not "not implemented".
+func TestAdmin_NewMux_Good(t *testing.T) {
+	mux := NewMux(Config{Reloader: &fakeReloader{}})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathReload, strings.NewReader(`{}`)))
+	if rec.Code == http.StatusNotImplemented {
+		t.Fatal("NewMux with a Reloader still mounted the not-implemented placeholder")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/admin/serve/reload with empty body = %d, want 400 (missing model/model_path)", rec.Code)
+	}
+}
+
+// TestAdmin_NewMux_Bad proves a zero-value Config (no dependencies wired at
+// all) still answers every route safely: /machine works standalone, and
+// /serve/reload reports itself not-implemented rather than panicking or
+// 404ing on a nil Reloader.
+func TestAdmin_NewMux_Bad(t *testing.T) {
+	mux := NewMux(Config{})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathMachine, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /v1/admin/machine on a zero-value Config = %d, want 200", rec.Code)
+	}
+
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, PathReload, strings.NewReader(`{}`)))
+	if rec2.Code != http.StatusNotImplemented {
+		t.Fatalf("POST /v1/admin/serve/reload on a zero-value Config = %d, want 501", rec2.Code)
+	}
+}
+
+// TestAdmin_NewMux_Ugly proves the model routes and the reload route mount
+// independently of each other: a Config with a ModelController but no
+// Reloader gets working /v1/admin/models routes alongside a still-501
+// /v1/admin/serve/reload.
+func TestAdmin_NewMux_Ugly(t *testing.T) {
+	mux := NewMux(Config{ModelController: &fakeController{}})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathModels, nil))
+	if rec.Code == http.StatusNotFound {
+		t.Fatal("NewMux with a ModelController did not mount /v1/admin/models")
+	}
+
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, PathReload, strings.NewReader(`{}`)))
+	if rec2.Code != http.StatusNotImplemented {
+		t.Fatalf("reload without a Reloader (even with a ModelController set) = %d, want 501", rec2.Code)
+	}
+}
+
+// --- MachineHash ---
+
+// TestAdmin_MachineHash_Good proves the token's format contract: a "lem-"
+// prefix over a 24-character lowercase-hex digest (sha256 truncated to 12
+// bytes) — the shape /v1/admin/machine and the reload confirm gate both
+// depend on.
+func TestAdmin_MachineHash_Good(t *testing.T) {
+	got := MachineHash()
+	if !strings.HasPrefix(got, "lem-") {
+		t.Fatalf("MachineHash() = %q, want a lem- prefix", got)
+	}
+	hexPart := strings.TrimPrefix(got, "lem-")
+	if len(hexPart) != 24 {
+		t.Fatalf("MachineHash() hex part = %q (len %d), want 24 hex characters", hexPart, len(hexPart))
+	}
+	for _, r := range hexPart {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			t.Fatalf("MachineHash() = %q, contains non-hex rune %q", got, r)
+		}
+	}
+}
+
+// TestAdmin_MachineHash_Bad proves GOOS/GOARCH genuinely factor into the
+// digest — the documented identity is hostname+GOOS+GOARCH, not hostname
+// alone, so a hash computed from hostname only must NOT match.
+func TestAdmin_MachineHash_Bad(t *testing.T) {
+	sum := sha256.Sum256([]byte(hostname()))
+	hostnameOnly := "lem-" + hex.EncodeToString(sum[:12])
+	if MachineHash() == hostnameOnly {
+		t.Fatalf("MachineHash() matched a hostname-only digest %q — GOOS/GOARCH are not being folded in", hostnameOnly)
+	}
+}
+
+// TestAdmin_MachineHash_Ugly proves MachineHash is safe and deterministic
+// under concurrent callers — the reload confirm gate and a /machine GET can
+// race in a live server, and both must observe the identical token.
+func TestAdmin_MachineHash_Ugly(t *testing.T) {
+	const n = 50
+	results := make([]string, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range n {
+		go func(i int) {
+			defer wg.Done()
+			results[i] = MachineHash()
+		}(i)
+	}
+	wg.Wait()
+	want := results[0]
+	for i, got := range results {
+		if got != want {
+			t.Fatalf("MachineHash() call %d = %q, want %q (all concurrent calls must agree)", i, got, want)
 		}
 	}
 }
