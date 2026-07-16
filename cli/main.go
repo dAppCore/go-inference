@@ -68,6 +68,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	switch args[0] {
 	case "serve":
 		return runServeCommand(ctx, args[1:], stdout, stderr)
+	case "bench":
+		return runBenchCommand(ctx, args[1:], stdout, stderr)
 	case "generate":
 		return runGenerateCommand(ctx, args[1:], stdout, stderr)
 	case "ssd":

@@ -17,3 +17,4 @@ go/lem
 
 # task build:embed output
 /bin/
+bench/last-run.json

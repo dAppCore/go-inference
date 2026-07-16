@@ -152,6 +152,12 @@ tasks:
     cmds:
       - go test -tags metal_runtime -count=1 ./...
 
+  bench:grid:
+    desc: "Run the locked gemma4 benchmark grid (bench/gemma4.json) via the lem bench verb. Needs build/dist/lib/*.metallib — run task metallib first."
+    dir: cli
+    cmds:
+      - MLX_METALLIB_PATH={{.ROOT_DIR}}/build/dist/lib/mlx.metallib go run -tags metal_runtime . bench --config {{.ROOT_DIR}}/bench/gemma4.json --json {{.ROOT_DIR}}/bench/last-run.json
+
   cover:
     desc: "Portable coverage -> coverage.out (the profile codecov.yml reads; 95% target). Prints the total on the last line."
     dir: go

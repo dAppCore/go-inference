@@ -1,0 +1,16 @@
+{
+  "prompt": "Write the integers from 1 to 800 separated by single spaces. Output only the numbers, nothing else.",
+  "tokens": 512,
+  "warmup": 16,
+  "runs": [
+    {"name": "e2b-4bit",  "model": "mlx-community/gemma-4-e2b-it-4bit",        "draft": "mlx-community/gemma-4-E2B-it-assistant-bf16"},
+    {"name": "e2b-qat4",  "model": "mlx-community/gemma-4-E2B-it-qat-4bit",    "draft": "mlx-community/gemma-4-E2B-it-assistant-bf16"},
+    {"name": "e4b-4bit",  "model": "mlx-community/gemma-4-e4b-it-4bit"},
+    {"name": "e4b-qat4",  "model": "mlx-community/gemma-4-E4B-it-qat-4bit",    "draft": "mlx-community/gemma-4-E4B-it-qat-assistant-4bit"},
+    {"name": "12b-4bit",  "model": "mlx-community/gemma-4-12B-it-4bit",        "draft": "mlx-community/gemma-4-12B-it-assistant-bf16"},
+    {"name": "26b-4bit",  "model": "mlx-community/gemma-4-26b-a4b-it-4bit",    "draft": "mlx-community/gemma-4-26B-A4B-it-qat-assistant-4bit"},
+    {"name": "26b-qat4",  "model": "mlx-community/gemma-4-26B-A4B-it-qat-4bit","draft": "mlx-community/gemma-4-26B-A4B-it-qat-assistant-4bit"},
+    {"name": "31b-4bit",  "model": "mlx-community/gemma-4-31B-it-4bit",        "draft": "mlx-community/gemma-4-31B-it-assistant-bf16"},
+    {"name": "31b-qat4",  "model": "mlx-community/gemma-4-31B-it-qat-4bit",    "draft": "mlx-community/gemma-4-31B-it-assistant-bf16"}
+  ]
+}
