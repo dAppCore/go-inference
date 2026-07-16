@@ -163,6 +163,28 @@ func (m *gatedDeltaMixer) forwardFromInput(qkv, z, a, b []float32, L, D int, pri
 	return gated, m.w.OutProj, vDim, gatedDeltaState{conv: nc, delta: nd, sc: sc}, nil
 }
 
+// forwardBF16Layer runs one WHOLE dense bf16 gated-delta layer through the bf16 layer seam
+// (qwen3.GatedDeltaBF16LayerDeviceTry) — the quant layer fold's raw-bf16 twin, same engagement and
+// state contracts.
+func (m *gatedDeltaMixer) forwardBF16Layer(h, inputNorm, postNorm []float32, gate, up, down *model.BF16Weight, FF, L, D int, eps float32, prior any) (y []float32, next any, engaged bool, err error) {
+	var pc, pd []float32
+	var sc *qwen3.GatedDeltaScratch
+	if st, ok := prior.(gatedDeltaState); ok {
+		pc, pd, sc = st.conv, st.delta, st.sc
+	}
+	if sc == nil {
+		sc = &qwen3.GatedDeltaScratch{}
+	}
+	y, engaged, err = qwen3.GatedDeltaBF16LayerDeviceTry(sc, h, inputNorm, m.w, m.cfg, postNorm, gate, up, down, L, D, FF, eps, pc, pd)
+	if !engaged {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, true, err
+	}
+	return y, gatedDeltaState{sc: sc}, true, nil
+}
+
 // forwardQuantLayer runs one WHOLE packed gated-delta layer through the device layer seam
 // (qwen3.GatedDeltaQuantLayerDeviceTry): input norm, the five packed projections, the block and the
 // packed FFN tail in one command buffer, x in / y out, state device-resident. engaged=false leaves

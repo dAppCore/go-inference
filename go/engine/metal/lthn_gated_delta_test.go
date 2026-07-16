@@ -646,3 +646,96 @@ func mustQuant(t *testing.T, seed, outDim, inDim int) *model.QuantWeight {
 	}
 	return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: 4, GroupSize: 64, OutDim: outDim, InDim: inDim}
 }
+
+// gdBF16TestModel builds a one-layer dense bf16-resident gated-delta composed model — the #26
+// layer-fold engagement shape (every projection a raw bf16 view).
+func gdBF16TestModel(t *testing.T) *composed.ComposedModel {
+	t.Helper()
+	const D, FF, vocab = 512, 1024, 64
+	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	convDim, vDim := cfg.ConvDim(), cfg.VDim()
+	bw := func(seed, outDim, inDim int) *model.BF16Weight {
+		return &model.BF16Weight{Data: f32sToBF16Bytes(cbSyn(outDim*inDim, seed)), OutDim: outDim, InDim: inDim}
+	}
+	w := &qwen3.GatedDeltaWeights{
+		ConvWeight: cbSyn(convDim*cfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
+		ALog: cbSyn(cfg.ValueHeads, 13), DtBias: cbSyn(cfg.ValueHeads, 14), Norm: cbSyn(cfg.HeadDim, 15),
+		InProjQKVB: bw(21, convDim, D), InProjZB: bw(22, vDim, D),
+		InProjAB: bw(23, cfg.ValueHeads, D), InProjBB: bw(24, cfg.ValueHeads, D),
+		OutProjB: bw(25, D, vDim),
+	}
+	return &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, BF16Resident: true,
+		Layers: []composed.Layer{{
+			InputNorm: cbSyn(D, 31), PostAttnNorm: cbSyn(D, 32),
+			MLP:   &composed.MLP{GateB: bw(41, FF, D), UpB: bw(42, FF, D), DownB: bw(43, D, FF), FF: FF},
+			Mixer: composed.NewGatedDeltaMixer(w, cfg),
+		}},
+	}
+}
+
+// TestGatedDeltaBF16LayerDevice_Good is the dense bf16 layer fold's session A/B: the same
+// bf16-resident model stepped through the whole-layer CB (hook bound) and the per-stage bf16 path
+// (hook nil) — carried state and all, at f32 rounding scale.
+func TestGatedDeltaBF16LayerDevice_Good(t *testing.T) {
+	gdRequireKernel(t)
+	if qwen3.GatedDeltaBF16LayerDevice == nil {
+		t.Skip("bf16 layer hook unbound (LTHN_BF16_SEAM=0?)")
+	}
+	m := gdBF16TestModel(t)
+	saved := qwen3.GatedDeltaBF16LayerDevice
+	defer func() { qwen3.GatedDeltaBF16LayerDevice = saved }()
+
+	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
+	run := func() [][]float32 {
+		sess := composed.NewSession(m)
+		var outs [][]float32
+		for _, ids := range steps {
+			hid, err := sess.Forward(ids)
+			if err != nil {
+				t.Fatalf("Forward(%v): %v", ids, err)
+			}
+			outs = append(outs, append([]float32(nil), hid...))
+		}
+		return outs
+	}
+	qwen3.GatedDeltaBF16LayerDevice = saved
+	fused := run()
+	qwen3.GatedDeltaBF16LayerDevice = nil
+	staged := run()
+	for i := range fused {
+		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
+		t.Logf("step %d: bf16 layer CB vs per-stage scaled max diff %.3e", i, rel)
+		if rel > 5e-4 {
+			t.Fatalf("step %d diverged: %.3e", i, rel)
+		}
+	}
+}
+
+// TestGatedDeltaBF16LayerDevice_Bad pins the rejections: bad bf16 geometry declines before any
+// dispatch and the direct run rejects size mismatches.
+func TestGatedDeltaBF16LayerDevice_Bad(t *testing.T) {
+	gdRequireKernel(t)
+	if !gatedDeltaBlockUsable(64, 64, 2, 4, 4) {
+		t.Skip("block kernels unavailable")
+	}
+	h, err := newGatedDeltaDeviceState(2, 4, 64, 64, 4, 1)
+	if err != nil {
+		t.Fatalf("newGatedDeltaDeviceState: %v", err)
+	}
+	if !bf16GeometryOK(&model.BF16Weight{Data: make([]byte, 8*4*2), OutDim: 8, InDim: 4}, 8, 4) {
+		t.Fatal("well-formed bf16 weight must pass")
+	}
+	if bf16GeometryOK(&model.BF16Weight{Data: make([]byte, 7), OutDim: 8, InDim: 4}, 8, 4) {
+		t.Fatal("short data must fail")
+	}
+	y := make([]float32, 512)
+	m := gdBF16TestModel(t)
+	gm := m.Layers[0].Mixer
+	_ = gm
+	w := &qwen3.GatedDeltaWeights{}
+	if err := gatedDeltaBF16LayerRun(h, make([]float32, 5), cbSyn(512, 1), w, cbSyn(512, 2),
+		nil, nil, nil, 1, 512, 1024, 1e-6, nil, nil, y); err == nil {
+		t.Fatal("empty weights must error")
+	}
+}

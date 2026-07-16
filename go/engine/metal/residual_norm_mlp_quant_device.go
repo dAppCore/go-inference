@@ -210,6 +210,14 @@ func encProjQuantBF16In(enc metal.MTLComputeCommandEncoder, w *model.QuantWeight
 	return encWidenBF16ToF32(enc, dstBF, dst, L*outDim)
 }
 
+// tailProjFromBF16 encodes one projection from ALREADY-CAST bf16 rows (xBF) into dst f32 via the
+// dstBF staging — the shape both weight forms (packed codes, raw bf16) provide, so one tail body
+// serves both (#26).
+type tailProjFromBF16 func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error
+
+// tailProjFromF32 is the same projection from f32 rows (the down projection's shape: cast + project).
+type tailProjFromF32 func(enc metal.MTLComputeCommandEncoder, x, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error
+
 // encResidualNormMLPQuantTail encodes the whole packed FFN tail into a live encoder:
 //
 //	hplus = h + mix (in place over h) → normed = RMSNorm(hplus, normW) → silu(normed·gateᵀ) ⊙
@@ -218,6 +226,21 @@ func encProjQuantBF16In(enc metal.MTLComputeCommandEncoder, w *model.QuantWeight
 // — the body ResidualNormMLPQuantDevice runs as its own command buffer, split out so the fused
 // gated-delta LAYER command buffer (#18 S3) stacks the identical tail behind the mixer stages.
 func encResidualNormMLPQuantTail(enc metal.MTLComputeCommandEncoder, tb quantTailBufs, normW metal.MTLBuffer, gate, up, down *model.QuantWeight, L, D, FF int, eps float32) error {
+	return encResidualNormMLPTailCore(enc, tb, normW,
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjQuantBF16In(enc, gate, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjQuantBF16In(enc, up, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		func(enc metal.MTLComputeCommandEncoder, x, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjQuantF32(enc, down, x, xBF, dstBF, dst, L, outDim, inDim)
+		}, L, D, FF, eps)
+}
+
+// encResidualNormMLPTailCore is the weight-form-agnostic tail body — the projections arrive as
+// closures (packed codes via the affine qmv, raw bf16 via the gemv), everything else is shared.
+func encResidualNormMLPTailCore(enc metal.MTLComputeCommandEncoder, tb quantTailBufs, normW metal.MTLBuffer, gateProj, upProj tailProjFromBF16, downProj tailProjFromF32, L, D, FF int, eps float32) error {
 	psoAdd, err := pipelineFor("vv_Addfloat32")
 	if err != nil {
 		return err
@@ -250,10 +273,10 @@ func encResidualNormMLPQuantTail(enc metal.MTLComputeCommandEncoder, tb quantTai
 		return err
 	}
 	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-	if err := encProjQuantBF16In(enc, gate, tb.nBF, tb.gBF, tb.g, L, FF, D); err != nil {
+	if err := gateProj(enc, tb.nBF, tb.gBF, tb.g, L, FF, D); err != nil {
 		return err
 	}
-	if err := encProjQuantBF16In(enc, up, tb.nBF, tb.uBF, tb.u, L, FF, D); err != nil {
+	if err := upProj(enc, tb.nBF, tb.uBF, tb.u, L, FF, D); err != nil {
 		return err
 	}
 	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
@@ -265,7 +288,7 @@ func encResidualNormMLPQuantTail(enc metal.MTLComputeCommandEncoder, tb quantTai
 	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
 	// down: cast the silu rows into gBF (free after its widen) and land the bf16 result in nBF
 	// (free after gate/up consumed it), widening into out.
-	if err := encProjQuantF32(enc, down, tb.s, tb.gBF, tb.nBF, tb.out, L, D, FF); err != nil {
+	if err := downProj(enc, tb.s, tb.gBF, tb.nBF, tb.out, L, D, FF); err != nil {
 		return err
 	}
 	memoryBarrier(enc, metal.MTLBarrierScopeBuffers)

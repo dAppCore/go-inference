@@ -607,15 +607,28 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 			// the only readback. engaged=false (hook unbound, geometry unservable, first-call decline)
 			// leaves the per-stage quant branch below in charge.
 			if gm, isGD := layer.Mixer.(*gatedDeltaMixer); isGD && s.m.residualScale() == 1 {
-				if mlp, isDense := layer.MLP.(*MLP); isDense && mlp.GateQ != nil && mlp.UpQ != nil && mlp.DownQ != nil {
-					y, next, engaged, qerr := gm.forwardQuantLayer(h, layer.InputNorm, layer.PostAttnNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, mlp.FF, L, D, eps, s.states[li])
-					if engaged {
-						if qerr != nil {
-							return nil, qerr
+				if mlp, isDense := layer.MLP.(*MLP); isDense {
+					switch {
+					case mlp.GateQ != nil && mlp.UpQ != nil && mlp.DownQ != nil:
+						y, next, engaged, qerr := gm.forwardQuantLayer(h, layer.InputNorm, layer.PostAttnNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, mlp.FF, L, D, eps, s.states[li])
+						if engaged {
+							if qerr != nil {
+								return nil, qerr
+							}
+							s.states[li] = next
+							h = y
+							continue
 						}
-						s.states[li] = next
-						h = y
-						continue
+					case mlp.GateB != nil && mlp.UpB != nil && mlp.DownB != nil:
+						y, next, engaged, berr := gm.forwardBF16Layer(h, layer.InputNorm, layer.PostAttnNorm, mlp.GateB, mlp.UpB, mlp.DownB, mlp.FF, L, D, eps, s.states[li])
+						if engaged {
+							if berr != nil {
+								return nil, berr
+							}
+							s.states[li] = next
+							h = y
+							continue
+						}
 					}
 				}
 			}
