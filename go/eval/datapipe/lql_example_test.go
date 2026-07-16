@@ -20,3 +20,18 @@ func ExampleParseLQL() {
 	// fine-tunes/project-gemma4
 	// 8
 }
+
+func ExampleParseLQLScript() {
+	statements, err := ParseLQLScript(`USE "base.vindex"; DESCRIBE "base.vindex";`)
+	if err != nil {
+		core.Println(err)
+		return
+	}
+	core.Println(len(statements))
+	core.Println(statements[0].Kind)
+	core.Println(statements[1].Kind)
+	// Output:
+	// 2
+	// use
+	// describe
+}
