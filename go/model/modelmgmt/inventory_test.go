@@ -32,17 +32,23 @@ func detailNotes(t *core.T, details map[string]*tableDetail, table string) strin
 
 func TestInventory_toInt_Good(t *core.T) {
 	core.AssertEqual(t, 42, toInt(int64(42)))
+	core.AssertEqual(t, 0, toInt(int64(0)))
+	core.AssertEqual(t, -7, toInt(int64(-7)))
 }
 
 func TestInventory_toInt_Bad(t *core.T) {
 	core.AssertEqual(t, 0, toInt("not a number"))
 	core.AssertEqual(t, 0, toInt(nil))
+	core.AssertEqual(t, 0, toInt(true)) // unhandled type falls to the default branch too
 }
 
+// TestInventory_toInt_Ugly covers the numeric widths DuckDB and InfluxDB
+// hand back, including float64 truncation toward zero (not rounding, not
+// flooring) in both directions.
 func TestInventory_toInt_Ugly(t *core.T) {
-	// DuckDB and InfluxDB hand back different numeric widths.
 	core.AssertEqual(t, 7, toInt(int32(7)))
 	core.AssertEqual(t, 3, toInt(float64(3.9)))
+	core.AssertEqual(t, -3, toInt(float64(-3.9)))
 }
 
 func TestInventory_gatherDetails_Good(t *core.T) {
@@ -58,6 +64,10 @@ func TestInventory_gatherDetails_Bad(t *core.T) {
 	// No known tables present -> no annotations.
 	details := gatherDetails(newTestDB(t), map[string]int{})
 	core.AssertEmpty(t, details)
+	// An unrecognised table name in counts is not annotated either — only
+	// the specific hardcoded table names gatherDetails knows about are.
+	unrelated := gatherDetails(newTestDB(t), map[string]int{"unrelated_table": 5})
+	core.AssertEmpty(t, unrelated)
 }
 
 func TestInventory_gatherDetails_Ugly(t *core.T) {
