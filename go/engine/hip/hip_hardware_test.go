@@ -132,7 +132,7 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 		biasBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", label+" biases", biasPayload, len(biases))
 		core.RequireNoError(t, err)
 		defer biasBuffer.Close()
-		rowCounts := []int{33, 256}
+		rowCounts := []int{33, 64, 256}
 		for _, affineRows := range rowCounts {
 			probabilities := make([]float32, affineRows*affineVocab)
 			for row := 0; row < affineRows; row++ {
@@ -163,6 +163,25 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 				}
 			}
 			assertFloat32SlicesNearRelativeNamedForHardwareTest(t, core.Sprintf("diffusion expected embedding %s group64 rows%d", label, affineRows), want, got, 0.00001, 0.00001)
+			if bits == 8 && affineRows == 64 {
+				t.Setenv(hipDisableDiffusionExpectedEmbeddingSubgroupEnv, "1")
+				control, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{
+					EmbeddingPointer: embedding.Pointer(),
+					EmbeddingBytes:   embedding.SizeBytes(),
+					ScalePointer:     scaleBuffer.Pointer(),
+					ScaleBytes:       scaleBuffer.SizeBytes(),
+					BiasPointer:      biasBuffer.Pointer(),
+					BiasBytes:        biasBuffer.SizeBytes(),
+					TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
+					GroupSize:        affineGroupSize,
+					QuantBits:        bits,
+					VocabSize:        affineVocab,
+					HiddenSize:       affineHidden,
+				}, 2)
+				core.RequireNoError(t, err)
+				assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding q8 rows64 tile control", control, got, 0, 0)
+				t.Setenv(hipDisableDiffusionExpectedEmbeddingSubgroupEnv, "")
+			}
 			if bits == 8 && affineRows == 256 {
 				t.Setenv(hipDisableDiffusionExpectedEmbeddingProbability4Env, "1")
 				control, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{

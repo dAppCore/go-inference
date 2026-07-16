@@ -40,7 +40,7 @@ const (
 	hipDiffusionExpectedEmbeddingQ8G64Subgroups        = 8
 	hipDiffusionExpectedEmbeddingQ8G64SubgroupRows     = hipDiffusionExpectedEmbeddingQ8G64RowsPerSubgroup * hipDiffusionExpectedEmbeddingQ8G64Subgroups
 	hipDiffusionExpectedEmbeddingQ8G64SubgroupDims     = hipDiffusionExpectedEmbeddingQ8G64SubgroupWidth * hipDiffusionExpectedEmbeddingQ8G64DimsPerThread
-	hipDiffusionExpectedEmbeddingQ8G64SubgroupMinRows  = 128
+	hipDiffusionExpectedEmbeddingQ8G64SubgroupMinRows  = 64
 	hipDiffusionExpectedEmbeddingQ8G64TileRows         = 32
 	hipDiffusionExpectedEmbeddingQ8G64TileDims         = 64
 )
