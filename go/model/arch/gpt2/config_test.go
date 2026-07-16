@@ -11,7 +11,7 @@ import (
 // Sources: https://huggingface.co/openai-community/gpt2/blob/main/config.json
 // https://huggingface.co/AI-Sweden-Models/gpt-sw3-1.3b/blob/main/config.json
 // https://huggingface.co/bigcode/tiny_starcoder_py/blob/main/config.json
-func TestConfig_RealCheckpointFixtures_Good(t *testing.T) {
+func TestConfig_Arch_Good(t *testing.T) {
 	fixtures := []struct {
 		name, json                string
 		hidden, heads, layers, kv int
@@ -37,13 +37,39 @@ func TestConfig_RealCheckpointFixtures_Good(t *testing.T) {
 	}
 }
 
-func TestConfig_RealCheckpointFixtures_Bad(t *testing.T) {
+func TestConfig_Arch_Bad(t *testing.T) {
 	if _, err := (&Config{}).Arch(); err == nil {
 		t.Fatal("empty config accepted")
 	}
 }
-func TestConfig_RealCheckpointFixtures_Ugly(t *testing.T) {
+func TestConfig_Arch_Ugly(t *testing.T) {
 	if _, err := (&Config{Hidden: 7, Heads: 2, Layers: 1, Positions: 1, Vocab: 1}).Arch(); err == nil {
 		t.Fatal("indivisible heads accepted")
+	}
+}
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{Hidden: 768}
+	cfg.InferFromWeights(nil)
+	if cfg.Hidden != 768 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// indivisible-heads guard — distinct from _Bad's all-zero rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{Hidden: 7, Heads: 2, Layers: 1, Positions: 1, Vocab: 1}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("indivisible heads became valid after InferFromWeights")
 	}
 }
