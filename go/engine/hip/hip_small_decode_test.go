@@ -1620,6 +1620,44 @@ func TestHIPGemma4Q4PrefillQKVProjectionBatchTripleCompatible_Bad(t *testing.T) 
 	core.AssertEqual(t, false, hipGemma4Q4PrefillQKVProjectionBatchTripleCompatible(cfg))
 }
 
+func TestHIPGemma4Q4PrefillQKVProjectionBatch_BatchOneMixedWeightsUsesSingleRowFallback_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	cfg, cleanup := hipGemma4Q4Layer0FixtureConfig(t, driver)
+	defer cleanup()
+
+	valuePayload, err := hipUint16Payload(make([]uint16, cfg.ValueProjection.Rows*cfg.ValueProjection.Cols))
+	core.RequireNoError(t, err)
+	valueWeight, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "mixed value projection weight", valuePayload, len(valuePayload)/2)
+	core.RequireNoError(t, err)
+	defer valueWeight.Close()
+	cfg.ValueProjection = hipMLXQ4DeviceWeightConfig{
+		WeightPointer:  valueWeight.Pointer(),
+		WeightBytes:    valueWeight.SizeBytes(),
+		Rows:           cfg.ValueProjection.Rows,
+		Cols:           cfg.ValueProjection.Cols,
+		WeightEncoding: hipProjectionWeightEncodingBF16,
+	}
+	core.AssertEqual(t, false, hipGemma4Q4PrefillQKVProjectionBatchTripleCompatible(cfg))
+
+	inputPayload, err := hipFloat32Payload(make([]float32, cfg.HiddenSize))
+	core.RequireNoError(t, err)
+	input, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "mixed batch-one QKV input", inputPayload, cfg.HiddenSize)
+	core.RequireNoError(t, err)
+	defer input.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+
+	start := len(driver.launches)
+	qkv, err := hipRunGemma4Q4PrefillQKVProjectionBatchWorkspace(context.Background(), driver, cfg, input, 1, workspace)
+	core.RequireNoError(t, err)
+	defer qkv.Close()
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4ProjBatch))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameProjectionBatch))
+	core.AssertEqual(t, 2, countLaunchName(launches, hipKernelNameMLXQ4Proj))
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameProjection))
+}
+
 func TestHIPGemma4Q4PrefillQKVProjectionBatch_AttentionKEqVBorrowsKeyProjection_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	cfg, cleanup := hipGemma4Q4Layer0FixtureConfig(t, driver)
