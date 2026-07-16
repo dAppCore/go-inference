@@ -82,7 +82,7 @@ const (
 	hipMLXQ4ProjectionBatchWideTokensPerBlock             = 16
 	hipMLXQ4ProjectionBatchQ8Tokens64PerBlock             = 64
 	hipMLXQ4ProjectionBatchQ8Row32MinRows                 = 32
-	hipMLXQ4ProjectionBatchQ8Row64MinRows                 = 8192
+	hipMLXQ4ProjectionBatchQ8Row64MinRows                 = 2048
 	hipMLXQ4ProjectionGreedyRowsPerBlock                  = 32
 	hipMLXQ4ProjectionGreedyQ6RowsPerBlock                = 64
 	hipMLXQ4ProjectionBestBytes                           = 8
