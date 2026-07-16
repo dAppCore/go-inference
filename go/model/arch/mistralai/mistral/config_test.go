@@ -27,7 +27,10 @@ const ministral3B = `{
   }
 }`
 
-func TestConfigArchMinistral3B(t *testing.T) {
+// TestConfig_Arch_Good pins the real Ministral-3-3B-Base-2512 config shape: the
+// multimodal wrapper (text arch nested under text_config), YaRN rope, full
+// attention (sliding_window null), tied embeddings.
+func TestConfig_Arch_Good(t *testing.T) {
 	var cfg mistral.Config
 	if r := core.JSONUnmarshal([]byte(ministral3B), &cfg); !r.OK {
 		t.Fatalf("unmarshal: %s", r.Error())
@@ -113,7 +116,9 @@ func TestConfigArchNoYaRN_Good(t *testing.T) {
 	}
 }
 
-func TestConfigArchDefaults(t *testing.T) {
+// TestConfig_Arch_Ugly proves the defaulting edge: head_dim, num_key_value_heads,
+// eps and rope all absent → derived defaults fire rather than zero-valuing the arch.
+func TestConfig_Arch_Ugly(t *testing.T) {
 	// minimal config: head_dim, num_key_value_heads, eps, rope all absent → derived defaults.
 	const minimal = `{"hidden_size": 64, "num_hidden_layers": 2, "num_attention_heads": 8, "intermediate_size": 128, "vocab_size": 100}`
 	var cfg mistral.Config
@@ -141,7 +146,10 @@ func TestConfigArchDefaults(t *testing.T) {
 	}
 }
 
-func TestConfigArchErrors(t *testing.T) {
+// TestConfig_Arch_Bad rejects the invalid-geometry inputs: missing hidden_size,
+// missing num_hidden_layers, heads not a multiple of kv heads, and head_dim
+// absent with hidden_size indivisible by num_attention_heads.
+func TestConfig_Arch_Bad(t *testing.T) {
 	for _, tc := range []struct {
 		name, json string
 	}{
@@ -159,5 +167,34 @@ func TestConfigArchErrors(t *testing.T) {
 				t.Fatal("expected an error")
 			}
 		})
+	}
+}
+
+// TestConfig_InferFromWeights_Good proves the no-op leaves a fully-declared
+// config untouched — Mistral declares every dim, so nothing is inferred.
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := mistral.Config{HiddenSize: 64}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 64 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := mistral.Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// head_dim-absent/hidden-indivisible edge — a distinct failure from the
+// totally-empty config in _Bad.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := mistral.Config{HiddenSize: 65, NumHiddenLayers: 2, NumAttentionHeads: 8}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("indivisible hidden size (no head_dim) became valid after InferFromWeights")
 	}
 }

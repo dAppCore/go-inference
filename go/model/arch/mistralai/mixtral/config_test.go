@@ -76,3 +76,19 @@ func TestConfig_InferFromWeights_Good(t *testing.T) {
 		t.Fatalf("InferFromWeights changed config: %+v", cfg)
 	}
 }
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{HiddenSize: 9, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 32, NumLocalExperts: 2, NumExpertsPerTok: 1}
+	cfg.InferFromWeights(map[string]safetensors.Tensor{})
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("indivisible hidden size became valid after InferFromWeights")
+	}
+}
