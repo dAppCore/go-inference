@@ -10,7 +10,7 @@ import (
 )
 
 // Fixture source: https://huggingface.co/ibm-granite/granite-3.1-1b-a400m-base/blob/main/config.json
-func TestParseConfig_Good(t *testing.T) {
+func TestConfig_ParseConfig_Good(t *testing.T) {
 	data, err := coreio.Local.Read("testdata/ibm-granite-granite-3.1-1b-a400m-base-config.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
@@ -25,13 +25,13 @@ func TestParseConfig_Good(t *testing.T) {
 	}
 }
 
-func TestParseConfig_Bad(t *testing.T) {
+func TestConfig_ParseConfig_Bad(t *testing.T) {
 	if r := ParseConfig([]byte(`{"model_type":`)); r.OK {
 		t.Fatal("ParseConfig malformed JSON succeeded")
 	}
 }
 
-func TestParseConfig_Ugly(t *testing.T) {
+func TestConfig_ParseConfig_Ugly(t *testing.T) {
 	r := ParseConfig([]byte(`{}`))
 	if !r.OK {
 		t.Fatalf("ParseConfig empty object parse: %s", r.Error())
@@ -63,5 +63,32 @@ func TestConfig_Arch_Ugly(t *testing.T) {
 	cfg := Config{ModelType: "granitemoe", HiddenSize: 8, IntermediateSize: 4, NumHiddenLayers: 1, NumAttentionHeads: 2, NumKeyValueHeads: 1, NumLocalExperts: 2, NumExpertsPerTok: 3, VocabSize: 32, RMSNormEps: 1e-5, RopeTheta: 10000, LogitsScaling: 6, ResidualMultiplier: .22, EmbeddingMultiplier: 12, AttentionMultiplier: .125}
 	if _, err := cfg.Arch(); err == nil || !core.Contains(err.Error(), "exceeds") {
 		t.Fatalf("Arch over-wide top-k error = %v", err)
+	}
+}
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{ModelType: "granite"}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("dense model_type became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// top-k-exceeds-experts guard — distinct from _Bad's wrong-model_type
+// rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{ModelType: "granitemoe", HiddenSize: 8, IntermediateSize: 4, NumHiddenLayers: 1, NumAttentionHeads: 2, NumKeyValueHeads: 1, NumLocalExperts: 2, NumExpertsPerTok: 3, VocabSize: 32, RMSNormEps: 1e-5, RopeTheta: 10000, LogitsScaling: 6, ResidualMultiplier: .22, EmbeddingMultiplier: 12, AttentionMultiplier: .125}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("top-k exceeding experts became valid after InferFromWeights")
 	}
 }
