@@ -89,6 +89,10 @@ type ChatTemplateKwargs struct {
 	// ThinkingBudget caps thought-channel tokens; the backend forces the
 	// channel close on overrun. 0/absent = unlimited.
 	ThinkingBudget *int `json:"thinking_budget,omitempty"`
+	// PreserveThinking extends reasoning preservation to tool-calling
+	// assistant turns ANYWHERE in history, not just after the last user
+	// message — the gemma4 canonical template's preserve_thinking flag.
+	PreserveThinking *bool `json:"preserve_thinking,omitempty"`
 }
 
 // StopList accepts OpenAI stop sequences as either a JSON string or string
@@ -120,6 +124,15 @@ type ChatMessage struct {
 	Images    [][]byte   `json:"-"`
 	Audios    [][]byte   `json:"-"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // assistant response: the model's function calls
+	// Reasoning / ReasoningContent carry an assistant turn's thought channel
+	// echoed back by a stateless client replaying history (reasoning is the
+	// canonical spelling, reasoning_content the vLLM/DeepSeek one). The
+	// handler re-frames them into the native thought span for turns after the
+	// last user message — the gemma4 canonical-template (2026-07-09)
+	// reasoning-preservation rule — so agentic tool loops keep their chain of
+	// thought across stateless replays.
+	Reasoning        string `json:"reasoning,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // ChatCompletionResponse is the non-streaming OpenAI-compatible response body.

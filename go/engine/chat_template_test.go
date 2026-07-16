@@ -231,3 +231,66 @@ func TestChatTemplate_ResolveThinking_Ugly(t *testing.T) {
 		t.Fatal("legacy dialect ResolveThinking(nil) = true, want off (no reasoning channel)")
 	}
 }
+
+// TestChatTemplate_MergeAdjacentAssistant_Good pins the gemma4 turn-tag-balance
+// rule (canonical chat_template.jinja, 2026-07-09): DIRECTLY consecutive
+// assistant messages fold into ONE model turn — opened once, contents
+// concatenated in order, closed once — instead of the unbalanced close/reopen
+// pair the pre-fix template emitted.
+func TestChatTemplate_MergeAdjacentAssistant_Good(t *testing.T) {
+	tmpl := GemmaChatTemplate(TurnTokens{Open: "<|turn>", Close: "<turn|>"}, false)
+	if !tmpl.MergeAdjacentAssistant {
+		t.Fatal("gemma4 dialect must declare MergeAdjacentAssistant")
+	}
+	got := RenderChatTurns(tmpl, []inference.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "part one, "},
+		{Role: "assistant", Content: "part two"},
+	})
+	want := "<|turn>user\nhi<turn|>\n" +
+		"<|turn>model\npart one, part two<turn|>\n" +
+		"<|turn>model\n"
+	if got != want {
+		t.Fatalf("gemma4 adjacent-assistant render = %q, want %q", got, want)
+	}
+}
+
+// TestChatTemplate_MergeAdjacentAssistant_Bad pins the contrast: ChatML
+// declares no fold, so consecutive assistant messages stay two balanced turns.
+func TestChatTemplate_MergeAdjacentAssistant_Bad(t *testing.T) {
+	got := RenderChatTurns(ChatMLChatTemplate(), []inference.Message{
+		{Role: "assistant", Content: "one"},
+		{Role: "assistant", Content: "two"},
+	})
+	want := "<|im_start|>assistant\none<|im_end|>\n" +
+		"<|im_start|>assistant\ntwo<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("ChatML adjacent-assistant render = %q, want %q", got, want)
+	}
+}
+
+// TestChatTemplate_MergeAdjacentAssistant_Ugly pins the fold's boundaries: a
+// user message between assistant turns breaks adjacency, consecutive USER
+// messages never fold (the rule is assistant-only), and the gemma3-era dialect
+// declares no fold at all.
+func TestChatTemplate_MergeAdjacentAssistant_Ugly(t *testing.T) {
+	g4 := GemmaChatTemplate(TurnTokens{Open: "<|turn>", Close: "<turn|>"}, false)
+	got := RenderChatTurns(g4, []inference.Message{
+		{Role: "assistant", Content: "a"},
+		{Role: "user", Content: "u"},
+		{Role: "user", Content: "v"},
+		{Role: "assistant", Content: "b"},
+	})
+	want := "<|turn>model\na<turn|>\n" +
+		"<|turn>user\nu<turn|>\n" +
+		"<|turn>user\nv<turn|>\n" +
+		"<|turn>model\nb<turn|>\n" +
+		"<|turn>model\n"
+	if got != want {
+		t.Fatalf("gemma4 non-adjacent render = %q, want %q", got, want)
+	}
+	if g3 := GemmaChatTemplate(TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}, false); g3.MergeAdjacentAssistant {
+		t.Fatal("gemma3-era dialect must not declare MergeAdjacentAssistant")
+	}
+}

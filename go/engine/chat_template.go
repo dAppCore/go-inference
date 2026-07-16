@@ -59,6 +59,15 @@ type ChatTemplate struct {
 	// spells "system".
 	InlineSystemAsUser bool
 
+	// MergeAdjacentAssistant folds DIRECTLY consecutive assistant messages
+	// into ONE assistant turn — the first opens it, contents concatenate in
+	// order, the last closes it — the gemma4 canonical chat_template.jinja
+	// (2026-07-09) turn-tag-balance rule, which suppresses the duplicate
+	// "<|turn>model" open and the early close between adjacent assistant
+	// history entries. ChatML and the gemma3-era dialect render every message
+	// as its own turn (their templates carry no such fold).
+	MergeAdjacentAssistant bool
+
 	// Thinking is the reasoning-channel framing, kept as the one dialect-
 	// divergent hook. Prelude is written into the leading system turn when
 	// thinking is ON (gemma "<|think|>\n"); OffSuffix is appended after the
@@ -147,6 +156,7 @@ func GemmaChatTemplate(turns TurnTokens, suppressor bool) ChatTemplate {
 			th.OffSuffix = "<|channel>thought\n<channel|>"
 		}
 		t.SystemAsLeadingTurn = true
+		t.MergeAdjacentAssistant = true
 		t.Thinking = th
 	}
 	return t
@@ -199,14 +209,36 @@ func (t ChatTemplate) turnRole(role string) string {
 	}
 }
 
+// assistantFamilyRole reports whether role is an assistant-authored spelling
+// (assistant or model) — the roles MergeAdjacentAssistant folds when adjacent.
+func assistantFamilyRole(role string) bool {
+	return role == "assistant" || role == "model"
+}
+
+// mergesWithPrev reports whether messages[i] continues messages[i-1]'s
+// assistant turn instead of opening its own: the template declares the fold
+// (MergeAdjacentAssistant) and both messages are assistant-authored. i may be
+// len(messages) (the lookahead from the last message), which never merges.
+func (t ChatTemplate) mergesWithPrev(messages []inference.Message, i int) bool {
+	return t.MergeAdjacentAssistant && i > 0 && i < len(messages) &&
+		assistantFamilyRole(messages[i].Role) && assistantFamilyRole(messages[i-1].Role)
+}
+
 // plainTurnsSize returns the exact rendered length of messages as plain turns
-// (Open + role + "\n" + content + Close + "\n" each) followed by the trailing
+// (Open + role + "\n" + content + Close + "\n" each, adjacent assistant
+// messages folded per MergeAdjacentAssistant) followed by the trailing
 // assistant generation cue — the pre-size for the single builder allocation
 // shared by the render loop and the woken-session continuation.
 func plainTurnsSize(t ChatTemplate, messages []inference.Message) int {
 	size := len(t.Open) + len(t.AssistantRole) + 1
-	for _, msg := range messages {
-		size += len(t.Open) + len(t.turnRole(msg.Role)) + 1 + len(msg.Content) + len(t.Close) + 1
+	for i, msg := range messages {
+		size += len(msg.Content)
+		if !t.mergesWithPrev(messages, i) {
+			size += len(t.Open) + len(t.turnRole(msg.Role)) + 1
+		}
+		if !t.mergesWithPrev(messages, i+1) {
+			size += len(t.Close) + 1
+		}
 	}
 	return size
 }
@@ -214,14 +246,21 @@ func plainTurnsSize(t ChatTemplate, messages []inference.Message) int {
 // writePlainTurns writes messages as plain turns followed by the assistant
 // generation cue into out — the one turn-writing body the render loop and the
 // continuation both drive, so plain-turn framing has a single implementation.
+// A message merging with its predecessor (mergesWithPrev) skips its own turn
+// open, and a message whose successor merges skips its close, so an adjacent
+// assistant run renders as one balanced turn.
 func writePlainTurns(out *strings.Builder, t ChatTemplate, messages []inference.Message) {
-	for _, msg := range messages {
-		out.WriteString(t.Open)
-		out.WriteString(t.turnRole(msg.Role))
-		out.WriteString("\n")
+	for i, msg := range messages {
+		if !t.mergesWithPrev(messages, i) {
+			out.WriteString(t.Open)
+			out.WriteString(t.turnRole(msg.Role))
+			out.WriteString("\n")
+		}
 		out.WriteString(msg.Content)
-		out.WriteString(t.Close)
-		out.WriteString("\n")
+		if !t.mergesWithPrev(messages, i+1) {
+			out.WriteString(t.Close)
+			out.WriteString("\n")
+		}
 	}
 	out.WriteString(t.Open)
 	out.WriteString(t.AssistantRole)

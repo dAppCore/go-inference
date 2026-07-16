@@ -133,6 +133,15 @@ func GenerateOptions(req ChatCompletionRequest) ([]inference.GenerateOption, err
 	return opts, nil
 }
 
+// preserveThinking reports chat_template_kwargs.preserve_thinking — the
+// canonical-template flag that keeps echoed reasoning on tool-calling turns
+// anywhere in history (turns after the last user message always keep theirs).
+func (req ChatCompletionRequest) preserveThinking() bool {
+	return req.ChatTemplateKwargs != nil &&
+		req.ChatTemplateKwargs.PreserveThinking != nil &&
+		*req.ChatTemplateKwargs.PreserveThinking
+}
+
 // thinkingOverride resolves an explicit reasoning toggle from the request:
 // chat_template_kwargs.enable_thinking (vLLM/SGLang convention) wins; otherwise
 // reasoning_effort=="none" disables thinking. nil = no override (model default).

@@ -508,6 +508,42 @@ func TestUnmarshal_ParseChatTemplateKwargs_Good(t *testing.T) {
 	}
 }
 
+// TestUnmarshal_ParseChatTemplateKwargs_Good_PreserveThinking pins the
+// preserve_thinking capture (bool, null-tolerant) beside its siblings.
+func TestUnmarshal_ParseChatTemplateKwargs_Good_PreserveThinking(t *testing.T) {
+	kw, _, err := parseChatTemplateKwargs([]byte(`{"preserve_thinking":true}`), 0)
+	if err != nil || kw.PreserveThinking == nil || !*kw.PreserveThinking {
+		t.Fatalf("parseChatTemplateKwargs(preserve_thinking:true) = %+v, err %v", kw, err)
+	}
+	kw, _, err = parseChatTemplateKwargs([]byte(`{"preserve_thinking":null}`), 0)
+	if err != nil || kw.PreserveThinking != nil {
+		t.Fatalf("parseChatTemplateKwargs(preserve_thinking:null) = %+v, err %v", kw, err)
+	}
+}
+
+// TestUnmarshal_ParseChatMessage_Good_AssistantHistoryFields pins the
+// assistant-history fields a stateless replay carries: reasoning /
+// reasoning_content parse as strings (null-tolerant), and tool_calls decode
+// into the typed list — previously all three fell through the unknown-key
+// skip, so the tool-history re-render in openAIMessageContent could never
+// fire.
+func TestUnmarshal_ParseChatMessage_Good_AssistantHistoryFields(t *testing.T) {
+	in := `{"role":"assistant","content":"ok","reasoning":"chain","tool_calls":[{"id":"1","type":"function","function":{"name":"f","arguments":"{\"x\":1}"}}]}`
+	msg, _, err := parseChatMessage([]byte(in), 0)
+	if err != nil {
+		t.Fatalf("parseChatMessage(%q) error = %v", in, err)
+	}
+	if msg.Reasoning != "chain" || len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "f" {
+		t.Fatalf("parseChatMessage(assistant history) = %+v", msg)
+	}
+
+	in = `{"role":"assistant","content":"ok","reasoning":null,"reasoning_content":"alt","tool_calls":null}`
+	msg, _, err = parseChatMessage([]byte(in), 0)
+	if err != nil || msg.Reasoning != "" || msg.ReasoningContent != "alt" || msg.ToolCalls != nil {
+		t.Fatalf("parseChatMessage(null-tolerant history) = %+v, err %v", msg, err)
+	}
+}
+
 // TestUnmarshal_ParseResponseInputMessageArray_Bad drives the array
 // walker's own malformed-shape branches directly.
 func TestUnmarshal_ParseResponseInputMessageArray_Bad(t *testing.T) {

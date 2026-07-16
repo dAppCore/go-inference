@@ -340,6 +340,40 @@ func parseChatMessage(data []byte, i int) (ChatMessage, int, error) {
 			}
 			msg.Content = s
 			i = vnext
+		case "reasoning", "reasoning_content":
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+				break
+			}
+			s, vnext, verr := jsonenc.ParseJSONString(data, i)
+			if verr != nil {
+				return msg, vnext, verr
+			}
+			if string(key) == "reasoning" {
+				msg.Reasoning = s
+			} else {
+				msg.ReasoningContent = s
+			}
+			i = vnext
+		case "tool_calls":
+			// Assistant history replayed by a stateless client: decode the
+			// call list so openAIMessageContent can re-render each call into
+			// its native span. Cold path — stdlib decode over the subslice,
+			// like the content-part array above.
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+				break
+			}
+			vnext, verr := jsonenc.SkipJSONValue(data, i)
+			if verr != nil {
+				return msg, vnext, verr
+			}
+			var calls []ToolCall
+			if result := core.JSONUnmarshal(data[i:vnext], &calls); !result.OK {
+				return msg, vnext, result.Err()
+			}
+			msg.ToolCalls = calls
+			i = vnext
 		default:
 			vnext, verr := jsonenc.SkipJSONValue(data, i)
 			if verr != nil {
@@ -457,6 +491,17 @@ func parseChatTemplateKwargs(data []byte, i int) (*ChatTemplateKwargs, int, erro
 				}
 				budget := int(v)
 				kw.ThinkingBudget = &budget
+				i = n
+			}
+		case "preserve_thinking":
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+			} else {
+				v, n, err := jsonenc.ParseJSONBool(data, i)
+				if err != nil {
+					return nil, n, err
+				}
+				kw.PreserveThinking = &v
 				i = n
 			}
 		default:
