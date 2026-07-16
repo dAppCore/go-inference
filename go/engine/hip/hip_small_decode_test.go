@@ -6793,7 +6793,10 @@ func TestHIPAttentionHeadsChunkedEligible_BlockPagesGood(t *testing.T) {
 	}
 	core.AssertEqual(t, true, hipAttentionHeadsChunkedEligible(req, 2, 256, 320))
 	req.WindowSize = 512
+	core.AssertEqual(t, true, hipAttentionHeadsChunkedEligible(req, 2, 256, 320))
+	req.KeyHeads = 2
 	core.AssertEqual(t, false, hipAttentionHeadsChunkedEligible(req, 2, 256, 320))
+	req.KeyHeads = 0
 	req.WindowSize = 0
 
 	req.DeviceKV.mode = rocmKVCacheModeQ8
@@ -6870,11 +6873,22 @@ func TestHIPAttentionHeadsChunkedEligible_Gemma4HeadDim512_Good(t *testing.T) {
 	}, workspace))
 	multiHeadCache.tokenCount = 512
 	multiHeadCache.pages[0].tokenCount = 512
-	core.AssertEqual(t, false, hipAttentionHeadsBatchChunkedEligible(hipAttentionHeadsBatchCausalDeviceRequest{
+	core.AssertEqual(t, true, hipAttentionHeadsBatchChunkedEligible(hipAttentionHeadsBatchCausalDeviceRequest{
 		DeviceKV:        multiHeadCache,
 		DescriptorTable: descriptor,
 		Dim:             512,
 		TokenCount:      512,
+		HeadCount:       8,
+		KeyHeads:        4,
+		QueryCount:      1,
+	}, workspace))
+	multiHeadCache.tokenCount = 128
+	multiHeadCache.pages[0].tokenCount = 128
+	core.AssertEqual(t, false, hipAttentionHeadsBatchChunkedEligible(hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        multiHeadCache,
+		DescriptorTable: descriptor,
+		Dim:             512,
+		TokenCount:      128,
 		HeadCount:       8,
 		KeyHeads:        4,
 		QueryCount:      1,
@@ -6892,11 +6906,22 @@ func TestHIPAttentionHeadsChunkedEligible_Gemma4HeadDim512_Good(t *testing.T) {
 	}, workspace))
 	cache.tokenCount = 512
 	cache.pages[0].tokenCount = 512
-	core.AssertEqual(t, false, hipAttentionHeadsBatchChunkedEligible(hipAttentionHeadsBatchCausalDeviceRequest{
+	core.AssertEqual(t, true, hipAttentionHeadsBatchChunkedEligible(hipAttentionHeadsBatchCausalDeviceRequest{
 		DeviceKV:        cache,
 		DescriptorTable: descriptor,
 		Dim:             512,
 		TokenCount:      512,
+		HeadCount:       8,
+		KeyHeads:        1,
+		QueryCount:      1,
+	}, workspace))
+	cache.tokenCount = 128
+	cache.pages[0].tokenCount = 128
+	core.AssertEqual(t, false, hipAttentionHeadsBatchChunkedEligible(hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        cache,
+		DescriptorTable: descriptor,
+		Dim:             512,
+		TokenCount:      128,
 		HeadCount:       8,
 		KeyHeads:        1,
 		QueryCount:      1,

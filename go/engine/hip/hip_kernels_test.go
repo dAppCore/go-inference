@@ -1407,8 +1407,8 @@ func TestHIPKernels_MLXAffineQ6ProjectionBatchRow16LaunchConfig_Good(t *testing.
 
 	q4, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 1536, 1536, 64, 4, 512)
 	core.RequireNoError(t, err)
-	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ4G64Tokens16, q4.Name)
-	core.AssertEqual(t, uint32(192), q4.GridX)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared, q4.Name)
+	core.AssertEqual(t, uint32(96), q4.GridX)
 	core.AssertEqual(t, uint32(32), q4.GridY)
 }
 
