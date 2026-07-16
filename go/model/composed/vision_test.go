@@ -9,6 +9,9 @@ import (
 	"image/png"
 	"math"
 	"testing"
+
+	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 // identityLinear builds an n×n identity-weight visionLinear (no bias) — the "pass-through" projection
@@ -187,6 +190,40 @@ func TestLinearForward_Good(t *testing.T) {
 	}
 }
 
+// TestLinearForward_Quant proves linearForward dispatches a PACKED visionLinear (WQ set, W nil) to
+// matNTQuant — the same quant matvec seam the composed text stack's projections use — by comparing its
+// output against linearForward run on the SAME weight dequantised dense (W set, WQ nil): the two must be
+// bit-identical, since matNTQuantHost dequantises each weight row and dots in the same ascending-k f64
+// order matNT/matNTCols use (mirrors composed_quant_test.go's TestMatNTQuantHost_MatchesDequantMatNT, one
+// level up at the visionLinear/linearForward seam rather than the raw matNTQuant helper).
+func TestLinearForward_Quant(t *testing.T) {
+	const out, in, bits, gs = 6, 32, 4, 32
+	dense := syn(out*in, 321)
+	packed, scales, biases, err := mlxaffine.QuantizeTensor(dense, out, in, bits, gs)
+	if err != nil {
+		t.Fatalf("QuantizeTensor: %v", err)
+	}
+	deq, err := mlxaffine.DequantizeTensor(packed, scales, biases, out, in, bits, gs)
+	if err != nil {
+		t.Fatalf("DequantizeTensor: %v", err)
+	}
+	x := syn(3*in, 654) // L=3 rows
+	qw := &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: bits, GroupSize: gs, OutDim: out, InDim: in}
+	wQuant := &visionLinear{WQ: qw, B: []float32{1, 2, 3, 4, 5, 6}, Out: out, In: in}
+	wDense := &visionLinear{W: deq, B: []float32{1, 2, 3, 4, 5, 6}, Out: out, In: in}
+
+	gotQuant := linearForward(append([]float32(nil), x...), wQuant, 3)
+	gotDense := linearForward(append([]float32(nil), x...), wDense, 3)
+	if len(gotQuant) != len(gotDense) {
+		t.Fatalf("len(gotQuant) = %d, len(gotDense) = %d", len(gotQuant), len(gotDense))
+	}
+	for i := range gotDense {
+		if gotQuant[i] != gotDense[i] {
+			t.Fatalf("linearForward(packed)[%d] = %v, != linearForward(dequantised-dense)[%d] = %v", i, gotQuant[i], i, gotDense[i])
+		}
+	}
+}
+
 func TestAddRows_Good(t *testing.T) {
 	got := addRows([]float32{1, 2, 3}, []float32{10, 20, 30})
 	want := []float32{11, 22, 33}
@@ -235,6 +272,54 @@ func TestVisionAttentionForward_Bad(t *testing.T) {
 	}
 }
 
+// TestVisionAttentionForward_LearnedPositionsSkipsRope pins visionTowerCfg.LearnedPositions' gate: with it
+// false (the zero value — every visionTowerCfg literal that predates this field, including every OTHER test
+// in this file), reshaping the SAME token sequence into a different grid (gridW=2 vs gridW=4 for L=4 tokens)
+// changes each token's (row,col) mapping and therefore its 2-D rope angle, so the output MUST differ. With
+// it true (the REAL layout's learned-position-table convention), rope is never applied at all, so the
+// SAME reshape must leave the output UNCHANGED — attention itself has no other geometry-dependent term.
+func TestVisionAttentionForward_LearnedPositionsSkipsRope(t *testing.T) {
+	const hidden = 4
+	w := &visionAttnWeights{Q: identityLinear(hidden), K: identityLinear(hidden), V: identityLinear(hidden), O: identityLinear(hidden)}
+	x := syn(4*hidden, 900) // L=4 tokens
+
+	identical := func(a, b []float32) bool {
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	cfgRope := visionTowerCfg{NumHeads: 1, NumKVHeads: 1, HeadDim: hidden, RopeTheta: 10000, Eps: 1e-6}
+	ropeA, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 2, cfgRope)
+	if err != nil {
+		t.Fatalf("visionAttentionForward (rope, gridW=2): %v", err)
+	}
+	ropeB, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 4, cfgRope)
+	if err != nil {
+		t.Fatalf("visionAttentionForward (rope, gridW=4): %v", err)
+	}
+	if identical(ropeA, ropeB) {
+		t.Fatal("LearnedPositions=false: reshaping the grid did not change the output — 2-D rope is not being applied")
+	}
+
+	cfgLearned := cfgRope
+	cfgLearned.LearnedPositions = true
+	learnedA, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 2, cfgLearned)
+	if err != nil {
+		t.Fatalf("visionAttentionForward (learned, gridW=2): %v", err)
+	}
+	learnedB, err := visionAttentionForward(append([]float32(nil), x...), w, 4, 4, cfgLearned)
+	if err != nil {
+		t.Fatalf("visionAttentionForward (learned, gridW=4): %v", err)
+	}
+	if !identical(learnedA, learnedB) {
+		t.Fatal("LearnedPositions=true: reshaping the grid changed the output — rope must be skipped entirely")
+	}
+}
+
 func TestVisionMLPForward_Good(t *testing.T) {
 	w := &visionMLPWeights{
 		Gate: visionLinear{W: []float32{1}, Out: 1, In: 1},
@@ -245,6 +330,36 @@ func TestVisionMLPForward_Good(t *testing.T) {
 	want := float32(silu(2) * 2)
 	if got[0] != want {
 		t.Fatalf("visionMLPForward = %v, want %v (silu(2)*2, identity down-proj)", got[0], want)
+	}
+}
+
+// TestVisionMLPForward_GELU covers the REAL layout's plain 2-linear GELU variant (w.GELU=true, FC1/FC2
+// instead of Gate/Up/Down) — the twin of TestVisionMLPForward_Good's SwiGLU case, same identity-down-proj
+// shape so the expected value reduces to the activation alone.
+func TestVisionMLPForward_GELU(t *testing.T) {
+	w := &visionMLPWeights{
+		FC1:  visionLinear{W: []float32{1}, Out: 1, In: 1},
+		FC2:  visionLinear{W: []float32{1}, Out: 1, In: 1},
+		GELU: true,
+	}
+	got := visionMLPForward([]float32{2}, w, 1)
+	want := geluTanh(2)
+	if got[0] != want {
+		t.Fatalf("visionMLPForward(GELU) = %v, want %v (geluTanh(2), identity fc2)", got[0], want)
+	}
+	// The SwiGLU fields must be ignored entirely when GELU is set — a non-zero, wrong-shaped Gate/Up/Down
+	// left over on the struct (never populated by loadBlockMLP's GELU branch, but proven here regardless)
+	// must not perturb the result.
+	w2 := &visionMLPWeights{
+		FC1:  visionLinear{W: []float32{1}, Out: 1, In: 1},
+		FC2:  visionLinear{W: []float32{1}, Out: 1, In: 1},
+		Gate: visionLinear{W: []float32{99}, Out: 1, In: 1}, Up: visionLinear{W: []float32{99}, Out: 1, In: 1},
+		Down: visionLinear{W: []float32{99}, Out: 1, In: 1},
+		GELU: true,
+	}
+	got2 := visionMLPForward([]float32{2}, w2, 1)
+	if got2[0] != want {
+		t.Fatalf("visionMLPForward(GELU) with stray SwiGLU fields set = %v, want %v (GELU must win)", got2[0], want)
 	}
 }
 
@@ -406,6 +521,55 @@ func TestVisionTowerForward_Bad(t *testing.T) {
 	tower := mkVisionTower(1, 2, 8, 1)
 	if _, _, err := visionTowerForward(syn(5, 1), 4, 4, tower); err == nil {
 		t.Fatal("visionTowerForward: want an error for a patch buffer size mismatch, got nil")
+	}
+}
+
+// TestVisionTowerForward_PosEmbedAdded proves the REAL layout's learned position table is actually added
+// to the patch-embed output before block 0 runs: the SAME tower/patches forward differently once
+// tower.PosEmbed carries a non-zero table sized [L,Hidden], and identically when PosEmbed is nil (the
+// GUESSED layout's zero value) — mirroring TestVisionMergerForward_BlockIsolation's perturbation style.
+func TestVisionTowerForward_PosEmbedAdded(t *testing.T) {
+	tower := mkVisionTower(2, 2, 8, 21)
+	const gridH, gridW = 4, 4
+	patches := syn(gridH*gridW*tower.Cfg.PatchDim, 88)
+
+	baseline, _, err := visionTowerForward(append([]float32(nil), patches...), gridH, gridW, tower)
+	if err != nil {
+		t.Fatalf("visionTowerForward (no pos_embed): %v", err)
+	}
+
+	tower.PosEmbed = syn(gridH*gridW*tower.Cfg.Hidden, 9999)
+	withPos, _, err := visionTowerForward(append([]float32(nil), patches...), gridH, gridW, tower)
+	if err != nil {
+		t.Fatalf("visionTowerForward (with pos_embed): %v", err)
+	}
+
+	same := len(baseline) == len(withPos)
+	if same {
+		for i := range baseline {
+			if baseline[i] != withPos[i] {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		t.Fatal("setting tower.PosEmbed did not change visionTowerForward's output — the learned position table is not being added")
+	}
+}
+
+// TestVisionTowerForward_PosEmbedGridMismatchBad pins the fail-loud contract for a pos_embed table whose
+// row count doesn't match the actual patch grid (interpolation is out of scope for this layer — see the
+// visionTowerForward doc comment): a fixed-size learned table sized for a DIFFERENT grid must error, not
+// silently truncate/wrap/misalign.
+func TestVisionTowerForward_PosEmbedGridMismatchBad(t *testing.T) {
+	tower := mkVisionTower(1, 2, 8, 22)
+	const gridH, gridW = 4, 4
+	patches := syn(gridH*gridW*tower.Cfg.PatchDim, 89)
+	tower.PosEmbed = syn((gridH*gridW-1)*tower.Cfg.Hidden, 9998) // one row short of the real grid
+
+	if _, _, err := visionTowerForward(patches, gridH, gridW, tower); err == nil {
+		t.Fatal("visionTowerForward: want an error for a pos_embed/grid size mismatch, got nil")
 	}
 }
 

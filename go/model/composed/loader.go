@@ -378,14 +378,18 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 		m.Eps = 1e-6
 	}
 
-	// Vision: additive-only. buildVisionTower probes tensors for vision_tower.*/multi_modal_projector.*
-	// and returns (nil, nil) when neither is present, so a text-only checkpoint (the whole suite before
-	// this) loads with m.Vision nil exactly as it always did. raw (not cfg) carries the WRAPPER-level
-	// vision_config + image/video token ids — cfg is already narrowed to the text_config side.
-	if vision, verr := buildVisionTower(tensors, raw.VisionConfig, D); verr != nil {
+	// Vision: additive-only. buildVisionTowerQuant probes tensors for vision_tower.*/multi_modal_projector.*
+	// (either supported layout — see vision_loader.go's file doc comment) and returns (nil, nil) when
+	// neither is present, so a text-only checkpoint (the whole suite before this) loads with m.Vision nil
+	// exactly as it always did. raw (not cfg) carries the WRAPPER-level vision_config + image/video token
+	// ids — cfg is already narrowed to the text_config side. quant/zeroCopy are the SAME checkpoint quant
+	// block and zero-copy choice the text stack's projections resolve through (proj/f32 above), so a
+	// quantised vision tower stays packed exactly like the text stack does.
+	if vision, visionAlias, verr := buildVisionTowerQuant(tensors, raw.VisionConfig, D, quant, zeroCopy); verr != nil {
 		return nil, core.E("composed.LoadComposed", "vision tower", verr)
 	} else if vision != nil {
 		m.Vision = vision
+		anyAlias = anyAlias || visionAlias
 		m.ImageTokenID = int32(raw.ImageTokenID)
 		// The Qwen-VL family's own stable special-token spellings (config.json carries only the numeric
 		// ids, not the text — see composed.ChatMLDialect's identical hardcoding for the ChatML turn
