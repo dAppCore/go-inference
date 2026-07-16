@@ -1040,9 +1040,9 @@ func TestHIPGemma4ExpertCache_Good_AdaptiveCacheSuppressesTransientPool(t *testi
 }
 
 func TestHIPGemma4ExpertCacheBudget_Good(t *testing.T) {
-	core.AssertEqual(t, uint64(10*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
-	core.AssertEqual(t, uint64(9*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
-	core.AssertEqual(t, uint64(5*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
+	core.AssertEqual(t, uint64(11*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
+	core.AssertEqual(t, uint64(10*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
+	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
 	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true}))
 }
 

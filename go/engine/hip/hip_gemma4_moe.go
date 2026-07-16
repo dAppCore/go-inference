@@ -87,8 +87,8 @@ type hipGGUFQ4_0SelectedExpertsLaunchArgs struct {
 
 const (
 	hipGemma4ExpertCacheDefaultBytes = 6 * memoryGiB
-	hipGemma4ExpertCacheMaximumBytes = 10 * memoryGiB
-	hipGemma4ExpertCacheReserveBytes = 2 * memoryGiB
+	hipGemma4ExpertCacheMaximumBytes = 11 * memoryGiB
+	hipGemma4ExpertCacheReserveBytes = 1 * memoryGiB
 	hipGemma4ExpertCacheRefreshEvery = 256
 )
 
