@@ -87,6 +87,19 @@ type ComposedModel struct {
 	// mmapAliased is set by loadComposed when at least one packed weight is a view into the input tensors —
 	// the signal model.LoadComposedDir reads (via RetainMmap) to hand this model the checkpoint mapping.
 	mmapAliased bool
+	// Vision is the loaded vision tower + projector/merger (see vision.go, vision_loader.go) — nil for a
+	// text-only checkpoint, or one whose safetensors carry no vision_tower.*/multi_modal_projector.*
+	// tensors. Non-nil is the AcceptsImageInput() live probe: a text-only quant of a vision family loads
+	// with Vision nil exactly as it always did (loadComposed's vision step is additive-only).
+	Vision *visionTower
+	// ImageTokenID is the vocabulary id one image soft-token placeholder occupies (config.json's top-level
+	// image_token_id) — 0 when Vision is nil. Read by ComposedTokenModel.ImagePlaceholderTokenID.
+	ImageTokenID int32
+	// VisionBeginToken/VisionToken/VisionEndToken are the literal spellings that wrap an image's
+	// soft-token run in the rendered prompt text (the Qwen-VL family's <|vision_start|>/<|image_pad|>/
+	// <|vision_end|> convention) — empty when Vision is nil. Read by
+	// ComposedTokenModel.ImagePlaceholderBlock.
+	VisionBeginToken, VisionToken, VisionEndToken string
 }
 
 // retain gives this model ownership of the checkpoint mapping c when its packed weights ALIAS c (a

@@ -44,14 +44,29 @@ type ropeParams struct {
 	MRopeSection        []int   `json:"mrope_section"`
 }
 
-// visionConfig is the multimodal wrapper's sibling vision tower config — carried (parse-and-carry) so a
-// wrapper checkpoint parses cleanly; the encoder assembly itself is out of scope (a later cut).
+// visionConfig is the multimodal wrapper's sibling vision tower config. HiddenSize/OutHiddenSize/Depth are
+// carried for documentation only — buildVisionTower (vision_loader.go) DERIVES those three (and HeadDim,
+// NumKVHeads, the vision FF width, and the merger's spatial merge size) straight from the checkpoint's own
+// tensor shapes, mirroring how the text loader derives the gated-delta geometry from weights rather than
+// trusting config field names a checkpoint might spell differently. Only PatchSize (pixel geometry has no
+// tensor to derive it from) is load-bearing; InChannels/RopeTheta/RMSNormEps fall back to the Qwen-VL
+// family's own documented defaults (3/10000/1e-6) when the checkpoint's config omits them, exactly as
+// loaderConfig.ropeTheta()/the text Eps default already do for the text stack. NumHeads is a FALLBACK only
+// — used when the checkpoint carries no per-head q_norm/k_norm to derive HeadDim from directly (mirrors
+// buildAttn's own headDim-from-qCols fallback). SpatialMergeSize, when present, is cross-validated against
+// the merger's own derived merge size rather than trusted blindly (validateLinearGeometry's pattern).
 type visionConfig struct {
-	ModelType     string `json:"model_type"`
-	Depth         int    `json:"depth"`
-	HiddenSize    int    `json:"hidden_size"`
-	OutHiddenSize int    `json:"out_hidden_size"`
-	PatchSize     int    `json:"patch_size"`
+	ModelType        string  `json:"model_type"`
+	Depth            int     `json:"depth"`
+	HiddenSize       int     `json:"hidden_size"`
+	OutHiddenSize    int     `json:"out_hidden_size"`
+	PatchSize        int     `json:"patch_size"`
+	InChannels       int     `json:"in_channels"`
+	NumHeads         int     `json:"num_heads"`
+	NumKeyValueHeads int     `json:"num_key_value_heads"`
+	SpatialMergeSize int     `json:"spatial_merge_size"`
+	RMSNormEps       float32 `json:"rms_norm_eps"`
+	RopeTheta        float32 `json:"rope_theta"`
 }
 
 // loaderConfig is the arch-relevant subset of a Qwen 3.6 config.json. Text fields nest under text_config in
@@ -111,6 +126,13 @@ type loaderConfig struct {
 	// a scalar — a plain int field would fail the whole parse on the list form.
 	BosTokenID tokenID `json:"bos_token_id"`
 	EosTokenID tokenID `json:"eos_token_id"`
+
+	// ImageTokenID is the wrapper-root image-placeholder token id (the Qwen-VL family convention), read
+	// only when the checkpoint also carries a vision tower (buildVisionTower's presence probe is the real
+	// gate); zero on a text-only checkpoint or one whose config omits it. Video is out of scope for this
+	// loader (composed carries no video head — see ComposedTokenModel.TokenEmbeddingsWithFeatures), so no
+	// VideoTokenID field is parsed until that scope exists.
+	ImageTokenID tokenID `json:"image_token_id"`
 
 	RopeParameters *ropeParams   `json:"rope_parameters"`
 	VisionConfig   *visionConfig `json:"vision_config"`
