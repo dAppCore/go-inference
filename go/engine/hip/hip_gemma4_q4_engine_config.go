@@ -31,12 +31,18 @@ type hipGemma4Q4EngineConfig struct {
 	// contiguous runs may see through to the end of their run during prefill.
 	// Zero IDs leave ordinary text prefill strictly causal.
 	BidirectionalSpanTokens [2]int32
+	// DisablePrefillSharedSuffixSkip keeps every layer active on every prompt
+	// ubatch, including non-final chunks whose trailing layers only borrow KV.
+	DisablePrefillSharedSuffixSkip bool
 	// ForceBatchedProjection makes the prefill body launch the batched
 	// projection kernel even for a single-token ubatch, instead of the
 	// single-row fast path. The attached-drafter target prefill sets this so a
 	// trailing one-token ubatch stays on the batched path; normal decode-style
 	// single-token prefill leaves it false and keeps the single-row kernel.
 	ForceBatchedProjection bool
+	// prefillLayerLimit is transient and may only bound a non-final causal
+	// prompt ubatch at a validated trailing KV-shared suffix.
+	prefillLayerLimit int
 }
 
 func defaultHIPGemma4Q4EngineConfig() hipGemma4Q4EngineConfig {
@@ -47,6 +53,7 @@ func defaultHIPGemma4Q4EngineConfig() hipGemma4Q4EngineConfig {
 		ChunkedAttention:                 true,
 		PrefillUBatchTokens:              hipGemma4Q4PrefillDefaultUBatchTokens,
 		PrefillAttentionQueryChunkTokens: hipGemma4Q4DefaultPrefillAttentionQueryChunkTokens,
+		DisablePrefillSharedSuffixSkip:   core.Env("GO_ROCM_DISABLE_PREFILL_SHARED_SUFFIX_SKIP") == "1",
 	}
 }
 

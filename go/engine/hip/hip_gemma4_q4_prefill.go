@@ -1888,6 +1888,37 @@ func hipRunGemma4Q4PrefillLayerQueryBatchWithSharedKVWorkspaceInto(ctx context.C
 	return hipRunGemma4Q4PrefillLayerQueryBatchWithSharedKVWorkspacePrecomputedInputNormInto(ctx, driver, cfg, input, nil, sharedSource, tokenCount, startPosition, epsilon, workspace, out)
 }
 
+func hipBorrowGemma4Q4PrefillSharedDeviceKVLayerInto(sharedSource, out *hipGemma4Q4PrefillLayerKVBatch) error {
+	if sharedSource == nil || sharedSource.DeviceKV == nil || sharedSource.DeviceKV.Cache == nil || sharedSource.DeviceKV.DescriptorTable == nil {
+		return core.E(hipGemma4Q4Layer0Operation, "prefill shared layer source device KV is required", nil)
+	}
+	if out == nil {
+		return core.E(hipGemma4Q4Layer0Operation, "prefill shared layer output is required", nil)
+	}
+	*out = hipGemma4Q4PrefillLayerKVBatch{}
+	cache, err := sharedSource.DeviceKV.Cache.borrowedAlias()
+	if err != nil {
+		return err
+	}
+	table, err := sharedSource.DeviceKV.DescriptorTable.borrowedAlias()
+	if err != nil {
+		_ = cache.Close()
+		return err
+	}
+	launch, err := cache.KernelLaunchDescriptor(table)
+	if err != nil {
+		_ = table.Close()
+		_ = cache.Close()
+		return err
+	}
+	out.DeviceKV = &out.deviceKVStorage
+	out.DeviceKV.Cache = cache
+	out.DeviceKV.DescriptorTable = table
+	out.DeviceKV.Launch = launch
+	out.DeviceKV.RetainWindow = sharedSource.DeviceKV.RetainWindow
+	return nil
+}
+
 func hipRunGemma4Q4PrefillLayerQueryBatchWithSharedKVWorkspacePrecomputedInputNormInto(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input, precomputedInputNorm *hipDeviceByteBuffer, sharedSource *hipGemma4Q4PrefillLayerKVBatch, tokenCount int, startPosition int, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace, out *hipGemma4Q4PrefillLayerKVBatch) (*hipGemma4Q4PrefillLayerKVBatch, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
@@ -2698,6 +2729,28 @@ func hipGemma4Q4CanUseBatchedGeneratePrefill(cfg hipGemma4Q4ForwardConfig) bool 
 	return true
 }
 
+func hipGemma4Q4PrefillSharedSuffixStart(sharedSources []int) int {
+	start := len(sharedSources)
+	for start > 0 && sharedSources[start-1] != start-1 {
+		start--
+	}
+	if start == 0 || start == len(sharedSources) {
+		return -1
+	}
+	for index := 0; index < start; index++ {
+		if sharedSources[index] != index {
+			return -1
+		}
+	}
+	for index := start; index < len(sharedSources); index++ {
+		source := sharedSources[index]
+		if source < 0 || source >= start {
+			return -1
+		}
+	}
+	return start
+}
+
 func hipRunGemma4Q4PrefillForwardBatch(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, best *hipDeviceByteBuffer) (*hipGemma4Q4PrefillForwardBatch, error) {
 	return hipRunGemma4Q4PrefillForwardBatchWithPrior(ctx, driver, cfg, tokens, startPosition, epsilon, mode, nil, perLayerInputs, outputRows, best)
 }
@@ -2810,8 +2863,16 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDevic
 	}
 	tokenCount := len(tokens)
 	sharedSources := hipGemma4Q4SharedKVSourceByLayer(cfg)
+	executionLayerCount := len(cfg.Layers)
+	if engineConfig.prefillLayerLimit > 0 {
+		if engineConfig.prefillLayerLimit != hipGemma4Q4PrefillSharedSuffixStart(sharedSources) ||
+			len(outputRows) > 0 || outputRow >= 0 || greedyToken != nil || initialHidden != nil || visibleTokenCaps != nil {
+			return nil, core.E(hipGemma4Q4Layer0Operation, "prefill layer limit requires a non-final causal shared-suffix chunk", nil)
+		}
+		executionLayerCount = engineConfig.prefillLayerLimit
+	}
 	var precomputedInputNorm *hipDeviceByteBuffer
-	for index, layerCfg := range cfg.Layers {
+	for index, layerCfg := range cfg.Layers[:executionLayerCount] {
 		if metrics := hipActiveDecodeRouteMetrics(); metrics != nil {
 			metrics.setLayer(index, layerCfg.LayerType)
 		}
@@ -2880,6 +2941,18 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDevic
 		hidden = body.FinalHidden
 		precomputedInputNorm = body.NextInputNorm
 		out.FinalHidden = hidden
+	}
+	for index := executionLayerCount; index < len(cfg.Layers); index++ {
+		source := sharedSources[index]
+		if source < 0 || source >= executionLayerCount || out.Layers[source].KV == nil {
+			return nil, core.E(hipGemma4Q4Layer0Operation, "prefill skipped shared KV source layer is unavailable", nil)
+		}
+		out.Layers = append(out.Layers, hipGemma4Q4PrefillForwardLayerBatch{})
+		layerBatch := &out.Layers[index]
+		layerBatch.KV = &layerBatch.kvStorage
+		if err := hipBorrowGemma4Q4PrefillSharedDeviceKVLayerInto(out.Layers[source].KV, layerBatch.KV); err != nil {
+			return nil, err
+		}
 	}
 	if len(outputRows) > 0 {
 		last := cfg.Layers[len(cfg.Layers)-1]

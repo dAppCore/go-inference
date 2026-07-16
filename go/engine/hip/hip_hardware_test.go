@@ -3062,6 +3062,61 @@ func TestNativeDecodeSmokeKernelStatus_Good(t *testing.T) {
 	}
 }
 
+func TestHIPGemma4Q4PrefillSharedSuffixSkipMatchesFullStack_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_MODEL_PATH"))
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_MODEL_PATH to a Gemma4 E-family MLX affine model pack")
+	}
+
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModel(modelPath, inference.WithContextLen(2048)))
+	if err != nil {
+		t.Fatalf("LoadModel(%q): %v", modelPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native model = %T, want linked *hipLoadedModel", rocmLoaded.native)
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded Gemma4 forward config: %v", err)
+	}
+	sharedSuffix := hipGemma4Q4PrefillSharedSuffixStart(hipGemma4Q4SharedKVSourceByLayer(cfg))
+	if sharedSuffix <= 0 {
+		t.Skipf("model has no clean trailing KV-shared suffix: sources=%v", cfg.SharedKVSources)
+	}
+
+	prompt := make([]int32, 1536)
+	for index := range prompt {
+		prompt[index] = []int32{2, 10979}[index&1]
+	}
+	run := func(disableSkip bool) []int32 {
+		engineConfig := loaded.gemma4Q4EngineConfig()
+		engineConfig.DisablePrefillSharedSuffixSkip = disableSkip
+		stream, streamErr := hipGemma4Q4GenerateTokenSeqWithEngineConfig(
+			context.Background(), loaded, cfg, prompt,
+			inference.GenerateConfig{MaxTokens: 8}, engineConfig,
+		)
+		tokens := inferenceTokenIDs(collectInferenceTokens(stream))
+		if err := streamErr(); err != nil {
+			t.Fatalf("Generate(disableSkip=%v): %v", disableSkip, err)
+		}
+		return tokens
+	}
+
+	skipped := run(false)
+	full := run(true)
+	core.AssertEqual(t, full, skipped)
+	t.Logf("shared suffix starts at layer %d; exact tokens=%v", sharedSuffix, skipped)
+}
+
 func TestHIPHardwareGemma4BF16Generate_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_GEMMA4_BF16_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_GEMMA4_BF16_TESTS=1 to run Gemma4 BF16 generation tests")

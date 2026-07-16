@@ -1249,6 +1249,10 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				}
 			}()
 		}
+		prefillSharedSuffix := -1
+		if useBatchedPrefill && !engineConfig.DisablePrefillSharedSuffixSkip && customEmbeddingBuffer == nil {
+			prefillSharedSuffix = hipGemma4Q4PrefillSharedSuffixStart(hipGemma4Q4SharedKVSourceByLayer(cfg))
+		}
 		var priorLayerKVScratch []*rocmDeviceKVCache
 		var priorLayerDescriptorScratch []*rocmDeviceKVDescriptorTable
 		for batchIndex := 0; batchIndex < prefillPlan.LenBatches(); batchIndex++ {
@@ -1352,7 +1356,12 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				outputTokens = nil
 				outputRow = -1
 			}
-			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, outputTokens, outputRow, finalGreedyBuffer, attentionWorkspace, engineConfig, initialHidden, visibleTokenCaps)
+			batchEngineConfig := engineConfig
+			batchEngineConfig.prefillLayerLimit = 0
+			if prefillSharedSuffix > 0 && batchIndex+1 < prefillPlan.LenBatches() && initialHidden == nil && visibleTokenCaps == nil {
+				batchEngineConfig.prefillLayerLimit = prefillSharedSuffix
+			}
+			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, outputTokens, outputRow, finalGreedyBuffer, attentionWorkspace, batchEngineConfig, initialHidden, visibleTokenCaps)
 			if visibleTokenCaps != nil {
 				closeErr := visibleTokenCaps.Close()
 				if err == nil && closeErr != nil {

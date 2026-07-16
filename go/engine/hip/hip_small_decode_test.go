@@ -623,6 +623,109 @@ func TestHIPGemma4Q4GenerateTokenSeq_MoEDisablesBatchedPrefill_Good(t *testing.T
 	core.AssertEqual(t, false, hipGemma4Q4CanUseBatchedGeneratePrefill(cfg))
 }
 
+func TestHIPGemma4Q4PrefillSharedSuffixStart_RequiresCleanOwnerPrefix(t *testing.T) {
+	tests := []struct {
+		name    string
+		sources []int
+		want    int
+	}{
+		{name: "empty", want: -1},
+		{name: "all owners", sources: []int{0, 1, 2, 3}, want: -1},
+		{name: "clean suffix", sources: []int{0, 1, 0, 1}, want: 2},
+		{name: "interleaved sharers", sources: []int{0, 0, 2, 2}, want: -1},
+		{name: "suffix source", sources: []int{0, 1, 0, 2}, want: -1},
+		{name: "forward source", sources: []int{0, 1, 0, 4}, want: -1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			core.AssertEqual(t, test.want, hipGemma4Q4PrefillSharedSuffixStart(test.sources))
+		})
+	}
+}
+
+func TestHIPGemma4Q4PrefillForward_SharedSuffixLimitReturnsFullDeviceState(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layers := make([]hipGemma4Q4Layer0Config, 4)
+	for index := range layers {
+		layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, index, 4, 2, 8)
+		defer cleanup()
+		layer.PerLayerInput = hipGemma4Q4PerLayerInputConfig{}
+		layers[index] = layer
+	}
+	hipGemma4Q4InstallNonzeroEmbeddingFixture(t, driver, &layers[0], "shared suffix prefill")
+	cfg := hipGemma4Q4ForwardConfig{
+		Layers:          layers,
+		KVSharedLayers:  2,
+		SharedKVSources: []int{0, 1, 0, 1},
+	}
+	engineConfig := defaultHIPGemma4Q4EngineConfig()
+	engineConfig.prefillLayerLimit = 2
+
+	launchStart := len(driver.launches)
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(
+		context.Background(), driver, cfg, []int32{0, 1}, 0, 1e-6,
+		rocmKVCacheModeFP16, nil, nil, nil, nil, -1, nil, nil, engineConfig,
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 4, len(forward.Layers))
+	for index := range forward.Layers {
+		if forward.Layers[index].KV == nil || forward.Layers[index].KV.DeviceKV == nil {
+			t.Fatalf("prefill layer %d has no device KV", index)
+		}
+		core.AssertEqual(t, 2, forward.Layers[index].KV.DeviceKV.Cache.TokenCount())
+	}
+	core.RequireTrue(t, forward.Layers[2].KV.DeviceKV.Cache.borrowed, "layer 2 should borrow its source KV")
+	core.RequireTrue(t, forward.Layers[3].KV.DeviceKV.Cache.borrowed, "layer 3 should borrow its source KV")
+	core.RequireTrue(t, forward.Layers[2].Body == nil, "layer 2 body should be skipped")
+	core.RequireTrue(t, forward.Layers[3].Body == nil, "layer 3 body should be skipped")
+	core.AssertEqual(t, 2, countLaunchName(driver.launches[launchStart:], hipKernelNameAttentionHeadsBatchCausal))
+
+	state, err := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, rocmKVCacheModeFP16)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int{2, 2, 2, 2}, state.LayerTokenCounts())
+	core.RequireNoError(t, forward.Close())
+	core.RequireNoError(t, state.Close())
+}
+
+func TestHIPGemma4Q4GenerateTokenSeq_SkipsSharedSuffixOnlyOnNonFinalPrefillChunks(t *testing.T) {
+	run := func(disableSkip bool) int {
+		driver := &fakeHIPDriver{available: true}
+		layers := make([]hipGemma4Q4Layer0Config, 4)
+		for index := range layers {
+			layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, index, 4, 2, 8)
+			defer cleanup()
+			layer.PerLayerInput = hipGemma4Q4PerLayerInputConfig{}
+			layers[index] = layer
+		}
+		hipGemma4Q4InstallNonzeroEmbeddingFixture(t, driver, &layers[0], "generate shared suffix")
+		cfg := hipGemma4Q4ForwardConfig{
+			Layers:          layers,
+			KVSharedLayers:  2,
+			SharedKVSources: []int{0, 1, 0, 1},
+		}
+		engineConfig := defaultHIPGemma4Q4EngineConfig()
+		engineConfig.DeviceKVMode = rocmKVCacheModeFP16
+		engineConfig.PrefillUBatchTokens = 2
+		engineConfig.DisablePrefillSharedSuffixSkip = disableSkip
+
+		stream, streamErr := hipGemma4Q4GenerateTokenSeqWithEngineConfig(
+			context.Background(), &hipLoadedModel{driver: driver}, cfg,
+			[]int32{0, 1, 0}, inference.GenerateConfig{MaxTokens: 1}, engineConfig,
+		)
+		generated := 0
+		for range stream {
+			generated++
+		}
+		core.RequireNoError(t, streamErr())
+		core.AssertEqual(t, 1, generated)
+		return countLaunchName(driver.launches, hipKernelNameAttentionHeadsBatchCausal)
+	}
+
+	core.AssertEqual(t, 4, run(false))
+	core.AssertEqual(t, 6, run(true))
+}
+
 func TestHIPAttachedDrafterTargetPrefillUsesBatchedPath_Good(t *testing.T) {
 	hipDrainAttentionHeadsChunkedWorkspacePoolForTest(t)
 	driver := &fakeHIPDriver{available: true}
