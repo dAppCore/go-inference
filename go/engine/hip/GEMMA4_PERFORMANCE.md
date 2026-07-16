@@ -17,7 +17,7 @@ discrete card is measured.
 | GPU | AMD Radeon RX 7800 XT, gfx1100, 16,368 MiB reported VRAM |
 | CPU / RAM | AMD Ryzen 9 9950X / 128 GB |
 | ROCm | 7.2.26015 |
-| go-inference | `8bec8394a37ca014b3ef78829bff32838bfd768f` |
+| go-inference | `d2a915c0cee14ba660cfa5d2dfe69310d17ce703` |
 | llama.cpp oracle | `c7d8722922a2599dc4d77f8808d8e6c2fde5e7a2` |
 
 ## Short-context board
@@ -132,6 +132,7 @@ tokens. Both engines use the same `UD-Q4_K_M` GGUF. llama.cpp holds one
 | llama.cpp `c7d8722` | 59.58 | 56.74 | 56.05 | 55.56 | 51.17 | 14.1% |
 | HIP before wide incremental GQA | 56.14 | 54.48 | 50.93 | 47.86 | not run | n/a |
 | HIP `50372990` | **56.67** | **56.06** | **54.71** | **53.66** | **49.37** | **12.9%** |
+| HIP `d2a915c0` packed q8 K | **56.68** | **56.28** | **55.18** | **54.24** | **50.91** | **10.2%** |
 
 `50372990` connects the already-validated grouped batch-attention path to
 single-token decode for 16-head GQA lanes. At 32K, the existing GQA8 kernel
@@ -140,9 +141,9 @@ per-head scan, a 3.23x kernel improvement. Whole-model gains grow with depth:
 0.9% at 2K, 2.9% at 4K, 7.4% at 8K, and 12.1% at 12K. The 4K, 8K, 12K, and
 32K receipts each used 2,560 GQA8 launches and zero old per-head launches.
 
-The 32K result is 3.5% behind llama.cpp and misses the 50 tok/s requirement by
-0.63 tok/s, so it remains active work. Its expert cache retained 1,814 entries
-and 7,005,408,256 bytes; the timed decode saw 530 misses, 105 evictions, and
+The `50372990` 32K result is 3.5% behind llama.cpp and misses the 50 tok/s
+requirement by 0.63 tok/s. Its expert cache retained 1,814 entries and
+7,005,408,256 bytes; the timed decode saw 530 misses, 105 evictions, and
 1,971,932,160 host-to-device bytes. The complete 32K test took 563.5 seconds,
 including model load, cold state materialisation, `tg512`, and teardown. Do not
 present that wall time as decode latency or as an isolated prefill measurement.
@@ -182,6 +183,27 @@ independent-shuffle sum with a dependency-chained tree reached 594.5-598.7 us
 at 32K and improved the 2K microbenchmark by about 1.6%, but regressed the
 stable 8K result from 204-206 us to about 239 us. All three changes were
 removed; preserve the original lane mapping and independent-shuffle sum.
+
+`d2a915c0` instead packs each aligned group of four GQA8 q8 key bytes into one
+portable 32-bit load before unpacking the signed values. Non-multiple-of-four
+dimensions and unaligned rows keep the scalar fallback. The 26B 32K synthetic
+GQA8 stage-1 benchmark fell from about 599 us to about 450 us, a roughly 25%
+kernel improvement. The same path improved the stable 12B synthetic result
+from 204-206 us to 189-190 us at 8K.
+
+The full retained-depth 26B gains over `50372990` grow with context: less than
+0.1% at 2K, 0.4% at 4K, 0.9% at 8K, 1.1% at 12K, and 3.1% at 32K. Every
+measured row now clears 50 tok/s, the 32K result is only 0.5% behind llama.cpp,
+and HIP's 2K-to-32K loss falls from 12.9% to 10.2%. The new 32K run also faced
+a harder expert-cache path than the old baseline: 589 misses, 172 evictions,
+and 2,191,242,240 host-to-device bytes versus 530 misses, 105 evictions, and
+1,971,932,160 bytes. The improvement therefore comes from attention rather
+than a more favorable expert route.
+
+The packed path passes the generic-attention hardware oracle at shallow and
+deep 26B geometry. The end-of-slice portability matrix also compiles it for
+AMD gfx1100 with HIP C++23, NVIDIA sm_75 through HIP/CUDA with C++20, and
+HIP-CPU x86_64 and AArch64 with C++20.
 
 ## DiffusionGemma diagnostic
 
