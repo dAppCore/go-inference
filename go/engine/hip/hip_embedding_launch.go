@@ -39,6 +39,9 @@ const (
 	hipDiffusionExpectedEmbeddingQ8G64RowsPerSubgroup  = 8
 	hipDiffusionExpectedEmbeddingQ8G64Subgroups        = 8
 	hipDiffusionExpectedEmbeddingQ8G64SubgroupRows     = hipDiffusionExpectedEmbeddingQ8G64RowsPerSubgroup * hipDiffusionExpectedEmbeddingQ8G64Subgroups
+	hipDiffusionExpectedEmbeddingQ8G64CompactSubgroups = 2
+	hipDiffusionExpectedEmbeddingQ8G64CompactRows      = hipDiffusionExpectedEmbeddingQ8G64RowsPerSubgroup * hipDiffusionExpectedEmbeddingQ8G64CompactSubgroups
+	hipDiffusionExpectedEmbeddingQ8G64CompactBlockSize = hipDiffusionExpectedEmbeddingQ8G64SubgroupWidth * hipDiffusionExpectedEmbeddingQ8G64CompactSubgroups
 	hipDiffusionExpectedEmbeddingQ8G64SubgroupDims     = hipDiffusionExpectedEmbeddingQ8G64SubgroupWidth * hipDiffusionExpectedEmbeddingQ8G64DimsPerThread
 	hipDiffusionExpectedEmbeddingQ8G64SubgroupMinRows  = 64
 	hipDiffusionExpectedEmbeddingQ8G64TileRows         = 32
@@ -750,6 +753,7 @@ func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver na
 	kernelName := hipKernelNameDiffusionExpectedEmbedding
 	gridRows := rows
 	gridHidden := cfg.HiddenSize
+	blockX := uint32(256)
 	bits := hipMLXQ4ProjectionBitsOrDefault(cfg.QuantBits)
 	if rows >= hipDiffusionExpectedEmbeddingQ8G64SubgroupMinRows &&
 		cfg.TableEncoding == hipEmbeddingTableEncodingMLXQ4 &&
@@ -759,8 +763,11 @@ func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver na
 		kernelName = hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4
 		if core.Env(hipDisableDiffusionExpectedEmbeddingProbability4Env) == "1" {
 			kernelName = hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64
+			gridRows = (rows + hipDiffusionExpectedEmbeddingQ8G64SubgroupRows - 1) / hipDiffusionExpectedEmbeddingQ8G64SubgroupRows
+		} else {
+			gridRows = (rows + hipDiffusionExpectedEmbeddingQ8G64CompactRows - 1) / hipDiffusionExpectedEmbeddingQ8G64CompactRows
+			blockX = hipDiffusionExpectedEmbeddingQ8G64CompactBlockSize
 		}
-		gridRows = (rows + hipDiffusionExpectedEmbeddingQ8G64SubgroupRows - 1) / hipDiffusionExpectedEmbeddingQ8G64SubgroupRows
 		gridHidden = ((cfg.HiddenSize + hipDiffusionExpectedEmbeddingQ8G64SubgroupDims - 1) / hipDiffusionExpectedEmbeddingQ8G64SubgroupDims) * 256
 	} else if rows >= hipDiffusionExpectedEmbeddingQ8G64TileRows &&
 		rows <= 2*hipDiffusionExpectedEmbeddingQ8G64TileRows &&
@@ -801,7 +808,7 @@ func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver na
 		GridX:  gridX,
 		GridY:  gridY,
 		GridZ:  1,
-		BlockX: 256,
+		BlockX: blockX,
 		BlockY: 1,
 		BlockZ: 1,
 	}); err != nil {

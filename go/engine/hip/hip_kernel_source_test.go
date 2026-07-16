@@ -436,6 +436,8 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64Probabilit
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4`)
 
+	core.AssertTrue(t, strings.Contains(kernel, `blockDim.x != ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_COMPACT_BLOCK_SIZE`), "probability-tiled subgroup kernel must use compact blocks for scheduler occupancy")
+	core.AssertTrue(t, strings.Contains(kernel, `blockIdx.y * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_COMPACT_ROWS_PER_BLOCK`), "probability-tiled subgroup kernel must advance by its compact row span")
 	core.AssertTrue(t, strings.Contains(kernel, `token_base += ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS`), "probability-tiled subgroup kernel must advance one coalesced token tile")
 	core.AssertTrue(t, strings.Contains(kernel, `const uint32_t probability_row = lane / ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS`), "probability-tiled subgroup kernel must spread each row's consecutive probabilities across adjacent lanes")
 	core.AssertTrue(t, strings.Contains(kernel, `row_lane * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS + token_lane`), "probability-tiled subgroup kernel must broadcast from the coalesced source lane")
