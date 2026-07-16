@@ -331,31 +331,43 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 	}
 	// proj resolves a 2-D projection weight: PACKED (quant checkpoint) or widened to f32 — exactly one of
 	// the two returns is non-nil. Small unquantised tensors (norms, conv, biases) keep the f32/f32opt path.
-	proj := func(name string) ([]float32, *model.QuantWeight, error) {
+	proj := func(name string) ([]float32, *model.QuantWeight, *model.BF16Weight, error) {
 		t, ok := get(name)
 		if !ok {
-			return nil, nil, core.NewError("composed.LoadComposed: missing " + name)
+			return nil, nil, nil, core.NewError("composed.LoadComposed: missing " + name)
 		}
 		qw, aliased, err := tensorAsQuant(tensors, name, t, quant, zeroCopy)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if qw != nil {
 			anyAlias = anyAlias || aliased
-			return nil, qw, nil
+			return nil, qw, nil, nil
+		}
+		// Dense bf16 2-D projections stay the checkpoint's own bytes (#26): a zero-copy view of the
+		// mmap region (retained via anyAlias) — the widen-to-f32 this replaces doubled both the
+		// resident set and the bytes streamed per token. Other dtypes (f32/f16) keep widening.
+		if (t.Dtype == "BF16" || t.Dtype == "bfloat16") && len(t.Shape) == 2 {
+			data := t.Data
+			if !zeroCopy {
+				data = append([]byte(nil), t.Data...)
+			} else {
+				anyAlias = true
+			}
+			return nil, nil, &model.BF16Weight{Data: data, OutDim: t.Shape[0], InDim: t.Shape[1]}, nil
 		}
 		f, err := tensorF32(t)
-		return f, nil, err
+		return f, nil, nil, err
 	}
-	projOpt := func(name string) ([]float32, *model.QuantWeight) {
+	projOpt := func(name string) ([]float32, *model.QuantWeight, *model.BF16Weight) {
 		if _, ok := get(name); !ok {
-			return nil, nil
+			return nil, nil, nil
 		}
-		f, qw, err := proj(name)
+		f, qw, bw, err := proj(name)
 		if err != nil {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return f, qw
+		return f, qw, bw
 	}
 
 	// Zero-centred norm shift (#24): official Qwen 3.5/3.6 checkpoints store every layer / final /
@@ -396,23 +408,26 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 		return nil, core.NewError("composed.LoadComposed: missing/!2D embed_tokens.weight")
 	}
 	vocab := embedT.Shape[0]
-	embed, embedQ, err := proj(prefix + "embed_tokens.weight")
+	embed, embedQ, embedB, err := proj(prefix + "embed_tokens.weight")
 	if err != nil {
 		return nil, err
 	}
 	// Logical width: a dense embed's dequantised length / vocab; a packed embed's InDim (its Shape[1] is
 	// the bits-compressed packed-word count, not the hidden size).
 	D := 0
-	if embedQ != nil {
+	switch {
+	case embedQ != nil:
 		D = embedQ.InDim
-	} else {
+	case embedB != nil:
+		D = embedB.InDim
+	default:
 		D = len(embed) / vocab
 	}
 	normF, err := normF32(prefix + "norm.weight")
 	if err != nil {
 		return nil, err
 	}
-	output, outputQ := projOpt("lm_head.weight") // untied; nil/nil ⇒ tied to embed
+	output, outputQ, outputB := projOpt("lm_head.weight") // untied; all nil ⇒ tied to embed
 
 	kinds, err := resolveKinds(cfg)
 	if err != nil {
@@ -420,7 +435,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 	}
 
 	isCohere := cfg.ModelType == "cohere" || cfg.ModelType == "cohere2"
-	m := &ComposedModel{Embed: embed, EmbedQ: embedQ, NormF: normF, Output: output, OutputQ: outputQ, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere || cfg.UseLayerNorm, ParallelResidual: isCohere, LogitScale: cfg.LogitScale, Quantised: quant != nil}
+	m := &ComposedModel{Embed: embed, EmbedQ: embedQ, EmbedB: embedB, NormF: normF, Output: output, OutputQ: outputQ, OutputB: outputB, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere || cfg.UseLayerNorm, ParallelResidual: isCohere, LogitScale: cfg.LogitScale, Quantised: quant != nil, BF16Resident: embedB != nil}
 	if arch != nil {
 		m.EmbedScale = arch.EmbedScale
 		m.LogitsScaling = arch.LogitsScaling
@@ -538,32 +553,52 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 // projFn resolves a 2-D projection weight to either its widened f32 slice OR a packed
 // model.QuantWeight (exactly one non-nil) — the closure the loader threads into the mixer/FFN
 // builders so a quant checkpoint keeps its projections packed while a dense one widens.
-type projFn func(string) ([]float32, *model.QuantWeight, error)
+type projFn func(string) ([]float32, *model.QuantWeight, *model.BF16Weight, error)
+
+// widenProjFn wraps a projFn for builders with no bf16 dispatch yet (mamba2, rwkv7, the MoE
+// experts): a bf16 view widens to f32 on the spot — the pre-#26 behaviour, scoped to exactly the
+// consumers that still need it.
+func widenProjFn(proj projFn) projFn {
+	return func(name string) ([]float32, *model.QuantWeight, *model.BF16Weight, error) {
+		f, qw, bw, err := proj(name)
+		if err != nil || bw == nil {
+			return f, qw, bw, err
+		}
+		wf := make([]float32, bw.OutDim*bw.InDim)
+		for i := range wf {
+			wf[i] = math.Float32frombits(uint32(uint16(bw.Data[2*i])|uint16(bw.Data[2*i+1])<<8) << 16)
+		}
+		return wf, nil, nil, nil
+	}
+}
 
 // buildAttn builds a full-attention mixer; geometry from the config.
 func buildAttn(proj projFn, f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, layer, D int, kind string) (Mixer, error) {
-	qF, qQ, err := proj(sp + "q_proj.weight")
+	qF, qQ, qB, err := proj(sp + "q_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	kF, kQ, err := proj(sp + "k_proj.weight")
+	kF, kQ, kB, err := proj(sp + "k_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	vF, vQ, err := proj(sp + "v_proj.weight")
+	vF, vQ, vB, err := proj(sp + "v_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	oF, oQ, err := proj(sp + "o_proj.weight")
+	oF, oQ, oB, err := proj(sp + "o_proj.weight")
 	if err != nil {
 		return nil, err
 	}
 	heads := cfg.NumAttentionHeads
 	headDim := cfg.HeadDim
 	if headDim == 0 && heads > 0 {
-		qCols := len(qF) / D // rows of q_proj = heads·headDim (2× when gated); a packed q_proj reads it from OutDim
+		qCols := len(qF) / D // rows of q_proj = heads·headDim (2× when gated); packed/bf16 forms read it from OutDim
 		if qQ != nil {
 			qCols = qQ.OutDim
+		}
+		if qB != nil {
+			qCols = qB.OutDim
 		}
 		headDim = qCols / heads
 		if cfg.AttnOutputGate {
@@ -602,6 +637,7 @@ func buildAttn(proj projFn, f32opt func(string) []float32, sp string, cfg *loade
 	return NewAttnMixer(&AttnWeights{
 		QProj: qF, KProj: kF, VProj: vF, OProj: oF,
 		QProjQ: qQ, KProjQ: kQ, VProjQ: vQ, OProjQ: oQ,
+		QProjB: qB, KProjB: kB, VProjB: vB, OProjB: oB,
 		QNorm: f32opt(sp + "q_norm.weight"), KNorm: f32opt(sp + "k_norm.weight"),
 	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), QKVClip: qkvClip, NormEps: func() float32 {
 		if cfg.LayerNormEps > 0 {
@@ -649,7 +685,7 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), proj projFn, f
 		return nil, err
 	}
 
-	qkvF, qkvQ, err := proj(sp + "in_proj_qkv.weight")
+	qkvF, qkvQ, qkvB, err := proj(sp + "in_proj_qkv.weight")
 	if err != nil {
 		return nil, err
 	}
@@ -665,26 +701,27 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), proj projFn, f
 	if err != nil {
 		return nil, err
 	}
-	inAF, inAQ, err := proj(sp + "in_proj_a.weight")
+	inAF, inAQ, inAB, err := proj(sp + "in_proj_a.weight")
 	if err != nil {
 		return nil, err
 	}
-	inBF, inBQ, err := proj(sp + "in_proj_b.weight")
+	inBF, inBQ, inBB, err := proj(sp + "in_proj_b.weight")
 	if err != nil {
 		return nil, err
 	}
-	inZF, inZQ, err := proj(sp + "in_proj_z.weight")
+	inZF, inZQ, inZB, err := proj(sp + "in_proj_z.weight")
 	if err != nil {
 		return nil, err
 	}
-	outPF, outPQ, err := proj(sp + "out_proj.weight")
+	outPF, outPQ, outPB, err := proj(sp + "out_proj.weight")
 	if err != nil {
 		return nil, err
 	}
 	w := &qwen3.GatedDeltaWeights{
-		InProjQKV: qkvF, InProjQKVQ: qkvQ, ConvWeight: convW, ConvBias: f32opt(sp + "conv1d.bias"),
-		InProjA: inAF, InProjAQ: inAQ, ALog: aLog, DtBias: f32opt(sp + "dt_bias"),
-		InProjB: inBF, InProjBQ: inBQ, InProjZ: inZF, InProjZQ: inZQ, Norm: norm, OutProj: outPF, OutProjQ: outPQ,
+		InProjQKV: qkvF, InProjQKVQ: qkvQ, InProjQKVB: qkvB, ConvWeight: convW, ConvBias: f32opt(sp + "conv1d.bias"),
+		InProjA: inAF, InProjAQ: inAQ, InProjAB: inAB, ALog: aLog, DtBias: f32opt(sp + "dt_bias"),
+		InProjB: inBF, InProjBQ: inBQ, InProjBB: inBB, InProjZ: inZF, InProjZQ: inZQ, InProjZB: inZB,
+		Norm: norm, OutProj: outPF, OutProjQ: outPQ, OutProjB: outPB,
 	}
 	cfg := qwen3.GatedDeltaConfig{KeyHeads: keyHeads, ValueHeads: valueHeads, HeadDim: headDim, ConvKernel: convK, Eps: 1e-6}
 	return NewGatedDeltaMixer(w, cfg), nil
@@ -696,25 +733,28 @@ func buildFFN(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 	if _, ok := get(sp + "experts.0.gate_proj.weight"); ok {
 		// A quant checkpoint's experts resolve through proj — PACKED (model.QuantWeight) when the tensor
 		// carries .scales/.biases siblings, f32 otherwise — exactly like the dense MLP's gate/up/down below.
-		return buildMoE(get, proj, f32, sp, cfg, arch, D)
+		return buildMoE(get, widenProjFn(proj), f32, sp, cfg, arch, D)
 	}
-	gateF, gateQ, err := proj(sp + "gate_proj.weight")
+	gateF, gateQ, gateB, err := proj(sp + "gate_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	upF, upQ, err := proj(sp + "up_proj.weight")
+	upF, upQ, upB, err := proj(sp + "up_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	downF, downQ, err := proj(sp + "down_proj.weight")
+	downF, downQ, downB, err := proj(sp + "down_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	ff := len(gateF) / D // gate_proj rows = FF; a packed gate reads it from OutDim
+	ff := len(gateF) / D // gate_proj rows = FF; packed/bf16 forms read it from OutDim
 	if gateQ != nil {
 		ff = gateQ.OutDim
 	}
-	return &MLP{Gate: gateF, Up: upF, Down: downF, GateQ: gateQ, UpQ: upQ, DownQ: downQ, FF: ff}, nil
+	if gateB != nil {
+		ff = gateB.OutDim
+	}
+	return &MLP{Gate: gateF, Up: upF, Down: downF, GateQ: gateQ, UpQ: upQ, DownQ: downQ, GateB: gateB, UpB: upB, DownB: downB, FF: ff}, nil
 }
 
 // buildMoE loads the MoE FFN: router (mlp.gate.weight — always host f32; small enough that real
@@ -727,9 +767,9 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 		return nil, err
 	}
 	expert := func(p string) (MoEExpert, error) {
-		g, gQ, e1 := proj(p + "gate_proj.weight")
-		u, uQ, e2 := proj(p + "up_proj.weight")
-		d, dQ, e3 := proj(p + "down_proj.weight")
+		g, gQ, _, e1 := proj(p + "gate_proj.weight")
+		u, uQ, _, e2 := proj(p + "up_proj.weight")
+		d, dQ, _, e3 := proj(p + "down_proj.weight")
 		for _, e := range []error{e1, e2, e3} {
 			if e != nil {
 				return MoEExpert{}, e

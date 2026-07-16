@@ -37,6 +37,7 @@ type AttnWeights struct {
 	// Packed forms in a quant checkpoint (nil ⇒ the dense f32 field is used). When set, the mixer
 	// dispatches q/k/v/o to the quant matvec seam instead of the f32 matNT + the f32 AttnQKVDevice fuse.
 	QProjQ, KProjQ, VProjQ, OProjQ *model.QuantWeight
+	QProjB, KProjB, VProjB, OProjB *model.BF16Weight
 	QNorm, KNorm                   []float32
 }
 
@@ -180,6 +181,10 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 		return nil, nil, err
 	}
 	st := next.(attnState)
+	if m.w.OProjB != nil { // bf16-resident o_proj (#26)
+		st.sc.o = matNTBF16(st.sc.o, attnOut, m.w.OProjB, L, mixCols, D)
+		return st.sc.o, st, nil
+	}
 	if m.w.OProjQ != nil { // packed o_proj — oProj (m.w.OProj) is nil in a quant checkpoint
 		st.sc.o = matNTQuant(st.sc.o, attnOut, m.w.OProjQ, L, mixCols, D)
 	} else {
@@ -204,8 +209,11 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 	if m.w.QProjQ != nil {
 		qLen = m.w.QProjQ.OutDim * D // packed q_proj: rows·D
 	}
+	if m.w.QProjB != nil {
+		qLen = m.w.QProjB.OutDim * D // bf16-resident q_proj: rows·D
+	}
 	if qLen != qCols*D {
-		return nil, nil, 0, nil, core.NewError("composed.attnMixer: q_proj size mismatch (OutputGate?)")
+		return nil, nil, 0, nil, core.NewError(core.Sprintf("composed.attnMixer: q_proj size mismatch: qLen %d != qCols %d x D %d (OutputGate %v)", qLen, qCols, D, cfg.OutputGate))
 	}
 	var st attnState
 	if p, ok := prior.(attnState); ok {
@@ -223,7 +231,14 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 	// the KV cache either way; deterministic.
 	var qRaw, k, v []float32
 	kvCols := KVH * cfg.HeadDim
-	if m.w.QProjQ != nil {
+	if m.w.QProjB != nil { // bf16-resident q/k/v (#26): same structure as the packed branch
+		sc.qRaw = matNTBF16(sc.qRaw, h, m.w.QProjB, L, D, qCols)
+		qRaw = sc.qRaw
+		sc.k = matNTBF16(sc.k, h, m.w.KProjB, L, D, kvCols)
+		k = sc.k
+		sc.v = matNTBF16(sc.v, h, m.w.VProjB, L, D, kvCols)
+		v = sc.v
+	} else if m.w.QProjQ != nil {
 		sc.qRaw = matNTQuant(sc.qRaw, h, m.w.QProjQ, L, D, qCols) // [L, qCols]
 		qRaw = sc.qRaw
 		sc.k = matNTQuant(sc.k, h, m.w.KProjQ, L, D, kvCols) // [L, KVH*HD]

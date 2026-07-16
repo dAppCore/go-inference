@@ -5,8 +5,12 @@
 package native
 
 import (
+	"os"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/composed"
 )
 
 // composed_bf16_backend.go — the dense bf16 matvec seam (#26): the exact quant-seam shape
@@ -15,9 +19,15 @@ import (
 // seam f32 exactly like the quant seam, cast to bf16 for the kernel. This is what stops the dense
 // composed lane widening every projection to f32 — the ×2 on bytes streamed per token AND on the
 // resident set that put the official bf16 Qwen exports at ×4-6 behind mlx-lm.
+// bf16SeamEnabled gates the device bf16 matvec seam. Default on; LTHN_BF16_SEAM=0 leaves the hooks
+// unbound so the row-widen host floor serves — the same-binary A/B arm (the LTHN_GD_BLOCK shape).
+var bf16SeamEnabled = os.Getenv("LTHN_BF16_SEAM") != "0"
+
 func init() {
-	// Bound in composed_backend.go alongside the other hooks once the lib seam lands (slice 1);
-	// the op below is complete and parity-gated now so consumers migrate onto a proven primitive.
+	if bf16SeamEnabled {
+		composed.ProjBF16MatMulInto = MatMulBF16WeightF32NTInto
+		qwen3.ProjBF16MatMulInto = MatMulBF16WeightF32NTInto
+	}
 }
 
 // MatMulBF16WF32NTInto computes out[M,N] = x[M,K] @ wᵀ for a dense bf16 weight (w = raw row-major

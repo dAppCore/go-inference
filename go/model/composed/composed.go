@@ -46,6 +46,7 @@ type FFN interface {
 type MLP struct {
 	Gate, Up, Down    []float32
 	GateQ, UpQ, DownQ *model.QuantWeight
+	GateB, UpB, DownB *model.BF16Weight
 	FF                int
 }
 
@@ -60,12 +61,14 @@ type Layer struct {
 // ComposedModel is the loaded hybrid stack: token embedding, the per-layer blocks, the final norm and the
 // LM head (tied to Embed when Output is nil). All f32 (the loader widens the bf16 checkpoint).
 type ComposedModel struct {
-	Embed            []float32          // [Vocab, D] (nil ⇒ EmbedQ packed)
+	Embed            []float32          // [Vocab, D] (nil ⇒ EmbedQ packed or EmbedB bf16-resident)
 	EmbedQ           *model.QuantWeight // packed embedding table (dequantised one row per token at gather; never widened whole)
+	EmbedB           *model.BF16Weight  // bf16-resident embedding table (#26 — widened one row per token at gather)
 	Layers           []Layer
 	NormF            []float32          // [D] final RMSNorm
-	Output           []float32          // [Vocab, D] (nil ⇒ tied to Embed, or OutputQ packed)
+	Output           []float32          // [Vocab, D] (nil ⇒ tied to Embed, or OutputQ packed / OutputB bf16)
 	OutputQ          *model.QuantWeight // packed untied LM head (served by the quant matvec)
+	OutputB          *model.BF16Weight  // bf16-resident untied LM head (served by the bf16 matvec seam)
 	D                int
 	Vocab            int
 	Eps              float32
@@ -79,6 +82,10 @@ type ComposedModel struct {
 	// per-projection path (the mixer's own Forward + the host FFN tail), where the big matmuls dispatch to
 	// the quant matvec seam. The f32 device tail-fusion hooks (ResidualNormMLPProj*Device) are bypassed —
 	// they take f32 weights, and quant fused tails are a later slice.
+	// BF16Resident marks a dense checkpoint whose 2-D projections stayed the checkpoint's own bf16
+	// bytes (#26): forwardEmb routes it down the per-layer mixer path exactly like Quantised (the f32
+	// fold ladder's hooks take f32 weights — bypassed).
+	BF16Resident bool
 	Quantised bool
 	// mmap is the checkpoint mapping this model's zero-copy packed weights VIEW (a QuantWeight.Packed slice
 	// aliases it), owned so the model unmaps it on Close/finalize; nil when no weight aliases a mapping (a
@@ -267,6 +274,14 @@ func (m *ComposedModel) embedRow(dst []float32, id int) error {
 		copy(dst, wr)
 		return nil
 	}
+	if m.EmbedB != nil {
+		base := id * m.D * 2
+		for i := 0; i < m.D; i++ {
+			u := uint32(m.EmbedB.Data[base+2*i]) | uint32(m.EmbedB.Data[base+2*i+1])<<8
+			dst[i] = math.Float32frombits(u << 16)
+		}
+		return nil
+	}
 	copy(dst, m.Embed[id*m.D:id*m.D+m.D])
 	return nil
 }
@@ -453,6 +468,15 @@ func (m *ComposedModel) normalise(x, w []float32, rows int) []float32 {
 
 // swiglu runs the SwiGLU MLP over x [L,D] → [L,D].
 func (mlp *MLP) forward(x []float32, L, D int) []float32 {
+	if mlp.GateB != nil { // bf16-resident MLP (#26): gate/up/down through the bf16 matvec seam
+		g := matNTBF16(nil, x, mlp.GateB, L, D, mlp.FF)
+		u := matNTBF16(nil, x, mlp.UpB, L, D, mlp.FF)
+		h := make([]float32, L*mlp.FF)
+		for i := range h {
+			h[i] = float32(silu(float64(g[i])) * float64(u[i]))
+		}
+		return matNTBF16(nil, h, mlp.DownB, L, mlp.FF, D)
+	}
 	if mlp.GateQ != nil { // packed MLP: gate/up/down through the quant matvec seam (the fused MLPDevice is f32-only)
 		g := matNTQuant(nil, x, mlp.GateQ, L, D, mlp.FF)
 		u := matNTQuant(nil, x, mlp.UpQ, L, D, mlp.FF)
@@ -576,7 +600,7 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 			continue
 		}
 
-		if s.m.Quantised {
+		if s.m.Quantised || s.m.BF16Resident {
 			// Whole-layer device fold (#18 S3): a packed gated-delta layer with a dense packed SwiGLU
 			// at residual scale 1 rides ONE command buffer — input norm, the five packed projections,
 			// the gated-delta block (state device-resident) and the FFN tail; x is the only upload, y
@@ -847,8 +871,12 @@ func (s *ComposedSession) headLogits(hidden []float32) []float32 {
 	switch {
 	case s.m.OutputQ != nil: // packed untied head
 		logits = matNTQuant(nil, normed, s.m.OutputQ, 1, s.m.D, s.m.Vocab)
+	case s.m.OutputB != nil: // bf16-resident untied head (#26)
+		logits = matNTBF16(nil, normed, s.m.OutputB, 1, s.m.D, s.m.Vocab)
 	case s.m.Output == nil && s.m.EmbedQ != nil: // packed embed, tied head
 		logits = matNTQuant(nil, normed, s.m.EmbedQ, 1, s.m.D, s.m.Vocab)
+	case s.m.Output == nil && s.m.EmbedB != nil: // bf16-resident embed, tied head (#26)
+		logits = matNTBF16(nil, normed, s.m.EmbedB, 1, s.m.D, s.m.Vocab)
 	default:
 		head := s.m.Output
 		if head == nil {

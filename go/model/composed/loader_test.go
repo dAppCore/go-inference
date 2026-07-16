@@ -325,8 +325,8 @@ func TestLoadComposed(t *testing.T) {
 	if len(m.Layers) != 4 || m.D != 8 || m.Vocab != 32 {
 		t.Fatalf("model dims wrong: layers=%d D=%d vocab=%d", len(m.Layers), m.D, m.Vocab)
 	}
-	if m.Output == nil {
-		t.Error("lm_head present → Output should be untied, not nil")
+	if m.Output == nil && m.OutputB == nil {
+		t.Error("lm_head present → the head should be untied (f32 or bf16-resident), not nil")
 	}
 	want := []string{"gated_deltanet", "full_attention", "gated_deltanet", "full_attention"}
 	for i, l := range m.Layers {
@@ -466,12 +466,21 @@ func TestLoadComposedLanguageModelModelPrefix(t *testing.T) {
 		t.Fatalf("geometry mismatch: got D=%d vocab=%d layers=%d, want D=%d vocab=%d layers=%d",
 			got.D, got.Vocab, len(got.Layers), want.D, want.Vocab, len(want.Layers))
 	}
-	for i := range want.Embed {
-		if got.Embed[i] != want.Embed[i] {
-			t.Fatalf("embed[%d]: wrapped %v ≠ flat %v", i, got.Embed[i], want.Embed[i])
+	// The bf16 fixture loads as bf16-resident views (#26): compare the embed through embedRow (the
+	// gather every consumer uses) so the check is storage-form-agnostic.
+	gr, wr := make([]float32, got.D), make([]float32, want.D)
+	if err := got.embedRow(gr, 3); err != nil {
+		t.Fatalf("wrapped embedRow: %v", err)
+	}
+	if err := want.embedRow(wr, 3); err != nil {
+		t.Fatalf("flat embedRow: %v", err)
+	}
+	for i := range wr {
+		if gr[i] != wr[i] {
+			t.Fatalf("embed row[%d]: wrapped %v ≠ flat %v", i, gr[i], wr[i])
 		}
 	}
-	if got.Output == nil {
+	if got.Output == nil && got.OutputB == nil {
 		t.Fatal("untied lm_head lost through the language_model. nesting")
 	}
 }

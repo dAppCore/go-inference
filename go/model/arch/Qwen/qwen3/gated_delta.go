@@ -66,6 +66,14 @@ type GatedDeltaWeights struct {
 	InProjBQ   *model.QuantWeight
 	InProjZQ   *model.QuantWeight
 	OutProjQ   *model.QuantWeight
+	// bf16-resident forms in a dense bf16 checkpoint (#26 — zero-copy views, never widened; nil ⇒
+	// the f32 or packed field is used). Same dispatch shape as the packed forms, through the bf16
+	// matvec seam.
+	InProjQKVB *model.BF16Weight
+	InProjAB   *model.BF16Weight
+	InProjBB   *model.BF16Weight
+	InProjZB   *model.BF16Weight
+	OutProjB   *model.BF16Weight
 }
 
 // ProjMatMul is the device-GEMM seam for the gated-delta projections (host matNT default; native injects
@@ -123,6 +131,49 @@ func matNTQuantHost(out, x []float32, qw *model.QuantWeight, M, K, N int) []floa
 			var acc float64
 			for k := range K {
 				acc += float64(xr[k]) * float64(wr[k])
+			}
+			out[m*N+n] = float32(acc)
+		}
+	}
+	return out
+}
+
+// ProjBF16MatMulInto is the dense bf16 matvec seam (#26) — the BF16Weight twin of
+// ProjQuantMatMulInto: out[M,N] = x[M,K] @ wᵀ over the checkpoint's own bf16 bytes, no widening.
+// AX-8: the lib declares the hook and runs the row-widen host fallback; the backend binds the
+// device gemv.
+var ProjBF16MatMulInto func(out, x []float32, w *model.BF16Weight, M, K, N int) ([]float32, error)
+
+// matNTBF16 dispatches a dense bf16 projection: the device seam when bound, else the host
+// row-widen floor — the gated-delta counterpart of composed.matNTBF16.
+func matNTBF16(out, x []float32, bw *model.BF16Weight, M, K, N int) []float32 {
+	if ProjBF16MatMulInto != nil {
+		if res, err := ProjBF16MatMulInto(out, x, bw, M, K, N); err == nil {
+			return res
+		}
+	}
+	return matNTBF16Host(out, x, bw, M, K, N)
+}
+
+// matNTBF16Host widens one weight ROW at a time and dots it with each input row — never the whole
+// [N,K] tensor. f64 accumulation in ascending-k order, matNTCols' tier; the correctness floor.
+func matNTBF16Host(out, x []float32, bw *model.BF16Weight, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
+	row := make([]float32, K)
+	for n := 0; n < N; n++ {
+		for k := 0; k < K; k++ {
+			u := uint32(bw.Data[(n*K+k)*2]) | uint32(bw.Data[(n*K+k)*2+1])<<8
+			row[k] = math.Float32frombits(u << 16)
+		}
+		for m := 0; m < M; m++ {
+			xr := x[m*K : m*K+K]
+			var acc float64
+			for k := 0; k < K; k++ {
+				acc += float64(xr[k]) * float64(row[k])
 			}
 			out[m*N+n] = float32(acc)
 		}
@@ -353,6 +404,11 @@ func GatedDeltaOutProjF32(gated []float32, w *GatedDeltaWeights, cfg GatedDeltaC
 	vDim := cfg.vDim()
 	var out []float32
 	var err error
+	if w.OutProjB != nil { // bf16-resident out_proj through the bf16 matvec seam (#26)
+		out = matNTBF16(sc.out, gated, w.OutProjB, L, vDim, D)
+		sc.out = out
+		return out, nil
+	}
 	if w.OutProjQ != nil { // packed out_proj through the quant matvec seam
 		out = matNTQuant(sc.out, gated, w.OutProjQ, L, vDim, D)
 	} else {
@@ -410,7 +466,19 @@ func GatedDeltaInputProjectF32(x []float32, w *GatedDeltaWeights, cfg GatedDelta
 	// buffer (a/b ride free inside it); z's value depends only on x, so computing it here — before the
 	// conv/recurrence that consume it downstream — is identical to computing it at its use site. A nil
 	// hook or a device error leaves inputFused false and each projection runs at its per-call site below.
-	if w.InProjQKVQ != nil {
+	switch {
+	case w.InProjQKVB != nil:
+		// bf16-resident input projections (#26): each dispatches to the bf16 matvec seam over the
+		// checkpoint's own bytes — same structure as the packed branch below.
+		sc.qkv = matNTBF16(sc.qkv, x, w.InProjQKVB, L, D, convDim)
+		qkv = sc.qkv
+		sc.aProj = matNTBF16(sc.aProj, x, w.InProjAB, L, D, VH)
+		alpha = sc.aProj
+		sc.bProj = matNTBF16(sc.bProj, x, w.InProjBB, L, D, VH)
+		beta = sc.bProj
+		sc.zProj = matNTBF16(sc.zProj, x, w.InProjZB, L, D, vDim)
+		zProj = sc.zProj
+	case w.InProjQKVQ != nil:
 		// Packed input projections: each dispatches to the quant matvec seam (the f32 GatedDeltaInputDevice
 		// fuse takes f32 weights — bypassed). z is computed here before the conv/recurrence exactly as the
 		// dense per-projection path does; identical downstream.
@@ -422,7 +490,7 @@ func GatedDeltaInputProjectF32(x []float32, w *GatedDeltaWeights, cfg GatedDelta
 		beta = sc.bProj
 		sc.zProj = matNTQuant(sc.zProj, x, w.InProjZQ, L, D, vDim)
 		zProj = sc.zProj
-	} else {
+	default:
 		inputFused := false
 		if GatedDeltaInputDevice != nil && L*D*convDim >= deviceMinWork {
 			if fqkv, fz, fa, fb, ferr := GatedDeltaInputDevice(x, w.InProjQKV, w.InProjZ, w.InProjA, w.InProjB, L, D, convDim, vDim, VH); ferr == nil {

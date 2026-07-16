@@ -131,8 +131,12 @@ func (h *MTPHead) draftLogits(base *ComposedModel, hOut []float32) []float32 {
 	switch {
 	case base.OutputQ != nil:
 		logits = matNTQuant(nil, y, base.OutputQ, 1, base.D, base.Vocab)
+	case base.OutputB != nil: // bf16-resident untied head (#26)
+		logits = matNTBF16(nil, y, base.OutputB, 1, base.D, base.Vocab)
 	case base.Output == nil && base.EmbedQ != nil:
 		logits = matNTQuant(nil, y, base.EmbedQ, 1, base.D, base.Vocab)
+	case base.Output == nil && base.Embed == nil && base.EmbedB != nil: // bf16-resident tied head (#26)
+		logits = matNTBF16(nil, y, base.EmbedB, 1, base.D, base.Vocab)
 	default:
 		head := base.Output
 		if head == nil {
@@ -677,23 +681,23 @@ func LoadMTPHead(tensors map[string]safetensors.Tensor, configJSON []byte, base 
 		}
 		return nil
 	}
-	proj := func(name string) ([]float32, *model.QuantWeight, error) {
+	proj := func(name string) ([]float32, *model.QuantWeight, *model.BF16Weight, error) {
 		t, ok := get(name)
 		if !ok {
-			return nil, nil, core.NewError("composed.mtp: LoadMTPHead missing " + name)
+			return nil, nil, nil, core.NewError("composed.mtp: LoadMTPHead missing " + name)
 		}
 		qw, _, err := tensorAsQuant(tensors, name, t, quant, false)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if qw != nil {
-			return nil, qw, nil
+			return nil, qw, nil, nil
 		}
 		fv, err := tensorF32(t)
-		return fv, nil, err
+		return fv, nil, nil, err
 	}
 
-	fcF, fcQ, err := proj("fc.weight")
+	fcF, fcQ, _, err := proj("fc.weight")
 	if err != nil {
 		return nil, core.E("composed.mtp: LoadMTPHead", "fc", err)
 	}
