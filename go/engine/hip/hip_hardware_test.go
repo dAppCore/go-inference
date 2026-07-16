@@ -6983,22 +6983,24 @@ func assertLoadedGemma4MLXQ4AttentionProjectionSmoke(t *testing.T, model *hipLoa
 	if len(layerInput) != hidden {
 		t.Fatalf("Gemma4 q4 attention input length = %d, want %d", len(layerInput), hidden)
 	}
+	cfg, err := model.loadedGemma4Q4Layer0Config()
+	core.RequireNoError(t, err)
 	qOutput := assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "q_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.q_proj",
-		rows:       2048,
+		rows:       cfg.QueryProjection.Rows,
 		cols:       hidden,
 	}, layerInput)
 	kOutput := assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "k_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.k_proj",
-		rows:       256,
+		rows:       cfg.KeyProjection.Rows,
 		cols:       hidden,
 	}, layerInput)
 	vOutput := assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "v_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.v_proj",
-		rows:       256,
+		rows:       cfg.ValueProjection.Rows,
 		cols:       hidden,
 	}, layerInput)
 	return gemma4BF16AttentionProjectionOutputs{Query: qOutput, Key: kOutput, Value: vOutput}
@@ -7016,10 +7018,12 @@ func assertLoadedGemma4MLXQ4ProjectionSmoke(t *testing.T, model *hipLoadedModel)
 	for index := range input {
 		input[index] = float32((index%11)-5) * 0.0625
 	}
+	cfg, err := model.loadedGemma4Q4Layer0Config()
+	core.RequireNoError(t, err)
 	return assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "q_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.q_proj",
-		rows:       2048,
+		rows:       cfg.QueryProjection.Rows,
 		cols:       hidden,
 	}, input)
 }
@@ -7036,26 +7040,31 @@ func assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t *testing.T, model *hipLoaded
 	if len(input) != spec.cols {
 		t.Fatalf("%s q4 input length = %d, want cols %d", spec.label, len(input), spec.cols)
 	}
-	bits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
+	preferredBits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
 	weight, ok := model.tensors[spec.tensorBase+".weight"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing %s packed weight tensor", bits, spec.label)
+		t.Fatalf("loaded Gemma4 q%d model is missing %s packed weight tensor", preferredBits, spec.label)
 	}
 	scales, ok := model.tensors[spec.tensorBase+".scales"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing %s scales tensor", bits, spec.label)
+		t.Fatalf("loaded Gemma4 q%d model is missing %s scales tensor", preferredBits, spec.label)
 	}
 	biases, ok := model.tensors[spec.tensorBase+".biases"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing %s biases tensor", bits, spec.label)
+		t.Fatalf("loaded Gemma4 q%d model is missing %s biases tensor", preferredBits, spec.label)
 	}
-	groupSize := model.modelInfo.QuantGroup
-	if groupSize == 0 {
-		groupSize = 64
-	}
-	packedPerRow, err := hipMLXAffinePackedCols(spec.cols, bits)
+	bits, rows, cols, groupSize, groups, packedPerRow, err := hipInferMLXAffineBitsFromTensorShapes(
+		weight,
+		scales,
+		biases,
+		model.modelInfo.QuantGroup,
+		model.modelInfo.QuantBits,
+		spec.label+" hardware smoke",
+	)
 	core.RequireNoError(t, err)
-	groups := spec.cols / groupSize
+	if rows != spec.rows || cols != spec.cols {
+		t.Fatalf("q%d %s inferred shape = [%d,%d], want [%d,%d]", bits, spec.label, rows, cols, spec.rows, spec.cols)
+	}
 	if weight.info.TypeName != "U32" ||
 		len(weight.info.Dimensions) != 2 ||
 		weight.info.Dimensions[0] != uint64(spec.rows) ||
