@@ -54,11 +54,19 @@ func (m *gatedDeltaMixer) Kind() string { return "gated_deltanet" }
 // the delta matrix, with the projection scratch sc nil'd — sc (qwen3.GatedDeltaScratch) is per-Forward
 // reusable workspace, not logical state, and Forward/forwardNoProj/forwardFromInput already reallocate it
 // lazily whenever it is nil (the same path a fresh, nil-prior session already takes), so nil-ing it here
-// is byte-identical to that path and stops the clone aliasing the live session's scratch buffers.
+// is byte-identical to that path and stops the clone aliasing the live session's scratch buffers. When
+// the device block path holds the state (sc.Device — the host conv/delta slices are then nil and stale),
+// the clone reads it back through the engine's export seam; the clone itself carries host slices only,
+// so a restored session re-primes its own device state lazily.
 func (m *gatedDeltaMixer) CloneState(prior any) any {
 	st, ok := prior.(gatedDeltaState)
 	if !ok {
 		return nil
+	}
+	if st.sc != nil && st.sc.Device != nil && qwen3.GatedDeltaDeviceStateExport != nil {
+		if conv, delta, ok := qwen3.GatedDeltaDeviceStateExport(st.sc.Device); ok {
+			return gatedDeltaState{conv: conv, delta: delta}
+		}
 	}
 	return gatedDeltaState{conv: slices.Clone(st.conv), delta: slices.Clone(st.delta)}
 }
@@ -72,7 +80,25 @@ func (m *gatedDeltaMixer) Forward(h []float32, L, D int, prior any) ([]float32, 
 	if sc == nil {
 		sc = &qwen3.GatedDeltaScratch{}
 	}
-	out, nc, nd, err := qwen3.GatedDeltaForwardScratchF32(h, m.w, m.cfg, pc, pd, L, D, sc)
+	qkv, z, a, b, err := qwen3.GatedDeltaInputProjectF32(h, m.w, m.cfg, L, D, sc)
+	if err != nil {
+		return nil, nil, err
+	}
+	if gated, engaged, derr := qwen3.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
+		if derr != nil {
+			return nil, nil, derr
+		}
+		out, oerr := qwen3.GatedDeltaOutProjF32(gated, m.w, m.cfg, L, D, sc)
+		if oerr != nil {
+			return nil, nil, oerr
+		}
+		return out, gatedDeltaState{sc: sc}, nil
+	}
+	gated, _, nc, nd, err := qwen3.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
+	if err != nil {
+		return nil, nil, err
+	}
+	out, err := qwen3.GatedDeltaOutProjF32(gated, m.w, m.cfg, L, D, sc)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -92,7 +118,17 @@ func (m *gatedDeltaMixer) forwardNoProj(h []float32, L, D int, prior any) (mixer
 	if sc == nil {
 		sc = &qwen3.GatedDeltaScratch{}
 	}
-	gated, vDim, nc, nd, err := qwen3.GatedDeltaForwardScratchNoProjF32(h, m.w, m.cfg, pc, pd, L, D, sc)
+	qkv, z, a, b, err := qwen3.GatedDeltaInputProjectF32(h, m.w, m.cfg, L, D, sc)
+	if err != nil {
+		return nil, nil, 0, nil, err
+	}
+	if gated, engaged, derr := qwen3.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
+		if derr != nil {
+			return nil, nil, 0, nil, derr
+		}
+		return gated, m.w.OutProj, m.cfg.VDim(), gatedDeltaState{sc: sc}, nil
+	}
+	gated, vDim, nc, nd, err := qwen3.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
 	if err != nil {
 		return nil, nil, 0, nil, err
 	}
@@ -112,6 +148,12 @@ func (m *gatedDeltaMixer) forwardFromInput(qkv, z, a, b []float32, L, D int, pri
 	}
 	if sc == nil {
 		sc = &qwen3.GatedDeltaScratch{}
+	}
+	if gated, engaged, derr := qwen3.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
+		if derr != nil {
+			return nil, nil, 0, nil, derr
+		}
+		return gated, m.w.OutProj, m.cfg.VDim(), gatedDeltaState{sc: sc}, nil
 	}
 	gated, vDim, nc, nd, err := qwen3.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
 	if err != nil {

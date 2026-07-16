@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/arch/deltanet"
 )
 
@@ -339,5 +340,173 @@ func TestGatedDeltaStepDeviceBeatsHost(t *testing.T) {
 		hostSpan, devSpan, float64(devSpan.Microseconds())/layers, speedup, roundTrip)
 	if speedup < 20 {
 		t.Fatalf("one-CB device span only ×%.2f over host (host %v, device %v) — want ≥20×", speedup, hostSpan, devSpan)
+	}
+}
+
+// --- S2: the device block vs qwen3.GatedDeltaForwardScratchFromInputF32 ---
+
+// gdBlockFixture builds one random gated-delta layer (weights + cfg) and a stream of raw
+// projection outputs, for driving both the host block and the device block over a carried state.
+type gdBlockFixture struct {
+	cfg qwen3.GatedDeltaConfig
+	w   *qwen3.GatedDeltaWeights
+	rng *rand.Rand
+}
+
+func newGDBlockFixture(seed int64, Hk, Hv, Dk, K int) *gdBlockFixture {
+	rng := rand.New(rand.NewSource(seed))
+	cfg := qwen3.GatedDeltaConfig{KeyHeads: Hk, ValueHeads: Hv, HeadDim: Dk, ConvKernel: K, Eps: 1e-6}
+	fill := func(n int, lo, hi float32) []float32 {
+		out := make([]float32, n)
+		for i := range out {
+			out[i] = lo + (hi-lo)*rng.Float32()
+		}
+		return out
+	}
+	convDim, vDim := cfg.ConvDim(), cfg.VDim()
+	w := &qwen3.GatedDeltaWeights{
+		ConvWeight: fill(convDim*K, -0.5, 0.5),
+		ConvBias:   fill(convDim, -0.2, 0.2),
+		ALog:       fill(Hv, -1, 1.2),
+		DtBias:     fill(Hv, -0.5, 0.5),
+		Norm:       fill(Dk, 0.5, 1.5),
+		OutProj:    fill(vDim, 0, 0), // unused: the block stops before out_proj
+	}
+	return &gdBlockFixture{cfg: cfg, w: w, rng: rng}
+}
+
+func (f *gdBlockFixture) inputs(L int) (qkv, z, a, b []float32) {
+	fill := func(n int) []float32 {
+		out := make([]float32, n)
+		for i := range out {
+			out[i] = -1 + 2*f.rng.Float32()
+		}
+		return out
+	}
+	return fill(L * f.cfg.ConvDim()), fill(L * f.cfg.VDim()), fill(L * f.cfg.ValueHeads), fill(L * f.cfg.ValueHeads)
+}
+
+// TestGatedDeltaBlockDeviceRun_Good drives the whole device block against the host block across a
+// carried-state sequence (three decode steps then an L=4 chunk) at both the fixture shape and the
+// real 27B geometry — gated outputs gate each call, the exported ring+delta state gates the end.
+func TestGatedDeltaBlockDeviceRun_Good(t *testing.T) {
+	gdRequireKernel(t)
+	for _, shape := range []struct {
+		name           string
+		Hk, Hv, Dk, K  int
+	}{
+		{"fixture", 2, 4, 64, 4},
+		{"real27B", 16, 48, 128, 4},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			f := newGDBlockFixture(31, shape.Hk, shape.Hv, shape.Dk, shape.K)
+			if !gatedDeltaBlockUsable(shape.Dk, shape.Dk, shape.Hk, shape.Hv, shape.K) {
+				t.Skip("block kernels unavailable")
+			}
+			h, err := newGatedDeltaDeviceState(shape.Hk, shape.Hv, shape.Dk, shape.Dk, shape.K, 1)
+			if err != nil {
+				t.Fatalf("newGatedDeltaDeviceState: %v", err)
+			}
+			var hostConv, hostDelta []float32
+			const D = 256
+			for step, L := range []int{1, 1, 1, 4} {
+				qkv, z, a, b := f.inputs(L)
+				// The host mutates alpha/beta in place — give each side its own copies.
+				aHost, bHost := append([]float32(nil), a...), append([]float32(nil), b...)
+				gatedHost, vDim, nc, nd, herr := qwen3.GatedDeltaForwardScratchFromInputF32(
+					append([]float32(nil), qkv...), z, aHost, bHost, f.w, f.cfg, hostConv, hostDelta, L, D, nil)
+				if herr != nil {
+					t.Fatalf("host block step %d: %v", step, herr)
+				}
+				hostConv, hostDelta = nc, nd
+				gatedDev := make([]float32, L*vDim)
+				if derr := GatedDeltaBlockDeviceRun(h, qkv, z, a, b,
+					f.w.ConvWeight, f.w.ConvBias, f.w.ALog, f.w.DtBias, f.w.Norm,
+					nil, nil, L, gatedDev); derr != nil {
+					t.Fatalf("device block step %d: %v", step, derr)
+				}
+				rel := gdScaledDiff(t, "gated", gatedDev, gatedHost)
+				t.Logf("%s step %d (L=%d): gated scaled max diff %.3e", shape.name, step, L, rel)
+				if rel > 5e-4 {
+					t.Fatalf("step %d gated drift %.3e beyond f32 rounding scale", step, rel)
+				}
+			}
+			expConv, expDelta := h.export()
+			if rel := gdScaledDiff(t, "ring", expConv, hostConv); rel > 5e-4 {
+				t.Fatalf("exported conv ring drift %.3e", rel)
+			}
+			if rel := gdScaledDiff(t, "delta", expDelta, hostDelta); rel > 5e-4 {
+				t.Fatalf("exported delta state drift %.3e", rel)
+			}
+		})
+	}
+}
+
+// TestGatedDeltaBlockDeviceRun_Bad pins the rejection shapes: nil handle, size mismatches and an
+// unservable geometry all error before any dispatch.
+func TestGatedDeltaBlockDeviceRun_Bad(t *testing.T) {
+	gdRequireKernel(t)
+	f := newGDBlockFixture(5, 2, 4, 64, 4)
+	h, err := newGatedDeltaDeviceState(2, 4, 64, 64, 4, 1)
+	if err != nil {
+		t.Fatalf("newGatedDeltaDeviceState: %v", err)
+	}
+	qkv, z, a, b := f.inputs(1)
+	gated := make([]float32, f.cfg.VDim())
+	if err := GatedDeltaBlockDeviceRun(nil, qkv, z, a, b, f.w.ConvWeight, f.w.ConvBias, f.w.ALog, f.w.DtBias, f.w.Norm, nil, nil, 1, gated); err == nil {
+		t.Fatal("nil handle must error")
+	}
+	if err := GatedDeltaBlockDeviceRun(h, qkv[:5], z, a, b, f.w.ConvWeight, f.w.ConvBias, f.w.ALog, f.w.DtBias, f.w.Norm, nil, nil, 1, gated); err == nil {
+		t.Fatal("qkv size mismatch must error")
+	}
+	if gatedDeltaBlockUsable(96, 96, 2, 4, 4) {
+		t.Fatal("Dk=96 must not be block-usable")
+	}
+	if gatedDeltaBlockUsable(64, 128, 2, 4, 4) {
+		t.Fatal("Dk != Dv must not be block-usable")
+	}
+}
+
+// TestGatedDeltaBlockDeviceRun_Ugly proves the export/prime seam (the snapshot/clone path): a
+// fresh handle primed from a mid-sequence export continues bit-identically with the original —
+// device state round-trips through host layout without loss.
+func TestGatedDeltaBlockDeviceRun_Ugly(t *testing.T) {
+	gdRequireKernel(t)
+	const Hk, Hv, Dk, K = 2, 4, 64, 4
+	f := newGDBlockFixture(17, Hk, Hv, Dk, K)
+	if !gatedDeltaBlockUsable(Dk, Dk, Hk, Hv, K) {
+		t.Skip("block kernels unavailable")
+	}
+	h1, err := newGatedDeltaDeviceState(Hk, Hv, Dk, Dk, K, 1)
+	if err != nil {
+		t.Fatalf("newGatedDeltaDeviceState: %v", err)
+	}
+	vDim := f.cfg.VDim()
+	// Two steps on h1, then export → prime h2 → identical third step on both.
+	for i := 0; i < 2; i++ {
+		qkv, z, a, b := f.inputs(1)
+		gated := make([]float32, vDim)
+		if err := GatedDeltaBlockDeviceRun(h1, qkv, z, a, b, f.w.ConvWeight, f.w.ConvBias, f.w.ALog, f.w.DtBias, f.w.Norm, nil, nil, 1, gated); err != nil {
+			t.Fatalf("h1 step %d: %v", i, err)
+		}
+	}
+	expConv, expDelta := h1.export()
+	h2, err := newGatedDeltaDeviceState(Hk, Hv, Dk, Dk, K, 1)
+	if err != nil {
+		t.Fatalf("newGatedDeltaDeviceState h2: %v", err)
+	}
+	qkv, z, a, b := f.inputs(1)
+	g1 := make([]float32, vDim)
+	g2 := make([]float32, vDim)
+	if err := GatedDeltaBlockDeviceRun(h1, qkv, z, a, b, f.w.ConvWeight, f.w.ConvBias, f.w.ALog, f.w.DtBias, f.w.Norm, nil, nil, 1, g1); err != nil {
+		t.Fatalf("h1 final step: %v", err)
+	}
+	if err := GatedDeltaBlockDeviceRun(h2, qkv, z, a, b, f.w.ConvWeight, f.w.ConvBias, f.w.ALog, f.w.DtBias, f.w.Norm, expConv, expDelta, 1, g2); err != nil {
+		t.Fatalf("h2 (primed from export) step: %v", err)
+	}
+	for i := range g1 {
+		if g1[i] != g2[i] {
+			t.Fatalf("export/prime round-trip diverged at %d: %v vs %v", i, g1[i], g2[i])
+		}
 	}
 }

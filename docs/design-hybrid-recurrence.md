@@ -93,11 +93,16 @@ end-to-end, so the kernels are f32-in/f32-out (no bf16 tier needed on this lane 
   accumulation) at the real 27B shape + one ragged shape; snapshot slots proven by stepping T=4 and
   matching slot s against the host state s tokens back. Bench: kernel µs at L=1 and L=64 vs the
   host loop (expect ~ms → ~µs).
-- **S2 — the device block.** One CB from qkv/z/a/b to gated output: conv-ring update + SiLU →
-  split/rms-norm (q,k) → α/β transform (A_log/dt_bias resident) → recurrence → gated
-  RMSNorm·SiLU(z). State device-resident across tokens (upload once on first step / restore, never
-  read back in the loop). Parity vs `GatedDeltaForwardScratchFromInputF32` (dense + quant). Receipt:
-  per-layer block time + E2E tok/s (state residency alone should collapse the host wall).
+- **S2 — the device block. DONE.** One CB from qkv/z/a/b to gated output: conv-ring update + SiLU
+  + split + ℓ2-norms (one fused kernel) → α/β transform → recurrence → gated RMSNorm·SiLU(z);
+  state device-resident across tokens (primed once, exported only for snapshots/clones). Engaged at
+  the MIXER level (`GatedDeltaBlockDeviceTry` — the mixer owns state threading; a nil-scratch legacy
+  caller can never engage and lose continuity), host block untouched as the parity reference; the
+  engine binds via `composed_backend.go` (`LTHN_GD_BLOCK=0` = the A/B off switch). Receipts
+  (2026-07-16): block parity vs the host block ~2e-7 scaled across carried sequences (fixture +
+  real 27B shapes, L=1 and L=4); export/prime round-trip byte-exact; **27B-4bit decode 215.75 →
+  133.46 ms/token = 4.63 → 7.49 tok/s (+62%)**; real generation sane (Asimov prompt, coherent).
+  Kernel receipt from S1 stands: 48 layers in one CB = 1.17 ms vs 78.7 ms host (×67).
 - **S3 — whole-layer CB.** Fold the input projections (quant qmv or f32 steel) and the out_proj +
   FFN tail into the block's CB — one CB per gated-delta layer, x handed device-to-device. Receipt:
   CB census/token (368 → ~64-80) + tok/s.

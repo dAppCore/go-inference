@@ -7,6 +7,7 @@ package native
 import (
 	"os"
 
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/composed"
 )
 
@@ -33,6 +34,11 @@ var inputFuseEnabled = oprojFuseEnabled && os.Getenv("LTHN_INPUT_FUSE") != "0"
 // device-GEMM head path (ComposedSession.headLogits) — the "before" arm of a same-binary interleaved A/B.
 var headFuseEnabled = oprojFuseEnabled && os.Getenv("LTHN_HEAD_FUSE") != "0"
 
+// gdBlockEnabled gates the device gated-delta BLOCK (conv ring + gates + recurrence + gated norm in
+// one command buffer, recurrent state resident on device — #18 S2). Default on; LTHN_GD_BLOCK=0
+// leaves the hooks unbound so the mixer runs the host block — the "before" arm of a same-binary A/B.
+var gdBlockEnabled = os.Getenv("LTHN_GD_BLOCK") != "0"
+
 // composed_backend.go wires native's device GEMM into the composed stack's own projections — the
 // attention mixer's q/k/v/o, the MLP/MoE matmuls, and the LM head (the largest single matmul of every
 // decode step) — the same AX-8 seam as gated_delta_backend.go: composed declares the hook and runs the
@@ -56,5 +62,9 @@ func init() {
 	}
 	if headFuseEnabled {
 		composed.ResidualNormMLPProjHeadDevice = ResidualNormMLPProjHeadDevice // folds the model's own final RMSNorm + LM head GEMM onto the back of the LAST layer's tail
+	}
+	if gdBlockEnabled {
+		qwen3.GatedDeltaBlockDevice = gatedDeltaBlockDeviceHook           // the whole post-projection gated-delta block in one CB, state device-resident (#18 S2)
+		qwen3.GatedDeltaDeviceStateExport = gatedDeltaDeviceStateExportHook // snapshot/clone readback for the resident state
 	}
 }

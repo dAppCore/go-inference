@@ -244,8 +244,44 @@ func gdSoftplus(v float64) float64 {
 // allocating — the dominant per-token cost. NEVER share a Scratch across concurrently-stepped sessions:
 // the buffers are mutable and unsynchronised (they mirror the recurrent conv/delta state's ownership —
 // per-session, threaded, never on the shared weights). Buffers grow to fit and are reused thereafter.
+// Device carries the engine's resident recurrent-state handle when the device block path is engaged
+// (GatedDeltaBlockDevice) — opaque to this package, same per-session lifetime as the scratch.
 type GatedDeltaScratch struct {
 	qkv, aProj, bProj, zProj, out []float32
+	Device                        any
+}
+
+// GatedDeltaBlockDevice is the device seam for the WHOLE post-projection gated-delta block — causal
+// conv ring + SiLU + split + norms, the α/β gate transform, the delta-rule recurrence and the gated
+// RMSNorm·SiLU(z) — in one command buffer with the recurrent state RESIDENT on device across calls
+// (stowed on sc.Device). a and b are the RAW projection outputs (the hook's own gate transform
+// applies α/β). On success the state advances device-side and the caller carries NO host state
+// slices; the engine exports through GatedDeltaDeviceStateExport for snapshots. AX-8: the lib
+// declares the hook, the backend binds it; nil ⇒ the host path below is the implementation.
+var GatedDeltaBlockDevice func(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L int) (gated []float32, err error)
+
+// GatedDeltaDeviceStateExport reads a device-resident recurrent state (a sc.Device handle) back
+// into host-layout slices (conv ring [(K-1),convDim], delta [Hv,Dk,Dv]) — the snapshot/clone seam.
+// ok=false means the handle is absent or not authoritative and the caller's host slices stand.
+var GatedDeltaDeviceStateExport func(dev any) (conv, delta []float32, ok bool)
+
+// GatedDeltaBlockDeviceTry engages the device block when the backend bound it and this sequence
+// threads a real scratch (state continuity lives on sc — a nil sc caller cannot carry the resident
+// handle between calls, so it must stay on the host path). engaged=false ⇒ the caller runs the host
+// block; engaged=true with err ⇒ the device holds this sequence's authoritative state and a host
+// fallback off the stale priors would corrupt it — propagate, never fall back mid-sequence.
+func GatedDeltaBlockDeviceTry(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L int) (gated []float32, engaged bool, err error) {
+	if GatedDeltaBlockDevice == nil || sc == nil {
+		return nil, false, nil
+	}
+	gated, err = GatedDeltaBlockDevice(sc, qkv, z, a, b, w, cfg, priorConv, priorDelta, L)
+	if err == nil {
+		return gated, true, nil
+	}
+	if sc.Device != nil {
+		return nil, true, err
+	}
+	return nil, false, nil // never engaged (first-call decline): the host path serves
 }
 
 // GatedDeltaForwardF32 is GatedDeltaForwardScratchF32 with a fresh (nil) scratch — every projection
@@ -271,16 +307,36 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	_ = vDim
+	out, err = GatedDeltaOutProjF32(gated, w, cfg, L, D, sc)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return out, newConv, newDelta, nil
+}
+
+// GatedDeltaOutProjF32 applies the block's final projection out [L,D] = gated [L,vDim] @ OutProjᵀ —
+// packed weights through the quant matvec seam, dense through the device/host GEMM ladder — writing
+// into sc.out (reused across tokens). Split out of GatedDeltaForwardScratchF32 so a caller running
+// the post-projection block on the device seam (GatedDeltaBlockDeviceTry) applies the identical
+// projection to the device block's output.
+func GatedDeltaOutProjF32(gated []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, L, D int, sc *GatedDeltaScratch) ([]float32, error) {
+	if sc == nil {
+		sc = &GatedDeltaScratch{} // throwaway: the output allocates fresh
+	}
+	vDim := cfg.vDim()
+	var out []float32
+	var err error
 	if w.OutProjQ != nil { // packed out_proj through the quant matvec seam
 		out = matNTQuant(sc.out, gated, w.OutProjQ, L, vDim, D)
 	} else {
 		out, err = projMatMulInto(sc.out, gated, w.OutProj, L, vDim, D)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
 	}
 	sc.out = out
-	return out, newConv, newDelta, nil
+	return out, nil
 }
 
 // GatedDeltaForwardScratchNoProjF32 is GatedDeltaForwardScratchF32 up to but NOT including out_proj: it
@@ -296,14 +352,31 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
+	qkv, zProj, alpha, beta, err := GatedDeltaInputProjectF32(x, w, cfg, L, D, sc)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+	return GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta, w, cfg, priorConv, priorDelta, L, D, sc)
+}
+
+// GatedDeltaInputProjectF32 computes the four x-reading input projections (in_proj_qkv/z/a/b) —
+// exactly the front half of GatedDeltaForwardScratchNoProjF32, split out so a caller that owns the
+// state threading (composed's mixer) can route the post-projection block to the device seam
+// (GatedDeltaBlockDeviceTry) instead of the host stages. Same dispatch ladder: packed weights per
+// projection through the quant matvec seam; dense through the fused input hook above the floor,
+// else the per-projection device/host GEMMs. alpha/beta are the RAW projection outputs.
+func GatedDeltaInputProjectF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, L, D int, sc *GatedDeltaScratch) (qkv, zProj, alpha, beta []float32, err error) {
+	if sc == nil {
+		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
+	}
 	if w == nil {
-		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
+		return nil, nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
 	}
 	KH, VH := cfg.KeyHeads, cfg.ValueHeads
 	if KH <= 0 || VH <= 0 || cfg.HeadDim <= 0 || VH%KH != 0 || len(x) != L*D {
-		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry or x size")
+		return nil, nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry or x size")
 	}
-	vDim = cfg.vDim()
+	vDim := cfg.vDim()
 	convDim := cfg.convDim()
 
 	// Input fuse: in_proj_qkv/z/a/b all read x [L,D]. When the backend supplies the fused hook and the
@@ -311,7 +384,6 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 	// buffer (a/b ride free inside it); z's value depends only on x, so computing it here — before the
 	// conv/recurrence that consume it downstream — is identical to computing it at its use site. A nil
 	// hook or a device error leaves inputFused false and each projection runs at its per-call site below.
-	var qkv, alpha, beta, zProj []float32
 	if w.InProjQKVQ != nil {
 		// Packed input projections: each dispatches to the quant matvec seam (the f32 GatedDeltaInputDevice
 		// fuse takes f32 weights — bypassed). z is computed here before the conv/recurrence exactly as the
@@ -335,27 +407,27 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 		if !inputFused {
 			qkv, err = projMatMulInto(sc.qkv, x, w.InProjQKV, L, D, convDim)
 			if err != nil {
-				return nil, 0, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			sc.qkv = qkv
 			alpha, err = projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
 			if err != nil {
-				return nil, 0, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			sc.aProj = alpha
 			beta, err = projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
 			if err != nil {
-				return nil, 0, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			sc.bProj = beta
 			zProj, err = projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
 			if err != nil {
-				return nil, 0, nil, nil, err
+				return nil, nil, nil, nil, err
 			}
 			sc.zProj = zProj
 		}
 	}
-	return GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta, w, cfg, priorConv, priorDelta, L, D, sc)
+	return qkv, zProj, alpha, beta, nil
 }
 
 // GatedDeltaForwardScratchFromInputF32 is GatedDeltaForwardScratchNoProjF32 from ALREADY-COMPUTED input
