@@ -70,6 +70,12 @@ func TestMappingCloseMunmapError(t *testing.T) {
 	t.Logf("Mapping.Close: munmap of a misaligned Data view fails (EINVAL) and is surfaced")
 }
 
+// init wires shardCloseFaultFixture (declared in sharded_test.go, which has no build tag) to
+// badMapping — this is the unix side of that indirection; see the var's doc comment.
+func init() {
+	shardCloseFaultFixture = badMapping
+}
+
 // TestDirMappingCloseShardError covers DirMapping.Close's per-shard error branch (sharded.go:152):
 // a single bad shard (misaligned Data) makes its Close fail, and DirMapping.Close must capture
 // that as firstErr and return it. One shard keeps the firstErr==nil assignment deterministic.

@@ -36,13 +36,15 @@ func TestValues_DecodeFloat32_Good(t *core.T) {
 }
 
 func TestValues_DecodeFloat32_Bad(t *core.T) {
-	_, err := DecodeFloat32("F32", []byte{0, 0, 0}, 1)
+	values, err := DecodeFloat32("F32", []byte{0, 0, 0}, 1)
 	core.AssertErrorIs(t, err, errDecodeF32PayloadMismatch)
+	core.AssertNil(t, values)
 }
 
 func TestValues_DecodeFloat32_Ugly(t *core.T) {
-	_, err := DecodeFloat32("I64", []byte{1, 2, 3, 4}, 1)
+	values, err := DecodeFloat32("I64", []byte{1, 2, 3, 4}, 1)
 	core.AssertError(t, err, "unsupported safetensors dtype")
+	core.AssertNil(t, values)
 }
 
 func TestValues_DecodeFloat32_F16(t *core.T) {
@@ -61,8 +63,9 @@ func TestValues_DecodeFloat32_F16_Subnormal(t *core.T) {
 }
 
 func TestValues_DecodeFloat32_F16_LengthMismatch(t *core.T) {
-	_, err := DecodeFloat32("F16", []byte{0}, 1)
+	values, err := DecodeFloat32("F16", []byte{0}, 1)
 	core.AssertErrorIs(t, err, errDecodeF16PayloadMismatch)
+	core.AssertNil(t, values)
 }
 
 func TestValues_DecodeFloat32_BF16(t *core.T) {
@@ -74,8 +77,9 @@ func TestValues_DecodeFloat32_BF16(t *core.T) {
 }
 
 func TestValues_DecodeFloat32_BF16_LengthMismatch(t *core.T) {
-	_, err := DecodeFloat32("BF16", []byte{0}, 1)
+	values, err := DecodeFloat32("BF16", []byte{0}, 1)
 	core.AssertErrorIs(t, err, errDecodeBF16PayloadMismatch)
+	core.AssertNil(t, values)
 }
 
 func TestValues_DecodeFloat32_F64(t *core.T) {
@@ -86,8 +90,9 @@ func TestValues_DecodeFloat32_F64(t *core.T) {
 }
 
 func TestValues_DecodeFloat32_F64_LengthMismatch(t *core.T) {
-	_, err := DecodeFloat32("F64", []byte{0}, 1)
+	values, err := DecodeFloat32("F64", []byte{0}, 1)
 	core.AssertErrorIs(t, err, errDecodeF64PayloadMismatch)
+	core.AssertNil(t, values)
 }
 
 func TestValues_EncodeFloat32_Good(t *core.T) {
@@ -99,6 +104,7 @@ func TestValues_EncodeFloat32_Good(t *core.T) {
 func TestValues_EncodeFloat32_Bad(t *core.T) {
 	got := EncodeFloat32(nil)
 	core.AssertEmpty(t, got)
+	core.AssertEmpty(t, EncodeFloat32([]float32{}))
 }
 
 func TestValues_EncodeFloat32_Ugly(t *core.T) {
@@ -167,6 +173,7 @@ func TestValues_Float16ToFloat32_Ugly(t *core.T) {
 func TestValues_BFloat16ToFloat32_Good(t *core.T) {
 	core.AssertEqual(t, float32(1), BFloat16ToFloat32(0x3F80))
 	core.AssertEqual(t, float32(-1), BFloat16ToFloat32(0xBF80))
+	core.AssertEqual(t, float32(2), BFloat16ToFloat32(0x4000))
 }
 
 // Bad: zero and negative zero both decode to a numerically-zero float32,
