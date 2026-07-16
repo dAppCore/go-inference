@@ -1333,7 +1333,11 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspace(ctx context.Context, drive
 }
 
 func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransient(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, borrowRawKV bool) (*hipGemma4Q4PrefillQKVBatch, error) {
-	return hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx, driver, cfg, input, tokenCount, workspace, borrowRawKV, nil)
+	return hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientForced(ctx, driver, cfg, input, tokenCount, workspace, borrowRawKV, false)
+}
+
+func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientForced(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, borrowRawKV, forceBatchedProjection bool) (*hipGemma4Q4PrefillQKVBatch, error) {
+	return hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientIntoForced(ctx, driver, cfg, input, tokenCount, workspace, borrowRawKV, forceBatchedProjection, nil)
 }
 
 func hipGemma4Q4PrefillQKVProjectionBatchTripleCompatible(cfg hipGemma4Q4Layer0Config) bool {
@@ -1359,6 +1363,10 @@ func hipGemma4Q4PrefillQKVProjectionBatchPairCompatible(cfg hipGemma4Q4Layer0Con
 }
 
 func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, borrowRawKV bool, out *hipGemma4Q4PrefillQKVBatch) (*hipGemma4Q4PrefillQKVBatch, error) {
+	return hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientIntoForced(ctx, driver, cfg, input, tokenCount, workspace, borrowRawKV, false, out)
+}
+
+func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientIntoForced(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, borrowRawKV, forceBatchedProjection bool, out *hipGemma4Q4PrefillQKVBatch) (*hipGemma4Q4PrefillQKVBatch, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
 	}
@@ -1386,7 +1394,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 		}
 	}()
 	var err error
-	if workspace != nil && tokenCount == 1 && hipGemma4Q4PrefillQKVProjectionBatchTripleCompatible(cfg) {
+	if workspace != nil && tokenCount == 1 && !forceBatchedProjection && hipGemma4Q4PrefillQKVProjectionBatchTripleCompatible(cfg) {
 		totalRows := cfg.QueryProjection.Rows + cfg.KeyProjection.Rows + cfg.ValueProjection.Rows
 		output, workspaceErr := workspace.EnsureProjectionOutput(driver, totalRows)
 		if workspaceErr != nil {
@@ -1405,7 +1413,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 		success = true
 		return out, nil
 	}
-	if workspace != nil && tokenCount == 1 && hipGemma4Q4PrefillQKVProjectionBatchPairCompatible(cfg) {
+	if workspace != nil && tokenCount == 1 && !forceBatchedProjection && hipGemma4Q4PrefillQKVProjectionBatchPairCompatible(cfg) {
 		totalRows := cfg.QueryProjection.Rows + cfg.KeyProjection.Rows
 		output, workspaceErr := workspace.EnsureProjectionOutput(driver, totalRows)
 		if workspaceErr != nil {
@@ -1430,7 +1438,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 		if workspaceErr != nil {
 			return nil, workspaceErr
 		}
-		if tokenCount == 1 {
+		if tokenCount == 1 && !forceBatchedProjection {
 			err = hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, cfg.QueryProjection, queryOutput, workspace)
 		} else {
 			err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx, driver, input, cfg.QueryProjection, tokenCount, queryOutput)
@@ -1439,7 +1447,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 			return nil, err
 		}
 		out.Query = out.borrowQueryView(driver, "prefill query projection workspace view", queryOutput)
-	} else if tokenCount == 1 {
+	} else if tokenCount == 1 && !forceBatchedProjection {
 		out.Query, err = hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, input, cfg.QueryProjection)
 	} else {
 		out.Query, err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInput(ctx, driver, input, cfg.QueryProjection, tokenCount)
@@ -1452,7 +1460,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 		if workspaceErr != nil {
 			return nil, workspaceErr
 		}
-		if tokenCount == 1 {
+		if tokenCount == 1 && !forceBatchedProjection {
 			err = hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, cfg.KeyProjection, keyOutput, workspace)
 		} else {
 			err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx, driver, input, cfg.KeyProjection, tokenCount, keyOutput)
@@ -1461,7 +1469,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 			return nil, err
 		}
 		out.Key = out.borrowKeyView(driver, "prefill key projection workspace view", keyOutput)
-	} else if tokenCount == 1 {
+	} else if tokenCount == 1 && !forceBatchedProjection {
 		out.Key, err = hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, input, cfg.KeyProjection)
 	} else {
 		out.Key, err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInput(ctx, driver, input, cfg.KeyProjection, tokenCount)
@@ -1478,7 +1486,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 		if workspaceErr != nil {
 			return nil, workspaceErr
 		}
-		if tokenCount == 1 {
+		if tokenCount == 1 && !forceBatchedProjection {
 			err = hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, cfg.ValueProjection, valueOutput, workspace)
 		} else {
 			err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx, driver, input, cfg.ValueProjection, tokenCount, valueOutput)
@@ -1487,7 +1495,7 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientInto(ctx context.C
 			return nil, err
 		}
 		out.Value = out.borrowValueView(driver, "prefill value projection workspace view", valueOutput)
-	} else if tokenCount == 1 {
+	} else if tokenCount == 1 && !forceBatchedProjection {
 		out.Value, err = hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, input, cfg.ValueProjection)
 	} else {
 		out.Value, err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInput(ctx, driver, input, cfg.ValueProjection, tokenCount)

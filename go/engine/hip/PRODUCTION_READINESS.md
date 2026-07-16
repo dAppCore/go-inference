@@ -72,6 +72,9 @@ Recorded on 2026-07-16 on the RX 7800 XT development host:
   shutdown, then make the complete HIP package race-clean.
 - [x] Add one unattended production gate that runs the focused host, AMD
   hardware, state, and batching receipts against a caller-selected GGUF.
+- [x] Keep sparse continuous batching deterministic beyond the first decode
+  step by routing K=1 and K>1 sparse QKV through the same batched projection
+  family. Dense models retain their separately verified fused K=1 route.
 - [x] Re-run the final AMD, HIP/CUDA, HIP-CPU x86_64, and HIP-CPU AArch64
   compile matrix once after the implementation is stable.
 - [ ] Build the release artifacts and verify the dependency guard before
@@ -106,6 +109,32 @@ Recorded on 2026-07-16 on the RX 7800 XT development host:
   three pinned ROCm source submodules above are not initialized. No fetch,
   pull, submodule update, or push was performed.
 
+## Final AMD production matrix
+
+Recorded on 2026-07-16 on the RX 7800 XT development host after the sparse QKV
+lane determinism fix:
+
+- `go test ./engine/hip -count=1`: PASS in 4.292 seconds.
+- `go test -race ./engine/hip -count=1`: PASS in 21.365 seconds.
+- `go vet ./engine/hip`: PASS.
+- Every `test-hip-production` row rebuilt the gfx1100 sidecar, passed the
+  scheduler gate, and executed every selected hardware receipt without a skip.
+
+| GGUF | native decode | K=2 lane parity | sparse K=2 parity | exact state | hardware total |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| E2B Q4_K_M | 21.01s | 21.33s | n/a | 20.87s | 63.521s |
+| E4B Q4_K_M | 21.01s | 21.47s | n/a | 20.77s | 63.590s |
+| 12B Q4_K_M | 20.38s | 20.02s | n/a | 21.84s | 62.444s |
+| 26B-A4B UD-Q4_K_M | 6.95s | 7.64s | 7.51s | 8.86s | 31.116s |
+
+The original 26B receipt only generated two tokens, which exercised one shared
+forward and missed the fault. The production receipt now generates four tokens.
+It caught K=1 sparse decode using fused triple-QKV while K>1 used three batched
+projections; their small rounding delta entered retained KV at layer zero and
+changed both streams on the second forward. Sparse layers now force the batched
+QKV route for every lane count. The same broad policy changed 12B dense output,
+so dense layers deliberately keep their proven fused K=1 route.
+
 ## Acceptance commands
 
 Run host checks from the Go module:
@@ -125,7 +154,7 @@ to execute without skipping, and accepts an actual GGUF file:
 make test-hip-production HIP_PRODUCTION_GGUF="$GGUF"
 ```
 
-The 26B sparse batching receipt adds its MoE-specific lane check:
+The 26B sparse batching receipt adds its four-token MoE-specific lane check:
 
 ```sh
 make test-hip-production HIP_PRODUCTION_GGUF="$GGUF" HIP_PRODUCTION_MOE=1

@@ -355,7 +355,9 @@ func TestHIPLaneSetE2BHardwareMatchesSingleLanes_Good(t *testing.T) {
 	}
 	batched := hipDrainLaneSet(t, set)
 	for index, handle := range handles {
-		core.AssertEqual(t, serial[index], batched[handle.ID])
+		if got := batched[handle.ID]; !slices.Equal(serial[index], got) {
+			t.Errorf("multi-lane stream %d = %v, want serial %v", index, got, serial[index])
+		}
 	}
 	core.AssertEqual(t, uint64(specs[0].MaxNew-1), set.BatchForwardCount())
 	core.RequireNoError(t, set.Close())
@@ -637,10 +639,10 @@ func TestHIPLaneSet26BMoEHardwareMatchesSingleLanes_Good(t *testing.T) {
 	promptB, err := model.Tokenize("Two plus two is")
 	core.RequireNoError(t, err)
 	specs := []inference.LaneSpec{
-		{PromptIDs: promptA, MaxNew: 2},
+		{PromptIDs: promptA, MaxNew: 4},
 		{
 			PromptIDs:  promptB,
-			MaxNew:     2,
+			MaxNew:     4,
 			Sampler:    inference.SamplerConfig{Temperature: 0.8, TopK: 8},
 			SampleSeed: 7,
 		},
@@ -668,7 +670,9 @@ func TestHIPLaneSet26BMoEHardwareMatchesSingleLanes_Good(t *testing.T) {
 	}
 	batched := hipDrainLaneSet(t, set)
 	for index, handle := range handles {
-		core.AssertEqual(t, serial[index], batched[handle.ID])
+		if got := batched[handle.ID]; !slices.Equal(serial[index], got) {
+			t.Errorf("multi-lane MoE stream %d = %v, want serial %v", index, got, serial[index])
+		}
 	}
 	if set.BatchForwardCount() == 0 {
 		t.Fatal("multi-lane MoE decode did not use the shared batch forward route")
