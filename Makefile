@@ -112,10 +112,13 @@ HIP_CPU_INCLUDE ?= /opt/hip-cpu/include
 HIP_CPU_CXX ?= g++
 HIP_CPU_AARCH64_CXX ?= aarch64-linux-gnu-g++
 HIP_CPU_STD ?= c++20
+HIP_PRODUCTION_GGUF ?=
+HIP_PRODUCTION_HSACO ?= $(AMD_KERNEL_MODULE)
+HIP_PRODUCTION_MOE ?= 0
 
 .PHONY: all help build build-cli lem-rocm lthn-rocm named-binaries release-binaries release-dependency-guard release-artifacts dist static-hip-binaries rocr-cmake-shims hsa-static-archive hip-static-archive require-static-hip-archive hip-link-info lem-amd lem-cuda lem-cpu-x86 lem-cpu-aarch64 lthn-amd lthn-cuda lthn-cpu-x86 lthn-cpu-aarch64 test test-cli test-all clean \
 	hip hip-amd hip-nvidia hip-cpu hip-cpu-x86_64 hip-cpu-aarch64 \
-	test-hip-amd test-hip-nvidia test-hip-cpu test-hip-cpu-runtime test-hip-cpu-kernel-runtime test-zluda-cuda \
+	test-hip-amd test-hip-nvidia test-hip-cpu test-hip-cpu-runtime test-hip-cpu-kernel-runtime test-zluda-cuda test-hip-production \
 	compile-matrix test-matrix
 
 all: build
@@ -131,6 +134,7 @@ help:
 		'  named-binaries     build all named release binaries' \
 		'  release-artifacts  build archives and checksums under $(DIST_DIR)' \
 		'  test               run the Go module test suite' \
+		'  test-hip-production run the AMD Gemma4 release receipt (set HIP_PRODUCTION_GGUF)' \
 		'  test-matrix        run the host suite plus every hip toolchain smoke, skipping what is absent' \
 		'  clean              remove $(BUILD_DIR)'
 
@@ -343,6 +347,32 @@ test-hip-cpu-kernel-runtime:
 
 test-zluda-cuda:
 	GO_ROCM_RUN_ZLUDA_CUDA_TESTS=1 CUDA_PATH="$(CUDA_PATH)" CUDA_HOME="$(CUDA_HOME)" $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_ZLUDACUDARuntimeSmoke_Good -count=1
+
+test-hip-production:
+	@test -n "$(strip $(HIP_PRODUCTION_GGUF))" || { echo "HIP_PRODUCTION_GGUF must name a local Gemma4 GGUF"; exit 1; }
+	@test -f "$(HIP_PRODUCTION_GGUF)" || { echo "HIP production GGUF not found: $(HIP_PRODUCTION_GGUF)"; exit 1; }
+	$(MAKE) --no-print-directory hip-amd
+	@test -f "$(HIP_PRODUCTION_HSACO)" || { echo "HIP production HSACO not found: $(HIP_PRODUCTION_HSACO)"; exit 1; }
+	$(GO) -C "$(GO_SUBTREE)" test ./engine/hip -count=1 -run '^TestScheduler_'
+	@set -o pipefail; \
+		gguf="$$(realpath "$(HIP_PRODUCTION_GGUF)")"; \
+		hsaco="$$(realpath "$(HIP_PRODUCTION_HSACO)")"; \
+		tests='TestNativeDecodeSmokeKernelStatus_Good|TestHIPGemma4ExactStateContinuityHardware_Good|TestHIPLaneSetE2BHardwareMatchesSingleLanes_Good'; \
+		if [ "$(HIP_PRODUCTION_MOE)" = "1" ]; then \
+			tests="$$tests|TestHIPLaneSet26BMoEHardwareMatchesSingleLanes_Good"; \
+		fi; \
+		log="$$(mktemp)"; \
+		trap 'rm -f "$$log"' EXIT; \
+		HIP_VISIBLE_DEVICES="$${HIP_VISIBLE_DEVICES:-0}" \
+		GO_ROCM_RUN_MODEL_TESTS=1 \
+		GO_ROCM_RUN_MOE_LANE_TESTS="$(HIP_PRODUCTION_MOE)" \
+		GO_ROCM_MODEL_PATH="$$gguf" \
+		GO_ROCM_KERNEL_HSACO="$$hsaco" \
+		$(GO) -C "$(GO_SUBTREE)" test ./engine/hip -count=1 -v -run "^($$tests)$$" | tee "$$log"; \
+		if grep -q -- '--- SKIP:' "$$log"; then \
+			echo "HIP production receipt skipped a required hardware test"; \
+			exit 1; \
+		fi
 
 # test-matrix aggregates the host suite plus every hip toolchain smoke behind
 # one command. Each leg probes its own toolchain first and skips with a
