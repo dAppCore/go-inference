@@ -103,12 +103,17 @@ func TestComposedDecodeRoundTripCensus(t *testing.T) {
 	// stays all-zero by design — quant fused tails are a later slice), so count it as the engaged seam.
 	quant := c.QuantProjection.Decode
 	quantTail := c.QuantResidualTail.Decode
+	folds := c.GatedDeltaLayerFold.Decode + c.AttnFrontFold.Decode + c.AttnTailFold.Decode
 	t.Logf("  QUANT seams (packed-weight lanes):")
 	t.Logf("    QuantResidualTail (fused tail over codes, #8-B)  = %d", quantTail)
 	t.Logf("    QuantProjection   (per-projection fall-through)  = %d", quant)
-	t.Logf("  TOTALS: fused=%d  unfused=%d  quantTail=%d  quantProj=%d  (device-seam CBs per decode token)", fused, unfused, quantTail, quant)
+	t.Logf("  FOLD seams (whole/half-layer CBs, #26/#18):")
+	t.Logf("    GatedDeltaLayerFold (norm+projs+block+tail)      = %d", c.GatedDeltaLayerFold.Decode)
+	t.Logf("    AttnFrontFold (norm + q/k/v)                     = %d", c.AttnFrontFold.Decode)
+	t.Logf("    AttnTailFold (o_proj + FFN tail)                 = %d", c.AttnTailFold.Decode)
+	t.Logf("  TOTALS: fused=%d  unfused=%d  quantTail=%d  quantProj=%d  folds=%d  (device-seam CBs per decode token)", fused, unfused, quantTail, quant, folds)
 
-	if fused+unfused+quant+quantTail == 0 {
+	if fused+unfused+quant+quantTail+folds == 0 {
 		t.Fatalf("decode engaged NO composed device seam — floor knocked the whole token to host? census=%+v", c)
 	}
 }

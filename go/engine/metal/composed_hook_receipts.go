@@ -44,6 +44,11 @@ type ComposedHookCounts struct {
 	// #8-B slice 1): ONE command buffer swallowing the layer's gate/up/down quant projections plus the
 	// residual/norm/silu glue — each hit here replaced three QuantProjection round trips.
 	QuantResidualTail ComposedHookPhaseCounts
+	// The whole-layer/half-layer fold seams (#26/#18): one hit = one command buffer that swallowed
+	// a full gated-delta layer, an attention front (norm+q/k/v), or an attention tail (o_proj+FFN).
+	GatedDeltaLayerFold ComposedHookPhaseCounts
+	AttnFrontFold       ComposedHookPhaseCounts
+	AttnTailFold        ComposedHookPhaseCounts
 }
 
 const (
@@ -60,6 +65,9 @@ const (
 	hookHead
 	hookQuantProjection
 	hookQuantResidualTail
+	hookGatedDeltaLayerFold
+	hookAttnFrontFold
+	hookAttnTailFold
 	hookCount
 )
 
@@ -100,8 +108,11 @@ func (g *ComposedHookReceiptGuard) Snapshot() ComposedHookCounts {
 		ProjectionTail: phase(hookProjectionTail), AttentionInput: phase(hookAttentionInput),
 		GatedDeltaFold: phase(hookGatedDeltaFold), Mamba2Input: phase(hookMamba2Input),
 		RWKV7Input: phase(hookRWKV7Input), Head: phase(hookHead),
-		QuantProjection:   phase(hookQuantProjection),
-		QuantResidualTail: phase(hookQuantResidualTail),
+		QuantProjection:     phase(hookQuantProjection),
+		QuantResidualTail:   phase(hookQuantResidualTail),
+		GatedDeltaLayerFold: phase(hookGatedDeltaLayerFold),
+		AttnFrontFold:       phase(hookAttnFrontFold),
+		AttnTailFold:        phase(hookAttnTailFold),
 	}
 }
 
@@ -116,6 +127,9 @@ func EnableComposedHookReceipts() *ComposedHookReceiptGuard {
 	mambaIn, rwkvIn, head := composed.ResidualNormMLPProjMamba2InputDevice, composed.ResidualNormMLPProjRWKV7InputDevice, composed.ResidualNormMLPProjHeadDevice
 	quantProj, quantProjGD := composed.ProjQuantMatMulInto, qwen3.ProjQuantMatMulInto
 	quantTail := composed.ResidualNormMLPQuantDevice
+	gdLayerQ, gdLayerB := qwen3.GatedDeltaQuantLayerDevice, qwen3.GatedDeltaBF16LayerDevice
+	attnFrontQ, attnTailQ := composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice
+	attnFrontB, attnTailB := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
 	g.restore = func() {
 		composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice = proj, mlp, aqkv, gdInput
 		composed.ResidualNormMLPDevice, composed.ResidualNormMLPProjDevice = resTail, projTail
@@ -123,6 +137,9 @@ func EnableComposedHookReceipts() *ComposedHookReceiptGuard {
 		composed.ResidualNormMLPProjMamba2InputDevice, composed.ResidualNormMLPProjRWKV7InputDevice, composed.ResidualNormMLPProjHeadDevice = mambaIn, rwkvIn, head
 		composed.ProjQuantMatMulInto, qwen3.ProjQuantMatMulInto = quantProj, quantProjGD
 		composed.ResidualNormMLPQuantDevice = quantTail
+		qwen3.GatedDeltaQuantLayerDevice, qwen3.GatedDeltaBF16LayerDevice = gdLayerQ, gdLayerB
+		composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = attnFrontQ, attnTailQ
+		composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = attnFrontB, attnTailB
 	}
 	if proj != nil {
 		composed.ProjMatMulInto = func(out, x, w []float32, M, K, N int) ([]float32, error) {
@@ -208,5 +225,47 @@ func EnableComposedHookReceipts() *ComposedHookReceiptGuard {
 			return quantTail(h, mix, nw, gate, up, down, L, D, FF, eps)
 		}
 	}
+	g.wrapFoldHooks()
 	return g
+}
+
+// wrapFoldHooks installs counting wrappers over the whole-layer/half-layer fold seams — split out
+// of EnableComposedHookReceipts only to keep that function readable; called from it.
+func (g *ComposedHookReceiptGuard) wrapFoldHooks() {
+	if gdQ := qwen3.GatedDeltaQuantLayerDevice; gdQ != nil {
+		qwen3.GatedDeltaQuantLayerDevice = func(sc *qwen3.GatedDeltaScratch, x, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) ([]float32, error) {
+			g.hit(hookGatedDeltaLayerFold, L)
+			return gdQ(sc, x, inputNorm, w, cfg, postNorm, gate, up, down, L, D, FF, eps, priorConv, priorDelta)
+		}
+	}
+	if gdB := qwen3.GatedDeltaBF16LayerDevice; gdB != nil {
+		qwen3.GatedDeltaBF16LayerDevice = func(sc *qwen3.GatedDeltaScratch, x, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) ([]float32, error) {
+			g.hit(hookGatedDeltaLayerFold, L)
+			return gdB(sc, x, inputNorm, w, cfg, postNorm, gate, up, down, L, D, FF, eps, priorConv, priorDelta)
+		}
+	}
+	if fq := composed.AttnQuantFrontDevice; fq != nil {
+		composed.AttnQuantFrontDevice = func(x, inputNorm []float32, qw, kw, vw *model.QuantWeight, L, D, qCols, kvCols int, eps float32) ([]float32, []float32, []float32, error) {
+			g.hit(hookAttnFrontFold, L)
+			return fq(x, inputNorm, qw, kw, vw, L, D, qCols, kvCols, eps)
+		}
+	}
+	if tq := composed.AttnQuantTailDevice; tq != nil {
+		composed.AttnQuantTailDevice = func(h, attnOut []float32, ow *model.QuantWeight, postNorm []float32, gate, up, down *model.QuantWeight, L, D, mixCols, FF int, eps float32) ([]float32, error) {
+			g.hit(hookAttnTailFold, L)
+			return tq(h, attnOut, ow, postNorm, gate, up, down, L, D, mixCols, FF, eps)
+		}
+	}
+	if fb := composed.AttnBF16FrontDevice; fb != nil {
+		composed.AttnBF16FrontDevice = func(x, inputNorm []float32, qw, kw, vw *model.BF16Weight, L, D, qCols, kvCols int, eps float32) ([]float32, []float32, []float32, error) {
+			g.hit(hookAttnFrontFold, L)
+			return fb(x, inputNorm, qw, kw, vw, L, D, qCols, kvCols, eps)
+		}
+	}
+	if tb := composed.AttnBF16TailDevice; tb != nil {
+		composed.AttnBF16TailDevice = func(h, attnOut []float32, ow *model.BF16Weight, postNorm []float32, gate, up, down *model.BF16Weight, L, D, mixCols, FF int, eps float32) ([]float32, error) {
+			g.hit(hookAttnTailFold, L)
+			return tb(h, attnOut, ow, postNorm, gate, up, down, L, D, mixCols, FF, eps)
+		}
+	}
 }

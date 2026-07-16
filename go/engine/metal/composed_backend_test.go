@@ -108,7 +108,8 @@ func TestComposedLongPromptPrefillAB(t *testing.T) {
 	// bypassed by design (it takes f32 weights; quant fused tails are a later slice), so disabling the fold
 	// hooks is a no-op and both arms are identical. The engagement assertion then targets the quant seam;
 	// for a dense checkpoint the f32 folds must engage as before.
-	if onCounts.QuantProjection.Prefill == 0 {
+	layerFolds := onCounts.GatedDeltaLayerFold.Prefill + onCounts.AttnFrontFold.Prefill + onCounts.AttnTailFold.Prefill
+	if onCounts.QuantProjection.Prefill == 0 && layerFolds == 0 {
 		if onCounts.AttentionInput.Prefill+onCounts.GatedDeltaFold.Prefill == 0 || onCounts.Head.Prefill == 0 {
 			t.Fatalf("hooks-on prefill did not engage composed folds: %+v", onCounts)
 		}

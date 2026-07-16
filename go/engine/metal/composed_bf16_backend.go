@@ -33,6 +33,8 @@ func init() {
 		qwen3.GatedDeltaBF16LayerDevice = gatedDeltaBF16LayerDeviceHook // the WHOLE dense bf16 layer in one CB (#26)
 		composed.AttnBF16FrontDevice = AttnBF16FrontDevice              // attention front: norm + q/k/v in one CB (#26/#18 S6a)
 		composed.AttnBF16TailDevice = AttnBF16TailDevice                // attention tail: o_proj + FFN tail in one CB
+		composed.AttnQuantFrontDevice = AttnQuantFrontDevice            // the packed twins — the 27B's attention layers
+		composed.AttnQuantTailDevice = AttnQuantTailDevice
 	}
 }
 
@@ -350,12 +352,47 @@ func putAttnBF16FrontScratch(key attnBF16FrontKey, sc *attnBF16FrontScratch) {
 // q/k/v for the host attention core (rope + cache + SDPA stay host until the device-KV slice).
 // The per-stage path pays a host norm + three seam round-trips.
 func AttnBF16FrontDevice(x, inputNorm []float32, qw, kw, vw *model.BF16Weight, L, D, qCols, kvCols int, eps float32) (q, k, v []float32, err error) {
+	if !bf16GeometryOK(qw, qCols, D) || !bf16GeometryOK(kw, kvCols, D) || !bf16GeometryOK(vw, kvCols, D) {
+		return nil, nil, nil, core.NewError("native.AttnBF16FrontDevice: bf16 geometry mismatch")
+	}
+	return attnFrontRunCore(x, inputNorm,
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjBF16From(enc, qw, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjBF16From(enc, kw, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjBF16From(enc, vw, xBF, dstBF, dst, L, outDim, inDim)
+		}, L, D, qCols, kvCols, eps)
+}
+
+// AttnQuantFrontDevice is the front's PACKED twin: the same one-CB norm + q/k/v, the affine qmv
+// over checkpoint codes in the gemv's slot — the 27B's 16 attention layers' per-projection quant
+// seams collapse into it.
+func AttnQuantFrontDevice(x, inputNorm []float32, qw, kw, vw *model.QuantWeight, L, D, qCols, kvCols int, eps float32) (q, k, v []float32, err error) {
+	if !quantGeometryOK(qw, qCols, D) || !quantGeometryOK(kw, kvCols, D) || !quantGeometryOK(vw, kvCols, D) {
+		return nil, nil, nil, core.NewError("native.AttnQuantFrontDevice: quant geometry mismatch")
+	}
+	return attnFrontRunCore(x, inputNorm,
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjQuantBF16In(enc, qw, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjQuantBF16In(enc, kw, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjQuantBF16In(enc, vw, xBF, dstBF, dst, L, outDim, inDim)
+		}, L, D, qCols, kvCols, eps)
+}
+
+// attnFrontRunCore is the weight-form-agnostic front body.
+func attnFrontRunCore(x, inputNorm []float32, projQ, projK, projV tailProjFromBF16, L, D, qCols, kvCols int, eps float32) (q, k, v []float32, err error) {
 	if err := ensureInit(); err != nil {
 		return nil, nil, nil, err
 	}
-	if L <= 0 || len(x) != L*D || len(inputNorm) != D ||
-		!bf16GeometryOK(qw, qCols, D) || !bf16GeometryOK(kw, kvCols, D) || !bf16GeometryOK(vw, kvCols, D) {
-		return nil, nil, nil, core.NewError("native.AttnBF16FrontDevice: size/geometry mismatch")
+	if L <= 0 || len(x) != L*D || len(inputNorm) != D {
+		return nil, nil, nil, core.NewError("native.attnFrontRunCore: size mismatch")
 	}
 	rmsName := "rmsfloat32"
 	if D > rmsLoopedLimit {
@@ -396,15 +433,15 @@ func AttnBF16FrontDevice(x, inputNorm []float32, qw, kw, vw *model.BF16Weight, L
 			return
 		}
 		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encProjBF16From(enc, qw, sc.nBF.buf, sc.qBF.buf, sc.q.buf, L, qCols, D); err != nil {
+		if err := projQ(enc, sc.nBF.buf, sc.qBF.buf, sc.q.buf, L, qCols, D); err != nil {
 			fail(err)
 			return
 		}
-		if err := encProjBF16From(enc, kw, sc.nBF.buf, sc.kBF.buf, sc.k.buf, L, kvCols, D); err != nil {
+		if err := projK(enc, sc.nBF.buf, sc.kBF.buf, sc.k.buf, L, kvCols, D); err != nil {
 			fail(err)
 			return
 		}
-		if err := encProjBF16From(enc, vw, sc.nBF.buf, sc.vBF.buf, sc.v.buf, L, kvCols, D); err != nil {
+		if err := projV(enc, sc.nBF.buf, sc.vBF.buf, sc.v.buf, L, kvCols, D); err != nil {
 			fail(err)
 			return
 		}
@@ -484,13 +521,44 @@ func putAttnBF16TailScratch(key attnBF16TailKey, sc *attnBF16TailScratch) {
 // (the KV cache advanced in the host core), so a device decline falls back to the host tail with
 // no state hazard.
 func AttnBF16TailDevice(h, attnOut []float32, ow *model.BF16Weight, postNorm []float32, gate, up, down *model.BF16Weight, L, D, mixCols, FF int, eps float32) ([]float32, error) {
+	if !bf16GeometryOK(ow, D, mixCols) ||
+		!bf16GeometryOK(gate, FF, D) || !bf16GeometryOK(up, FF, D) || !bf16GeometryOK(down, D, FF) {
+		return nil, core.NewError("native.AttnBF16TailDevice: bf16 geometry mismatch")
+	}
+	return attnTailRunCore(h, attnOut,
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjBF16From(enc, ow, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		postNorm,
+		func(enc metal.MTLComputeCommandEncoder, tb quantTailBufs, normW metal.MTLBuffer, L, D, FF int, eps float32) error {
+			return encResidualNormMLPBF16Tail(enc, tb, normW, gate, up, down, L, D, FF, eps)
+		}, L, D, mixCols, FF, eps)
+}
+
+// AttnQuantTailDevice is the tail's PACKED twin: o_proj + the packed FFN tail over checkpoint
+// codes, one command buffer.
+func AttnQuantTailDevice(h, attnOut []float32, ow *model.QuantWeight, postNorm []float32, gate, up, down *model.QuantWeight, L, D, mixCols, FF int, eps float32) ([]float32, error) {
+	if !quantGeometryOK(ow, D, mixCols) ||
+		!quantGeometryOK(gate, FF, D) || !quantGeometryOK(up, FF, D) || !quantGeometryOK(down, D, FF) {
+		return nil, core.NewError("native.AttnQuantTailDevice: quant geometry mismatch")
+	}
+	return attnTailRunCore(h, attnOut,
+		func(enc metal.MTLComputeCommandEncoder, xBF, dstBF, dst metal.MTLBuffer, L, outDim, inDim int) error {
+			return encProjQuantBF16In(enc, ow, xBF, dstBF, dst, L, outDim, inDim)
+		},
+		postNorm,
+		func(enc metal.MTLComputeCommandEncoder, tb quantTailBufs, normW metal.MTLBuffer, L, D, FF int, eps float32) error {
+			return encResidualNormMLPQuantTail(enc, tb, normW, gate, up, down, L, D, FF, eps)
+		}, L, D, mixCols, FF, eps)
+}
+
+// attnTailRunCore is the weight-form-agnostic tail body: o_proj closure + tail-emitter closure.
+func attnTailRunCore(h, attnOut []float32, projO tailProjFromBF16, postNorm []float32, encTail func(metal.MTLComputeCommandEncoder, quantTailBufs, metal.MTLBuffer, int, int, int, float32) error, L, D, mixCols, FF int, eps float32) ([]float32, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
-	if L <= 0 || len(h) != L*D || len(attnOut) != L*mixCols || len(postNorm) != D ||
-		!bf16GeometryOK(ow, D, mixCols) ||
-		!bf16GeometryOK(gate, FF, D) || !bf16GeometryOK(up, FF, D) || !bf16GeometryOK(down, D, FF) {
-		return nil, core.NewError("native.AttnBF16TailDevice: size/geometry mismatch")
+	if L <= 0 || len(h) != L*D || len(attnOut) != L*mixCols || len(postNorm) != D {
+		return nil, core.NewError("native.attnTailRunCore: size mismatch")
 	}
 	y := make([]float32, L*D)
 	key := attnBF16TailKey{L: L, D: D, mixCols: mixCols, FF: FF}
@@ -525,15 +593,15 @@ func AttnBF16TailDevice(h, attnOut []float32, ow *model.BF16Weight, postNorm []f
 			return
 		}
 		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encProjBF16From(enc, ow, sc.attnBF.buf, sc.mixBF.buf, sc.mix.buf, L, D, mixCols); err != nil {
+		if err := projO(enc, sc.attnBF.buf, sc.mixBF.buf, sc.mix.buf, L, D, mixCols); err != nil {
 			fail(err)
 			return
 		}
 		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encResidualNormMLPBF16Tail(enc, quantTailBufs{
+		if err := encTail(enc, quantTailBufs{
 			h: hBuf, mix: sc.mix.buf, normed: sc.normed.buf, nBF: sc.nBF.buf,
 			g: sc.g.buf, gBF: sc.gBF.buf, u: sc.u.buf, uBF: sc.uBF.buf, s: sc.s.buf, out: sc.out.buf,
-		}, postNormBuf, gate, up, down, L, D, FF, eps); err != nil {
+		}, postNormBuf, L, D, FF, eps); err != nil {
 			fail(err)
 			return
 		}

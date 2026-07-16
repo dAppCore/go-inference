@@ -181,6 +181,51 @@ var AttnBF16FrontDevice func(x, inputNorm []float32, qw, kw, vw *model.BF16Weigh
 // so a decline here falls back to the host tail with no state hazard.
 var AttnBF16TailDevice func(h, attnOut []float32, ow *model.BF16Weight, postNorm []float32, gate, up, down *model.BF16Weight, L, D, mixCols, FF int, eps float32) (y []float32, err error)
 
+// AttnQuantFrontDevice / AttnQuantTailDevice are the fold seams' PACKED twins — the same two
+// command buffers over a quant checkpoint's codes (the 27B's attention layers). Identical
+// contracts to the bf16 pair.
+var AttnQuantFrontDevice func(x, inputNorm []float32, qw, kw, vw *model.QuantWeight, L, D, qCols, kvCols int, eps float32) (q, k, v []float32, err error)
+var AttnQuantTailDevice func(h, attnOut []float32, ow *model.QuantWeight, postNorm []float32, gate, up, down *model.QuantWeight, L, D, mixCols, FF int, eps float32) (y []float32, err error)
+
+// forwardQuantLayer runs one WHOLE packed attention layer through the fold seams — the quant twin
+// of forwardBF16Layer with the same engagement and failure semantics.
+func (m *attnMixer) forwardQuantLayer(h, inputNorm, postNorm []float32, mlp *MLP, L, D int, eps float32, prior any) (y []float32, next any, engaged bool, err error) {
+	if AttnQuantFrontDevice == nil || AttnQuantTailDevice == nil ||
+		m.w.QProjQ == nil || m.w.KProjQ == nil || m.w.VProjQ == nil || m.w.OProjQ == nil ||
+		mlp.GateQ == nil || mlp.UpQ == nil || mlp.DownQ == nil {
+		return nil, nil, false, nil
+	}
+	cfg := m.cfg
+	qCols := cfg.Heads * cfg.HeadDim
+	if cfg.OutputGate {
+		qCols = 2 * cfg.Heads * cfg.HeadDim
+	}
+	kvCols := cfg.KVHeads * cfg.HeadDim
+	qRaw, k, v, ferr := AttnQuantFrontDevice(h, inputNorm, m.w.QProjQ, m.w.KProjQ, m.w.VProjQ, L, D, qCols, kvCols, eps)
+	if ferr != nil {
+		return nil, nil, false, nil // nothing touched — the per-stage path serves this token
+	}
+	var st attnState
+	if p, ok := prior.(attnState); ok {
+		st = p
+	}
+	sc := st.sc
+	if sc == nil {
+		sc = &attnScratch{}
+	}
+	attnOut, _, mixCols, nextState, cerr := m.continueFromQKV(qRaw, k, v, L, D, st, sc)
+	if cerr != nil {
+		return nil, nil, true, cerr
+	}
+	if yDev, terr := AttnQuantTailDevice(h, attnOut, m.w.OProjQ, postNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, L, D, mixCols, mlp.FF, eps); terr == nil {
+		return yDev, nextState, true, nil
+	}
+	ns := nextState.(attnState)
+	ns.sc.o = matNTQuant(ns.sc.o, attnOut, m.w.OProjQ, L, mixCols, D)
+	y = tailHost(append([]float32(nil), h...), ns.sc.o, postNorm, mlp, L, D, eps, 1)
+	return y, nextState, true, nil
+}
+
 // forwardBF16Layer runs one WHOLE dense bf16 attention layer through the fold seams — [front CB]
 // → host rope/cache/SDPA → [tail CB] — engaging only when both seams are bound and every
 // projection carries its bf16 form. engaged=false leaves the per-stage path in charge. A front

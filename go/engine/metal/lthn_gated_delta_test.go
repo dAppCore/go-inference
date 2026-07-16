@@ -827,3 +827,68 @@ func TestAttnBF16FoldDevice_Bad(t *testing.T) {
 		t.Fatal("tail geometry mismatch must error")
 	}
 }
+
+// TestAttnQuantFoldDevice_Good is the packed twins' session A/B: a two-layer [gated-delta,
+// attention] fully-quantised model stepped with the fold hooks bound vs the per-stage quant path.
+func TestAttnQuantFoldDevice_Good(t *testing.T) {
+	gdRequireKernel(t)
+	if composed.AttnQuantFrontDevice == nil || composed.AttnQuantTailDevice == nil {
+		t.Skip("quant attention fold hooks unbound (LTHN_BF16_SEAM=0?)")
+	}
+	const D, FF, vocab = 512, 1024, 64
+	gcfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	convDim, vDim := gcfg.ConvDim(), gcfg.VDim()
+	gw := &qwen3.GatedDeltaWeights{
+		ConvWeight: cbSyn(convDim*gcfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
+		ALog: cbSyn(gcfg.ValueHeads, 13), DtBias: cbSyn(gcfg.ValueHeads, 14), Norm: cbSyn(gcfg.HeadDim, 15),
+		InProjQKVQ: mustQuant(t, 21, convDim, D), InProjZQ: mustQuant(t, 22, vDim, D),
+		InProjAQ: mustQuant(t, 23, gcfg.ValueHeads, D), InProjBQ: mustQuant(t, 24, gcfg.ValueHeads, D),
+		OutProjQ: mustQuant(t, 25, D, vDim),
+	}
+	const AH, AKVH, AHD = 4, 2, 128
+	m := &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, Quantised: true,
+		Layers: []composed.Layer{
+			{
+				InputNorm: cbSyn(D, 31), PostAttnNorm: cbSyn(D, 32),
+				MLP:   &composed.MLP{GateQ: mustQuant(t, 41, FF, D), UpQ: mustQuant(t, 42, FF, D), DownQ: mustQuant(t, 43, D, FF), FF: FF},
+				Mixer: composed.NewGatedDeltaMixer(gw, gcfg),
+			},
+			{
+				InputNorm: cbSyn(D, 51), PostAttnNorm: cbSyn(D, 52),
+				MLP: &composed.MLP{GateQ: mustQuant(t, 61, FF, D), UpQ: mustQuant(t, 62, FF, D), DownQ: mustQuant(t, 63, D, FF), FF: FF},
+				Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+					QProjQ: mustQuant(t, 71, AH*AHD, D), KProjQ: mustQuant(t, 72, AKVH*AHD, D), VProjQ: mustQuant(t, 73, AKVH*AHD, D),
+					OProjQ: mustQuant(t, 74, D, AH*AHD), QNorm: cbSyn(AHD, 75), KNorm: cbSyn(AHD, 76),
+				}, composed.AttnConfig{Heads: AH, KVHeads: AKVH, HeadDim: AHD, RotaryDim: AHD, RopeTheta: 1e6, NormEps: 1e-6}),
+			},
+		},
+	}
+	savedF, savedT := composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice
+	defer func() { composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT }()
+
+	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
+	run := func() [][]float32 {
+		sess := composed.NewSession(m)
+		var outs [][]float32
+		for _, ids := range steps {
+			hid, err := sess.Forward(ids)
+			if err != nil {
+				t.Fatalf("Forward(%v): %v", ids, err)
+			}
+			outs = append(outs, append([]float32(nil), hid...))
+		}
+		return outs
+	}
+	composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT
+	fused := run()
+	composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = nil, nil
+	staged := run()
+	for i := range fused {
+		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
+		t.Logf("step %d: quant attn fold vs per-stage scaled max diff %.3e", i, rel)
+		if rel > 5e-4 {
+			t.Fatalf("step %d diverged: %.3e", i, rel)
+		}
+	}
+}

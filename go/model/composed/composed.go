@@ -638,6 +638,9 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 			if am, isAttn := layer.Mixer.(*attnMixer); isAttn && s.m.residualScale() == 1 && !s.m.LayerNorm {
 				if mlp, isDense := layer.MLP.(*MLP); isDense {
 					y, next, engaged, aerr := am.forwardBF16Layer(h, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+					if !engaged {
+						y, next, engaged, aerr = am.forwardQuantLayer(h, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+					}
 					if engaged {
 						if aerr != nil {
 							return nil, aerr
