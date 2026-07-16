@@ -499,3 +499,54 @@ func TestLoadComposedMLXConvLayout(t *testing.T) {
 		t.Fatalf("layer count: got %d want %d", len(got.Layers), len(want.Layers))
 	}
 }
+
+// TestLoadComposedQwenNormShift pins the zero-centred norm convention (#24): an OFFICIAL Qwen
+// 3.5/3.6 export (qwen-family model_type, unconverted provenance marks — an mtp.* head or the
+// torch conv1d [ch,1,K] layout) stores every layer/final/q-k RMSNorm gamma as an offset from one,
+// so the load adds the one (mlx-lm's sanitize move); the mlx-community conversions arrive
+// pre-baked and mark-free, and a non-qwen model_type never shifts even with torch-layout conv.
+// The gated-delta block's own norm is stored plain in both forms and must never shift.
+func TestLoadComposedQwenNormShift(t *testing.T) {
+	build := func(modelType string, withMTP bool) (*ComposedModel, []float32, []float32) {
+		ts, _ := mkHybridCheckpoint() // torch conv layout [ch,1,K] — one provenance mark by itself
+		if withMTP {
+			ts["mtp.fc.weight"] = bf16T(syn(8*16, 999), 8, 16)
+		}
+		cfgJSON := []byte(`{"model_type":"` + modelType + `","hidden_size":8,"num_hidden_layers":4,"intermediate_size":16,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":8,"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":1000000,"partial_rotary_factor":0.5,"full_attention_interval":2}`)
+		m, err := LoadComposed(ts, cfgJSON)
+		if err != nil {
+			t.Fatalf("LoadComposed(%s, mtp=%v): %v", modelType, withMTP, err)
+		}
+		raw, err := tensorF32(ts["model.layers.0.input_layernorm.weight"])
+		if err != nil {
+			t.Fatalf("tensorF32: %v", err)
+		}
+		gdNorm, err := tensorF32(ts["model.layers.0.linear_attn.norm.weight"])
+		if err != nil {
+			t.Fatalf("tensorF32 gd norm: %v", err)
+		}
+		return m, raw, gdNorm
+	}
+
+	// Official export shape: qwen model_type + marks ⇒ shifted by exactly +1.
+	m, raw, gdRaw := build("qwen3_5", true)
+	for i := range raw {
+		if m.Layers[0].InputNorm[i] != raw[i]+1 {
+			t.Fatalf("qwen official: InputNorm[%d] = %v, want raw+1 = %v", i, m.Layers[0].InputNorm[i], raw[i]+1)
+		}
+	}
+	gm := m.Layers[0].Mixer.(*gatedDeltaMixer)
+	for i := range gdRaw {
+		if gm.w.Norm[i] != gdRaw[i] {
+			t.Fatalf("qwen official: gated-delta block norm[%d] shifted — must stay plain", i)
+		}
+	}
+
+	// Non-qwen model_type with the same marks ⇒ untouched.
+	m2, raw2, _ := build("composed", true)
+	for i := range raw2 {
+		if m2.Layers[0].InputNorm[i] != raw2[i] {
+			t.Fatalf("non-qwen: InputNorm[%d] = %v, want raw %v (no shift)", i, m2.Layers[0].InputNorm[i], raw2[i])
+		}
+	}
+}

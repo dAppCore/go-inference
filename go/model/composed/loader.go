@@ -134,6 +134,34 @@ func quantBlock(configJSON []byte) *model.QuantConfig {
 	return probe.TextConfig.Quantization
 }
 
+// composedNormsZeroCentred reports whether this checkpoint stores its RMSNorm gammas zero-centred
+// (the official Qwen 3.5/3.6 export): true when any mtp.* head tensor survives or any conv1d.weight
+// still has the torch [ch,1,K] layout — exactly mlx-lm qwen3_5.sanitize's should_shift_norm_weights
+// test, which the conversions this loader also serves have already been through (mtp stripped, conv
+// moved, norms pre-baked).
+func composedNormsZeroCentred(tensors map[string]safetensors.Tensor) bool {
+	for name, t := range tensors {
+		if core.HasPrefix(name, "mtp.") || core.Contains(name, ".mtp.") {
+			return true
+		}
+		if core.HasSuffix(name, "conv1d.weight") && len(t.Shape) == 3 && t.Shape[2] != 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// qwenHybridModelType names the model_type family whose exports store zero-centred norms — the same
+// arch scoping mlx-lm gets from its per-class sanitize (register.go's qwen ids, minus the generic
+// composed/hybrid catch-alls, which no official Qwen export carries).
+func qwenHybridModelType(mt string) bool {
+	switch mt {
+	case "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6", "qwen3_6_moe", "qwen3_next":
+		return true
+	}
+	return false
+}
+
 // tensorAsF32 widens t (looked up as name) to a flat f32 slice. A quantised tensor — mlx
 // affine's packed-uint32 weight with .scales/.biases siblings — dequantises host-side, its
 // (groupSize, bits) read from the quantization block and cross-checked against the packed
@@ -330,6 +358,39 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 		return f, qw
 	}
 
+	// Zero-centred norm shift (#24): official Qwen 3.5/3.6 checkpoints store every layer / final /
+	// q/k RMSNorm gamma as an OFFSET from one (y = x·(1+w)/rms); the mlx-community conversions ship
+	// the same weights pre-baked (mlx-lm's qwen3_5 sanitize adds the 1 and strips the provenance
+	// marks before saving). Serving an official checkpoint with plain ·w garbles every token, so the
+	// load mirrors mlx-lm's exact provenance test: an UNCONVERTED checkpoint still carries its mtp.*
+	// head and/or the torch conv1d layout [ch,1,K]. Only the four norm slots below shift — the
+	// gated-delta block's own norm (linear_attn.norm.weight) is stored plain in both forms.
+	normShift := float32(0)
+	if qwenHybridModelType(raw.ModelType) || qwenHybridModelType(cfg.ModelType) {
+		if composedNormsZeroCentred(tensors) {
+			normShift = 1
+		}
+	}
+	normF32 := func(name string) ([]float32, error) {
+		v, err := f32(name)
+		if err != nil || normShift == 0 {
+			return v, err
+		}
+		for i := range v {
+			v[i] += normShift
+		}
+		return v, nil
+	}
+	normF32opt := func(name string) []float32 {
+		v := f32opt(name)
+		if v != nil && normShift != 0 {
+			for i := range v {
+				v[i] += normShift
+			}
+		}
+		return v
+	}
+
 	embedT, ok := get(prefix + "embed_tokens.weight")
 	if !ok || len(embedT.Shape) != 2 {
 		return nil, core.NewError("composed.LoadComposed: missing/!2D embed_tokens.weight")
@@ -347,7 +408,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 	} else {
 		D = len(embed) / vocab
 	}
-	normF, err := f32(prefix + "norm.weight")
+	normF, err := normF32(prefix + "norm.weight")
 	if err != nil {
 		return nil, err
 	}
@@ -401,13 +462,13 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 
 	for i := 0; i < cfg.NumHiddenLayers; i++ {
 		lp := prefix + core.Sprintf("layers.%d.", i)
-		inNorm, err := f32(lp + "input_layernorm.weight")
+		inNorm, err := normF32(lp + "input_layernorm.weight")
 		if err != nil {
 			return nil, err
 		}
 		var postNorm []float32
 		if !isCohere {
-			postNorm, err = f32(lp + "post_attention_layernorm.weight")
+			postNorm, err = normF32(lp + "post_attention_layernorm.weight")
 			if err != nil {
 				return nil, err
 			}
@@ -419,7 +480,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 
 		var mixer Mixer
 		if kinds[i] == "full_attention" || kinds[i] == "sliding_attention" {
-			mixer, err = buildAttn(proj, f32opt, lp+"self_attn.", cfg, arch, i, D, kinds[i])
+			mixer, err = buildAttn(proj, normF32opt, lp+"self_attn.", cfg, arch, i, D, kinds[i])
 		} else {
 			mixer, err = buildGatedDelta(get, proj, f32opt, lp+"linear_attn.", cfg, D)
 		}

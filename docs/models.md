@@ -64,20 +64,20 @@ auto-arms a detected drafter). Two rules, both measured:
 Gated-delta linear attention interleaved with full attention (`full_attention_interval 4`),
 262144-token context, served through `go/model/composed` with the device gated-delta block
 (`docs/design-hybrid-recurrence.md`). Native MTP head supported (the trained checkpoint head, not
-a bolt-on drafter). **Serve the mlx-community 4-bit conversions** — every one measured sane; the
-official `Qwen/` bf16 repos are the source form and currently MIS-SERVE through this lane (rows
-below — the compatibility audit is on the board).
+a bolt-on drafter). Both artefact forms serve: the mlx-community 4-bit conversions (the serving
+form) and the official `Qwen/` bf16 exports (the source/eval form — the loader applies their
+zero-centred RMSNorm convention, `TestLoadComposedQwenNormShift`).
 
-Numbers: M3 Ultra, `lem bench` tg-512 greedy, 2026-07-16 build `3af77a87`.
+Numbers: M3 Ultra, `lem bench` tg-512 greedy, 2026-07-16.
 
 | model | HF repo | ctx | weights | decode | status |
 |-------|---------|----:|--------:|-------:|--------|
 | Qwen3.5 0.8B | `mlx-community/Qwen3.5-0.8B-OptiQ-4bit` | 256K | 0.65 GB | 51.9 | ✓ sane — the smallest servable hybrid (also the lane's test fixture) |
-| Qwen3.5 4B | `mlx-community/Qwen3.5-4B-OptiQ-4bit` | 256K | 3.27 GB | 20.4 | ✓ sane ("Paris" answered correctly) — the low-RAM sweet spot today |
-| Qwen3.6 27B | `mlx-community/Qwen3.6-27B-4bit` | 256K | 16.1 GB | 7.3 chat-lane / **15.05 raw session** | ✓ sane; perf campaign #18 in flight (4.63 → 15.05; target ≥40 — mlx-lm 41.3). The chat-vs-session ×2 gap is a fresh finding on the board |
-| Qwen3.5 2B / 4B / 9B (official bf16) | `Qwen/Qwen3.5-{2B,4B,9B}` | 256K | 4.6 / 9.3 / 19.3 GB | loads, ~10–24 | ✗ **junk output** (whitespace/garbage) through the composed dense-bf16 path — every mlx 4-bit conversion of the same family is sane, so the official-layout bf16 load is the suspect. Board audit; do not serve |
-| Bonsai 27B 1-bit | `prism-ml/Bonsai-27B-mlx-1bit` | 256K | 5 GB | — | ✗ 1-bit affine width is outside the shipped kernel set (2/3/4/5/6/8) — warm-up hangs on the host fallback. 5 GB for a 27B is exactly the low-end story; needs the 1-bit qmv kernel first |
-| Qwen2.5-Coder 3B | `mlx-community/Qwen2.5-Coder-3B-4bit` | — | 2 GB | 167 but ✗ **junk output** | qwen2 arch loads fast and garbles — same board audit |
+| Qwen3.5 4B | `mlx-community/Qwen3.5-4B-OptiQ-4bit` | 256K | 3.27 GB | 20.4 | ✓ sane — the low-RAM sweet spot today |
+| Qwen3.6 27B | `mlx-community/Qwen3.6-27B-4bit` | 256K | 16.1 GB | 7.3 chat-lane / **15.05 raw session** | ✓ sane; perf campaign #18 in flight (4.63 → 15.05; target ≥40 — mlx-lm 41.3). The chat-vs-session ×2 gap is board #25 |
+| Qwen3.5 2B / 4B / 9B (official bf16) | `Qwen/Qwen3.5-{2B,4B,9B}` | 256K | 4.6 / 9.3 / 19.3 GB | 20.1 / 10.6 / 8.2 | ✓ sane ("Paris" answered, mlx-lm argmax parity). bf16 source form — heavier per token than the 4-bit conversions by sheer byte mass; serve the conversions, eval against these |
+| Bonsai 27B 1-bit | `prism-ml/Bonsai-27B-mlx-1bit` | 256K | 5 GB | — | ✗ 1-bit affine width is outside the shipped kernel set (2/3/4/5/6/8) — warm-up hangs on the host fallback. 5 GB for a 27B is exactly the low-end story; needs the 1-bit qmv kernel first (#24) |
+| Qwen2.5-Coder 3B | `mlx-community/Qwen2.5-Coder-3B-4bit` | — | 2 GB | — | ✗ garbles (qwen2 arch mapping — #24); no number until the output is sane |
 | Qwen3.6-35B-A3B | (not yet local) | — | — | — | the MoE hybrid target — pulls with the #17/#18 follow-on |
 
 Low-end/home serving guidance from the rows above: today's honest recommendations are the
