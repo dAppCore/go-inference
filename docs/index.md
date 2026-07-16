@@ -81,6 +81,7 @@ import (
 - [Interfaces](interfaces.md) — `TextModel`, `Backend`, `TrainableModel`, `Adapter`, optional capabilities
 - [Types](types.md) — `Token`, `GenerateConfig`, `LoadConfig`, `LoRAConfig`, and supporting structs
 - [Backends](backends.md) — the in-tree engines, the registry, implementing a new backend
+- [Models](models.md) — the curated local-inference model list: gemma4 family, quant guidance, MTP pairings, measured numbers
 
 ## Stability contract
 
