@@ -6095,29 +6095,31 @@ func assertLoadedGemma4MLXQ4EmbeddingLookupSmoke(t *testing.T, model *hipLoadedM
 		!hipMLXAffineSupportedBits(model.modelInfo.QuantBits) {
 		return nil
 	}
-	bits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
+	preferredBits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
 	weight, ok := model.tensors["language_model.model.embed_tokens.weight"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens packed weight tensor", bits)
+		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens packed weight tensor", preferredBits)
 	}
 	scales, ok := model.tensors["language_model.model.embed_tokens.scales"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens scales tensor", bits)
+		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens scales tensor", preferredBits)
 	}
 	biases, ok := model.tensors["language_model.model.embed_tokens.biases"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens biases tensor", bits)
+		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens biases tensor", preferredBits)
 	}
 	vocab := model.modelInfo.VocabSize
 	hidden := model.modelInfo.HiddenSize
-	groupSize := model.modelInfo.QuantGroup
-	if groupSize == 0 {
-		groupSize = 64
-	}
-	packedPerRow, err := hipMLXAffinePackedCols(hidden, bits)
+	bits, rows, cols, groupSize, groups, packedPerRow, err := hipInferMLXAffineBitsFromTensorShapes(
+		weight,
+		scales,
+		biases,
+		model.modelInfo.QuantGroup,
+		model.modelInfo.QuantBits,
+		"embed_tokens hardware smoke",
+	)
 	core.RequireNoError(t, err)
-	groups := hidden / groupSize
-	if vocab <= 0 || hidden <= 0 || groupSize <= 0 || hidden%groupSize != 0 {
+	if vocab <= 0 || hidden <= 0 || rows != vocab || cols != hidden || groupSize <= 0 || hidden%groupSize != 0 {
 		t.Fatalf("loaded Gemma4 q%d dimensions vocab=%d hidden=%d group=%d are not a valid affine layout", bits, vocab, hidden, groupSize)
 	}
 	if weight.info.TypeName != "U32" ||
@@ -6521,7 +6523,7 @@ func assertLoadedGemma4MLXQ4Layer0Smoke(t *testing.T, model *hipLoadedModel, emb
 		core.RequireNoError(t, deviceState.Close())
 		t.Logf("Gemma4 q4 %d-layer greedy decode prompt=%v generated tokens=%v", decodeLayers, promptTokens, hipGemma4Q4GreedyTokenIDs(decode.Generated))
 	}
-	if len(allLayers.Layers) > 15 {
+	if len(allLayers.Layers) == productionLaneGemma4E2BLayers && hidden == productionLaneGemma4E2BHiddenSize {
 		for _, check := range []struct {
 			layer        int
 			headDim      int

@@ -285,8 +285,9 @@ func hipUpdateGemma4Q4DeviceDecodeState(driver nativeHIPDriver, cfg hipGemma4Q4F
 		oldLayer := &previousDevice.layers[index]
 		layerCfg := cfg.Layers[index]
 		if !oldLayer.borrowedCache && hipGemma4Q4LayerStateCanAppendDeviceKV(layerCfg, previousHost.Layers[index], nextHost.Layers[index]) {
-			keyStart := len(nextHost.Layers[index].Keys) - layerCfg.HeadDim
-			valueStart := len(nextHost.Layers[index].Values) - layerCfg.HeadDim
+			kvDim := layerCfg.keyValueDim()
+			keyStart := len(nextHost.Layers[index].Keys) - kvDim
+			valueStart := len(nextHost.Layers[index].Values) - kvDim
 			nextCache, err := oldLayer.cache.withAppendedToken(nextHost.Layers[index].Keys[keyStart:], nextHost.Layers[index].Values[valueStart:])
 			if err != nil {
 				return nil, err
@@ -409,7 +410,8 @@ func hipMirrorGemma4Q4LayerDecodeState(driver nativeHIPDriver, cfg hipGemma4Q4La
 	if err != nil {
 		return hipGemma4Q4DeviceLayerKVState{}, err
 	}
-	if err := host.AppendVectors(0, cfg.HeadDim, cfg.HeadDim, layerState.Keys, layerState.Values); err != nil {
+	kvDim := cfg.keyValueDim()
+	if err := host.AppendVectors(0, kvDim, kvDim, layerState.Keys, layerState.Values); err != nil {
 		return hipGemma4Q4DeviceLayerKVState{}, err
 	}
 	device, err := host.MirrorToDevice(driver)
@@ -431,10 +433,11 @@ func hipMirrorGemma4Q4LayerDecodeState(driver nativeHIPDriver, cfg hipGemma4Q4La
 }
 
 func hipGemma4Q4LayerStateCanAppendDeviceKV(cfg hipGemma4Q4Layer0Config, previous, next hipGemma4Q4LayerKVState) bool {
-	if cfg.HeadDim <= 0 || len(previous.Keys) == 0 || len(previous.Values) == 0 {
+	kvDim := cfg.keyValueDim()
+	if kvDim <= 0 || len(previous.Keys) == 0 || len(previous.Values) == 0 {
 		return false
 	}
-	if len(next.Keys) != len(previous.Keys)+cfg.HeadDim || len(next.Values) != len(previous.Values)+cfg.HeadDim {
+	if len(next.Keys) != len(previous.Keys)+kvDim || len(next.Values) != len(previous.Values)+kvDim {
 		return false
 	}
 	return hipFloat32SlicesEqual(previous.Keys, next.Keys[:len(previous.Keys)]) && hipFloat32SlicesEqual(previous.Values, next.Values[:len(previous.Values)])
@@ -611,12 +614,13 @@ func (state *hipGemma4Q4DeviceDecodeState) CompatibleWithHostState(cfg hipGemma4
 			return core.E("rocm.hip.Gemma4Q4DeviceKV", core.Sprintf("device layer %d cache mode mismatch", index), nil)
 		}
 		layerCfg := cfg.Layers[index]
-		hostTokens := len(host.Layers[index].Keys) / layerCfg.HeadDim
+		kvDim := layerCfg.keyValueDim()
+		hostTokens := len(host.Layers[index].Keys) / kvDim
 		if layer.cache.TokenCount() != hostTokens {
 			return core.E("rocm.hip.Gemma4Q4DeviceKV", core.Sprintf("device layer %d token count mismatch", index), nil)
 		}
 		keyWidth, valueWidth, ok := layer.cache.LastVectorWidths()
-		if !ok || keyWidth != layerCfg.HeadDim || valueWidth != layerCfg.HeadDim {
+		if !ok || keyWidth != kvDim || valueWidth != kvDim {
 			return core.E("rocm.hip.Gemma4Q4DeviceKV", core.Sprintf("device layer %d KV width mismatch", index), nil)
 		}
 	}

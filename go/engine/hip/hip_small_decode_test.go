@@ -5391,6 +5391,36 @@ func TestHIPGemma4Q4DecoderLayerOmitHostKVRejectsHostSharedFallback_Good(t *test
 	core.AssertContains(t, err.Error(), "device-only KV path requires device token buffers or shared device KV")
 }
 
+func TestHIPGemma4Q4DeviceStateMultiKVHeadGeometry_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup()
+	layer.KeyHeads = 2
+	layer.KeyProjection = layer.QueryProjection
+	layer.ValueProjection = layer.QueryProjection
+	cfg := hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+	state := hipGemma4Q4DecodeState{Layers: []hipGemma4Q4LayerKVState{{
+		Keys:   []float32{1, 2, 3, 4, 5, 6, 7, 8},
+		Values: []float32{8, 7, 6, 5, 4, 3, 2, 1},
+	}}}
+
+	device, err := hipMirrorGemma4Q4DecodeState(driver, cfg, state, rocmKVCacheModeKQ8VQ4)
+	core.RequireNoError(t, err)
+	defer device.Close()
+	core.AssertEqual(t, []int{1}, device.LayerTokenCounts())
+	keyWidth, valueWidth, ok := device.layers[0].cache.LastVectorWidths()
+	core.AssertEqual(t, true, ok)
+	core.AssertEqual(t, layer.keyValueDim(), keyWidth)
+	core.AssertEqual(t, layer.keyValueDim(), valueWidth)
+	core.RequireNoError(t, device.CompatibleWithHostState(cfg, state, rocmKVCacheModeKQ8VQ4))
+
+	next := hipGemma4Q4LayerKVState{
+		Keys:   append(append([]float32(nil), state.Layers[0].Keys...), state.Layers[0].Keys...),
+		Values: append(append([]float32(nil), state.Layers[0].Values...), state.Layers[0].Values...),
+	}
+	core.AssertEqual(t, true, hipGemma4Q4LayerStateCanAppendDeviceKV(layer, state.Layers[0], next))
+}
+
 func TestHIPGemma4Q4PackagePrefillDecode_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	layer0, cleanup0 := hipGemma4Q4Layer0FixtureConfig(t, driver)
