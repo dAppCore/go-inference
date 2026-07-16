@@ -7,12 +7,13 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/safetensors"
 )
 
-// TestGemma3Arch verifies the gemma3 config→Arch derivation against the specifics confirmed from metal
-// gemma3: scale 1/sqrt(head_dim), full rotary, no softcap, no value-norm, and the sliding/global layer
-// pattern (global when (i+1)%pattern == 0).
-func TestGemma3Arch(t *testing.T) {
+// TestGemma3_Config_Arch_Good verifies the gemma3 config→Arch derivation against the specifics confirmed
+// from metal gemma3: scale 1/sqrt(head_dim), full rotary, no softcap, no value-norm, and the
+// sliding/global layer pattern (global when (i+1)%pattern == 0).
+func TestGemma3_Config_Arch_Good(t *testing.T) {
 	const layers, pattern, headDim = 12, 6, 256
 	c := &Config{
 		HiddenSize: 2048, NumHiddenLayers: layers, IntermediateSize: 8192,
@@ -57,6 +58,102 @@ func TestGemma3Arch(t *testing.T) {
 		}
 	}
 	t.Logf("gemma3 Arch: scale=1/sqrt(%d), full rotary, no softcap/value-norm, %d layers (%d global per pattern %d)", headDim, layers, globals, pattern)
+}
+
+func TestGemma3_Config_Arch_Bad(t *testing.T) {
+	if _, err := (&Config{}).Arch(); err == nil {
+		t.Fatal("empty config accepted")
+	}
+}
+
+// TestGemma3_Config_Arch_Ugly proves the multimodal-wrapper delegation: a
+// config with only TextConfig set resolves the NESTED dims, not the (empty)
+// outer ones — the distinct edge Arch()'s TextConfig != nil branch exists for.
+func TestGemma3_Config_Arch_Ugly(t *testing.T) {
+	inner := &Config{HiddenSize: 8, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 16}
+	c := &Config{TextConfig: inner}
+	arch, err := c.Arch()
+	if err != nil {
+		t.Fatalf("Arch (multimodal wrapper delegation): %v", err)
+	}
+	if arch.Hidden != 8 || arch.Vocab != 16 {
+		t.Fatalf("delegated arch = %+v, want the nested text_config dims (hidden 8, vocab 16)", arch)
+	}
+}
+
+func TestGemma3_Config_ResolvedQuant_Good(t *testing.T) {
+	q := &model.QuantConfig{Bits: 4, Mode: "affine"}
+	c := &Config{Quantization: q}
+	if got := c.ResolvedQuant(); got != q {
+		t.Fatalf("ResolvedQuant = %+v, want the top-level quantization block", got)
+	}
+}
+
+// TestGemma3_Config_ResolvedQuant_Bad proves absence is reported honestly: a
+// config with no quantization block anywhere returns nil (bf16), not a
+// fabricated default.
+func TestGemma3_Config_ResolvedQuant_Bad(t *testing.T) {
+	c := &Config{}
+	if got := c.ResolvedQuant(); got != nil {
+		t.Fatalf("ResolvedQuant = %+v, want nil (no quant declared)", got)
+	}
+}
+
+// TestGemma3_Config_ResolvedQuant_Ugly exercises the nested fallback: the
+// multimodal wrapper's own Quantization is absent but text_config carries
+// one — a distinct code path from both the top-level hit and the true-nil case.
+func TestGemma3_Config_ResolvedQuant_Ugly(t *testing.T) {
+	q := &model.QuantConfig{Bits: 8, Mode: "mxfp8"}
+	c := &Config{TextConfig: &Config{Quantization: q}}
+	if got := c.ResolvedQuant(); got != q {
+		t.Fatalf("ResolvedQuant = %+v, want the nested text_config quantization block", got)
+	}
+}
+
+func TestGemma3_Config_InferFromWeights_Good(t *testing.T) {
+	c := &Config{NumHiddenLayers: 1, NumAttentionHeads: 8}
+	weights := map[string]safetensors.Tensor{
+		"model.layers.0.self_attn.q_proj.weight": {Shape: []int{2048, 1024}}, // 8 heads * 256 head_dim
+		"model.embed_tokens.weight":              {Shape: []int{262144, 1024}},
+	}
+	c.InferFromWeights(weights)
+	if c.HeadDim != 256 {
+		t.Fatalf("HeadDim = %d, want 256 (2048/8)", c.HeadDim)
+	}
+	if c.VocabSize != 262144 {
+		t.Fatalf("VocabSize = %d, want 262144", c.VocabSize)
+	}
+}
+
+// TestGemma3_Config_InferFromWeights_Bad proves missing checkpoint tensors
+// degrade to the declared-dims fallback rather than leaving garbage.
+func TestGemma3_Config_InferFromWeights_Bad(t *testing.T) {
+	c := &Config{HiddenSize: 2048, NumAttentionHeads: 8}
+	c.InferFromWeights(nil)
+	if c.HeadDim != 256 { // falls back to hidden/heads when weights absent
+		t.Fatalf("HeadDim = %d, want 256 fallback (hidden/heads)", c.HeadDim)
+	}
+	if c.VocabSize != 0 {
+		t.Fatalf("VocabSize = %d, want 0 (no embed weight, no fallback)", c.VocabSize)
+	}
+}
+
+// TestGemma3_Config_InferFromWeights_Ugly proves the multimodal-wrapper
+// delegation mutates the NESTED TextConfig, leaving the outer wrapper's own
+// fields untouched — distinct from _Bad's flat-config fallback path.
+func TestGemma3_Config_InferFromWeights_Ugly(t *testing.T) {
+	inner := &Config{NumHiddenLayers: 1, NumAttentionHeads: 4}
+	c := &Config{TextConfig: inner}
+	weights := map[string]safetensors.Tensor{
+		"model.layers.0.self_attn.q_proj.weight": {Shape: []int{1024, 512}}, // 4 heads * 256 head_dim
+	}
+	c.InferFromWeights(weights)
+	if inner.HeadDim != 256 {
+		t.Fatalf("nested TextConfig.HeadDim = %d, want 256 (delegation)", inner.HeadDim)
+	}
+	if c.HeadDim != 0 {
+		t.Fatalf("outer wrapper HeadDim = %d, want 0 (only TextConfig is mutated)", c.HeadDim)
+	}
 }
 
 // TestGemma3Registered confirms gemma3 is in the reactive arch registry with the gemma (1+w) RMSNorm
