@@ -8,8 +8,8 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 

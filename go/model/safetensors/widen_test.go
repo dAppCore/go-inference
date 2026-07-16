@@ -20,14 +20,14 @@ func TestWiden_WidenF16ToBF16_KnownValues(t *testing.T) {
 		f16      uint16 // IEEE-754 half input
 		wantBF16 uint16 // expected bfloat16 output
 	}{
-		{"one", 0x3C00, 0x3F80},         // 1.0
-		{"two", 0x4000, 0x4000},         // 2.0
-		{"half", 0x3800, 0x3F00},        // 0.5
-		{"neg_one", 0xBC00, 0xBF80},     // -1.0
-		{"zero", 0x0000, 0x0000},        // +0.0
-		{"neg_zero", 0x8000, 0x8000},    // -0.0
-		{"round_up", 0x3C05, 0x3F81},    // 1.0048828125 → rounds up (low16 0xA000 > 0x8000)
-		{"round_down", 0x3C01, 0x3F80},  // 1.0009765625 → rounds down to 1.0
+		{"one", 0x3C00, 0x3F80},        // 1.0
+		{"two", 0x4000, 0x4000},        // 2.0
+		{"half", 0x3800, 0x3F00},       // 0.5
+		{"neg_one", 0xBC00, 0xBF80},    // -1.0
+		{"zero", 0x0000, 0x0000},       // +0.0
+		{"neg_zero", 0x8000, 0x8000},   // -0.0
+		{"round_up", 0x3C05, 0x3F81},   // 1.0048828125 → rounds up (low16 0xA000 > 0x8000)
+		{"round_down", 0x3C01, 0x3F80}, // 1.0009765625 → rounds down to 1.0
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

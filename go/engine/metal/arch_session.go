@@ -688,7 +688,7 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 		}
 		stampArchProjectorsSiLU(lb, ffnUsesSiLU(arch.Activation)) // qwen/llama/mistral SwiGLU (gemma stays GELU)
 		state := newArchDecodeState(arch.Layer, lb, moeWeights, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, attnScale, arch.Eps, arch.ValueNorm, maxLen)
-		state.ropeScale = archRopeScale(arch) // RoPE position scale, distinct from the attention scale
+		state.ropeScale = archRopeScale(arch)               // RoPE position scale, distinct from the attention scale
 		state.ropeFreqs = uploadRopePeriods(arch.RopeFreqs) // YaRN long-context spectrum (nil ⇒ base rope)
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
@@ -930,7 +930,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 			return
 		}
 		stampArchProjectorsSiLU(lb, ffnUsesSiLU(arch.Activation)) // qwen/llama/mistral SwiGLU (gemma stays GELU)
-		moeWeights := make([]*MoELayerWeights, len(arch.Layer)) // bf16 MoE unused on the quant path
+		moeWeights := make([]*MoELayerWeights, len(arch.Layer))   // bf16 MoE unused on the quant path
 		state := newArchDecodeState(arch.Layer, lb, moeWeights, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, attnScale, arch.Eps, arch.ValueNorm, maxLen)
 		state.ropeScale = archRopeScale(arch) // RoPE position scale, distinct from the attention scale
 		state.moeQuant = moeQuant

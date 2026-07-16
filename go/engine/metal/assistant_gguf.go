@@ -7,8 +7,8 @@ package native
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/tokenizer"
-	"dappco.re/go/inference/model/mtp"
 	"dappco.re/go/inference/model/gguf"
+	"dappco.re/go/inference/model/mtp"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )

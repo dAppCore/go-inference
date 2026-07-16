@@ -11,8 +11,8 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/composed"
 	state "dappco.re/go/inference/model/state"
 )
 

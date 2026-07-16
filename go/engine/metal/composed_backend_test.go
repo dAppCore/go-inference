@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
-	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/arch/rwkv7"
+	"dappco.re/go/inference/model/composed"
 )
 
 const composedPrefillABDefaultDir = "/Users/snider/.cache/huggingface/hub/models--mlx-community--Qwen3.5-0.8B-OptiQ-4bit/snapshots/9affd71fc70de2bb08a666ac2d08a3fff5c858e0"

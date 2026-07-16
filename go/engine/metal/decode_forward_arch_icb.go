@@ -1895,7 +1895,7 @@ func recordArchICB(
 				setRope(emit(), q, qr, nHeads, li)
 			}
 			recInputProj(emitNB(), li, inBuf, anwBufs[li], normed, kProj, 0, projK) // 2nd consumer (q barriered it) — overlap
-			if lay.qkvBias { // Qwen2 additive K bias — on the kProj staging before QK-norm/RoPE writes the cache
+			if lay.qkvBias {                                                        // Qwen2 additive K bias — on the kProj staging before QK-norm/RoPE writes the cache
 				setBin(emit(), addPSO, kProj, kBiasBufs[li], kProj, kvOf(li)*hdOf(li))
 			}
 			fuseK := useFusedQKRope && hasKN // fuse kNorm+ropeK into one op (writes the cache at buf 2)
@@ -1962,7 +1962,7 @@ func recordArchICB(
 					setRope(emit(), kProj, kThrow, kvOf(li), li) // discarded
 				}
 				recInputProj(emitNB(), li, inBuf, anwBufs[li], normed, vThrow, 0, vProjOf(li)) // discarded; 2nd consumer of `normed` — overlap
-				if lay.qkvBias { // Qwen2 additive V bias on the discarded V (keeps the op layout uniform)
+				if lay.qkvBias {                                                               // Qwen2 additive V bias on the discarded V (keeps the op layout uniform)
 					setBin(emit(), addPSO, vThrow, vBiasBufs[li], vThrow, kvOf(li)*hdOf(li))
 				}
 				if valueNormOnes != nil {
@@ -2024,7 +2024,7 @@ func recordArchICB(
 			}
 			recInputProj(emitFFN(), li, hBuf, mnwBufs[li], mlpNormed, gate, 0, projGate)
 			recInputProj(emitNB(), li, hBuf, mnwBufs[li], mlpNormed, up, 0, projUp) // 2nd consumer of `mlpNormed` (gate barriered it) — overlap gate
-			if lay.siluMLP { // SwiGLU: silu(gate)·up = gate·sigmoid(gate)·up — sigmoid + two in-place muls (3 ops)
+			if lay.siluMLP {                                                        // SwiGLU: silu(gate)·up = gate·sigmoid(gate)·up — sigmoid + two in-place muls (3 ops)
 				cs := emit()
 				setICBPSO(cs, sigmoidICBPSO)
 				setICBKernelBuffer(cs, gate, 0, 0)

@@ -298,8 +298,8 @@ func TestAssemble_AttentionKEqV_Ugly(t *testing.T) {
 		// layer 1 SHARES layer 0's cache — no k/v of its own.
 		"layer.1.attn_norm.weight": vec(4),
 		"layer.1.q.weight":         mat(4, 4), "layer.1.o.weight": mat(4, 4),
-		"layer.1.mlp_norm.weight":  vec(4),
-		"layer.1.gate.weight":      mat(8, 4), "layer.1.up.weight": mat(8, 4), "layer.1.down.weight": mat(4, 8),
+		"layer.1.mlp_norm.weight": vec(4),
+		"layer.1.gate.weight":     mat(8, 4), "layer.1.up.weight": mat(8, 4), "layer.1.down.weight": mat(4, 8),
 	}
 	arch := minimalDenseArch()
 	arch.Layer = []LayerSpec{

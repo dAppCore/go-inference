@@ -7,8 +7,8 @@ package native
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/arch/mamba2"
+	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
 

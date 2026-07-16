@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	_ "dappco.re/go/inference/model/gemma4"  // register the gemma4 loaders for the dispatch check
 	_ "dappco.re/go/inference/model/arch/mistralai/mistral" // register the mistral loaders
+	_ "dappco.re/go/inference/model/gemma4"                 // register the gemma4 loaders for the dispatch check
 )
 
 // TestLoadDirReactiveDispatch pins the reactive registry dispatch the generic loader runs:

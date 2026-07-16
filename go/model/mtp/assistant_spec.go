@@ -62,11 +62,11 @@ func resolveMTPMethod(m MTPMethod) MTPMethod {
 // loader. Method carries the speculative method inferred from the drafter (see MTPMethod).
 type AssistantConfig struct {
 	ModelType         string
-	Method            MTPMethod    // speculative method inferred from the drafter (default MTPDraftModel)
-	BackboneHidden    int          // the TARGET hidden size the drafter's input projection consumes
-	NumCentroids      int          // ordered-embedding head: centroid count (0 = plain LM head)
-	CentroidTopK      int          // ordered-embedding head: intermediate top-K
-	OrderedEmbeddings bool         // logits via the ordered-embedding (centroid) head
+	Method            MTPMethod          // speculative method inferred from the drafter (default MTPDraftModel)
+	BackboneHidden    int                // the TARGET hidden size the drafter's input projection consumes
+	NumCentroids      int                // ordered-embedding head: centroid count (0 = plain LM head)
+	CentroidTopK      int                // ordered-embedding head: intermediate top-K
+	OrderedEmbeddings bool               // logits via the ordered-embedding (centroid) head
 	LayerTypes        []string           // per-layer attention type names — matched against the target's KV streams
 	Arch              model.Arch         // the drafter's OWN decode architecture, fully derived
 	Quant             *model.QuantConfig // quantization block (nil = bf16) — quantised tensor-shape validation reads it
