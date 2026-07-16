@@ -19,6 +19,12 @@ var (
 	// pieceTimingOn). Σ span vs wall is the remaining per-token host/sync gap — the headroom a submit-ahead
 	// pipeline could overlap. Reset before a measured run.
 	chainedGPUSpanNs int64
+	// sampledPickNs times the sampled decode's per-token PICK lanes (#23) — everything between the
+	// step producing a hidden and the chosen token: each FromHidden lane pays its own head encode +
+	// wait + selection, so these buckets name where the sampled loop's host-serial wall actually
+	// lives. Gated by pieceTimingOn like every counter here.
+	// [0]=topK-token lane  [1]=logits-token lane  [2]=candidates lane (head+select)  [3]=candidate sample  [4]=greedy head
+	sampledPickNs [5]int64
 	// laneGPUSpanNs is chainedGPUSpanNs's lane-set twin: the GPU execution span of harvested chained lane
 	// rounds (gated by pieceTimingOn; accumulated in waitReleaseChainedCB). Lane wall − Σ span = the lane
 	// path's per-token host/sync gap, directly comparable with the serial chain's on the same boot.
@@ -112,6 +118,13 @@ func ptStart() time.Time {
 func ptEnd(idx int, t time.Time) {
 	if pieceTimingOn {
 		pieceNs[idx] += int64(time.Since(t))
+	}
+}
+
+// spEnd accumulates one sampled-pick lane's elapsed time (#23) — the sampled twin of ptEnd.
+func spEnd(idx int, t time.Time) {
+	if pieceTimingOn {
+		sampledPickNs[idx] += int64(time.Since(t))
 	}
 }
 

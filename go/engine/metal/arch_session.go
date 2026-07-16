@@ -3114,6 +3114,15 @@ func (s *ArchSession) generateSampledFromLogitsInPool(firstLogits []byte, maxNew
 	return gen, nil
 }
 
+// sampleTopKCandidatesFromHiddenWithHistoryInPoolTimed wraps the candidates lane in the #23
+// sampled-pick counter (head encode + wait + select together — the lane pays them as one call).
+func (s *ArchSession) sampleTopKCandidatesFromHiddenWithHistoryInPoolTimed(hidden []byte, params model.SampleParams, history []int32) ([]byte, []int32, bool, error) {
+	spT := ptStart()
+	logits, ids, ok, err := s.sampleTopKCandidatesFromHiddenWithHistoryInPool(hidden, params, history)
+	spEnd(2, spT)
+	return logits, ids, ok, err
+}
+
 func (s *ArchSession) sampleTokenFromLogits(logits []byte, sampler *model.Sampler, params model.SampleParams, history []int32) (int32, error) {
 	if sampledGreedyParamsEligible(params) {
 		return greedyBF16Suppressed(logits, s.arch.Vocab, params.SuppressTokens)
@@ -5815,38 +5824,50 @@ func (s *ArchSession) generateSampledFromHiddenInPoolWithHistory(hidden []byte, 
 		var next int32
 		var err error
 		if sampledGreedyParamsEligible(pickParams) {
+			spT := ptStart()
 			next, err = s.headGreedyOrLogits(hidden, pickParams.SuppressTokens, nil, nil, false)
+			spEnd(4, spT)
 			readyLogits, readyIDs = nil, nil
 			readyTokenOK = false
 		} else if readyTokenOK {
 			next = readyToken
 			readyTokenOK = false
 		} else if readyIDs != nil {
+			spT := ptStart()
 			next, err = sampler.SampleCandidates(readyLogits, readyIDs, pickParams)
+			spEnd(3, spT)
 			readyLogits, readyIDs = nil, nil
 		} else if sampledTopOneGreedyParamsEligible(pickParams, history) {
 			sampler.Draw()
+			spT := ptStart()
 			next, err = s.headGreedyOrLogits(hidden, pickParams.SuppressTokens, nil, nil, false)
+			spEnd(4, spT)
 			readyLogits, readyIDs = nil, nil
 			readyTokenOK = false
 		} else if s.sampleTopKTokenParamsEligible(pickParams) {
 			draw := sampler.Draw()
 			var ok bool
+			spT := ptStart()
 			next, ok, err = s.sampleTopKTokenFromHiddenInPool(hidden, pickParams, draw, history)
+			spEnd(0, spT)
 			if !ok && err == nil {
 				err = core.NewError("native.ArchSession.generateSampledFromHiddenInPool: TopK token path declined after eligibility check")
 			}
 		} else if s.sampleLogitsTokenParamsEligible(pickParams) && !sampleLogitsTokenCPUPreferred(pickParams, s.arch.Vocab) {
 			draw := sampler.Draw()
 			var ok bool
+			spT := ptStart()
 			next, ok, err = s.sampleLogitsTokenFromHiddenInPool(hidden, pickParams, draw, history)
+			spEnd(1, spT)
 			if !ok && err == nil {
 				err = core.NewError("native.ArchSession.generateSampledFromHiddenInPool: logits token path declined after eligibility check")
 			}
-		} else if candidateLogits, candidateIDs, ok, topKErr := s.sampleTopKCandidatesFromHiddenWithHistoryInPool(hidden, pickParams, history); topKErr != nil {
+		} else if candidateLogits, candidateIDs, ok, topKErr := s.sampleTopKCandidatesFromHiddenWithHistoryInPoolTimed(hidden, pickParams, history); topKErr != nil {
 			return nil, history, topKErr
 		} else if ok {
+			spT := ptStart()
 			next, err = sampler.SampleCandidates(candidateLogits, candidateIDs, pickParams)
+			spEnd(3, spT)
 		} else {
 			logits, headErr := s.headLogitsScratch(hidden, false)
 			if headErr != nil {
