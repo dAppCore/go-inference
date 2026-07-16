@@ -65,7 +65,7 @@ func TestParse_Ugly(t *testing.T) {
 	}
 }
 
-func TestNormalizeWeights_Good(t *testing.T) {
+func TestRegister_NormalizeWeights_Good(t *testing.T) {
 	values := func(n int) []byte {
 		out := make([]byte, n*4)
 		for i := range n {
@@ -102,14 +102,14 @@ func TestNormalizeWeights_Good(t *testing.T) {
 	}
 }
 
-func TestNormalizeWeights_Bad(t *testing.T) {
+func TestRegister_NormalizeWeights_Bad(t *testing.T) {
 	_, err := NormalizeWeights(map[string]safetensors.Tensor{"model.layers.0.feed_forward.experts.gate_up_proj": {Dtype: "F32", Shape: []int{2, 3}}})
 	if err == nil {
 		t.Fatal("malformed packed experts accepted")
 	}
 }
 
-func TestNormalizeWeights_Ugly(t *testing.T) {
+func TestRegister_NormalizeWeights_Ugly(t *testing.T) {
 	_, err := NormalizeWeights(map[string]safetensors.Tensor{"model.layers.0.feed_forward.experts.gate_up_proj": {Dtype: "I8", Shape: []int{1, 2, 4}, Data: make([]byte, 8)}})
 	if err == nil {
 		t.Fatal("unsupported expert dtype accepted")

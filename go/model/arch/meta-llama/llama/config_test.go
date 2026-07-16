@@ -24,7 +24,7 @@ func loadConfigFixture(t *testing.T, name string) Config {
 	return cfg
 }
 
-func TestConfigArchLlama31_8B_Good(t *testing.T) {
+func TestConfig_Arch_Good(t *testing.T) {
 	cfg := loadConfigFixture(t, "meta-llama-llama-3.1-8b-config.json")
 	arch, err := cfg.Arch()
 	if err != nil {
@@ -61,13 +61,26 @@ func TestConfigArchLlama32_1B_Good(t *testing.T) {
 	}
 }
 
-func TestLlama3InvFreqs_Bad(t *testing.T) {
+// TestConfig_Llama3InvFreqs_Good pins the realistic Llama-3.1 rope_scaling params: the expected
+// frequency count, and the unchanged high-frequency dim.
+func TestConfig_Llama3InvFreqs_Good(t *testing.T) {
+	rp := RopeScaling{RopeType: "llama3", Factor: 8, LowFreqFactor: 1, HighFreqFactor: 4, OriginalMaxPositionEmbeddings: 8192}
+	got := Llama3InvFreqs(500000, rp, 128)
+	if len(got) != 64 {
+		t.Fatalf("frequencies = %d, want 64", len(got))
+	}
+	if got[0] != 1 {
+		t.Fatalf("high frequency = %g, want unchanged 1", got[0])
+	}
+}
+
+func TestConfig_Llama3InvFreqs_Bad(t *testing.T) {
 	if got := Llama3InvFreqs(500000, RopeScaling{RopeType: "llama3", Factor: 1, OriginalMaxPositionEmbeddings: 8192}, 128); got != nil {
 		t.Fatalf("invalid extension returned %d frequencies", len(got))
 	}
 }
 
-func TestLlama3InvFreqs_Ugly(t *testing.T) {
+func TestConfig_Llama3InvFreqs_Ugly(t *testing.T) {
 	rp := RopeScaling{RopeType: "llama3", Factor: 8, LowFreqFactor: 1, HighFreqFactor: 4, OriginalMaxPositionEmbeddings: 8192}
 	got := Llama3InvFreqs(500000, rp, 128)
 	if len(got) != 64 {
@@ -120,25 +133,44 @@ func TestConfigArchDefaultRope_Good(t *testing.T) {
 	}
 }
 
-func TestConfigArch_Bad(t *testing.T) {
+func TestConfig_Arch_Bad(t *testing.T) {
 	cfg := Config{HiddenSize: 65, IntermediateSize: 128, NumHiddenLayers: 2, NumAttentionHeads: 8, VocabSize: 32}
 	if _, err := cfg.Arch(); err == nil {
 		t.Fatal("indivisible hidden size accepted without head_dim")
 	}
 }
 
-func TestConfigArch_Ugly(t *testing.T) {
+func TestConfig_Arch_Ugly(t *testing.T) {
 	cfg := Config{HiddenSize: 64, IntermediateSize: 128, NumHiddenLayers: 1, NumAttentionHeads: 8, NumKeyValueHeads: 3, VocabSize: 32}
 	if _, err := cfg.Arch(); err == nil {
 		t.Fatal("non-divisible GQA geometry accepted")
 	}
 }
 
-func TestConfigInferFromWeights_Good(t *testing.T) {
+func TestConfig_InferFromWeights_Good(t *testing.T) {
 	cfg := Config{HiddenSize: 64}
 	cfg.InferFromWeights(map[string]safetensors.Tensor{"ignored": {Shape: []int{1}}})
 	if cfg.HiddenSize != 64 {
 		t.Fatalf("InferFromWeights changed declared geometry: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// head_dim-absent/hidden-indivisible guard — distinct from _Bad's all-zero
+// rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{HiddenSize: 65, IntermediateSize: 128, NumHiddenLayers: 2, NumAttentionHeads: 8, VocabSize: 32}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("indivisible hidden size (no head_dim) became valid after InferFromWeights")
 	}
 }
 
