@@ -9,3 +9,10 @@ func ExampleConfig_Arch() {
 	core.Println(a.HeadDim, a.ALiBi)
 	// Output: 4 true
 }
+
+func ExampleConfig_InferFromWeights() {
+	c := Config{ModelType: "mpt", DModel: 8}
+	c.InferFromWeights(nil) // no-op: MPT declares every dim in config.json
+	core.Println(c.DModel)
+	// Output: 8
+}

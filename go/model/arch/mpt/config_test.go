@@ -42,6 +42,32 @@ func TestConfig_Arch_Ugly(t *testing.T) {
 	}
 }
 
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	c := Config{ModelType: "mpt", DModel: 8}
+	c.InferFromWeights(nil)
+	if c.DModel != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", c)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	c := Config{}
+	c.InferFromWeights(nil)
+	if _, err := c.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// model_type gate — distinct from _Bad's all-zero-fields rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	c := Config{ModelType: "unknown", DModel: 8, NHeads: 2, NLayers: 1, ExpansionRatio: 4, VocabSize: 8}
+	c.InferFromWeights(nil)
+	if _, err := c.Arch(); err == nil {
+		t.Fatal("unknown model_type became valid after InferFromWeights")
+	}
+}
+
 // TestTinyMPTForward_Good uses varied deterministic fills through the shared ALiBi op.
 func TestTinyMPTForward_Good(t *testing.T) {
 	w := make([]float32, 16)
