@@ -100,11 +100,23 @@ func LoadVisionImageFeatureConfig(modelPath string) (*VisionImageFeatureConfig, 
 // rule, rescales to [0,1], and returns pre-patchified BF16 rows
 // [numPatches, patchSize*patchSize*3] for VisionTower.
 func VisionImagePatches(data []byte, cfg *VisionImageFeatureConfig) ([]byte, int, error) {
+	patches, _, _, softTokens, err := VisionImagePatchesGrid(data, cfg)
+	return patches, softTokens, err
+}
+
+// VisionImagePatchesGrid is VisionImagePatches plus the TRUE patch grid the
+// resize produced (gridH rows × gridW columns, row-major — the order the
+// patch rows are laid in). The tower needs the real dims: a flattened patch
+// count alone cannot recover them (2268 tiles as 42×54 or 63×36), and a
+// wrong or transposed grid lays the split-axis position field — and the 3×3
+// pooler — across the wrong rows, scrambling every non-square image.
+func VisionImagePatchesGrid(data []byte, cfg *VisionImageFeatureConfig) ([]byte, int, int, int, error) {
 	pixels, h, w, softTokens, err := VisionImagePixels(data, cfg)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, 0, err
 	}
-	return patchifyVisionPixelsBF16(pixels, h, w, normalizeVisionImageFeatureConfig(cfg).PatchSize), softTokens, nil
+	patch := normalizeVisionImageFeatureConfig(cfg).PatchSize
+	return patchifyVisionPixelsBF16(pixels, h, w, patch), int(h / patch), int(w / patch), softTokens, nil
 }
 
 // VisionImagePixels decodes PNG/JPEG bytes, applies the Gemma 4 image sizing

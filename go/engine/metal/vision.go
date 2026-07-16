@@ -958,7 +958,19 @@ func VisionTower(patches []byte, w *VisionWeights, cfg VisionConfig) ([]byte, er
 		return nil, core.NewError("native.VisionTower: weights must be non-nil")
 	}
 	L := len(patches) / (cfg.PatchDim * bf16Size)
-	gridH, gridW := visionGridForPatchCount(L, cfg.PoolKernel)
+	// The caller's cfg grid is authoritative when set (VisionImagePatchesGrid
+	// threads the true resize grid through — a patch count alone cannot
+	// recover the dims, and the count-derived fallback below returns h ≤ w,
+	// TRANSPOSING every portrait grid's position field and pooling). The
+	// fallback survives for square fixtures and legacy callers.
+	gridH, gridW := cfg.GridH, cfg.GridW
+	if gridH > 0 && gridW > 0 {
+		if gridH*gridW != L {
+			return nil, core.NewError("native.VisionTower: cfg grid does not tile the patch count")
+		}
+	} else {
+		gridH, gridW = visionGridForPatchCount(L, cfg.PoolKernel)
+	}
 	lcfg := cfg
 	lcfg.GridH, lcfg.GridW = gridH, gridW
 

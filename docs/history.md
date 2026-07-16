@@ -201,9 +201,14 @@ after the upstream commits:
   the update, so the metal kernels (already implementing the declared scheme)
   need nothing.
 
-Known follow-ups from the live receipt, tracked as tasks: the metal encoder
-tower's feature quality degrades at large budget grids (readable at 280,
-"illegible" verdict at 1120 on the same image — position-table handling or a
-kernel grid assumption; the pure-Go host tower is the divergence reference),
-and the 12B unified (encoder-free) lane declines image prefill under chat's
-chunked prefill entirely.
+The live receipt also flushed out — and fixed, same day — a long-standing
+encoder-tower defect: the tower re-derived its patch grid from the flattened
+patch COUNT (most-square factorisation, h ≤ w), transposing the split-axis
+position field and the 3×3 pooling for every portrait image at every budget.
+A giant-letter bisect (square reads, portrait misreads, both budgets) cornered
+it; threading the true resize grid through VisionImagePatchesGrid →
+ProjectImageFeaturesAt → VisionTower fixed it. Post-fix, the 26B transcribes
+the same test sheet VERBATIM at 1120 — every line including the fine print —
+where pre-fix it declared the image illegible. Still open, tracked: the 12B
+unified (encoder-free) lane declines image prefill under chat's chunked
+prefill entirely.

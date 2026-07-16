@@ -226,14 +226,14 @@ func (m *NativeTokenModel) projectImageWithCfg(image []byte, cfg *VisionImageFea
 		}
 		return features, n, nil
 	}
-	patches, softTokens, err := VisionImagePatches(image, cfg)
+	patches, gridH, gridW, softTokens, err := VisionImagePatchesGrid(image, cfg)
 	if err != nil {
 		return nil, 0, core.E("native.vision", "preprocess image", err)
 	}
 	if softTokens <= 0 {
 		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: image produced no soft tokens")
 	}
-	features, err := m.ProjectImageFeatures(patches)
+	features, err := m.ProjectImageFeaturesAt(patches, gridH, gridW)
 	if err != nil {
 		return nil, 0, core.E("native.vision", "project", err)
 	}
@@ -316,6 +316,26 @@ func (m *NativeTokenModel) ProjectImageFeatures(patches []byte) ([]byte, error) 
 	if !ok {
 		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeatures: model has no vision payload")
 	}
+	return VisionTower(patches, weights, cfg)
+}
+
+// ProjectImageFeaturesAt is ProjectImageFeatures with the TRUE patch grid the
+// preprocessing produced: the tower lays its split-axis position field and
+// 3×3 pooling on exactly these dims instead of re-deriving a (possibly
+// transposed or plain wrong) grid from the patch count. ProjectImage threads
+// the grid from VisionImagePatchesGrid through here.
+func (m *NativeTokenModel) ProjectImageFeaturesAt(patches []byte, gridH, gridW int) ([]byte, error) {
+	if m == nil {
+		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeaturesAt: nil model")
+	}
+	if gridH <= 0 || gridW <= 0 {
+		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeaturesAt: grid dims must be positive")
+	}
+	weights, cfg, ok := nativeVisionFromLoaded(m.vision)
+	if !ok {
+		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeaturesAt: model has no vision payload")
+	}
+	cfg.GridH, cfg.GridW = gridH, gridW
 	return VisionTower(patches, weights, cfg)
 }
 
