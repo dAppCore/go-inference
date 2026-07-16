@@ -45,16 +45,18 @@ func init() {
 		},
 	})
 
-	// The multi-token-prediction drafter (qwen3_5_mtp) is a REGISTERED model_type with a clean refusal, not
-	// an "unknown model architecture": it is the small speculative head trained alongside a Qwen 3.6 base,
-	// served as that base's drafter — it has no standalone forward. Pairing it to its base is a later slice;
-	// today it must load-fail with a message that says WHY, so a user who points lem at the MTP submodule
-	// alone gets direction rather than a mystery. Registered separately from the base hybrid so the refusal
-	// message is distinct from a real load failure.
+	// The multi-token-prediction drafter (qwen3_5_mtp) is a REGISTERED model_type that PAIRS with its base
+	// (assistant.go declares it to the reactive assistant registry; mtp.go realises the head + the verify
+	// loop) but still REFUSES a STANDALONE load: it is the small speculative head trained alongside a Qwen
+	// 3.6 base, served as that base's drafter, and it has no standalone forward (it shares the base's
+	// embedding + LM head and projects from the base's last hidden state — there is no base hidden to
+	// project from on its own). So a user who points lem at the MTP submodule ALONE gets direction toward
+	// pairing rather than a mystery; a paired load goes through LoadSpeculativePairDirs, not this hook.
+	// Registered separately from the base hybrid so the refusal message is distinct from a real load failure.
 	model.RegisterArch(model.ArchSpec{
 		ModelTypes: []string{"qwen3_5_mtp", "qwen3_5_mtp_text", "qwen3_6_mtp"},
 		Composed: func(map[string]safetensors.Tensor, []byte) (model.TokenModel, error) {
-			return nil, core.NewError("composed: qwen3_5_mtp is an MTP drafter — serve paired with its base model")
+			return nil, core.NewError("composed: qwen3_5_mtp is an MTP drafter with no standalone forward — serve it paired with its base model (lem pair <base> <mtp>)")
 		},
 	})
 }
