@@ -12884,6 +12884,92 @@ __device__ float rocm_attention_block_reduce_max(float value, float *scratch)
 	return scratch[0];
 }
 
+__device__ void rocm_attention_block_reduce_sum_pair(
+	float value0,
+	float value1,
+	float *scratch0,
+	float *scratch1,
+	float &reduced0,
+	float &reduced1)
+{
+	const uint32_t lane = threadIdx.x & 31u;
+	const uint32_t wave = threadIdx.x >> 5u;
+	const uint32_t wave_count = (blockDim.x + 31u) >> 5u;
+	for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
+		value0 += rocm_shfl_down(value0, stride, 32);
+		value1 += rocm_shfl_down(value1, stride, 32);
+	}
+	if (lane == 0u) {
+		scratch0[wave] = value0;
+		scratch1[wave] = value1;
+	}
+	__syncthreads();
+	float block0 = lane < wave_count ? scratch0[lane] : 0.0f;
+	float block1 = lane < wave_count ? scratch1[lane] : 0.0f;
+	if (wave == 0u) {
+		for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
+			block0 += rocm_shfl_down(block0, stride, 32);
+			block1 += rocm_shfl_down(block1, stride, 32);
+		}
+		if (lane == 0u) {
+			scratch0[0] = block0;
+			scratch1[0] = block1;
+		}
+	}
+	__syncthreads();
+	reduced0 = scratch0[0];
+	reduced1 = scratch1[0];
+}
+
+__device__ void rocm_attention_block_reduce_max_pair(
+	float value0,
+	float value1,
+	float *scratch0,
+	float *scratch1,
+	float &reduced0,
+	float &reduced1)
+{
+	const uint32_t lane = threadIdx.x & 31u;
+	const uint32_t wave = threadIdx.x >> 5u;
+	const uint32_t wave_count = (blockDim.x + 31u) >> 5u;
+	for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
+		const float other0 = rocm_shfl_down(value0, stride, 32);
+		const float other1 = rocm_shfl_down(value1, stride, 32);
+		if (other0 > value0) {
+			value0 = other0;
+		}
+		if (other1 > value1) {
+			value1 = other1;
+		}
+	}
+	if (lane == 0u) {
+		scratch0[wave] = value0;
+		scratch1[wave] = value1;
+	}
+	__syncthreads();
+	float block0 = lane < wave_count ? scratch0[lane] : -FLT_MAX;
+	float block1 = lane < wave_count ? scratch1[lane] : -FLT_MAX;
+	if (wave == 0u) {
+		for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
+			const float other0 = rocm_shfl_down(block0, stride, 32);
+			const float other1 = rocm_shfl_down(block1, stride, 32);
+			if (other0 > block0) {
+				block0 = other0;
+			}
+			if (other1 > block1) {
+				block1 = other1;
+			}
+		}
+		if (lane == 0u) {
+			scratch0[0] = block0;
+			scratch1[0] = block1;
+		}
+	}
+	__syncthreads();
+	reduced0 = scratch0[0];
+	reduced1 = scratch1[0];
+}
+
 __device__ void rocm_run_single_head_attention_range_token_parallel(const rocm_attention_launch_args &args, uint32_t token_start, uint32_t token_end)
 {
 	const uint32_t tid = threadIdx.x;
@@ -14457,46 +14543,39 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2(const 
 	}
 	__syncthreads();
 
-	const float max_score0 = rocm_attention_block_reduce_max(local_max0, scratch);
+	float max_score0 = -FLT_MAX;
+	float max_score1 = -FLT_MAX;
+	rocm_attention_block_reduce_max_pair(local_max0, local_max1, scratch, value_scratch1, max_score0, max_score1);
 	if (tid == 0u) {
 		shared_max_score0 = max_score0;
-	}
-	__syncthreads();
-	const float max_score1 = rocm_attention_block_reduce_max(local_max1, scratch);
-	if (tid == 0u) {
 		shared_max_score1 = max_score1;
 	}
 	__syncthreads();
 
 	float local_sum0 = 0.0f;
-	for (uint32_t local = tid; local < local_count; local += threads) {
-		float value = 0.0f;
-		if (shared_max_score0 > -FLT_MAX && scores0[local] > -FLT_MAX) {
-			value = rocm_fast_expf(scores0[local] - shared_max_score0);
-			local_sum0 += value;
-		}
-		scores0[local] = value;
-	}
-	const float sum0 = rocm_attention_block_reduce_sum(local_sum0, scratch);
-	if (tid == 0u) {
-		shared_sum0 = sum0;
-		stats0[0] = shared_max_score0;
-		stats0[1] = sum0;
-	}
-	__syncthreads();
-
 	float local_sum1 = 0.0f;
 	for (uint32_t local = tid; local < local_count; local += threads) {
-		float value = 0.0f;
-		if (shared_max_score1 > -FLT_MAX && scores1[local] > -FLT_MAX) {
-			value = rocm_fast_expf(scores1[local] - shared_max_score1);
-			local_sum1 += value;
+		float value0 = 0.0f;
+		float value1 = 0.0f;
+		if (shared_max_score0 > -FLT_MAX && scores0[local] > -FLT_MAX) {
+			value0 = rocm_fast_expf(scores0[local] - shared_max_score0);
+			local_sum0 += value0;
 		}
-		scores1[local] = value;
+		if (shared_max_score1 > -FLT_MAX && scores1[local] > -FLT_MAX) {
+			value1 = rocm_fast_expf(scores1[local] - shared_max_score1);
+			local_sum1 += value1;
+		}
+		scores0[local] = value0;
+		scores1[local] = value1;
 	}
-	const float sum1 = rocm_attention_block_reduce_sum(local_sum1, scratch);
+	float sum0 = 0.0f;
+	float sum1 = 0.0f;
+	rocm_attention_block_reduce_sum_pair(local_sum0, local_sum1, scratch, value_scratch1, sum0, sum1);
 	if (tid == 0u) {
+		shared_sum0 = sum0;
 		shared_sum1 = sum1;
+		stats0[0] = shared_max_score0;
+		stats0[1] = sum0;
 		stats1[0] = shared_max_score1;
 		stats1[1] = sum1;
 	}
