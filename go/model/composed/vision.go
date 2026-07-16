@@ -10,17 +10,22 @@ import (
 	"math"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 )
 
 // vision.go is the composed model's own side of the repo's ONE multimodal route (go/engine/vision.go): a
-// pure host-f32 Qwen-VL-family vision tower + merger/projector, run once per image at prefill (no
-// recurrent/KV state of its own — a ComposedModel.Vision forward is stateless, mirroring how the metal
-// engine's VisionTower runs once per image ahead of the token decode loop). Geometry lives on
-// visionTowerCfg, assembled by vision_loader.go from the checkpoint's own tensor shapes; this file only
-// runs the maths: patch embed → N bidirectional transformer blocks (2-D rotary position embedding,
-// optional per-head QK-norm, SwiGLU MLP) → the merger (LayerNorm → spatial mergeSize×mergeSize concat →
-// 2-layer GELU MLP) → text-hidden soft-token features. No engine/model-root import: composed stays a leaf
-// the engine depends on, never the reverse (AX-8).
+// host Qwen-VL-family vision tower + merger/projector, run once per image at prefill (no recurrent/KV state
+// of its own — a ComposedModel.Vision forward is stateless, mirroring how the metal engine's VisionTower
+// runs once per image ahead of the token decode loop). Geometry lives on visionTowerCfg, assembled by
+// vision_loader.go from the checkpoint's own tensor shapes; this file only runs the maths: patch embed →
+// (an optional additive LEARNED position embedding — visionTowerCfg.LearnedPositions) → N bidirectional
+// transformer blocks (2-D rotary position embedding XOR the learned table, never both; optional per-head
+// QK-norm; SwiGLU MLP or a plain 2-linear GELU MLP — visionMLPWeights.GELU) → the merger (LayerNorm →
+// spatial mergeSize×mergeSize concat → 2-layer GELU MLP) → text-hidden soft-token features. Every
+// projection runs host f32 OR, on a quantised checkpoint, the SAME packed model.QuantWeight/matNTQuant seam
+// the composed text stack's projections use (visionLinear.WQ; see vision_loader.go's visionProj) — never
+// widened blind. No engine/model-root import: composed stays a leaf the engine depends on, never the
+// reverse (AX-8).
 
 // The Qwen-VL family's stable special-token spellings that wrap an image's soft-token run in the rendered
 // prompt text. config.json carries only the numeric id (parsed as loaderConfig.ImageTokenID); the literal
@@ -33,16 +38,28 @@ const (
 )
 
 // visionLinear is one dense projection: out[L,Out] = in[L,In]·Wᵀ (+ bias). W is row-major [Out,In]; B is
-// nil when the checkpoint carries no bias for this projection.
+// nil when the checkpoint carries no bias for this projection. WQ is the SAME projection kept PACKED — an
+// mlx-affine quantised weight, model.QuantWeight, the exact type the composed text stack's AttnWeights/MLP
+// carry (attention.go/composed.go) — when the checkpoint quantises it; exactly one of W/WQ is set (never
+// both: vision_loader.go's visionProj resolves either the packed or the dense form per tensor, mirroring
+// loader.go's own proj closure), and linearForward dispatches on WQ's presence.
 type visionLinear struct {
 	W       []float32
+	WQ      *model.QuantWeight
 	B       []float32
 	Out, In int
 }
 
-// linearForward runs one visionLinear over L rows of width In, adding the bias when present.
+// linearForward runs one visionLinear over L rows of width In, adding the bias when present. A packed
+// weight (WQ set) dispatches to matNTQuant — the SAME quant matvec seam the text stack's projections use
+// (composed.go) — instead of ever widening a quantised vision weight to f32.
 func linearForward(x []float32, w *visionLinear, L int) []float32 {
-	out := matNT(x, w.W, L, w.In, w.Out)
+	var out []float32
+	if w.WQ != nil {
+		out = matNTQuant(nil, x, w.WQ, L, w.In, w.Out)
+	} else {
+		out = matNT(x, w.W, L, w.In, w.Out)
+	}
 	if len(w.B) > 0 {
 		for t := range L {
 			row := out[t*w.Out : (t+1)*w.Out]
@@ -63,10 +80,17 @@ type visionAttnWeights struct {
 	QNorm, KNorm []float32
 }
 
-// visionMLPWeights is one block's SwiGLU feed-forward: out = (SiLU(x·Gateᵀ)⊙x·Upᵀ)·Downᵀ — the same shape
-// as the text stack's MLP, reusing the package's own silu() helper.
+// visionMLPWeights is one block's feed-forward, one of TWO shapes selected by GELU (set by the loader from
+// which tensor names resolved — vision_loader.go's loadBlockMLP — never both populated):
+//   - SwiGLU (GELU false, the zero value): out = (SiLU(x·Gateᵀ)⊙x·Upᵀ)·Downᵀ — Gate/Up/Down set, the same
+//     shape as the text stack's MLP, reusing the package's own silu() helper. The "guessed" layout's MLP.
+//   - plain 2-linear GELU (GELU true): out = GELU(x·FC1ᵀ)·FC2ᵀ — FC1/FC2 set, activation geluTanh (this
+//     file's own tanh-approx GELU, already used by the merger below) — the REAL Qwen-VL-family layout's
+//     mlp.linear_fc1/linear_fc2 shape (vision_loader.go), config hidden_act "gelu_pytorch_tanh".
 type visionMLPWeights struct {
 	Gate, Up, Down visionLinear
+	FC1, FC2       visionLinear
+	GELU           bool
 }
 
 // visionBlock is one pre-norm encoder block: LayerNorm → bidirectional attention → residual, LayerNorm →
@@ -99,14 +123,26 @@ type visionTowerCfg struct {
 	TextHidden                    int
 	RopeTheta                     float32
 	Eps                           float32
+	// LearnedPositions marks a tower whose positions come from an ADDITIVE table added once after the patch
+	// embed (visionTower.PosEmbed — the REAL Qwen-VL-family layout's vision_tower.pos_embed.weight; see
+	// vision_loader.go) rather than the 2-D rotary embedding visionAttentionForward otherwise applies per
+	// block (the "guessed" layout's convention). The two are mutually exclusive per checkpoint family.
+	// False is the zero value, so every visionTowerCfg literal that predates this field (every test in
+	// vision_test.go, and any future direct construction) keeps running 2-D RoPE exactly as before — only
+	// the loader's real-layout path (driven by pos_embed's presence) sets this true.
+	LearnedPositions bool
 }
 
 // visionTower is the whole loaded tower + merger for one checkpoint.
 type visionTower struct {
-	Patch  visionLinear
-	Blocks []visionBlock
-	Merger visionMerger
-	Cfg    visionTowerCfg
+	Patch visionLinear
+	// PosEmbed is the learned absolute position-embedding table [NumPositions,Hidden] (flattened row-major),
+	// added once to the patch-embed output before the first block — see visionTowerCfg.LearnedPositions and
+	// visionTowerForward. nil for the 2-D-RoPE "guessed" layout.
+	PosEmbed []float32
+	Blocks   []visionBlock
+	Merger   visionMerger
+	Cfg      visionTowerCfg
 }
 
 // layerNormRowsWithBias LayerNorm-normalises each of the `rows` rows of x [rows,d]: (x-mean)/√(var+eps)·w
@@ -200,22 +236,34 @@ func visionAttentionForward(x []float32, w *visionAttnWeights, L, gridW int, cfg
 	k := linearForward(x, &w.K, L)
 	v := linearForward(x, &w.V, L)
 
+	// invFreq stays nil (and visionRope2D is never called) when cfg.LearnedPositions — positions were
+	// already injected additively before block 0 (visionTowerForward), so the REAL layout applies neither
+	// 2-D rope nor any other positional signal here. QNorm/KNorm application stays UNCONDITIONAL either way
+	// (rmsNormHead no-ops on its own when the slice is nil), since a layout that ships QK-norm alongside a
+	// learned position table is a fact about per-head normalisation, not positions.
+	var invFreq []float64
 	theta := float64(cfg.RopeTheta)
 	if theta == 0 {
 		theta = 10000
 	}
-	invFreq := visionRotaryTable(HD, theta)
+	if !cfg.LearnedPositions {
+		invFreq = visionRotaryTable(HD, theta)
+	}
 	for t := range L {
 		row, col := t/gridW, t%gridW
 		for h := range H {
 			qh := q[t*H*HD+h*HD : t*H*HD+h*HD+HD]
 			rmsNormHead(qh, w.QNorm, cfg.Eps) // no-op when QNorm is nil (rmsNormHead's own guard)
-			visionRope2D(qh, row, col, HD, invFreq)
+			if !cfg.LearnedPositions {
+				visionRope2D(qh, row, col, HD, invFreq)
+			}
 		}
 		for h := range KVH {
 			kh := k[t*KVH*HD+h*HD : t*KVH*HD+h*HD+HD]
 			rmsNormHead(kh, w.KNorm, cfg.Eps)
-			visionRope2D(kh, row, col, HD, invFreq)
+			if !cfg.LearnedPositions {
+				visionRope2D(kh, row, col, HD, invFreq)
+			}
 		}
 	}
 
@@ -259,8 +307,17 @@ func visionAttentionForward(x []float32, w *visionAttnWeights, L, gridW int, cfg
 	return linearForward(out, &w.O, L), nil
 }
 
-// visionMLPForward runs the block's SwiGLU feed-forward over x [L,Hidden] → [L,Hidden].
+// visionMLPForward runs the block's feed-forward over x [L,Hidden] → [L,Hidden]: SwiGLU (Gate/Up/Down) or
+// plain GELU (FC1/FC2), selected by w.GELU — set at load time by which tensor names resolved (see
+// vision_loader.go's loadBlockMLP).
 func visionMLPForward(x []float32, w *visionMLPWeights, L int) []float32 {
+	if w.GELU {
+		h := linearForward(x, &w.FC1, L)
+		for i := range h {
+			h[i] = geluTanh(h[i])
+		}
+		return linearForward(h, &w.FC2, L)
+	}
 	g := linearForward(x, &w.Gate, L)
 	u := linearForward(x, &w.Up, L)
 	h := make([]float32, len(g))
@@ -343,8 +400,8 @@ func (m *visionMerger) forward(x []float32, gridH, gridW int, cfg visionTowerCfg
 }
 
 // visionTowerForward runs the whole Qwen-VL-family vision forward on a pre-patchified grid: patch embed →
-// N bidirectional blocks → the merger, returning the projected soft-token features [softTokens,TextHidden]
-// and softTokens.
+// an optional additive LEARNED position embedding → N bidirectional blocks → the merger, returning the
+// projected soft-token features [softTokens,TextHidden] and softTokens.
 func visionTowerForward(patches []float32, gridH, gridW int, tower *visionTower) (features []float32, softTokens int, err error) {
 	cfg := tower.Cfg
 	L := gridH * gridW
@@ -355,6 +412,16 @@ func visionTowerForward(patches []float32, gridH, gridW int, tower *visionTower)
 		return nil, 0, core.NewError(core.Sprintf("composed.visionTowerForward: patch buffer len %d != L·PatchDim %d", len(patches), L*cfg.PatchDim))
 	}
 	h := linearForward(patches, &tower.Patch, L)
+	if len(tower.PosEmbed) > 0 {
+		// The REAL layout's learned position table is a FIXED [NumPositions,Hidden] lookup, sized for one
+		// specific training grid — a patch grid of a different size has no defined table entry to add, so
+		// this fails loud rather than silently truncating/wrapping or attempting an (unimplemented)
+		// interpolation; that is an explicitly deferred scope for this slice (see the task's divergence 4).
+		if len(tower.PosEmbed) != L*cfg.Hidden {
+			return nil, 0, core.NewError(core.Sprintf("composed.visionTowerForward: pos_embed table has %d position(s), patch grid has %d (interpolation not supported)", len(tower.PosEmbed)/cfg.Hidden, L))
+		}
+		h = addRows(h, tower.PosEmbed)
+	}
 	for i := range tower.Blocks {
 		if h, err = tower.Blocks[i].forward(h, L, gridW, cfg); err != nil {
 			return nil, 0, core.E("composed.visionTowerForward", core.Sprintf("block %d", i), err)
