@@ -2878,6 +2878,16 @@ func hipAttentionHeadsIncrementalGQA2Eligible(headCount, keyHeads int) bool {
 	return headCount/keyHeads == 2
 }
 
+func hipAttentionHeadsIncrementalGroupedEligible(headCount, keyHeads int) bool {
+	if hipAttentionHeadsIncrementalGQA2Eligible(headCount, keyHeads) {
+		return true
+	}
+	if !hipAttentionHeadsIncrementalGQA2Enabled || headCount < 16 {
+		return false
+	}
+	return hipAttentionHeadsBatchChunkedGQA2Eligible(headCount, keyHeads)
+}
+
 func hipAttentionHeadsBatchChunkedGQA4Eligible(headCount, keyHeads, chunkCount int) bool {
 	if !hipAttentionHeadsBatchChunkedGQA4Enabled || headCount <= 0 || keyHeads <= 0 || headCount%keyHeads != 0 || chunkCount < hipAttentionHeadsBatchChunkedGQA4MinChunks {
 		return false
@@ -5130,7 +5140,7 @@ func hipAttentionHeadsChunkedEligible(req hipAttentionRequest, headCount, dim, t
 	if dim <= 0 || dim > hipAttentionHeadsChunkedBlockSize || tokenCount < hipAttentionHeadsChunkSize {
 		return false
 	}
-	if req.WindowSize > 0 && tokenCount <= hipAttentionHeadsSharedMaxTokens && !hipAttentionHeadsIncrementalGQA2Eligible(headCount, keyHeads) {
+	if req.WindowSize > 0 && tokenCount <= hipAttentionHeadsSharedMaxTokens && !hipAttentionHeadsIncrementalGroupedEligible(headCount, keyHeads) {
 		return false
 	}
 	if req.DeviceKV == nil || req.DescriptorTable == nil {
@@ -5147,7 +5157,7 @@ func hipRunAttentionHeadsChunked(ctx context.Context, driver nativeHIPDriver, re
 		return err
 	}
 	keyHeads := req.keyHeadsOrDefault()
-	if hipAttentionHeadsIncrementalGQA2Eligible(headCount, keyHeads) {
+	if hipAttentionHeadsIncrementalGroupedEligible(headCount, keyHeads) {
 		return hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspace(ctx, driver, hipAttentionHeadsBatchCausalDeviceRequest{
 			DeviceKV:        req.DeviceKV,
 			DescriptorTable: req.DescriptorTable,

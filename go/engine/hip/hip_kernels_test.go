@@ -4943,6 +4943,70 @@ func TestHIPKernels_AttentionHeadsBatchChunkedMultiKVHeads_Good(t *testing.T) {
 	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage2, incremental[1].Name)
 }
 
+func TestHIPKernels_AttentionHeadsIncrementalGroupedGQA8_Good(t *testing.T) {
+	previousGQA2 := hipAttentionHeadsBatchChunkedGQA2Enabled
+	previousGQA4 := hipAttentionHeadsBatchChunkedGQA4Enabled
+	previousGQA8 := hipAttentionHeadsBatchChunkedGQA8Enabled
+	previousIncremental := hipAttentionHeadsIncrementalGQA2Enabled
+	previousChunkSize := hipAttentionHeadsChunkSize
+	previousChunkSizeExplicit := hipAttentionHeadsChunkSizeExplicit
+	hipAttentionHeadsBatchChunkedGQA2Enabled = true
+	hipAttentionHeadsBatchChunkedGQA4Enabled = true
+	hipAttentionHeadsBatchChunkedGQA8Enabled = true
+	hipAttentionHeadsIncrementalGQA2Enabled = true
+	hipAttentionHeadsChunkSize = 32
+	hipAttentionHeadsChunkSizeExplicit = true
+	t.Cleanup(func() {
+		hipAttentionHeadsBatchChunkedGQA2Enabled = previousGQA2
+		hipAttentionHeadsBatchChunkedGQA4Enabled = previousGQA4
+		hipAttentionHeadsBatchChunkedGQA8Enabled = previousGQA8
+		hipAttentionHeadsIncrementalGQA2Enabled = previousIncremental
+		hipAttentionHeadsChunkSize = previousChunkSize
+		hipAttentionHeadsChunkSizeExplicit = previousChunkSizeExplicit
+	})
+
+	const (
+		dim        = 4
+		tokenCount = 1024
+		headCount  = 16
+		keyHeads   = 2
+	)
+	driver := &fakeHIPDriver{available: true}
+	cache, err := newROCmKVCache(rocmKVCacheModeKQ8VQ4, hipGemma4Q4DeviceKVBlockSize())
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, cache.AppendVectors(0, keyHeads*dim, keyHeads*dim, make([]float32, tokenCount*keyHeads*dim), make([]float32, tokenCount*keyHeads*dim)))
+	deviceKV, err := cache.MirrorToDevice(driver)
+	core.RequireNoError(t, err)
+	defer deviceKV.Close()
+	descriptor, err := deviceKV.KernelDescriptorTable()
+	core.RequireNoError(t, err)
+	defer descriptor.Close()
+	query, err := hipUploadByteBuffer(driver, "rocm.hip.AttentionHeadsIncrementalGrouped", "GQA8 query", make([]byte, headCount*dim*4), headCount*dim)
+	core.RequireNoError(t, err)
+	defer query.Close()
+	output, err := hipAllocateByteBuffer(driver, "rocm.hip.AttentionHeadsIncrementalGrouped", "GQA8 output", uint64(headCount*dim*4), headCount*dim)
+	core.RequireNoError(t, err)
+	defer output.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+
+	start := len(driver.launches)
+	err = hipRunAttentionHeadsOutputFromDeviceQueryToDeviceKernelWithWorkspace(context.Background(), driver, hipAttentionRequest{
+		QueryDim:        dim,
+		KeyHeads:        keyHeads,
+		DeviceKV:        deviceKV,
+		DescriptorTable: descriptor,
+		Scale:           1,
+	}, query, headCount, output, workspace)
+	core.RequireNoError(t, err)
+	launches := driver.launches[start:]
+	if len(launches) != 2 {
+		t.Fatalf("incremental grouped launches = %d, want 2: %+v", len(launches), launches)
+	}
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1GQA8, launches[0].Name)
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage2, launches[1].Name)
+}
+
 func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_WindowStartsAtActiveChunk(t *testing.T) {
 	const (
 		dim             = 4
