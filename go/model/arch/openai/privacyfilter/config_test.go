@@ -6,11 +6,12 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model/safetensors"
 )
 
-// TestConfig_PrivacyFilter_Good parses the unmodified config from openai/privacy-filter.
+// TestConfig_ParseConfig_Good parses the unmodified config from openai/privacy-filter.
 // Source: https://huggingface.co/openai/privacy-filter/resolve/main/config.json
-func TestConfig_PrivacyFilter_Good(t *testing.T) {
+func TestConfig_ParseConfig_Good(t *testing.T) {
 	data := core.ReadFile(core.PathJoin("testdata", "openai-privacy-filter-config.json"))
 	if !data.OK {
 		t.Fatal("read openai/privacy-filter fixture")
@@ -40,8 +41,85 @@ func TestConfig_PrivacyFilter_Good(t *testing.T) {
 	}
 }
 
-func TestConfig_Bad(t *testing.T) {
+func TestConfig_ParseConfig_Bad(t *testing.T) {
 	if _, err := ParseConfig([]byte(`{"model_type":`)); err == nil {
 		t.Fatal("ParseConfig accepted malformed JSON")
+	}
+}
+
+// TestConfig_ParseConfig_Ugly proves ParseConfig never validates geometry —
+// a syntactically valid but semantically empty document parses fine.
+// Distinct from _Bad's syntax error.
+func TestConfig_ParseConfig_Ugly(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{}`))
+	if err != nil {
+		t.Fatalf("ParseConfig must accept a syntactically valid but semantically empty document: %v", err)
+	}
+	if cfg.ModelType != "" {
+		t.Fatalf("empty document produced a non-empty ModelType: %q", cfg.ModelType)
+	}
+}
+
+// TestConfig_Arch_Good pins the documented "always refuses" behaviour for a
+// realistic, fully-populated config: the refusal echoes the config's ACTUAL
+// class/expert counts (proving it doesn't fabricate a generic message).
+func TestConfig_Arch_Good(t *testing.T) {
+	cfg := Config{NumLocalExperts: 128, NumExpertsPerTok: 4, ID2Label: map[string]string{"0": "O"}}
+	_, err := cfg.Arch()
+	if err == nil {
+		t.Fatal("Arch: expected a clean not-yet-supported refusal, got a resolved architecture")
+	}
+	if !core.Contains(err.Error(), "128") || !core.Contains(err.Error(), "1-class") {
+		t.Fatalf("Arch refusal %q must echo the config's actual class/expert counts", err.Error())
+	}
+}
+
+func TestConfig_Arch_Bad(t *testing.T) {
+	_, err := (&Config{}).Arch()
+	if err == nil {
+		t.Fatal("Arch accepted an empty config")
+	}
+	if !core.Contains(err.Error(), "PII token-classification model") {
+		t.Fatalf("Arch refusal %q must still explain the arch even for an empty config", err.Error())
+	}
+}
+
+// TestConfig_Arch_Ugly proves Arch performs NO validation at all — even
+// nonsensical negative expert counts are echoed verbatim in the refusal
+// (there is only ever one refusal shape, unconditionally) — distinct from
+// _Bad's zero-value case.
+func TestConfig_Arch_Ugly(t *testing.T) {
+	cfg := Config{NumLocalExperts: -1, NumExpertsPerTok: -1}
+	_, err := cfg.Arch()
+	if err == nil || !core.Contains(err.Error(), "-1") {
+		t.Fatalf("Arch refusal %v must echo even nonsensical negative counts verbatim", err)
+	}
+}
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 640}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 640 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+// TestConfig_InferFromWeights_Bad proves the no-op does not make Arch
+// succeed — Arch always refuses regardless.
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("Arch must still refuse after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op stays inert even given a
+// malformed/weird weights map entry — distinct from _Good's nil-weights case.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{HiddenSize: 640}
+	cfg.InferFromWeights(map[string]safetensors.Tensor{"weird": {}})
+	if cfg.HiddenSize != 640 {
+		t.Fatalf("InferFromWeights changed config on a malformed weights map: %+v", cfg)
 	}
 }

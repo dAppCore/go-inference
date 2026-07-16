@@ -16,3 +16,10 @@ func ExampleConfig_Arch() {
 	core.Println(err != nil)
 	// Output: true
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := Config{HiddenSize: 2880}
+	cfg.InferFromWeights(nil) // no-op: GPT-OSS declares every dim in config.json
+	core.Println(cfg.HiddenSize)
+	// Output: 2880
+}
