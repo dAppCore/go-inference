@@ -608,6 +608,92 @@ func hipGemma4Q4PlanPromptPrefillInto(promptTokens []int32, startPos int, ubatch
 	return plan, plan.Batches, nil
 }
 
+func hipGemma4Q4PlanPromptPrefillSharedSuffixInto(promptTokens []int32, startPos, ubatchTokens, slidingWindow int, batches []hipGemma4Q4PrefillUBatch) (hipGemma4Q4PrefillPlan, []hipGemma4Q4PrefillUBatch, error) {
+	if len(promptTokens) == 0 {
+		return hipGemma4Q4PrefillPlan{}, batches, core.E(hipGemma4Q4Layer0Operation, "prompt prefill requires at least one token", nil)
+	}
+	if startPos < 0 {
+		return hipGemma4Q4PrefillPlan{}, batches, core.E(hipGemma4Q4Layer0Operation, "prompt prefill start position must be non-negative", nil)
+	}
+	if ubatchTokens <= 0 {
+		return hipGemma4Q4PrefillPlan{}, batches, core.E(hipGemma4Q4Layer0Operation, "prompt prefill ubatch size must be positive", nil)
+	}
+	if slidingWindow <= 0 {
+		return hipGemma4Q4PlanPromptPrefillInto(promptTokens, startPos, ubatchTokens, batches)
+	}
+	plan := hipGemma4Q4PrefillPlan{
+		PromptTokens: len(promptTokens),
+		StartPos:     startPos,
+		UBatchTokens: ubatchTokens,
+		OutputTokens: 1,
+	}
+	first := hipGemma4Q4PrefillSharedSuffixChunkLen(startPos, len(promptTokens), ubatchTokens, slidingWindow)
+	if first == len(promptTokens) {
+		plan.BatchCount = 1
+		plan.InlineBatch = hipGemma4Q4PrefillUBatch{
+			End:       len(promptTokens),
+			Position:  startPos,
+			Tokens:    promptTokens,
+			OutputRow: len(promptTokens) - 1,
+		}
+		return plan, batches[:0], nil
+	}
+	capacity := hipGemma4Q4PrefillBatchCount(len(promptTokens), ubatchTokens) + 2
+	if cap(batches) < capacity {
+		batches = make([]hipGemma4Q4PrefillUBatch, 0, capacity)
+	} else {
+		batches = batches[:0]
+	}
+	for start := 0; start < len(promptTokens); {
+		count := hipGemma4Q4PrefillSharedSuffixChunkLen(startPos+start, len(promptTokens)-start, ubatchTokens, slidingWindow)
+		if count <= 0 || count > len(promptTokens)-start {
+			return hipGemma4Q4PrefillPlan{}, batches, core.E(hipGemma4Q4Layer0Operation, "shared-suffix prefill produced an invalid batch", nil)
+		}
+		end := start + count
+		outputRow := -1
+		if end == len(promptTokens) {
+			outputRow = count - 1
+		}
+		batches = append(batches, hipGemma4Q4PrefillUBatch{
+			Start:     start,
+			End:       end,
+			Position:  startPos + start,
+			Tokens:    promptTokens[start:end],
+			OutputRow: outputRow,
+		})
+		start = end
+	}
+	plan.BatchCount = len(batches)
+	plan.Batches = batches
+	return plan, batches, nil
+}
+
+func hipGemma4Q4PrefillSharedSuffixChunkLen(position, remaining, ubatchTokens, slidingWindow int) int {
+	if remaining <= 0 || ubatchTokens <= 0 {
+		return 0
+	}
+	if slidingWindow <= 0 {
+		return min(remaining, ubatchTokens)
+	}
+	if remaining > ubatchTokens {
+		if offset := position % slidingWindow; offset > 0 {
+			aligned := slidingWindow - offset
+			if aligned < remaining && aligned <= ubatchTokens {
+				return aligned
+			}
+		}
+		return ubatchTokens
+	}
+	boundary := (position + remaining) % slidingWindow
+	if boundary == 0 {
+		boundary = slidingWindow
+	}
+	if boundary < remaining {
+		return remaining - boundary
+	}
+	return remaining
+}
+
 // hipGemma4Q4BidirectionalTokenSpans returns the [start,end) runs of image and
 // video placeholder IDs. Adjacent runs of different media token types remain
 // separate so an image cannot attend into the following video block.
@@ -2749,6 +2835,19 @@ func hipGemma4Q4PrefillSharedSuffixStart(sharedSources []int) int {
 		}
 	}
 	return start
+}
+
+func hipGemma4Q4PrefillSharedSuffixWindow(cfg hipGemma4Q4ForwardConfig, suffixStart int) int {
+	if suffixStart <= 0 || suffixStart > len(cfg.Layers) {
+		return 0
+	}
+	window := 0
+	for _, layer := range cfg.Layers[:suffixStart] {
+		if layer.SlidingWindow > 0 && (window == 0 || layer.SlidingWindow < window) {
+			window = layer.SlidingWindow
+		}
+	}
+	return window
 }
 
 func hipRunGemma4Q4PrefillForwardBatch(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, best *hipDeviceByteBuffer) (*hipGemma4Q4PrefillForwardBatch, error) {

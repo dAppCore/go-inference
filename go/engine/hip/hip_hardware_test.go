@@ -3093,20 +3093,41 @@ func TestHIPGemma4Q4PrefillSharedSuffixSkipMatchesFullStack_Good(t *testing.T) {
 		t.Skipf("model has no clean trailing KV-shared suffix: sources=%v", cfg.SharedKVSources)
 	}
 
-	prompt := make([]int32, 1536)
-	for index := range prompt {
-		prompt[index] = []int32{2, 10979}[index&1]
+	prefix := make([]int32, 100)
+	appendTokens := make([]int32, 1000)
+	for index := range prefix {
+		prefix[index] = []int32{2, 10979}[index&1]
+	}
+	for index := range appendTokens {
+		appendTokens[index] = []int32{2, 10979}[index&1]
 	}
 	run := func(disableSkip bool) []int32 {
 		engineConfig := loaded.gemma4Q4EngineConfig()
 		engineConfig.DisablePrefillSharedSuffixSkip = disableSkip
-		stream, streamErr := hipGemma4Q4GenerateTokenSeqWithEngineConfig(
-			context.Background(), loaded, cfg, prompt,
-			inference.GenerateConfig{MaxTokens: 8}, engineConfig,
+		var retained *hipGemma4Q4DeviceDecodeState
+		prefixStream, prefixErr := hipGemma4Q4GenerateTokenSeqWithState(
+			context.Background(), loaded, cfg, prefix,
+			inference.GenerateConfig{MaxTokens: 1}, engineConfig, nil,
+			func(state *hipGemma4Q4DeviceDecodeState) error {
+				retained = state
+				return nil
+			},
+		)
+		for range prefixStream {
+		}
+		if err := prefixErr(); err != nil {
+			t.Fatalf("prefix Generate(disableSkip=%v): %v", disableSkip, err)
+		}
+		if retained == nil {
+			t.Fatalf("prefix Generate(disableSkip=%v) retained no device state", disableSkip)
+		}
+		stream, streamErr := hipGemma4Q4GenerateTokenSeqWithState(
+			context.Background(), loaded, cfg, appendTokens,
+			inference.GenerateConfig{MaxTokens: 8}, engineConfig, retained, nil,
 		)
 		tokens := inferenceTokenIDs(collectInferenceTokens(stream))
 		if err := streamErr(); err != nil {
-			t.Fatalf("Generate(disableSkip=%v): %v", disableSkip, err)
+			t.Fatalf("append Generate(disableSkip=%v): %v", disableSkip, err)
 		}
 		return tokens
 	}

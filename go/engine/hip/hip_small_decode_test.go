@@ -726,6 +726,50 @@ func TestHIPGemma4Q4GenerateTokenSeq_SkipsSharedSuffixOnlyOnNonFinalPrefillChunk
 	core.AssertEqual(t, 6, run(true))
 }
 
+func TestHIPGemma4Q4GenerateTokenSeq_SharedSuffixRealignsRetainedAppend(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layers := make([]hipGemma4Q4Layer0Config, 4)
+	for index := range layers {
+		layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, index, 4, 2, 8)
+		defer cleanup()
+		layer.PerLayerInput = hipGemma4Q4PerLayerInputConfig{}
+		layers[index] = layer
+	}
+	hipGemma4Q4InstallNonzeroEmbeddingFixture(t, driver, &layers[0], "retained shared suffix")
+	cfg := hipGemma4Q4ForwardConfig{
+		Layers:          layers,
+		KVSharedLayers:  2,
+		SharedKVSources: []int{0, 1, 0, 1},
+	}
+	engineConfig := defaultHIPGemma4Q4EngineConfig()
+	engineConfig.DeviceKVMode = rocmKVCacheModeFP16
+	engineConfig.PrefillUBatchTokens = 512
+
+	var retained *hipGemma4Q4DeviceDecodeState
+	prefixStream, prefixErr := hipGemma4Q4GenerateTokenSeqWithState(
+		context.Background(), &hipLoadedModel{driver: driver}, cfg, make([]int32, 100),
+		inference.GenerateConfig{MaxTokens: 1}, engineConfig, nil,
+		func(state *hipGemma4Q4DeviceDecodeState) error {
+			retained = state
+			return nil
+		},
+	)
+	for range prefixStream {
+	}
+	core.RequireNoError(t, prefixErr())
+	core.RequireTrue(t, retained != nil, "prefix should retain device state")
+
+	launchStart := len(driver.launches)
+	appendStream, appendErr := hipGemma4Q4GenerateTokenSeqWithState(
+		context.Background(), &hipLoadedModel{driver: driver}, cfg, make([]int32, 1000),
+		inference.GenerateConfig{MaxTokens: 1}, engineConfig, retained, nil,
+	)
+	for range appendStream {
+	}
+	core.RequireNoError(t, appendErr())
+	core.AssertEqual(t, 3, countLaunchName(driver.launches[launchStart:], hipKernelNameEmbedLookup))
+}
+
 func TestHIPAttachedDrafterTargetPrefillUsesBatchedPath_Good(t *testing.T) {
 	hipDrainAttentionHeadsChunkedWorkspacePoolForTest(t)
 	driver := &fakeHIPDriver{available: true}
@@ -1000,6 +1044,37 @@ func TestHIPGemma4Q4PrefillPlan_Good_SingleBatchInline(t *testing.T) {
 	core.AssertEqual(t, false, batch.OutputToken(0))
 	core.AssertEqual(t, true, batch.OutputToken(1))
 	core.AssertEqual(t, 7, batch.Position)
+}
+
+func TestHIPGemma4Q4PrefillSharedSuffixPlan_MinimizesFinalBoundary(t *testing.T) {
+	tests := []struct {
+		name  string
+		pos   int
+		total int
+		want  []int
+	}{
+		{name: "aligned", total: 1024, want: []int{512, 512}},
+		{name: "one token boundary", total: 1025, want: []int{512, 512, 1}},
+		{name: "short prompt", total: 20, want: []int{20}},
+		{name: "mid window append", pos: 100, total: 1000, want: []int{412, 512, 76}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tokens := make([]int32, test.total)
+			plan, batches, err := hipGemma4Q4PlanPromptPrefillSharedSuffixInto(tokens, test.pos, 512, 512, nil)
+			core.RequireNoError(t, err)
+			core.AssertEqual(t, len(test.want), plan.LenBatches())
+			got := make([]int, 0, plan.LenBatches())
+			for index := 0; index < plan.LenBatches(); index++ {
+				batch := plan.Batch(index)
+				got = append(got, len(batch.Tokens))
+				core.AssertEqual(t, index == plan.LenBatches()-1, batch.OutputRow >= 0)
+			}
+			core.AssertEqual(t, test.want, got)
+			core.AssertEqual(t, plan.Batches, batches)
+		})
+	}
 }
 
 func TestHIPGemma4Q4PrefillPlanInto_ReusesScratch_Good(t *testing.T) {

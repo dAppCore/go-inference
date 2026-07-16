@@ -1158,7 +1158,17 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				}
 			}
 		}
+		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) && !engineConfig.DisableBatchedPrefill
+		prefillSharedSuffix := -1
+		prefillSharedSuffixWindow := 0
+		if useBatchedPrefill && !engineConfig.DisablePrefillSharedSuffixSkip && len(promptEmbeddings) == 0 && len(bidirSpans) == 0 {
+			prefillSharedSuffix = hipGemma4Q4PrefillSharedSuffixStart(hipGemma4Q4SharedKVSourceByLayer(cfg))
+			prefillSharedSuffixWindow = hipGemma4Q4PrefillSharedSuffixWindow(cfg, prefillSharedSuffix)
+		}
 		prefillBatchCapacity := hipGemma4Q4PrefillBatchCount(len(promptTokens), ubatchTokens) + len(bidirSpans)
+		if prefillSharedSuffixWindow > 0 {
+			prefillBatchCapacity += 2
+		}
 		prefillPlanBatches := hipBorrowGemma4Q4PrefillUBatches(prefillBatchCapacity)
 		defer func() {
 			hipReleaseGemma4Q4PrefillUBatches(prefillPlanBatches)
@@ -1166,6 +1176,8 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 		var prefillPlan hipGemma4Q4PrefillPlan
 		if len(bidirSpans) > 0 {
 			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillBidirectionalInto(promptTokens, req.Position, ubatchTokens, bidirSpans, prefillPlanBatches)
+		} else if prefillSharedSuffixWindow > 0 {
+			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillSharedSuffixInto(promptTokens, req.Position, ubatchTokens, prefillSharedSuffixWindow, prefillPlanBatches)
 		} else {
 			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillInto(promptTokens, req.Position, ubatchTokens, prefillPlanBatches)
 		}
@@ -1227,7 +1239,6 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 		// sampled. Sampling used to force the token-at-a-time prefill producer,
 		// flattening 12B logits while preserving many argmaxes. Batched prefill
 		// owns every compatible prompt; the selected sampler consumes its last row.
-		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) && !engineConfig.DisableBatchedPrefill
 		disableBatchedDecode := denseProjectionWeights || engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
 		useBatchedDecode := useBatchedPrefill && !disableBatchedDecode && !deviceCandidateSampling
 		if attentionWorkspace != nil {
@@ -1248,10 +1259,6 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 					runErr = err
 				}
 			}()
-		}
-		prefillSharedSuffix := -1
-		if useBatchedPrefill && !engineConfig.DisablePrefillSharedSuffixSkip && customEmbeddingBuffer == nil {
-			prefillSharedSuffix = hipGemma4Q4PrefillSharedSuffixStart(hipGemma4Q4SharedKVSourceByLayer(cfg))
 		}
 		var priorLayerKVScratch []*rocmDeviceKVCache
 		var priorLayerDescriptorScratch []*rocmDeviceKVDescriptorTable
