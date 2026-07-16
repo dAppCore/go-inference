@@ -4,8 +4,34 @@ package bert
 
 import "testing"
 
-// TestParseConfig_Good decodes a well-formed BertModel config and fills defaults.
-func TestParseConfig_Good(t *testing.T) {
+func TestConfig_HeadDim_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 384, NumAttentionHeads: 12}
+	if got := cfg.HeadDim(); got != 32 {
+		t.Fatalf("HeadDim() = %d, want 32", got)
+	}
+}
+
+// TestConfig_HeadDim_Bad proves the zero-head-count guard: HeadDim returns 0
+// rather than dividing by zero.
+func TestConfig_HeadDim_Bad(t *testing.T) {
+	if got := (Config{}).HeadDim(); got != 0 {
+		t.Fatalf("HeadDim() = %d, want 0 for a zero head count", got)
+	}
+}
+
+// TestConfig_HeadDim_Ugly proves HeadDim itself does NOT validate divisibility
+// — a hidden_size not evenly divisible by heads truncates (integer division)
+// rather than erroring; that guard lives in Config.validate/ParseConfig, not
+// here. Distinct from _Bad's divide-by-zero guard.
+func TestConfig_HeadDim_Ugly(t *testing.T) {
+	cfg := Config{HiddenSize: 10, NumAttentionHeads: 3}
+	if got := cfg.HeadDim(); got != 3 {
+		t.Fatalf("HeadDim() = %d, want 3 (10/3 truncated, HeadDim doesn't itself validate)", got)
+	}
+}
+
+// TestConfig_ParseConfig_Good decodes a well-formed BertModel config and fills defaults.
+func TestConfig_ParseConfig_Good(t *testing.T) {
 	data := []byte(`{
 		"model_type": "bert",
 		"hidden_size": 384,
@@ -69,16 +95,16 @@ func TestParseConfig_Good_Defaults(t *testing.T) {
 	}
 }
 
-// TestParseConfig_Bad_NotDivisible rejects a hidden size the heads cannot split.
-func TestParseConfig_Bad_NotDivisible(t *testing.T) {
+// TestConfig_ParseConfig_Bad rejects a hidden size the heads cannot split.
+func TestConfig_ParseConfig_Bad(t *testing.T) {
 	data := []byte(`{"hidden_size":10,"num_hidden_layers":1,"num_attention_heads":3,"intermediate_size":16,"vocab_size":10,"max_position_embeddings":16,"type_vocab_size":2}`)
 	if _, err := ParseConfig(data); err == nil {
 		t.Fatal("expected an error for hidden_size not divisible by heads")
 	}
 }
 
-// TestParseConfig_Ugly_InvalidJSON surfaces a decode error rather than a zero config.
-func TestParseConfig_Ugly_InvalidJSON(t *testing.T) {
+// TestConfig_ParseConfig_Ugly surfaces a decode error rather than a zero config.
+func TestConfig_ParseConfig_Ugly(t *testing.T) {
 	if _, err := ParseConfig([]byte(`{not json`)); err == nil {
 		t.Fatal("expected a decode error for malformed JSON")
 	}

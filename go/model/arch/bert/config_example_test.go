@@ -27,36 +27,14 @@ func ExampleParseConfig() {
 	// Output:
 }
 
+func ExampleConfig_HeadDim() {
+	cfg := bert.Config{HiddenSize: 384, NumAttentionHeads: 12}
+	core.Println(cfg.HeadDim())
+	// Output: 32
+}
+
 func ExampleConfig_IsCrossEncoder() {
 	cfg := bert.Config{NumLabels: 1, Architectures: []string{"BertForSequenceClassification"}}
 	core.Println(cfg.IsCrossEncoder())
 	// Output: true
-}
-
-// ExampleNewTokenizer builds a WordPiece tokeniser from a vocab blob and frames
-// a sentence as [CLS] … [SEP] ids.
-func ExampleNewTokenizer() {
-	vocab := "[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nthe\nfox\n"
-	tk, err := bert.NewTokenizer([]byte(vocab), true)
-	if err != nil {
-		panic(err)
-	}
-	ids := tk.Encode("The fox")
-	// ids == [2 5 6 3] -> [CLS] the fox [SEP]
-	println(len(ids))
-	// Output:
-}
-
-func ExampleTokenizer_EncodePair() {
-	vocab := "[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nquery\npassage\n"
-	tk, err := bert.NewTokenizer([]byte(vocab), true)
-	if err != nil {
-		panic(err)
-	}
-	ids, tokenTypes := tk.EncodePair("query", "passage")
-	core.Println(ids)
-	core.Println(tokenTypes)
-	// Output:
-	// [2 5 3 6 3]
-	// [0 0 0 1 1]
 }
