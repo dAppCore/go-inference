@@ -174,6 +174,15 @@ block leaves too much score and value work serial per thread; the change was
 removed. Keep the 512-thread GQA8 block unless a new algorithm reduces work as
 well as resources.
 
+K-row subgroup experiments were also rejected. A 32-lane subgroup made each
+row contiguous but serialized chunk traversal and measured 709.7-711.7 us at
+32K. Eight lanes balanced locality and concurrency but still measured
+602.8-605.0 us. Finally, retaining the original lane width and replacing its
+independent-shuffle sum with a dependency-chained tree reached 594.5-598.7 us
+at 32K and improved the 2K microbenchmark by about 1.6%, but regressed the
+stable 8K result from 204-206 us to about 239 us. All three changes were
+removed; preserve the original lane mapping and independent-shuffle sum.
+
 ## DiffusionGemma diagnostic
 
 The cached `mlx-community/diffusiongemma-26B-A4B-it-4bit` model is block
