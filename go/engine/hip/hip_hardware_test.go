@@ -2300,11 +2300,18 @@ func TestHIPHardwareMLXAffineQ4GELUTanh12BRow8MatchesRow16_Good(t *testing.T) {
 
 	previousRoute := hipMLXQ4GELUTanh12BGateUpRouteEnabled
 	previousGeometry := hipMLXQ4GELUTanh12BGateUpGeometry
-	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
 	t.Cleanup(func() {
 		hipMLXQ4GELUTanh12BGateUpRouteEnabled = previousRoute
 		hipMLXQ4GELUTanh12BGateUpGeometry = previousGeometry
 	})
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled = false
+	genericOutput, err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(context.Background(), hipRuntime.driver, gateBuffers.Input, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers))
+	core.RequireNoError(t, err)
+	generic, err := hipReadFloat32DeviceOutput(genericOutput, hipGemma4Q4Layer0Operation, "hardware 12B generic GELU output", rows)
+	genericOutput.Close()
+	core.RequireNoError(t, err)
+
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
 	hipMLXQ4GELUTanh12BGateUpGeometry = ""
 	row16Output, err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(context.Background(), hipRuntime.driver, gateBuffers.Input, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers))
 	core.RequireNoError(t, err)
@@ -2319,6 +2326,7 @@ func TestHIPHardwareMLXAffineQ4GELUTanh12BRow8MatchesRow16_Good(t *testing.T) {
 	row8Output.Close()
 	core.RequireNoError(t, err)
 
+	assertFloat32SlicesNear(t, generic, row8, 0.001)
 	assertFloat32SlicesNear(t, row16, row8, 0.001)
 }
 

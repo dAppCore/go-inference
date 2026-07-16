@@ -1205,10 +1205,13 @@ func TestHIPKernels_MLXAffineQ8G64GELUTanhRow8LaunchConfig_Good(t *testing.T) {
 }
 
 func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpLaunchConfig_Good(t *testing.T) {
-	previous := hipMLXQ4GELUTanh12BGateUpRouteEnabled
+	previousRoute := hipMLXQ4GELUTanh12BGateUpRouteEnabled
+	previousGeometry := hipMLXQ4GELUTanh12BGateUpGeometry
 	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
+	hipMLXQ4GELUTanh12BGateUpGeometry = "row16"
 	t.Cleanup(func() {
-		hipMLXQ4GELUTanh12BGateUpRouteEnabled = previous
+		hipMLXQ4GELUTanh12BGateUpRouteEnabled = previousRoute
+		hipMLXQ4GELUTanh12BGateUpGeometry = previousGeometry
 	})
 
 	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulLaunchArgsBytes)
@@ -1228,6 +1231,14 @@ func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpLaunchConfig_Good(t *testing.
 	disabled, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 32, 4)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, disabled.Name)
+}
+
+func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpDefaults_Good(t *testing.T) {
+	core.AssertEqual(t, true, hipMLXQ4GELUTanh12BGateUpRouteEnabledFromEnv(""))
+	core.AssertEqual(t, true, hipMLXQ4GELUTanh12BGateUpRouteEnabledFromEnv("1"))
+	core.AssertEqual(t, false, hipMLXQ4GELUTanh12BGateUpRouteEnabledFromEnv("0"))
+	core.AssertEqual(t, "row8", hipMLXQ4GELUTanh12BGateUpGeometryFromEnv(""))
+	core.AssertEqual(t, "row16", hipMLXQ4GELUTanh12BGateUpGeometryFromEnv("row16"))
 }
 
 func TestHIPKernels_MLXAffineQ4G64GELUTanh12BGateUpLaunchConfig_Good(t *testing.T) {
@@ -1279,7 +1290,7 @@ func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpRow8LaunchConfig_Good(t *test
 	core.AssertEqual(t, uint32(1920), exact.GridX)
 	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
 
-	hipMLXQ4GELUTanh12BGateUpGeometry = ""
+	hipMLXQ4GELUTanh12BGateUpGeometry = "row16"
 	baseline, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 32, 4)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, baseline.Name)
