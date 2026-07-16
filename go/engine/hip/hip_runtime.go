@@ -398,6 +398,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameAttentionHeadsBatchChunkedStage1,
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA4,
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA8,
 	hipKernelNameAttentionHeadsBatchChunkedStage2,
 	hipKernelNameVectorAddScaled,
 	hipKernelNameVectorScale,

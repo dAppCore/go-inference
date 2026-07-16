@@ -113,6 +113,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`,
 		`extern "C" __global__ void rocm_vector_add`,
 		`extern "C" __global__ void rocm_vector_add_scaled`,
@@ -1040,6 +1041,11 @@ func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testin
 	core.AssertTrue(t, strings.Contains(gqa4Stage1, `quantized_dots[head] += query_values[head][dim] * quantized_key`), "GQA4 stage1 must reuse each K element across four query heads")
 	core.AssertTrue(t, strings.Contains(gqa4Stage1, `const unsigned char packed = values[dim0 >> 1u]`), "GQA4 stage1 must load each packed V pair once")
 	core.AssertTrue(t, strings.Contains(gqa4Stage1, `rocm_attention_heads_batch_chunked_visible_tokens(args, query_row)`), "GQA4 stage1 must share capped K/V scans")
+	gqa8Stage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8`)
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `constexpr uint32_t group_size = 8u`), "GQA8 stage1 must own eight query heads per block")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `quantized_dots[head] += query_values[head][dim] * quantized_key`), "GQA8 stage1 must reuse each K element across eight query heads")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `const unsigned char packed = values[dim0 >> 1u]`), "GQA8 stage1 must load each packed V pair once")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `rocm_attention_heads_batch_chunked_visible_tokens(args, query_row)`), "GQA8 stage1 must share capped K/V scans")
 	batchStage2 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`)
 	core.AssertTrue(t, strings.Contains(batchStage2, `const bool cached_chunk_weights = chunk_count <= threads`), "batch stage2 must cache per-chunk softmax weights when they fit in shared scratch")
 	heads := hipKernelSourceFunctionBodyForTest(t, source, `__device__ void rocm_run_single_head_attention_token_parallel`)
@@ -1141,6 +1147,7 @@ func TestHIPKernelSource_AttentionReductionBlockSizeGuards_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`,
 	} {
 		body := hipKernelSourceFunctionBodyForTest(t, source, marker)

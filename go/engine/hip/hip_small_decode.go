@@ -2835,15 +2835,18 @@ type hipAttentionHeadsBatchChunkedEligibilityReason uint8
 const (
 	hipAttentionHeadsBatchChunkedGQA2DisableEnv = "GO_ROCM_DISABLE_GQA2_CHUNKED_ATTENTION"
 	hipAttentionHeadsBatchChunkedGQA4DisableEnv = "GO_ROCM_DISABLE_GQA4_CHUNKED_ATTENTION"
+	hipAttentionHeadsBatchChunkedGQA8DisableEnv = "GO_ROCM_DISABLE_GQA8_CHUNKED_ATTENTION"
 	hipAttentionHeadsIncrementalGQA2DisableEnv  = "GO_ROCM_DISABLE_INCREMENTAL_GQA2_ATTENTION"
 	hipAttentionHeadsChunkSizeEnv               = "GO_ROCM_ATTENTION_CHUNK_SIZE"
 	hipAttentionHeadsBatchChunkedGQA4MinChunks  = 32
+	hipAttentionHeadsBatchChunkedGQA8MinChunks  = 32
 	hipAttentionHeadsDeepChunkMinTokens         = 16 * 1024
 	hipAttentionHeadsDeepChunkSize              = 128
 )
 
 var hipAttentionHeadsBatchChunkedGQA2Enabled = os.Getenv(hipAttentionHeadsBatchChunkedGQA2DisableEnv) != "1"
 var hipAttentionHeadsBatchChunkedGQA4Enabled = os.Getenv(hipAttentionHeadsBatchChunkedGQA4DisableEnv) != "1"
+var hipAttentionHeadsBatchChunkedGQA8Enabled = os.Getenv(hipAttentionHeadsBatchChunkedGQA8DisableEnv) != "1"
 var hipAttentionHeadsIncrementalGQA2Enabled = os.Getenv(hipAttentionHeadsIncrementalGQA2DisableEnv) != "1"
 var hipAttentionHeadsChunkSize = hipAttentionHeadsConfiguredChunkSize(os.Getenv(hipAttentionHeadsChunkSizeEnv))
 var hipAttentionHeadsChunkSizeExplicit = os.Getenv(hipAttentionHeadsChunkSizeEnv) != ""
@@ -2883,6 +2886,14 @@ func hipAttentionHeadsBatchChunkedGQA4Eligible(headCount, keyHeads, chunkCount i
 	return queryHeadsPerKV >= 4 && queryHeadsPerKV%4 == 0
 }
 
+func hipAttentionHeadsBatchChunkedGQA8Eligible(headCount, keyHeads, chunkCount int) bool {
+	if !hipAttentionHeadsBatchChunkedGQA8Enabled || headCount < 16 || keyHeads <= 0 || headCount%keyHeads != 0 || chunkCount < hipAttentionHeadsBatchChunkedGQA8MinChunks {
+		return false
+	}
+	queryHeadsPerKV := headCount / keyHeads
+	return queryHeadsPerKV >= 8 && queryHeadsPerKV%8 == 0
+}
+
 func hipAttentionHeadsBatchChunkedStage1LaunchConfig(args []byte, queryCount, headCount, keyHeads, chunkCount, chunkSize, dim int) (hipKernelLaunchConfig, error) {
 	name := hipKernelNameAttentionHeadsBatchChunkedStage1
 	stage1HeadRows := queryCount * headCount
@@ -2890,7 +2901,14 @@ func hipAttentionHeadsBatchChunkedStage1LaunchConfig(args []byte, queryCount, he
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}
-	if hipAttentionHeadsBatchChunkedGQA4Eligible(headCount, keyHeads, chunkCount) {
+	if hipAttentionHeadsBatchChunkedGQA8Eligible(headCount, keyHeads, chunkCount) {
+		name = hipKernelNameAttentionHeadsBatchChunkedStage1GQA8
+		stage1HeadRows = queryCount * (headCount / 8)
+		sharedMemBytes, err = hipAttentionHeadsBatchChunkedGQA8SharedMemBytes(chunkSize, dim)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+	} else if hipAttentionHeadsBatchChunkedGQA4Eligible(headCount, keyHeads, chunkCount) {
 		name = hipKernelNameAttentionHeadsBatchChunkedStage1GQA4
 		stage1HeadRows = queryCount * (headCount / 4)
 		sharedMemBytes, err = hipAttentionHeadsBatchChunkedGQA4SharedMemBytes(chunkSize, dim)
@@ -2953,6 +2971,30 @@ func hipAttentionHeadsBatchChunkedGQA4SharedMemBytes(chunkSize, dim int) (uint32
 	}
 	if bytes > math.MaxUint32 {
 		return 0, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "attention GQA4 chunked shared memory byte count is out of uint32 range", nil)
+	}
+	return uint32(bytes), nil
+}
+
+func hipAttentionHeadsBatchChunkedGQA8SharedMemBytes(chunkSize, dim int) (uint32, error) {
+	chunk, err := rocmDeviceKVPositiveUint32("attention GQA8 chunked chunk size", chunkSize)
+	if err != nil {
+		return 0, err
+	}
+	width, err := rocmDeviceKVPositiveUint32("attention GQA8 chunked query dim", dim)
+	if err != nil {
+		return 0, err
+	}
+	bytes := uint64(chunk) * 8 * 4
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 8)
+	bytes += uint64(chunk) * 8
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+	bytes += uint64(chunk) * 4
+	for index := 0; index < 8; index++ {
+		bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+		bytes += uint64(width) * 4
+	}
+	if bytes > math.MaxUint32 {
+		return 0, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "attention GQA8 chunked shared memory byte count is out of uint32 range", nil)
 	}
 	return uint32(bytes), nil
 }

@@ -99,6 +99,7 @@ const (
 	hipKernelNameAttentionHeadsBatchChunkedStage1           = "rocm_attention_heads_batch_chunked_stage1_v2"
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA2       = "rocm_attention_heads_batch_chunked_stage1_gqa2"
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA4       = "rocm_attention_heads_batch_chunked_stage1_gqa4"
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA8       = "rocm_attention_heads_batch_chunked_stage1_gqa8"
 	hipKernelNameAttentionHeadsBatchChunkedStage2           = "rocm_attention_heads_batch_chunked_stage2"
 	hipKernelNameVectorAdd                                  = "rocm_vector_add"
 	hipKernelNameVectorAddScaled                            = "rocm_vector_add_scaled"

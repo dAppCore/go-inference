@@ -3127,6 +3127,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchAttentionHeadsBatchChunked(config.Args, false)
 	case hipKernelNameAttentionHeadsBatchChunkedStage1GQA4:
 		return driver.launchAttentionHeadsBatchChunked(config.Args, false)
+	case hipKernelNameAttentionHeadsBatchChunkedStage1GQA8:
+		return driver.launchAttentionHeadsBatchChunked(config.Args, false)
 	case hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return driver.launchAttentionHeadsBatchChunked(config.Args, true)
 	case hipKernelNameVectorAdd:

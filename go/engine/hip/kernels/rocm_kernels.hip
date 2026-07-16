@@ -15004,6 +15004,350 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4(const 
 	}
 }
 
+// Reuse each K/V scan across eight adjacent query heads while preserving the
+// per-head workspace layout consumed by the generic chunked stage 2 kernel.
+extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_attention_heads_batch_chunked_launch_args &args = *reinterpret_cast<const rocm_attention_heads_batch_chunked_launch_args *>(packet);
+	constexpr uint32_t group_size = 8u;
+	if (!rocm_valid_attention_heads_batch_chunked_args(args) || args.head_count < group_size || args.head_count % group_size != 0u) {
+		return;
+	}
+	const uint32_t query_heads_per_kv = args.head_count / args.key_heads;
+	if (query_heads_per_kv < group_size || query_heads_per_kv % group_size != 0u) {
+		return;
+	}
+	const uint32_t chunk_count = args.chunk_count;
+	const uint32_t groups_per_query = args.head_count / group_size;
+	const uint32_t group_row = blockIdx.x / chunk_count;
+	const uint32_t chunk = blockIdx.x - group_row * chunk_count;
+	const uint32_t query_row = group_row / groups_per_query;
+	const uint32_t group_index = group_row - query_row * groups_per_query;
+	const uint32_t head_base = group_index * group_size;
+	if (query_row >= args.query_count || head_base + group_size > args.head_count || chunk >= chunk_count) {
+		return;
+	}
+	const uint32_t tid = threadIdx.x;
+	const uint32_t threads = blockDim.x;
+	if (threads != ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t kv_head = rocm_attention_kv_head_for_query(head_base, args.head_count, args.key_heads);
+	if (kv_head != rocm_attention_kv_head_for_query(head_base + group_size - 1u, args.head_count, args.key_heads)) {
+		return;
+	}
+	const uint32_t kv_dim_offset = kv_head * args.dim;
+	const uint32_t kv_width = args.key_heads * args.dim;
+
+	float *partials[group_size];
+	float *stats[group_size];
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		const uint32_t row = query_row * args.head_count + head_base + head;
+		partials[head] = reinterpret_cast<float *>(static_cast<uintptr_t>(args.partial_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * args.dim;
+		stats[head] = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * 2u;
+	}
+	const uint32_t visible_tokens = rocm_attention_heads_batch_chunked_visible_tokens(args, query_row);
+	if (visible_tokens == 0u || visible_tokens > args.token_count) {
+		if (tid == 0u) {
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				stats[head][0] = -FLT_MAX;
+				stats[head][1] = 0.0f;
+			}
+		}
+		for (uint32_t dim = tid; dim < args.dim; dim += threads) {
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				partials[head][dim] = 0.0f;
+			}
+		}
+		return;
+	}
+	const uint32_t window_start = args.window_size > 0u && visible_tokens > args.window_size
+		? visible_tokens - args.window_size
+		: 0u;
+	const uint32_t chunk_start = args.chunk_start_token + chunk * args.chunk_size;
+	const uint32_t chunk_end = chunk_start + args.chunk_size < visible_tokens
+		? chunk_start + args.chunk_size
+		: visible_tokens;
+	const uint32_t effective_start = chunk_start < window_start ? window_start : chunk_start;
+	if (chunk_start >= visible_tokens || chunk_end <= window_start || effective_start >= chunk_end) {
+		if (tid == 0u) {
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				stats[head][0] = -FLT_MAX;
+				stats[head][1] = 0.0f;
+			}
+		}
+		for (uint32_t dim = tid; dim < args.dim; dim += threads) {
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				partials[head][dim] = 0.0f;
+			}
+		}
+		return;
+	}
+
+	extern __shared__ unsigned char shared_bytes[];
+	float *scores[group_size];
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		scores[head] = reinterpret_cast<float *>(shared_bytes) + static_cast<uint64_t>(head) * args.chunk_size;
+	}
+	uint64_t value_pointer_offset = rocm_attention_align_shared_offset(static_cast<uint64_t>(group_size) * args.chunk_size * sizeof(float), sizeof(uint64_t));
+	uint64_t value_scale_offset = rocm_attention_align_shared_offset(value_pointer_offset + static_cast<uint64_t>(args.chunk_size) * sizeof(uint64_t), sizeof(float));
+	uint64_t query_cache_offset = rocm_attention_align_shared_offset(value_scale_offset + static_cast<uint64_t>(args.chunk_size) * sizeof(float), sizeof(float));
+	uint64_t *value_pointers = reinterpret_cast<uint64_t *>(shared_bytes + value_pointer_offset);
+	float *value_scales = reinterpret_cast<float *>(shared_bytes + value_scale_offset);
+	float *query_values[group_size];
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		query_values[head] = reinterpret_cast<float *>(shared_bytes + query_cache_offset + static_cast<uint64_t>(head) * args.dim * sizeof(float));
+	}
+	__shared__ float scratch[ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE];
+	__shared__ float value_scratch1[ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE];
+	__shared__ float shared_max_scores[group_size];
+	__shared__ float shared_sums[group_size];
+
+	const float *queries[group_size];
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		const uint32_t row = query_row * args.head_count + head_base + head;
+		queries[head] = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.query_pointer)) + static_cast<uint64_t>(row) * args.dim;
+	}
+	const float requested_scale = rocm_float_from_bits(args.scale_bits);
+	const float scale = requested_scale == 0.0f ? 1.0f / sqrtf(static_cast<float>(args.dim)) : requested_scale;
+	const rocm_device_kv_descriptor_header *device_kv_header = reinterpret_cast<const rocm_device_kv_descriptor_header *>(static_cast<uintptr_t>(args.descriptor_pointer));
+	const unsigned char *device_kv_base = reinterpret_cast<const unsigned char *>(device_kv_header);
+	const bool direct_kq8vq4_token_pages =
+		device_kv_header != nullptr &&
+		device_kv_header->block_size == 1u &&
+		device_kv_header->page_count == args.token_count &&
+		device_kv_header->mode_code == ROCM_DEVICE_KV_DESCRIPTOR_MODE_KQ8VQ4;
+
+	if (tid < args.dim) {
+		for (uint32_t head = 0u; head < group_size; ++head) {
+			query_values[head][tid] = queries[head][tid];
+		}
+	}
+	__syncthreads();
+
+	float local_max_scores[group_size];
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		local_max_scores[head] = -FLT_MAX;
+	}
+	const uint32_t local_count = chunk_end - effective_start;
+	const uint32_t score_lanes = args.chunk_size <= threads && (threads % args.chunk_size) == 0u
+		? threads / args.chunk_size
+		: 1u;
+	if (score_lanes > 1u && score_lanes <= 8u && (score_lanes & (score_lanes - 1u)) == 0u && args.dim >= score_lanes) {
+		const uint32_t local = tid / score_lanes;
+		const uint32_t lane = tid - local * score_lanes;
+		float partial_dots[group_size];
+		for (uint32_t head = 0u; head < group_size; ++head) {
+			partial_dots[head] = 0.0f;
+		}
+		uint64_t key_pointer = 0u;
+		float key_scale = 0.0f;
+		uint64_t value_pointer = 0u;
+		float value_scale = 0.0f;
+		uint32_t page_valid = 0u;
+		if (local < local_count && lane == 0u) {
+			const uint32_t token = effective_start + local;
+			const rocm_device_kv_page_descriptor *page = direct_kq8vq4_token_pages
+				? reinterpret_cast<const rocm_device_kv_page_descriptor *>(device_kv_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + token * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES)
+				: rocm_attention_heads_batch_chunked_device_kv_page(args, token);
+			if (direct_kq8vq4_token_pages) {
+				page_valid = page != nullptr && page->key_pointer != 0u && page->value_pointer != 0u ? 1u : 0u;
+			} else {
+				page_valid = rocm_attention_kq8vq4_page_valid(page, token, kv_width) ? 1u : 0u;
+			}
+			if (page_valid != 0u) {
+				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
+				const unsigned char *key_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->key_pointer));
+				const uint64_t key_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->key_encoding)) ? 0u : local_token * page->key_width;
+				key_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token))) + key_base + kv_dim_offset;
+				key_scale = rocm_device_kv_row_scale(key_bytes, page->key_encoding, local_token, page->key_width);
+				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
+				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
+				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
+			}
+		}
+		page_valid = rocm_shfl_u32(page_valid, 0, static_cast<int>(score_lanes));
+		key_pointer = rocm_shfl_u64(key_pointer, 0, static_cast<int>(score_lanes));
+		key_scale = rocm_shfl_float(key_scale, 0, static_cast<int>(score_lanes));
+		if (local < local_count && page_valid != 0u) {
+			const int8_t *key_values = reinterpret_cast<const int8_t *>(static_cast<uintptr_t>(key_pointer));
+			float quantized_dots[group_size];
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				quantized_dots[head] = 0.0f;
+			}
+			for (uint32_t dim = lane; dim < args.dim; dim += score_lanes) {
+				const float quantized_key = static_cast<float>(key_values[dim]);
+				for (uint32_t head = 0u; head < group_size; ++head) {
+					quantized_dots[head] += query_values[head][dim] * quantized_key;
+				}
+			}
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				partial_dots[head] = quantized_dots[head] * key_scale;
+			}
+		}
+		for (uint32_t head = 0u; head < group_size; ++head) {
+			float dot = partial_dots[head];
+			for (uint32_t score_lane = 1u; score_lane < score_lanes; ++score_lane) {
+				dot += rocm_shfl_down(partial_dots[head], score_lane, static_cast<int>(score_lanes));
+			}
+			if (lane == 0u && local < local_count) {
+				float score = -FLT_MAX;
+				if (page_valid != 0u) {
+					score = dot * scale;
+					if (score > local_max_scores[head]) {
+						local_max_scores[head] = score;
+					}
+				}
+				scores[head][local] = score;
+			}
+		}
+		if (lane == 0u && local < local_count) {
+			value_pointers[local] = value_pointer;
+			value_scales[local] = value_scale;
+		}
+	} else {
+		for (uint32_t local = tid; local < local_count; local += threads) {
+			const uint32_t token = effective_start + local;
+			const rocm_device_kv_page_descriptor *page = direct_kq8vq4_token_pages
+				? reinterpret_cast<const rocm_device_kv_page_descriptor *>(device_kv_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + token * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES)
+				: rocm_attention_heads_batch_chunked_device_kv_page(args, token);
+			const bool page_valid = direct_kq8vq4_token_pages
+				? page != nullptr && page->key_pointer != 0u && page->value_pointer != 0u
+				: rocm_attention_kq8vq4_page_valid(page, token, kv_width);
+			uint64_t value_pointer = 0u;
+			float value_scale = 0.0f;
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				scores[head][local] = -FLT_MAX;
+			}
+			if (page_valid) {
+				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
+				const unsigned char *key_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->key_pointer));
+				const uint64_t key_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->key_encoding)) ? 0u : local_token * page->key_width;
+				const int8_t *key_values = reinterpret_cast<const int8_t *>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token)) + key_base + kv_dim_offset);
+				const float key_scale = rocm_device_kv_row_scale(key_bytes, page->key_encoding, local_token, page->key_width);
+				float quantized_dots[group_size];
+				for (uint32_t head = 0u; head < group_size; ++head) {
+					quantized_dots[head] = 0.0f;
+				}
+				for (uint32_t dim = 0u; dim < args.dim; ++dim) {
+					const float quantized_key = static_cast<float>(key_values[dim]);
+					for (uint32_t head = 0u; head < group_size; ++head) {
+						quantized_dots[head] += query_values[head][dim] * quantized_key;
+					}
+				}
+				for (uint32_t head = 0u; head < group_size; ++head) {
+					const float score = quantized_dots[head] * key_scale * scale;
+					scores[head][local] = score;
+					if (score > local_max_scores[head]) {
+						local_max_scores[head] = score;
+					}
+				}
+				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
+				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
+				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
+			}
+			value_pointers[local] = value_pointer;
+			value_scales[local] = value_scale;
+		}
+	}
+	__syncthreads();
+
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		const float max_score = rocm_attention_block_reduce_max(local_max_scores[head], scratch);
+		if (tid == 0u) {
+			shared_max_scores[head] = max_score;
+		}
+		__syncthreads();
+	}
+
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		float local_sum = 0.0f;
+		for (uint32_t local = tid; local < local_count; local += threads) {
+			float value = 0.0f;
+			if (shared_max_scores[head] > -FLT_MAX && scores[head][local] > -FLT_MAX) {
+				value = rocm_fast_expf(scores[head][local] - shared_max_scores[head]);
+				local_sum += value;
+			}
+			scores[head][local] = value;
+		}
+		const float sum = rocm_attention_block_reduce_sum(local_sum, scratch);
+		if (tid == 0u) {
+			shared_sums[head] = sum;
+			stats[head][0] = shared_max_scores[head];
+			stats[head][1] = sum;
+		}
+		__syncthreads();
+	}
+
+	const uint32_t dim_pair_count = (args.dim + 1u) >> 1u;
+	const uint32_t value_groups = dim_pair_count == 0u ? 0u : threads / dim_pair_count;
+	const uint32_t dim_pair = dim_pair_count == 0u ? 0u : tid % dim_pair_count;
+	const uint32_t group = dim_pair_count == 0u ? 0u : tid / dim_pair_count;
+	const uint32_t dim0 = dim_pair << 1u;
+	const uint32_t dim1 = dim0 + 1u;
+	float head_partials0[group_size];
+	float head_partials1[group_size];
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		head_partials0[head] = 0.0f;
+		head_partials1[head] = 0.0f;
+	}
+	if (value_groups > 0u && group < value_groups && dim0 < args.dim) {
+		for (uint32_t local = group; local < local_count; local += value_groups) {
+			const uint64_t value_pointer = value_pointers[local];
+			if (value_pointer == 0u) {
+				continue;
+			}
+			const unsigned char *values = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(value_pointer));
+			const unsigned char packed = values[dim0 >> 1u];
+			int quantized0 = static_cast<int>(packed & 0x0fu);
+			if (quantized0 >= 8) {
+				quantized0 -= 16;
+			}
+			int quantized1 = static_cast<int>((packed >> 4) & 0x0fu);
+			if (quantized1 >= 8) {
+				quantized1 -= 16;
+			}
+			const float value_scale = value_scales[local];
+			for (uint32_t head = 0u; head < group_size; ++head) {
+				if (shared_sums[head] <= 0.0f) {
+					continue;
+				}
+				const float weighted_scale = scores[head][local] * value_scale;
+				head_partials0[head] += weighted_scale * static_cast<float>(quantized0);
+				if (dim1 < args.dim) {
+					head_partials1[head] += weighted_scale * static_cast<float>(quantized1);
+				}
+			}
+		}
+	}
+
+	for (uint32_t head = 0u; head < group_size; ++head) {
+		scratch[tid] = head_partials0[head];
+		value_scratch1[tid] = head_partials1[head];
+		__syncthreads();
+		if (tid < dim_pair_count) {
+			float out0 = 0.0f;
+			float out1 = 0.0f;
+			for (uint32_t value_group = 0u; value_group < value_groups; ++value_group) {
+				out0 += scratch[value_group * dim_pair_count + tid];
+				out1 += value_scratch1[value_group * dim_pair_count + tid];
+			}
+			partials[head][tid << 1u] = out0;
+			const uint32_t output_dim = (tid << 1u) + 1u;
+			if (output_dim < args.dim) {
+				partials[head][output_dim] = out1;
+			}
+		}
+		__syncthreads();
+	}
+}
+
+
 extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2(const unsigned char *packet)
 {
 	if (packet == nullptr) {

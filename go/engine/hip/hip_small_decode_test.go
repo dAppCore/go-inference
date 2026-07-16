@@ -3349,6 +3349,23 @@ func TestHIPAttentionHeadsBatchChunkedGQA4Eligible_Good(t *testing.T) {
 	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks), "disabled route must stay on GQA2 or v2")
 }
 
+func TestHIPAttentionHeadsBatchChunkedGQA8Eligible_Good(t *testing.T) {
+	previous := hipAttentionHeadsBatchChunkedGQA8Enabled
+	hipAttentionHeadsBatchChunkedGQA8Enabled = true
+	t.Cleanup(func() {
+		hipAttentionHeadsBatchChunkedGQA8Enabled = previous
+	})
+
+	core.AssertTrue(t, hipAttentionHeadsBatchChunkedGQA8Eligible(16, 1, hipAttentionHeadsBatchChunkedGQA8MinChunks), "12B global heads must share one scan across groups of eight")
+	core.AssertTrue(t, hipAttentionHeadsBatchChunkedGQA8Eligible(16, 2, hipAttentionHeadsBatchChunkedGQA8MinChunks), "26B global heads must share one scan across groups of eight")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA8Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA8MinChunks), "the frozen E2B route must stay on GQA4")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA8Eligible(16, 1, hipAttentionHeadsBatchChunkedGQA8MinChunks-1), "short scans must stay on GQA4")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA8Eligible(16, 3, hipAttentionHeadsBatchChunkedGQA8MinChunks), "invalid GQA topology must stay on its existing route")
+
+	hipAttentionHeadsBatchChunkedGQA8Enabled = false
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA8Eligible(16, 1, hipAttentionHeadsBatchChunkedGQA8MinChunks), "disabled route must stay on GQA4")
+}
+
 func TestHIPAttentionHeadsConfiguredChunkSize_Good(t *testing.T) {
 	for _, test := range []struct {
 		value string
