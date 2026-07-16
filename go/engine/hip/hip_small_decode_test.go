@@ -587,6 +587,27 @@ func TestHIPGemma4Q4GenerateTokenSeq_UsesBatchedPrefill_Good(t *testing.T) {
 	wantGreedySlots := hipProjectionGreedyRoundFirstSlabSlots(hipProjectionGreedyReserveSlots + 4)
 	core.AssertEqual(t, 1, countUint64Value(driver.allocations[allocStart:], uint64(wantGreedySlots*hipMLXQ4ProjectionBestBytes)))
 
+	start = len(driver.launches)
+	stream, streamErr = hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), &hipLoadedModel{driver: driver}, cfg, []int32{0, 1, 0}, inference.GenerateConfig{
+		MaxTokens:      2,
+		Temperature:    1,
+		TemperatureSet: true,
+		TopK:           2,
+		TopKSet:        true,
+		TopP:           0.95,
+		TopPSet:        true,
+		RepeatPenalty:  1,
+	}, engineConfig)
+	generated = nil
+	for token := range stream {
+		generated = append(generated, token)
+	}
+	core.RequireNoError(t, streamErr())
+	core.AssertEqual(t, 2, len(generated))
+	launches = driver.launches[start:]
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4ProjGreedy))
+	core.AssertEqual(t, 2, countLaunchName(launches, hipKernelNameMLXQ4ProjScores))
+
 	engineConfig.BidirectionalSpanTokens = [2]int32{1, 0}
 	start = len(driver.launches)
 	stream, streamErr = hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), &hipLoadedModel{driver: driver}, cfg, []int32{0, 1, 1, 0}, inference.GenerateConfig{MaxTokens: 1}, engineConfig)
@@ -823,6 +844,69 @@ func TestHIPAttachedDrafterTargetPrefillUsesBatchedPath_Good(t *testing.T) {
 	}
 	if finalGreedyLaunches := countLaunchName(launches, hipKernelNameMLXQ4ProjGreedy); finalGreedyLaunches == 0 {
 		t.Fatalf("attached target prefill launched final_greedy=%d, want final greedy projection", finalGreedyLaunches)
+	}
+}
+
+func TestHIPAttachedDrafterTargetAdvanceOne_SkipGreedyReturnsHidden(t *testing.T) {
+	hipDrainAttentionHeadsChunkedWorkspacePoolForTest(t)
+	driver := &fakeHIPDriver{available: true}
+	layer0, cleanup0 := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup0()
+	layer1, cleanup1 := hipGemma4Q4FixtureConfig(t, driver, 1, 4, 2, 8)
+	defer cleanup1()
+	hipGemma4Q4InstallNonzeroEmbeddingFixture(t, driver, &layer0, "sampled target advance")
+	layers, cleanupPerLayer := hipGemma4Q4GlobalPerLayerInputFixture(t, driver, []hipGemma4Q4Layer0Config{layer0, layer1})
+	defer cleanupPerLayer()
+	cfg := hipGemma4Q4ForwardConfig{Layers: layers}
+	engineConfig := defaultHIPGemma4Q4EngineConfig()
+	engineConfig.PrefillUBatchTokens = 2
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+	workspace.EnsureProjectionGreedyBestCapacity(4)
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(driver)
+	core.RequireNoError(t, err)
+
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward: cfg,
+		DeviceKVMode:  rocmKVCacheModeKQ8VQ4,
+		EngineConfig:  engineConfig,
+		InputTokenIDs: []int32{0, 1, 0},
+		Epsilon:       1e-6,
+		GreedyBuffer:  greedyBuffer,
+		Workspace:     workspace,
+	})
+	core.RequireNoError(t, err)
+	defer hipReleaseForwardDeviceFinalHidden(&prefill.Current)
+	prior := prefill.DeviceState
+	prefill.DeviceState = nil
+
+	start := len(driver.launches)
+	advanced, err := hipRunAttachedDrafterTargetAdvanceOneBatch(context.Background(), driver, hipAttachedDrafterTargetAdvanceOneRequest{
+		TargetForward:    cfg,
+		DeviceKVMode:     rocmKVCacheModeKQ8VQ4,
+		EngineConfig:     engineConfig,
+		PriorDeviceState: prior,
+		TokenID:          0,
+		Position:         prefill.Position,
+		Epsilon:          1e-6,
+		GreedyBuffer:     greedyBuffer,
+		Workspace:        workspace,
+		ReturnHidden:     true,
+		SkipGreedy:       true,
+	})
+	core.RequireNoError(t, err)
+	defer advanced.Close()
+
+	if advanced.Current.DeviceFinalHidden == nil || advanced.Current.DeviceFinalHidden.Pointer() == 0 {
+		t.Fatal("sampled target advance did not return final hidden state")
+	}
+	if advanced.Current.GreedyDevice != nil {
+		t.Fatal("sampled target advance returned an unused greedy device result")
+	}
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4ProjGreedy))
+	if batchProjectionLaunches := countLaunchName(launches, hipKernelNameMLXQ4ProjBatch); batchProjectionLaunches == 0 {
+		t.Fatal("sampled target advance skipped the transformer body")
 	}
 }
 

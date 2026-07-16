@@ -1359,7 +1359,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 			}
 			outputTokens := ubatch.OutputTokens
 			outputRow := ubatch.OutputRow
-			if denseProjectionWeights {
+			if denseProjectionWeights || hostSampling {
 				outputTokens = nil
 				outputRow = -1
 			}
@@ -1395,7 +1395,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				}
 				haveCurrent = true
 			}
-			if hostSampling || denseDeviceGreedy {
+			if (hostSampling || denseDeviceGreedy) && ubatch.OutputRow >= 0 {
 				outputRow := ubatch.OutputRow
 				if outputRow < 0 {
 					outputRow = len(ubatch.Tokens) - 1
@@ -1484,6 +1484,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 					GreedyBuffer:     finalGreedyBuffer,
 					Workspace:        attentionWorkspace,
 					ReturnHidden:     hostSampling,
+					SkipGreedy:       hostSampling,
 				})
 				if err != nil {
 					runErr = err
