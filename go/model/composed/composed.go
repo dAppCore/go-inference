@@ -241,6 +241,16 @@ var MLPDevice func(gate, up, down, x []float32, L, D, FF int) ([]float32, error)
 // exactly this tail, so the backend primitive is named for the op, not for this stack.
 var ResidualNormMLPDevice func(h, mixOut, normW, gate, up, down []float32, L, D, FF int, eps float32) ([]float32, error)
 
+// ResidualNormMLPQuantDevice is ResidualNormMLPDevice's PACKED-weight twin (#8-B): the same fused
+// pre-norm FFN tail — mixer residual, post-attn RMSNorm, SwiGLU MLP, MLP residual in ONE command
+// buffer — with gate/up/down consumed as the checkpoint's own affine-packed codes (model.QuantWeight,
+// never widened). This is the fold the quant bypass in forwardEmb could not take: without it a packed
+// layer pays three separate quant-seam round trips (gate, up, down) bracketed by host glue. Residuals
+// are plain adds, so the wiring only routes here at residualScale == 1 (the Qwen hybrids); nil — or a
+// MoE FFN, a sub-floor shape, or a scaled-residual arch — keeps the host tail. Same AX-8 shape as the
+// f32 hook: composed declares, the engine binds.
+var ResidualNormMLPQuantDevice func(h, mixOut, normW []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32) ([]float32, error)
+
 // ResidualNormMLPProjDevice is ResidualNormMLPDevice with the mixer's FINAL projection (attention o_proj /
 // gated-delta out_proj) folded onto the front: given the mixer's pre-projection hidden mixerHidden [L,mixCols]
 // and that projection's weight projW [D,mixCols], it computes mixOut = mixerHidden@projWᵀ, then the same
@@ -522,18 +532,27 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 		}
 
 		if s.m.Quantised {
-			// Packed checkpoint: the fused device tails (ResidualNormMLPProj*Device) take f32 weights and
-			// are a later slice, so run the plain per-projection path — the mixer's own Forward (its q/k/v/o
-			// or in_proj/out_proj dispatch to the quant matvec seam) then the host FFN tail: MLP.forward
-			// dispatches gate/up/down to the seam too, and a MoE FFN's routed + shared experts dispatch
-			// packed experts through it per swigluExpertQuantInto (moe.go). The big matmuls still hit the
-			// device quant kernels; only the tail-fusion optimisation is skipped (correctness first).
+			// Packed checkpoint: the mixer's own Forward (its q/k/v/o or in_proj/out_proj dispatch to the
+			// quant matvec seam) then the FFN tail. The tail rides the fused packed-weight device fold
+			// (ResidualNormMLPQuantDevice — residual + norm + SwiGLU-over-codes + residual in ONE command
+			// buffer, #8-B) when the layer is a plain packed SwiGLU at residual scale 1; a MoE FFN (its
+			// routed + shared experts dispatch packed experts per swigluExpertQuantInto), a sub-floor
+			// shape, a scaled-residual arch or a device decline keeps the host tail, whose gate/up/down
+			// dispatch to the per-projection seam exactly as before.
 			normed := rmsNormRowsPlain(h, layer.InputNorm, L, D, eps)
 			mixOut, next, err := layer.Mixer.Forward(normed, L, D, s.states[li])
 			if err != nil {
 				return nil, err
 			}
 			s.states[li] = next
+			if mlp, ok := layer.MLP.(*MLP); ok && ResidualNormMLPQuantDevice != nil &&
+				mlp.GateQ != nil && mlp.UpQ != nil && mlp.DownQ != nil &&
+				s.m.residualScale() == 1 && L*D*mlp.FF >= deviceMinWork {
+				if y, derr := ResidualNormMLPQuantDevice(h, mixOut, layer.PostAttnNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, L, D, mlp.FF, eps); derr == nil {
+					h = y
+					continue
+				}
+			}
 			h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps, s.m.residualScale())
 			continue
 		}

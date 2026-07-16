@@ -102,10 +102,13 @@ func TestComposedDecodeRoundTripCensus(t *testing.T) {
 	// A PACKED checkpoint serves through the quant matvec seam, bypassing the f32 fold ladder above (which
 	// stays all-zero by design — quant fused tails are a later slice), so count it as the engaged seam.
 	quant := c.QuantProjection.Decode
-	t.Logf("  QUANT seam (packed-weight matvec, bypasses f32 folds) = %d", quant)
-	t.Logf("  TOTALS: fused=%d  unfused=%d  quant=%d  (device-seam CBs per decode token)", fused, unfused, quant)
+	quantTail := c.QuantResidualTail.Decode
+	t.Logf("  QUANT seams (packed-weight lanes):")
+	t.Logf("    QuantResidualTail (fused tail over codes, #8-B)  = %d", quantTail)
+	t.Logf("    QuantProjection   (per-projection fall-through)  = %d", quant)
+	t.Logf("  TOTALS: fused=%d  unfused=%d  quantTail=%d  quantProj=%d  (device-seam CBs per decode token)", fused, unfused, quantTail, quant)
 
-	if fused+unfused+quant == 0 {
+	if fused+unfused+quant+quantTail == 0 {
 		t.Fatalf("decode engaged NO composed device seam — floor knocked the whole token to host? census=%+v", c)
 	}
 }

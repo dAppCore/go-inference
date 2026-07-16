@@ -32,6 +32,9 @@ import (
 func init() {
 	composed.ProjQuantMatMulInto = MatMulQuantF32NTInto
 	qwen3.ProjQuantMatMulInto = MatMulQuantF32NTInto
+	// #8-B slice 1: the packed-weight FFN-tail fold — residual + norm + SwiGLU-over-codes +
+	// residual in ONE command buffer where the bypass paid three quant-seam round trips.
+	composed.ResidualNormMLPQuantDevice = ResidualNormMLPQuantDevice
 }
 
 // MatMulQuantF32NTInto computes out[M,N] = x[M,K] @ dequant(w)ᵀ for an MLX affine-packed weight with f32
