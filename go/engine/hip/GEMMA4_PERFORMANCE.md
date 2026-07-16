@@ -17,7 +17,7 @@ discrete card is measured.
 | GPU | AMD Radeon RX 7800 XT, gfx1100, 16,368 MiB reported VRAM |
 | CPU / RAM | AMD Ryzen 9 9950X / 128 GB |
 | ROCm | 7.2.26015 |
-| go-inference | `845e43540f02d62519c3c886ed5ee0039bf69f80` |
+| go-inference | `50372990b5dde3b82612c4e92208d5d24023f90b` |
 | llama.cpp oracle | `c7d8722922a2599dc4d77f8808d8e6c2fde5e7a2` |
 
 ## Short-context board
@@ -34,7 +34,7 @@ numerical parity comparison against Q4_K_M.
 | E2B | **159.5** | 138.7 | 5,611.78 | 150.25 | -7.7% | native lane frozen above 100 tok/s |
 | E4B | 79.88 | **82.17** | 3,202.18 | 94.61 | -13.2% | active short-context gap |
 | 12B | **53.74** | 36.93 | 1,425.00 | 50.20 | -26.4% | native floor met; Q4_K path remains active |
-| 26B-A4B | n/a | **56.67** | 806.55 | 62.25 | -9.0% | 50 tok/s floor met; context sweep pending |
+| 26B-A4B | n/a | **56.80** | 806.55 | 62.25 | -8.8% | 50 tok/s floor met; deep-context row remains active |
 
 Native HIP artifacts are `mlx-community/gemma-4-e2b-it-4bit`,
 `lmstudio-community/gemma-4-E4B-it-MLX-4bit`, and
@@ -63,8 +63,9 @@ synthesis; the same 12B GGUF completes `tg512` instead of returning
 
 ## Context growth
 
-These HIP receipts use a prompt of `context - 512` tokens followed by `tg512`.
-They are not the same geometry as the short-context llama.cpp rows above.
+The established E4B and 12B HIP receipts use a prompt of `context - 512`
+tokens followed by `tg512`. They are not the same geometry as the
+short-context llama.cpp rows above.
 
 | target | 2K | 4K | 8K | 12K | 32K | 2K to 32K loss |
 |---|---:|---:|---:|---:|---:|---:|
@@ -74,6 +75,35 @@ They are not the same geometry as the short-context llama.cpp rows above.
 E4B's 32K receipt and 12B's 8K/32K receipts also passed exact state
 continuation. Preserve that state/continuity check whenever a context row is
 updated.
+
+### 26B-A4B retained-depth decode
+
+These rows separate decode from cold prefill. llama.cpp prefills its depth
+outside the `tg512` timer. HIP materialises the same `context - 512` retained
+depth through an engine session, then times only the following 512 non-MTP
+tokens. Both engines use the same `UD-Q4_K_M` GGUF. llama.cpp holds one
+32K-capable placement plan across the sweep with `--fit-target 512 --fit-ctx
+32768`.
+
+| engine / revision | 2K | 4K | 8K | 12K | 32K | 2K to 32K loss |
+|---|---:|---:|---:|---:|---:|---:|
+| llama.cpp `c7d8722` | 59.58 | 56.74 | 56.05 | 55.56 | 51.17 | 14.1% |
+| HIP before wide incremental GQA | 56.14 | 54.48 | 50.93 | 47.86 | not run | n/a |
+| HIP `50372990` | **56.67** | **56.06** | **54.71** | **53.66** | **49.37** | **12.9%** |
+
+`50372990` connects the already-validated grouped batch-attention path to
+single-token decode for 16-head GQA lanes. At 32K, the existing GQA8 kernel
+measures 0.594 ms per 26B global-attention call versus 1.916 ms for the generic
+per-head scan, a 3.23x kernel improvement. Whole-model gains grow with depth:
+0.9% at 2K, 2.9% at 4K, 7.4% at 8K, and 12.1% at 12K. The 4K, 8K, 12K, and
+32K receipts each used 2,560 GQA8 launches and zero old per-head launches.
+
+The 32K result is 3.5% behind llama.cpp and misses the 50 tok/s requirement by
+0.63 tok/s, so it remains active work. Its expert cache retained 1,814 entries
+and 7,005,408,256 bytes; the timed decode saw 530 misses, 105 evictions, and
+1,971,932,160 host-to-device bytes. The complete 32K test took 563.5 seconds,
+including model load, cold state materialisation, `tg512`, and teardown. Do not
+present that wall time as decode latency or as an isolated prefill measurement.
 
 ## DiffusionGemma diagnostic
 
@@ -109,3 +139,28 @@ HIP_VISIBLE_DEVICES=0 llama-bench -m "$GGUF" \
 ```
 
 Add `-fitt 512 -fitc 1024` for the 26B-A4B row.
+
+llama.cpp retained-depth 26B sweep:
+
+```sh
+HIP_VISIBLE_DEVICES=0 llama-bench -m "$GGUF" \
+  -p 0 -n 512 -d 1536,3584,7680,11776,32256 \
+  -r 3 -ngl 999 -sm none -dev ROCm0 -fa on -t 16 \
+  -fitt 512 -fitc 32768 -o json
+```
+
+HIP retained-depth row, where `$DEPTH` is one less than the llama.cpp depth so
+the untimed materialisation token lands on the same boundary:
+
+```sh
+HIP_VISIBLE_DEVICES=0 \
+GO_ROCM_RUN_RETAINED_DEPTH_BENCHMARK=1 \
+GO_ROCM_PRODUCTION_MODEL_PATH="$GGUF" \
+GO_ROCM_KERNEL_HSACO="$HSACO" \
+GO_ROCM_RETAINED_DEPTH_TOKENS="$DEPTH" \
+GO_ROCM_RETAINED_DEPTH_DECODE_TOKENS=512 \
+GO_ROCM_RETAINED_DEPTH_CONTEXT_LEN="$CONTEXT" \
+go test ./engine/hip -run '^$' \
+  -bench '^BenchmarkInferenceGemma4Q4RetainedDepthDecode$' \
+  -benchtime=1x -count=1
+```
