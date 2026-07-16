@@ -63,7 +63,7 @@ func TestTinyStableLMForward_Good(t *testing.T) {
 }
 
 // Source: https://huggingface.co/stabilityai/stablelm-2-12b/blob/main/model.safetensors.index.json
-func TestRegister_WeightIndex_Good(t *testing.T) {
+func TestRegister_WeightMap_Good(t *testing.T) {
 	b := core.ReadFile(core.PathJoin("testdata", "stabilityai-stablelm-2-12b-index-receipt.json"))
 	if !b.OK {
 		t.Fatal("read index receipt")

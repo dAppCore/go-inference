@@ -81,7 +81,7 @@ func submitReq(t *testing.T, e *batchEngine, id string, promptTokens, maxNew int
 
 // TestBatch_Submit_Good: several requests admitted together each stream their
 // own tokens to completion, in order.
-func TestBatch_Submit_Good(t *testing.T) {
+func TestBatch_Submit_DrainScheduled_Good(t *testing.T) {
 	e := newBatchEngine(nil, Config{MaxConcurrent: 4, MaxQueue: 8, StreamBuffer: 8})
 	defer e.close()
 

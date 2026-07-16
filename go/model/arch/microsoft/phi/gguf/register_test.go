@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestRegister_Phi3QuantizeLane_Good(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Good(t *testing.T) {
 	root := t.TempDir()
 	if r := core.WriteFile(core.PathJoin(root, "tokenizer.json"), []byte(`{"model":{"vocab":{"a":0},"merges":[]}}`), 0o600); !r.OK {
 		t.Fatal(r.Err())
@@ -31,12 +31,12 @@ func TestRegister_Phi3QuantizeLane_Good(t *testing.T) {
 		t.Fatalf("architecture = %v", meta[0].Value)
 	}
 }
-func TestRegister_Phi3QuantizeLane_Bad(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Bad(t *testing.T) {
 	if basegguf.NewTransformerQuantizeLane(phiSpec).Detect([]byte(`{"model_type":"phi"}`)) {
 		t.Fatal("Phi-2 detected as Phi-3")
 	}
 }
-func TestRegister_Phi3QuantizeLane_Ugly(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Ugly(t *testing.T) {
 	if basegguf.NewTransformerQuantizeLane(phiSpec).SupportsFormat("") {
 		t.Fatal("empty format supported")
 	}

@@ -62,7 +62,7 @@ func TestMountAdminHandlers_NilMux_Bad(t *testing.T) {
 
 // TestAdminHealthHandler_MethodRejection_Bad proves a non-GET /v1/health is
 // rejected before any health callback runs.
-func TestAdminHealthHandler_MethodRejection_Bad(t *testing.T) {
+func TestAdminHealthHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	rec := do(t, http.MethodPost, DefaultHealthPath, "")
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /v1/health = %d, want 405", rec.Code)
@@ -72,7 +72,7 @@ func TestAdminHealthHandler_MethodRejection_Bad(t *testing.T) {
 // TestAdminHealthHandler_DefaultBody_Good proves GET /v1/health with no
 // AdminConfig.Health callback reports the built-in status, naming the
 // resolver's known models.
-func TestAdminHealthHandler_DefaultBody_Good(t *testing.T) {
+func TestAdminHealthHandler_DefaultBody_DefaultHealthPath_Good(t *testing.T) {
 	rec := do(t, http.MethodGet, DefaultHealthPath, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /v1/health = %d, want 200", rec.Code)
@@ -86,7 +86,7 @@ func TestAdminHealthHandler_DefaultBody_Good(t *testing.T) {
 // TestAdminHealthHandler_CustomCallback_Good proves a host-supplied Health
 // callback's zero-valued fields (Status/Runtime/Time) are filled with the
 // same defaults the built-in path uses, rather than serialising as blank.
-func TestAdminHealthHandler_CustomCallback_Good(t *testing.T) {
+func TestAdminHealthHandler_CustomCallback_NewMuxWithAdmin_Good(t *testing.T) {
 	resolver := openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": newFakeTextModel()})
 	mux := NewMuxWithAdmin(resolver, AdminConfig{
 		Health: func(context.Context) (Health, error) {
@@ -106,7 +106,7 @@ func TestAdminHealthHandler_CustomCallback_Good(t *testing.T) {
 
 // TestAdminHealthHandler_CustomCallbackError_Bad proves a failing Health
 // callback surfaces as a 500 rather than a 200 with an empty body.
-func TestAdminHealthHandler_CustomCallbackError_Bad(t *testing.T) {
+func TestAdminHealthHandler_CustomCallbackError_NewMuxWithAdmin_Bad(t *testing.T) {
 	resolver := openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": newFakeTextModel()})
 	mux := NewMuxWithAdmin(resolver, AdminConfig{
 		Health: func(context.Context) (Health, error) {
@@ -125,7 +125,7 @@ func TestAdminHealthHandler_CustomCallbackError_Bad(t *testing.T) {
 
 // TestAdminActionHandler_MethodRejection_Bad proves a non-POST /v1/runtime/wake
 // is rejected before any callback runs.
-func TestAdminActionHandler_MethodRejection_Bad(t *testing.T) {
+func TestAdminActionHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	rec := do(t, http.MethodGet, DefaultAdminWakePath, "")
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /v1/runtime/wake = %d, want 405", rec.Code)
@@ -135,7 +135,7 @@ func TestAdminActionHandler_MethodRejection_Bad(t *testing.T) {
 // TestAdminActionHandler_NilCallback_Good proves wake/sleep with no host
 // callback wired still answers 200 "ok" — the routes are always mounted even
 // when the host has nothing to hook them to.
-func TestAdminActionHandler_NilCallback_Good(t *testing.T) {
+func TestAdminActionHandler_NilCallback_DefaultAdminWakePath_Good(t *testing.T) {
 	for _, path := range []string{DefaultAdminWakePath, DefaultAdminSleepPath} {
 		rec := do(t, http.MethodPost, path, "")
 		if rec.Code != http.StatusOK {
@@ -149,7 +149,7 @@ func TestAdminActionHandler_NilCallback_Good(t *testing.T) {
 
 // TestAdminActionHandler_CallbackError_Bad proves a failing wake/sleep
 // callback is surfaced as a 500, not swallowed into a 200.
-func TestAdminActionHandler_CallbackError_Bad(t *testing.T) {
+func TestAdminActionHandler_CallbackError_NewMuxWithAdmin_Bad(t *testing.T) {
 	resolver := openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": newFakeTextModel()})
 	mux := NewMuxWithAdmin(resolver, AdminConfig{
 		Wake: func(context.Context) error { return core.NewError("wake boom") },
@@ -182,7 +182,7 @@ func TestAdminActionHandler_DefaultAction_Good(t *testing.T) {
 
 // TestAdminCacheEntriesHandler_MethodRejection_Bad proves a non-GET
 // /v1/cache/entries is rejected before any model resolve.
-func TestAdminCacheEntriesHandler_MethodRejection_Bad(t *testing.T) {
+func TestAdminCacheEntriesHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	rec := do(t, http.MethodPost, DefaultAdminCacheEntriesPath, "")
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /v1/cache/entries = %d, want 405", rec.Code)
@@ -191,7 +191,7 @@ func TestAdminCacheEntriesHandler_MethodRejection_Bad(t *testing.T) {
 
 // TestAdminCacheEntriesHandler_MissingModel_Bad proves an absent ?model= query
 // parameter is refused with 400 before any resolve attempt.
-func TestAdminCacheEntriesHandler_MissingModel_Bad(t *testing.T) {
+func TestAdminCacheEntriesHandler_MissingModel_StatusBadRequest_Bad(t *testing.T) {
 	rec := do(t, http.MethodGet, DefaultAdminCacheEntriesPath, "")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("GET /v1/cache/entries (no model) = %d, want 400", rec.Code)
@@ -200,7 +200,7 @@ func TestAdminCacheEntriesHandler_MissingModel_Bad(t *testing.T) {
 
 // TestAdminCacheEntriesHandler_UnknownModel_Bad proves an unresolvable model
 // name surfaces as a 404, not a 200 or a panic.
-func TestAdminCacheEntriesHandler_UnknownModel_Bad(t *testing.T) {
+func TestAdminCacheEntriesHandler_UnknownModel_StatusNotFound_Bad(t *testing.T) {
 	rec := do(t, http.MethodGet, DefaultAdminCacheEntriesPath+"?model=absent", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("GET /v1/cache/entries (unknown model) = %d, want 404", rec.Code)
@@ -210,7 +210,7 @@ func TestAdminCacheEntriesHandler_UnknownModel_Bad(t *testing.T) {
 // TestAdminCacheEntriesHandler_NotLister_Bad proves a resolved model that
 // does not implement CacheEntryLister answers 501, naming the reason, rather
 // than a bare panic on the failed type assertion.
-func TestAdminCacheEntriesHandler_NotLister_Bad(t *testing.T) {
+func TestAdminCacheEntriesHandler_NotLister_StatusNotImplemented_Bad(t *testing.T) {
 	resolver := openaicompat.NewStaticResolver(map[string]inference.TextModel{"plain": newFakeTextModel()})
 	mux := NewMux(resolver)
 	rec := httptest.NewRecorder()
@@ -225,7 +225,7 @@ func TestAdminCacheEntriesHandler_NotLister_Bad(t *testing.T) {
 
 // TestAdminCacheEntriesHandler_ListerError_Bad proves a CacheEntries failure
 // surfaces as a 500.
-func TestAdminCacheEntriesHandler_ListerError_Bad(t *testing.T) {
+func TestAdminCacheEntriesHandler_ListerError_FakeCacheLister_Bad(t *testing.T) {
 	model := &fakeCacheLister{fakeTextModel: newFakeTextModel(), err: core.NewError("cache read boom")}
 	resolver := openaicompat.NewStaticResolver(map[string]inference.TextModel{"cached": model})
 	mux := NewMux(resolver)
@@ -242,7 +242,7 @@ func TestAdminCacheEntriesHandler_ListerError_Bad(t *testing.T) {
 // TestAdminCacheEntriesHandler_NoStatsService_Good proves a model that
 // implements CacheEntryLister but not inference.CacheService returns its
 // entries with the stats block omitted, rather than erroring.
-func TestAdminCacheEntriesHandler_NoStatsService_Good(t *testing.T) {
+func TestAdminCacheEntriesHandler_NoStatsService_FakeCacheLister_Good(t *testing.T) {
 	model := &fakeCacheLister{
 		fakeTextModel: newFakeTextModel(),
 		entries:       []inference.CacheBlockRef{{ID: "blk-1", TokenCount: 128}},
@@ -269,7 +269,7 @@ func TestAdminCacheEntriesHandler_NoStatsService_Good(t *testing.T) {
 // TestAdminCacheEntriesHandler_StatsError_Bad proves a model implementing
 // both CacheEntryLister and inference.CacheService, whose CacheStats call
 // fails, surfaces a 500 (the entries themselves already succeeded).
-func TestAdminCacheEntriesHandler_StatsError_Bad(t *testing.T) {
+func TestAdminCacheEntriesHandler_StatsError_FakeCacheService_Bad(t *testing.T) {
 	model := &fakeCacheService{
 		fakeCacheLister: &fakeCacheLister{fakeTextModel: newFakeTextModel()},
 		statsErr:        core.NewError("stats boom"),
@@ -288,7 +288,7 @@ func TestAdminCacheEntriesHandler_StatsError_Bad(t *testing.T) {
 
 // TestAdminCacheEntriesHandler_HappyPath_Good proves a model implementing
 // both interfaces returns entries plus the stats block.
-func TestAdminCacheEntriesHandler_HappyPath_Good(t *testing.T) {
+func TestAdminCacheEntriesHandler_HappyPath_FakeCacheService_Good(t *testing.T) {
 	model := &fakeCacheService{
 		fakeCacheLister: &fakeCacheLister{
 			fakeTextModel: newFakeTextModel(),

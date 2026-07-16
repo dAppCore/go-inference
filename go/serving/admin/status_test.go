@@ -11,7 +11,7 @@ import (
 
 // TestStatusHandler_MethodRejection_Bad proves a non-GET
 // /v1/admin/serve/status is rejected before any snapshot work.
-func TestStatusHandler_MethodRejection_Bad(t *testing.T) {
+func TestStatusHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	mux := NewMux(Config{ServeStatus: ServeStatus{ModelPath: "/models/boot"}})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathServeStatus, nil))
@@ -22,7 +22,7 @@ func TestStatusHandler_MethodRejection_Bad(t *testing.T) {
 
 // TestStatusHandler_NoReloader_Good proves that with no Reloader wired
 // (currentPath nil), GET reports the boot-snapshot ModelPath unchanged.
-func TestStatusHandler_NoReloader_Good(t *testing.T) {
+func TestStatusHandler_NoReloader_ServeStatus_Good(t *testing.T) {
 	mux := NewMux(Config{ServeStatus: ServeStatus{ModelPath: "/models/boot", Runtime: "go-inference"}})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathServeStatus, nil))
@@ -60,7 +60,7 @@ func TestStatusHandler_CurrentPathOverride_Good(t *testing.T) {
 // TestStatusHandler_CurrentPathEmpty_Good proves a Reloader that reports an
 // empty CurrentPath (pre-first-load) leaves the boot-snapshot ModelPath
 // alone rather than blanking it.
-func TestStatusHandler_CurrentPathEmpty_Good(t *testing.T) {
+func TestStatusHandler_CurrentPathEmpty_FakeReloader_Good(t *testing.T) {
 	rl := &fakeReloader{current: ""}
 	mux := NewMux(Config{Reloader: rl, ServeStatus: ServeStatus{ModelPath: "/models/boot"}})
 	rec := httptest.NewRecorder()

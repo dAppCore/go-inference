@@ -91,7 +91,7 @@ func do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
 
 // TestOllamaChatHandler_MethodRejection_Bad pins that a non-POST /api/chat is
 // rejected (405) before any model work.
-func TestOllamaChatHandler_MethodRejection_Bad(t *testing.T) {
+func TestOllamaChatHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	rec := do(t, http.MethodGet, "/api/chat", "")
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /api/chat = %d, want 405", rec.Code)
@@ -100,7 +100,7 @@ func TestOllamaChatHandler_MethodRejection_Bad(t *testing.T) {
 
 // TestOllamaChatHandler_BadBody_Ugly pins that a malformed JSON body is a 400,
 // not a panic or a 500.
-func TestOllamaChatHandler_BadBody_Ugly(t *testing.T) {
+func TestOllamaChatHandler_BadBody_StatusBadRequest_Ugly(t *testing.T) {
 	rec := do(t, http.MethodPost, "/api/chat", "{not json")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("POST /api/chat malformed = %d, want 400", rec.Code)

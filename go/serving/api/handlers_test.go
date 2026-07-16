@@ -113,7 +113,7 @@ func TestHandlers_ScoreSession(t *testing.T) {
 }
 
 // TestHandlers_ScoreSession_Bad pins the empty and wrong-method cases.
-func TestHandlers_ScoreSession_Bad(t *testing.T) {
+func TestHandlers_ScoreSession_StatusNotFound_Bad(t *testing.T) {
 	router := setupTestRouter()
 	if rec := performRequestBody(router, http.MethodPost, "/v1/score/session", `{"turns":[]}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty turns: status %d, want 400", rec.Code)

@@ -12,7 +12,7 @@ import (
 // TestRegister_WeightIndex_Good pins StarCoder2's tensor roles against its public sharded index.
 // Source: https://huggingface.co/bigcode/starcoder2-7b/blob/main/model.safetensors.index.json
 // The 3B repository currently publishes one unsharded model.safetensors and therefore has no index.
-func TestRegister_WeightIndex_Good(t *testing.T) {
+func TestRegister_WeightMap_Good(t *testing.T) {
 	data := core.ReadFile(core.PathJoin("testdata", "bigcode-starcoder2-7b-model.safetensors.index.json"))
 	if !data.OK {
 		t.Fatal("read StarCoder2 weight-index fixture")
@@ -44,7 +44,7 @@ func TestRegister_WeightIndex_Good(t *testing.T) {
 }
 
 // TestRegister_ArchitectureClass_Bad rejects a class name as a model_type alias.
-func TestRegister_ArchitectureClass_Bad(t *testing.T) {
+func TestRegister_LookupArch_Bad(t *testing.T) {
 	if _, ok := model.LookupArch("Starcoder2ForCausalLM"); ok {
 		t.Fatal("architecture class registered as model_type")
 	}

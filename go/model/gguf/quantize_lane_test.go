@@ -28,10 +28,10 @@ func TestQuantizeLane_RegisterQuantizeLane_Good(t *testing.T) {
 	}
 }
 
-// TestQuantizeLane_RegisterQuantizeLane_Bad covers no lane matching: an
+// TestQuantizeLane_LookupQuantizeLane_Bad covers no lane matching: an
 // unrecognised config.json misses every registered Detect and
 // lookupQuantizeLane reports ok=false.
-func TestQuantizeLane_RegisterQuantizeLane_Bad(t *testing.T) {
+func TestQuantizeLane_LookupQuantizeLane_Bad(t *testing.T) {
 	if _, ok := lookupQuantizeLane([]byte("never-registered-lane-config")); ok {
 		t.Fatal("lookupQuantizeLane(unrecognised config) = found, want ok=false")
 	}

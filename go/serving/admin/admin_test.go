@@ -70,7 +70,7 @@ func TestMachineHash_Stable_Good(t *testing.T) {
 
 // TestMachineHandler_MethodRejection_Bad proves a non-GET /v1/admin/machine is
 // rejected before any identity work.
-func TestMachineHandler_MethodRejection_Bad(t *testing.T) {
+func TestMachineHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	mux := NewMux(Config{})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathMachine, nil))
@@ -82,7 +82,7 @@ func TestMachineHandler_MethodRejection_Bad(t *testing.T) {
 // TestMachineHandler_HappyPath_Good proves GET /v1/admin/machine reports the
 // same hash MachineHash() computes, plus the runtime/Go/OS/arch identity
 // fields the reload confirm gate and operator tooling both read.
-func TestMachineHandler_HappyPath_Good(t *testing.T) {
+func TestMachineHandler_HappyPath_MachineHash_Good(t *testing.T) {
 	mux := NewMux(Config{})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, PathMachine, nil))

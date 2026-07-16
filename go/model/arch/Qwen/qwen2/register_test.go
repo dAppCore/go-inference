@@ -12,7 +12,7 @@ import (
 // TestRegister_WeightIndex_Good pins the mapping evidenced by Qwen/Qwen2.5-7B's index:
 // https://huggingface.co/Qwen/Qwen2.5-7B/blob/main/model.safetensors.index.json
 // Qwen2 is llama/mistral-shaped with QKV projection biases, not qwen3-shaped QK norm.
-func TestRegister_WeightIndex_Good(t *testing.T) {
+func TestRegister_WeightMap_Good(t *testing.T) {
 	data := core.ReadFile(core.PathJoin("testdata", "qwen-qwen2.5-7b-model.safetensors.index.json"))
 	if !data.OK {
 		t.Fatal("read Qwen2.5 weight index fixture")

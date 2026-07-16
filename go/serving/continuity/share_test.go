@@ -248,7 +248,7 @@ func drain(seq iter.Seq[inference.Token]) {
 // wakes A's shared token span from A's durable bundle and prefills ONLY its
 // divergent tail — no second full prefill. The recorded restore span and append
 // tail are the token-count receipt.
-func TestManagerChat_ShareGraft_Good(t *testing.T) {
+func TestManagerChat_ShareGraft_SharedGrafts_Good(t *testing.T) {
 	ctx := context.Background()
 	store := state.NewInMemoryStore(nil)
 	const blockSize = 4
@@ -373,7 +373,7 @@ func TestManagerChat_ShareOff_Untouched(t *testing.T) {
 // TestManagerChat_SharePublish_Good drives a fresh conversation's REAL sleep and
 // proves finishTurn publishes its framed prompt as a shareable prefix, keyed to
 // the bundle the sleep actually wrote — the produce side the graft consumes.
-func TestManagerChat_SharePublish_Good(t *testing.T) {
+func TestManagerChat_SharePublish_Match_Good(t *testing.T) {
 	ctx := context.Background()
 	store := state.NewInMemoryStore(nil)
 

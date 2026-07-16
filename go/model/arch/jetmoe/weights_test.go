@@ -10,7 +10,7 @@ import (
 	coreio "dappco.re/go/io"
 )
 
-func TestAdaptFFNWeights_IndexMap_Good(t *testing.T) {
+func TestAdaptFFNWeights_WeightMap_Good(t *testing.T) {
 	data, err := coreio.Local.Read(core.PathJoin("testdata", "jetmoe-jetmoe-8b-model.safetensors.index.json"))
 	if err != nil {
 		t.Fatal(err)
