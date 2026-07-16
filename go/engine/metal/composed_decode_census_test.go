@@ -104,6 +104,11 @@ func TestComposedDecodeRoundTripCensus(t *testing.T) {
 	quant := c.QuantProjection.Decode
 	quantTail := c.QuantResidualTail.Decode
 	folds := c.GatedDeltaLayerFold.Decode + c.AttnFrontFold.Decode + c.AttnTailFold.Decode
+	// Whole-layer / whole-token seams (#26 device-KV + whole-token chain, bf16 or quant): a chained
+	// decode engages NEITHER the fold ladder above NOR the per-projection seams — ChainedForward is a
+	// hit whenever every layer of the model qualified for the session-wide chain; AttnFullLayerFold
+	// covers a model that rides the device-KV whole-layer seam per-layer without qualifying globally.
+	chainSeams := c.ChainedForward.Decode + c.AttnFullLayerFold.Decode
 	t.Logf("  QUANT seams (packed-weight lanes):")
 	t.Logf("    QuantResidualTail (fused tail over codes, #8-B)  = %d", quantTail)
 	t.Logf("    QuantProjection   (per-projection fall-through)  = %d", quant)
@@ -111,9 +116,12 @@ func TestComposedDecodeRoundTripCensus(t *testing.T) {
 	t.Logf("    GatedDeltaLayerFold (norm+projs+block+tail)      = %d", c.GatedDeltaLayerFold.Decode)
 	t.Logf("    AttnFrontFold (norm + q/k/v)                     = %d", c.AttnFrontFold.Decode)
 	t.Logf("    AttnTailFold (o_proj + FFN tail)                 = %d", c.AttnTailFold.Decode)
-	t.Logf("  TOTALS: fused=%d  unfused=%d  quantTail=%d  quantProj=%d  folds=%d  (device-seam CBs per decode token)", fused, unfused, quantTail, quant, folds)
+	t.Logf("  WHOLE-TOKEN seams (#26 device-KV + chain):")
+	t.Logf("    AttnFullLayerFold (whole attn layer, device-KV)  = %d", c.AttnFullLayerFold.Decode)
+	t.Logf("    ChainedForward (whole token, one retained CB)    = %d", c.ChainedForward.Decode)
+	t.Logf("  TOTALS: fused=%d  unfused=%d  quantTail=%d  quantProj=%d  folds=%d  chainSeams=%d  (device-seam CBs per decode token)", fused, unfused, quantTail, quant, folds, chainSeams)
 
-	if fused+unfused+quant+quantTail+folds == 0 {
+	if fused+unfused+quant+quantTail+folds+chainSeams == 0 {
 		t.Fatalf("decode engaged NO composed device seam — floor knocked the whole token to host? census=%+v", c)
 	}
 }

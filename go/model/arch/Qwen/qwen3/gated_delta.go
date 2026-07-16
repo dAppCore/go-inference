@@ -355,6 +355,22 @@ var GatedDeltaBF16LayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float32
 // buffer; the chain owns commit/wait. AX-8: declared here, bound by the backend.
 var GatedDeltaBF16ChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, priorConv, priorDelta []float32, FF int, eps float32) error
 
+// GatedDeltaQuantChainLayerDevice is GatedDeltaBF16ChainLayerDevice's PACKED-weight twin: one
+// packed gated-delta layer encoded onto an open chain context, the affine-qmv twin of the raw-bf16
+// chain step. AX-8: declared here, bound by the backend.
+var GatedDeltaQuantChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, priorConv, priorDelta []float32, FF int, eps float32) error
+
+// GatedDeltaChainGeometryOK reports whether the device gated-delta kernels can actually serve this
+// layer's geometry (the key/value head dims must be an instantiated width) — a cheap, side-effect-
+// free probe gatedDeltaMixer.chainableBF16/chainableQuant (composed package) call BEFORE the
+// session commits to the whole-token chain. Chaining, once begun, cannot gracefully fall back
+// mid-layer (an earlier layer's device state may already be resident), so an un-servable geometry
+// must be excluded from the chain-eligibility decision itself, not discovered by a failed chain
+// step. Never consulted when nil: chainableBF16/chainableQuant treat a nil probe as "not
+// verifiable" and decline the chain, the same conservative default a nil chain-layer hook already
+// gets. AX-8: declared here, bound by the backend alongside the chain-layer hooks.
+var GatedDeltaChainGeometryOK func(cfg GatedDeltaConfig) bool
+
 // GatedDeltaBF16LayerDeviceTry mirrors GatedDeltaQuantLayerDeviceTry's engagement contract for the
 // dense bf16 whole-layer seam.
 func GatedDeltaBF16LayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, engaged bool, err error) {

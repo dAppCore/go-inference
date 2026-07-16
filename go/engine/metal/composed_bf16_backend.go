@@ -41,11 +41,25 @@ func init() {
 			// hardcodes sigmoid; an earlier silu reading diverged on gated models);
 			// LTHN_ATTN_DEVKV=0 is the same-binary A/B arm.
 			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice
+			composed.AttnQuantFullLayerDevice = AttnQuantFullLayerDevice // the packed twin (#26 QUANT)
 			composed.AttnKVExportDevice = attnKVExportHook
 			composed.ComposedChainBeginDevice = ComposedChainBeginDevice   // whole-token chain (#26): one upload, one wait
 			composed.ComposedChainEndDevice = ComposedChainEndDevice
 			composed.AttnBF16ChainLayerDevice = attnBF16ChainLayerDevice
+			composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice // the packed chain twin
 			qwen3.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice
+			qwen3.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice // the packed chain twin
+			// Chain-eligibility geometry probes: chainableBF16/chainableQuant (composed package) call
+			// these BEFORE committing a model to the whole-token chain — chaining cannot gracefully
+			// fall back mid-layer once begun, so an un-servable geometry (e.g. a HeadDim the device
+			// kernels never instantiated) must be excluded from eligibility itself, not discovered by
+			// a failed chain step.
+			composed.AttnChainGeometryOK = func(cfg composed.AttnConfig) bool {
+				return attnCoreUsable(cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim)
+			}
+			qwen3.GatedDeltaChainGeometryOK = func(cfg qwen3.GatedDeltaConfig) bool {
+				return gatedDeltaBlockUsable(cfg.HeadDim, cfg.HeadDim, cfg.KeyHeads, cfg.ValueHeads, cfg.ConvKernel)
+			}
 		}
 	}
 }

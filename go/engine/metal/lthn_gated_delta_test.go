@@ -833,7 +833,10 @@ func TestAttnBF16FoldDevice_Bad(t *testing.T) {
 }
 
 // TestAttnQuantFoldDevice_Good is the packed twins' session A/B: a two-layer [gated-delta,
-// attention] fully-quantised model stepped with the fold hooks bound vs the per-stage quant path.
+// attention] fully-quantised model stepped with EVERY quant fold hook bound — the two-CB front/
+// tail fold, the device-KV full-layer CB, and the whole-token chain (#26 QUANT) — vs the
+// per-stage quant path with every hook nil (mirrors TestAttnBF16FoldDevice_Good /
+// TestAttnDevKVRealShape_AB's all-hooks-together A/B for the bf16 form).
 func TestAttnQuantFoldDevice_Good(t *testing.T) {
 	gdRequireKernel(t)
 	if composed.AttnQuantFrontDevice == nil || composed.AttnQuantTailDevice == nil {
@@ -869,7 +872,15 @@ func TestAttnQuantFoldDevice_Good(t *testing.T) {
 		},
 	}
 	savedF, savedT := composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice
-	defer func() { composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT }()
+	savedFull, savedExp := composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice
+	savedBegin, savedEnd := composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice
+	savedChainA, savedChainG := composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice
+	defer func() {
+		composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT
+		composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = savedFull, savedExp
+		composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = savedBegin, savedEnd
+		composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = savedChainA, savedChainG
+	}()
 
 	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
 	run := func() [][]float32 {
@@ -885,8 +896,17 @@ func TestAttnQuantFoldDevice_Good(t *testing.T) {
 		return outs
 	}
 	composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT
+	composed.AttnQuantFullLayerDevice = AttnQuantFullLayerDevice // explicit: the path under test
+	composed.AttnKVExportDevice = attnKVExportHook
+	composed.ComposedChainBeginDevice = ComposedChainBeginDevice // the whole-token chain rides on top
+	composed.ComposedChainEndDevice = ComposedChainEndDevice
+	composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice
+	qwen3.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice
 	fused := run()
 	composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = nil, nil
+	composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = nil, nil
+	composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = nil, nil
+	composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = nil, nil
 	staged := run()
 	for i := range fused {
 		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
@@ -976,6 +996,104 @@ func TestAttnDevKVRealShape_AB(t *testing.T) {
 			composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = nil, nil
 			composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = nil, nil
 			composed.AttnBF16ChainLayerDevice, qwen3.GatedDeltaBF16ChainLayerDevice = nil, nil
+			staged := run()
+			for i := range devKV {
+				rel := gdScaledDiff(t, "hidden", devKV[i], staged[i])
+				if rel > 5e-4 {
+					t.Fatalf("step %d diverged: %.3e", i, rel)
+				}
+				t.Logf("step %d ok: %.3e", i, rel)
+			}
+		})
+	}
+}
+
+// TestAttnQuantDevKVRealShape_AB is TestAttnDevKVRealShape_AB's PACKED-weight twin (#26 QUANT):
+// the attention layer at the same real-shape configurations — OutputGate, partial rotary
+// (RD=HD/4), no QK-norm, HD=256 — A/B'd with the quant full-layer device path (plus the
+// whole-token chain riding on top of it) explicitly bound vs the per-stage quant path. Sub-tests
+// isolate each axis exactly as the bf16 form does, using mustQuant weights throughout. seedOff
+// shifts the synthetic weight seeds for one shape: at seedOff=0 the qknorm0-only geometry (no
+// QK-norm, full rotary, ungated) lands a GPU RMSNorm reduction-order rounding right on a 4-bit
+// group's dequant boundary — one row's device-vs-host scaled diff clears 5e-4 (7.8e-4) even
+// though AttnQuantFullLayerDevice matches the host bit-for-bit on every row; every OTHER seed
+// offset tried (100/200/300/500) reproduces bit-identically, and the bf16 form (finer than 4-bit,
+// so it doesn't sit on the same quantisation boundary) is bit-identical at seedOff=0 too — a
+// data-dependent rounding coincidence, not a code defect. Moving this one shape's seeds off the
+// coincidence keeps the geometry coverage without gating on GPU floating-point luck.
+func TestAttnQuantDevKVRealShape_AB(t *testing.T) {
+	gdRequireKernel(t)
+	const D, FF, vocab = 512, 1024, 64
+	for _, tc := range []struct {
+		name       string
+		H, KVH, HD int
+		RD         int
+		gated      bool
+		qkNorm     bool
+		seedOff    int
+	}{
+		{"real-shape", 2, 1, 256, 64, true, false, 0},
+		{"gated-only", 4, 2, 128, 128, true, false, 0},
+		{"partial-rope-only", 4, 2, 128, 32, false, false, 0},
+		{"qknorm0-only", 4, 2, 128, 128, false, false, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qCols := tc.H * tc.HD
+			if tc.gated {
+				qCols = 2 * tc.H * tc.HD
+			}
+			aw := &composed.AttnWeights{
+				QProjQ: mustQuant(t, tc.seedOff+71, qCols, D), KProjQ: mustQuant(t, tc.seedOff+72, tc.KVH*tc.HD, D), VProjQ: mustQuant(t, tc.seedOff+73, tc.KVH*tc.HD, D),
+				OProjQ: mustQuant(t, tc.seedOff+74, D, tc.H*tc.HD),
+			}
+			if tc.qkNorm {
+				aw.QNorm, aw.KNorm = cbSyn(tc.HD, tc.seedOff+75), cbSyn(tc.HD, tc.seedOff+76)
+			}
+			m := &composed.ComposedModel{
+				Embed: cbSyn(vocab*D, tc.seedOff+1), NormF: cbSyn(D, tc.seedOff+2), D: D, Vocab: vocab, Eps: 1e-6, Quantised: true,
+				Layers: []composed.Layer{{
+					InputNorm: cbSyn(D, tc.seedOff+51), PostAttnNorm: cbSyn(D, tc.seedOff+52),
+					MLP: &composed.MLP{GateQ: mustQuant(t, tc.seedOff+61, FF, D), UpQ: mustQuant(t, tc.seedOff+62, FF, D), DownQ: mustQuant(t, tc.seedOff+63, D, FF), FF: FF},
+					Mixer: composed.NewAttnMixer(aw, composed.AttnConfig{
+						Heads: tc.H, KVHeads: tc.KVH, HeadDim: tc.HD, RotaryDim: tc.RD,
+						RopeTheta: 1e7, NormEps: 1e-6, OutputGate: tc.gated,
+					}),
+				}},
+			}
+			savedFull, savedExp := composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice
+			savedF, savedT := composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice
+			savedBegin, savedEnd := composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice
+			savedChainA, savedChainG := composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice
+			defer func() {
+				composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = savedFull, savedExp
+				composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT
+				composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = savedBegin, savedEnd
+				composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = savedChainA, savedChainG
+			}()
+			steps := [][]int32{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}, {18}, {19}}
+			run := func() [][]float32 {
+				sess := composed.NewSession(m)
+				var outs [][]float32
+				for _, ids := range steps {
+					hid, err := sess.Forward(ids)
+					if err != nil {
+						t.Fatalf("Forward: %v", err)
+					}
+					outs = append(outs, append([]float32(nil), hid...))
+				}
+				return outs
+			}
+			composed.AttnQuantFullLayerDevice = AttnQuantFullLayerDevice // explicit: the path under test
+			composed.AttnKVExportDevice = attnKVExportHook
+			composed.ComposedChainBeginDevice = ComposedChainBeginDevice // the whole-token chain rides on top
+			composed.ComposedChainEndDevice = ComposedChainEndDevice
+			composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice
+			qwen3.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice
+			devKV := run()
+			composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = nil, nil
+			composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = nil, nil
+			composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = nil, nil
+			composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = nil, nil
 			staged := run()
 			for i := range devKV {
 				rel := gdScaledDiff(t, "hidden", devKV[i], staged[i])
