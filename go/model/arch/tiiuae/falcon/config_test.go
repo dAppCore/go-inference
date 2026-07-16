@@ -9,7 +9,7 @@ import (
 )
 
 // Fixture source: https://huggingface.co/tiiuae/falcon-rw-1b/blob/main/config.json
-func TestConfigFalconRW1B_Good(t *testing.T) {
+func TestConfig_Arch_Good(t *testing.T) {
 	var cfg Config
 	if r := core.JSONUnmarshal([]byte(falconRW1BConfig), &cfg); !r.OK {
 		t.Fatalf("parse fixture: %v", r.Value)
@@ -46,9 +46,45 @@ func TestConfigNewDecoderArchitecture_Good(t *testing.T) {
 	}
 }
 
-func TestConfigArch_Bad(t *testing.T) {
+func TestConfig_Arch_Bad(t *testing.T) {
 	if _, err := (Config{}).Arch(); err == nil {
 		t.Fatal("empty config accepted")
+	}
+}
+
+// TestConfig_Arch_Ugly rejects a NewDecoderArchitecture config whose declared
+// num_kv_heads doesn't divide the attention heads — distinct from _Bad's
+// totally-empty config.
+func TestConfig_Arch_Ugly(t *testing.T) {
+	cfg := Config{HiddenSize: 64, NumHiddenLayers: 2, NumAttentionHeads: 8, VocabSize: 100, NewDecoderArchitecture: true, NumKVHeads: 3}
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("attention heads not divisible by kv heads accepted")
+	}
+}
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 64}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 64 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// kv-heads-divisibility guard — distinct from _Bad's all-zero rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{HiddenSize: 64, NumHiddenLayers: 2, NumAttentionHeads: 8, VocabSize: 100, NewDecoderArchitecture: true, NumKVHeads: 3}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("kv heads not dividing attention heads became valid after InferFromWeights")
 	}
 }
 
