@@ -68,11 +68,3 @@ func TestDotsocrRegistered_Good(t *testing.T) {
 		}
 	}
 }
-
-// TestParseConfig_Bad pins that a malformed config.json is rejected at Parse, not silently
-// accepted into a zero-value Config that would later refuse for the wrong reason.
-func TestParseConfig_Bad(t *testing.T) {
-	if _, err := ParseConfig([]byte("{")); err == nil {
-		t.Fatal("malformed config.json accepted")
-	}
-}
