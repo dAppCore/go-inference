@@ -1683,3 +1683,149 @@ func encLogitsSampleBF16Object(enc metal.MTLComputeCommandEncoderObject, logits,
 	)
 	return nil
 }
+
+// --- reduction-shaped top-k (#23) -------------------------------------------
+
+// topKReduceTileRows mirrors the kernel's lthn_topk_reduce_tile_rows.
+const topKReduceTileRows = 1024
+
+// topKReduceMaxTiles mirrors the kernel's lthn_topk_reduce_max_tiles — the
+// stage-2 cursor merge holds one list head per (lane, j≤8) register pair.
+const topKReduceMaxTiles = 256
+
+var (
+	bf16LogitsTopKReducePSOOnce  sync.Once
+	bf16LogitsTopKReducePSO      metal.MTLComputePipelineState
+	bf16LogitsTopKReducePSOErr   error
+	topKReduceMergeSamplePSOOnce sync.Once
+	topKReduceMergeSamplePSO     metal.MTLComputePipelineState
+	topKReduceMergeSamplePSOErr  error
+)
+
+func bf16LogitsTopKReducePipeline() (metal.MTLComputePipelineState, error) {
+	bf16LogitsTopKReducePSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			bf16LogitsTopKReducePSOErr = core.NewError("native.bf16LogitsTopKReducePipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_bf16_logits_topk_reduce_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			bf16LogitsTopKReducePSOErr = core.NewError("native.bf16LogitsTopKReducePipeline: kernel lthn_bf16_logits_topk_reduce_bf16 not found")
+			return
+		}
+		bf16LogitsTopKReducePSO, bf16LogitsTopKReducePSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return bf16LogitsTopKReducePSO, bf16LogitsTopKReducePSOErr
+}
+
+func topKReduceMergeSamplePipeline() (metal.MTLComputePipelineState, error) {
+	topKReduceMergeSamplePSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			topKReduceMergeSamplePSOErr = core.NewError("native.topKReduceMergeSamplePipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_topk_reduce_merge_sample_f32")
+		if fn == nil || fn.GetID() == 0 {
+			topKReduceMergeSamplePSOErr = core.NewError("native.topKReduceMergeSamplePipeline: kernel lthn_topk_reduce_merge_sample_f32 not found")
+			return
+		}
+		topKReduceMergeSamplePSO, topKReduceMergeSamplePSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return topKReduceMergeSamplePSO, topKReduceMergeSamplePSOErr
+}
+
+// topKReduceSampleUsable gates the reduction-shaped device TopK pick: both
+// kernels present and the vocab within the stage-2 merge's tile budget.
+func topKReduceSampleUsable(topK, vocab int) bool {
+	if topK <= 0 || topK > headSampleTopKMaxK || vocab <= 0 {
+		return false
+	}
+	if (vocab+topKReduceTileRows-1)/topKReduceTileRows > topKReduceMaxTiles {
+		return false
+	}
+	if _, err := bf16LogitsTopKReducePipeline(); err != nil {
+		return false
+	}
+	if _, err := topKReduceMergeSamplePipeline(); err != nil {
+		return false
+	}
+	return true
+}
+
+// topKReduceTileCount is the stage-1 grid width (and the params.n stage 2 expects).
+func topKReduceTileCount(vocab int) int {
+	return (vocab + topKReduceTileRows - 1) / topKReduceTileRows
+}
+
+// encBF16LogitsTopKReduceBF16 encodes stage 1 of the reduction-shaped TopK
+// pick: per 1024-row tile, one simdgroup emits the tile's top-k logits in
+// DESCENDING order (suppress/soft-cap/repeat-penalty applied at load) into
+// values/indices[tile*topK .. tile*topK+topK). Binding order mirrors
+// encBF16LogitsTopKTilesBF16.
+func encBF16LogitsTopKReduceBF16(
+	enc metal.MTLComputeCommandEncoder,
+	logits, values, indices, suppress, history metal.MTLBuffer,
+	vocab, suppressCount, historyCount, topK int,
+	repeatPenalty, softCap float32,
+) error {
+	if vocab <= 0 {
+		return core.NewError("native.encBF16LogitsTopKReduceBF16: invalid logits geometry")
+	}
+	if topK <= 0 || topK > headSampleTopKMaxK {
+		return core.NewError("native.encBF16LogitsTopKReduceBF16: topK must be in 1..64")
+	}
+	tiles := topKReduceTileCount(vocab)
+	if tiles > topKReduceMaxTiles {
+		return core.NewError("native.encBF16LogitsTopKReduceBF16: vocab exceeds the reduce merge tile budget")
+	}
+	pso, err := bf16LogitsTopKReducePipeline()
+	if err != nil {
+		return err
+	}
+	setPSO(enc, pso)
+	setBuf(enc, logits, 0, 0)
+	setBuf(enc, values, 0, 1)
+	setBuf(enc, indices, 0, 2)
+	setEncInt32(enc, int32(vocab), 3)
+	if suppress == nil {
+		suppress = logits
+	}
+	setBuf(enc, suppress, 0, 4)
+	setEncInt32(enc, int32(suppressCount), 5)
+	if history == nil {
+		history = logits
+	}
+	setBuf(enc, history, 0, 6)
+	setEncInt32(enc, int32(historyCount), 7)
+	setEncFloat32(enc, repeatPenalty, 8)
+	setEncFloat32(enc, softCap, 9)
+	setEncInt32(enc, int32(topK), 10)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: uint(tiles), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
+}
+
+// encTopKReduceMergeSampleF32 encodes stage 2: the cursor merge of the tiles'
+// descending lists plus the shared lthn_sample_topk_window pick. params must
+// carry n = TILE COUNT (topKReduceTileCount), not the flat candidate count.
+func encTopKReduceMergeSampleF32(enc metal.MTLComputeCommandEncoder, values, indices, out, params metal.MTLBuffer) error {
+	if params == nil {
+		return core.NewError("native.encTopKReduceMergeSampleF32: missing params buffer")
+	}
+	pso, err := topKReduceMergeSamplePipeline()
+	if err != nil {
+		return err
+	}
+	setPSO(enc, pso)
+	setBuf(enc, values, 0, 0)
+	setBuf(enc, indices, 0, 1)
+	setBuf(enc, out, 0, 2)
+	setBuf(enc, params, 0, 3)
+	dispatchThreads(enc,
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
+}
