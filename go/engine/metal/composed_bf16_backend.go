@@ -35,10 +35,11 @@ func init() {
 		composed.AttnBF16TailDevice = AttnBF16TailDevice                // attention tail: o_proj + FFN tail in one CB
 		composed.AttnQuantFrontDevice = AttnQuantFrontDevice            // the packed twins — the 27B's attention layers
 		composed.AttnQuantTailDevice = AttnQuantTailDevice
-		if os.Getenv("LTHN_ATTN_DEVKV") == "1" {
-			// Device-KV full attention layer (#26): OPT-IN while the integration bug on real
-			// shapes (gated + partial rotary — fixture-invisible) is run down; the kernels
-			// themselves are parity-proven at those shapes (composed_attn_core_backend_test.go).
+		if os.Getenv("LTHN_ATTN_DEVKV") != "0" {
+			// Device-KV full attention layer (#26): the whole layer in one CB over the resident
+			// cache. Default on since the sigmoid-gate fix (the transformers qwen3_5 reference
+			// hardcodes sigmoid; an earlier silu reading diverged on gated models);
+			// LTHN_ATTN_DEVKV=0 is the same-binary A/B arm.
 			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice
 			composed.AttnKVExportDevice = attnKVExportHook
 		}

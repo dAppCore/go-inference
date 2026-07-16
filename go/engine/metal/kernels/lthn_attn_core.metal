@@ -241,8 +241,11 @@ kernel void lthn_attn_sdpa_f32(
     }
 }
 
-// lthn_attn_gate_silu_f32 — the σ-gate: out[i] *= silu(gate[i]), elementwise over [L·H·HD].
-kernel void lthn_attn_gate_silu_f32(
+// lthn_attn_gate_sigmoid_f32 — the σ-gate: out[i] *= sigmoid(gate[i]), elementwise over
+// [L·H·HD]. The transformers qwen3_5 reference hardcodes SIGMOID here (output_gate_type is not
+// consumed) — attention.go's host gate does the same; an earlier silu reading of the σ was wrong
+// on both sides of the original parity test.
+kernel void lthn_attn_gate_sigmoid_f32(
     device       float * out   [[buffer(0)]],
     device const float * gate  [[buffer(1)]],
     constant     int   & total [[buffer(2)]],
@@ -251,6 +254,5 @@ kernel void lthn_attn_gate_silu_f32(
     if (gid >= (uint)total) {
         return;
     }
-    const float g = gate[gid];
-    out[gid] *= g / (1.0f + exp(-g));
+    out[gid] *= 1.0f / (1.0f + exp(-gate[gid]));
 }

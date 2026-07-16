@@ -896,3 +896,84 @@ func TestAttnQuantFoldDevice_Good(t *testing.T) {
 		}
 	}
 }
+
+// TestAttnDevKVRealShape_AB reproduces the device-KV integration bug the original fixture could
+// not see (#26): the attention layer at the REAL Qwen3.5 configuration — OutputGate, partial
+// rotary (RD=HD/4), no QK-norm, HD=256 — A/B'd with the full-layer device path explicitly bound
+// vs the per-stage path. Sub-tests isolate each axis.
+func TestAttnDevKVRealShape_AB(t *testing.T) {
+	gdRequireKernel(t)
+	const D, FF, vocab = 512, 1024, 64
+	bw := func(seed, outDim, inDim int) *model.BF16Weight {
+		return &model.BF16Weight{Data: f32sToBF16Bytes(cbSyn(outDim*inDim, seed)), OutDim: outDim, InDim: inDim}
+	}
+	for _, tc := range []struct {
+		name        string
+		H, KVH, HD  int
+		RD          int
+		gated       bool
+		qkNorm      bool
+	}{
+		{"real-shape", 2, 1, 256, 64, true, false},
+		{"gated-only", 4, 2, 128, 128, true, false},
+		{"partial-rope-only", 4, 2, 128, 32, false, false},
+		{"qknorm0-only", 4, 2, 128, 128, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			qCols := tc.H * tc.HD
+			if tc.gated {
+				qCols = 2 * tc.H * tc.HD
+			}
+			aw := &composed.AttnWeights{
+				QProjB: bw(71, qCols, D), KProjB: bw(72, tc.KVH*tc.HD, D), VProjB: bw(73, tc.KVH*tc.HD, D),
+				OProjB: bw(74, D, tc.H*tc.HD),
+			}
+			if tc.qkNorm {
+				aw.QNorm, aw.KNorm = cbSyn(tc.HD, 75), cbSyn(tc.HD, 76)
+			}
+			m := &composed.ComposedModel{
+				Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, BF16Resident: true,
+				Layers: []composed.Layer{{
+					InputNorm: cbSyn(D, 51), PostAttnNorm: cbSyn(D, 52),
+					MLP: &composed.MLP{GateB: bw(61, FF, D), UpB: bw(62, FF, D), DownB: bw(63, D, FF), FF: FF},
+					Mixer: composed.NewAttnMixer(aw, composed.AttnConfig{
+						Heads: tc.H, KVHeads: tc.KVH, HeadDim: tc.HD, RotaryDim: tc.RD,
+						RopeTheta: 1e7, NormEps: 1e-6, OutputGate: tc.gated,
+					}),
+				}},
+			}
+			savedFull, savedExp := composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice
+			savedF, savedT := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
+			defer func() {
+				composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice = savedFull, savedExp
+				composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
+			}()
+			steps := [][]int32{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}, {18}, {19}}
+			run := func() [][]float32 {
+				sess := composed.NewSession(m)
+				var outs [][]float32
+				for _, ids := range steps {
+					hid, err := sess.Forward(ids)
+					if err != nil {
+						t.Fatalf("Forward: %v", err)
+					}
+					outs = append(outs, append([]float32(nil), hid...))
+				}
+				return outs
+			}
+			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice // explicit: the opt-in path under test
+			composed.AttnKVExportDevice = attnKVExportHook
+			devKV := run()
+			composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice = nil, nil
+			composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = nil, nil
+			staged := run()
+			for i := range devKV {
+				rel := gdScaledDiff(t, "hidden", devKV[i], staged[i])
+				if rel > 5e-4 {
+					t.Fatalf("step %d diverged: %.3e", i, rel)
+				}
+				t.Logf("step %d ok: %.3e", i, rel)
+			}
+		})
+	}
+}

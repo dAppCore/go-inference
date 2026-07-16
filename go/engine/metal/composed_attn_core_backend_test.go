@@ -114,9 +114,9 @@ func attnCoreHostRef(qRaw, k, v, qNormW, kNormW, cacheK, cacheV, out []float32, 
 					acc += scores[j] * float64(cacheV[(j*KVH+kvh)*HD+d])
 				}
 				val := acc / sum
-				if gated != 0 {
+				if gated != 0 { // sigmoid, NOT silu — the transformers qwen3_5 hardcoded convention
 					g := float64(gate[(t*H+hd)*HD+d])
-					val *= g / (1 + math.Exp(-g))
+					val *= 1 / (1 + math.Exp(-g))
 				}
 				orow[d] = float32(val)
 			}

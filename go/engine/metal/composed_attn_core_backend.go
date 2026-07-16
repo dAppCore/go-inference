@@ -38,7 +38,7 @@ func attnSDPAPipeline() (metal.MTLComputePipelineState, error) {
 	return attnSDPAPSO, attnSDPAErr
 }
 func attnGatePipeline() (metal.MTLComputePipelineState, error) {
-	attnGateOnce.Do(func() { gdPlainPipeline("lthn_attn_gate_silu_f32", &attnGatePSO, &attnGateErr) })
+	attnGateOnce.Do(func() { gdPlainPipeline("lthn_attn_gate_sigmoid_f32", &attnGatePSO, &attnGateErr) })
 	return attnGatePSO, attnGateErr
 }
 
@@ -134,7 +134,8 @@ func encAttnSDPA(enc metal.MTLComputeCommandEncoder, q, cacheK, cacheV, out meta
 	return nil
 }
 
-// encAttnGateSilu encodes the σ-gate multiply out[i] *= silu(gate[i]).
+// encAttnGateSilu encodes the σ-gate multiply out[i] *= sigmoid(gate[i]) — the transformers
+// qwen3_5 hardcoded-sigmoid convention (see the kernel doc).
 func encAttnGateSilu(enc metal.MTLComputeCommandEncoder, out, gate metal.MTLBuffer, total int) error {
 	pso, err := attnGatePipeline()
 	if err != nil {
