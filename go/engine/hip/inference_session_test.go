@@ -333,6 +333,17 @@ func TestHipEngineSession_SetReuseCanonicalLanding_Good(t *testing.T) {
 }
 
 func TestHipEngineSession_RestoreFromKV_Good_ArmsCanonicalLandingForQuantizedKV(t *testing.T) {
+	source := hipEngineSessionForTest([]int32{1})
+	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+
+	restored := &hipEngineSession{cfg: source.cfg, mode: rocmKVCacheModeKQ8VQ4}
+	defer func() { _ = restored.Close() }()
+	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
+	core.AssertTrue(t, restored.engine.DisableBatchedPrefill)
+}
+
+func TestHipEngineSession_RestoreFromKV_Good_KeepsBatchedLandingForExactDeviceKV(t *testing.T) {
 	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
 	defer func() { _ = source.Close() }()
 	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
@@ -341,7 +352,7 @@ func TestHipEngineSession_RestoreFromKV_Good_ArmsCanonicalLandingForQuantizedKV(
 	restored := &hipEngineSession{cfg: source.cfg, mode: rocmKVCacheModeKQ8VQ4, driver: source.driver}
 	defer func() { _ = restored.Close() }()
 	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
-	core.AssertTrue(t, restored.engine.DisableBatchedPrefill)
+	core.AssertFalse(t, restored.engine.DisableBatchedPrefill)
 }
 
 func TestHipEngineSession_PrefillTokenEmbeddings_Bad(t *testing.T) {
