@@ -239,7 +239,17 @@ type SpeculativePair struct {
 	// DefaultDraftBlock is the draft depth used when the caller pins none: the checkpoint's declared
 	// block_size (the depth the head was trained to chain), falling back to the engine default.
 	DefaultDraftBlock int
-	drafter           drafter
+	// BlockVerify selects the batched verify lane: each round verifies the whole draft block in ONE
+	// base forward (k+1 rows), keeping the advanced state on full acceptance and restoring +
+	// re-forwarding only the committed prefix on a reject (Snapshot/Restore). On pure host math the
+	// batched rows are arithmetically identical to sequential steps (per-row dot products, same
+	// order), so the output is byte-identical to per-token verify — the fixture receipts pin that.
+	// With device GEMM hooks bound, batch width changes the arithmetic path (measured on the real
+	// 27B: no exact floats between a 19-row prefill and 19 single steps), so the lane is
+	// token-identity tier there: near-tie argmaxes can flip vs plain decode. Per-token verify
+	// (false, the default) remains the bit-exact reference lane.
+	BlockVerify bool
+	drafter     drafter
 }
 
 // NewSpeculativePair attaches head to base as a speculative pair, validating the attachment (the head must
@@ -316,6 +326,9 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 	// across a later base forward.
 	boundary := append([]float32(nil), hidden[(len(prompt)-1)*D:]...)
 	g := argmaxF32(sess.headLogits(boundary)) // the base's canonical next token at this boundary
+	if p.BlockVerify {
+		return p.generateBlockVerify(sess, boundary, g, maxNew, eosID, draftBlock)
+	}
 	out := make([]int32, 0, maxNew)
 	// specctl adapts the draft length to recent acceptance (cold-start optimistic at Max), the same policy
 	// the metal MTP loop (mtp_draftlen.go) runs — reused, not re-rolled.
@@ -385,6 +398,111 @@ func (p *SpeculativePair) GenerateSpeculative(prompt []int32, maxNew, eosID, dra
 		metrics.AcceptedTokens += accepted
 		metrics.RejectedTokens += len(drafts) - accepted
 		ctrl.Record(len(drafts), accepted)
+	}
+	finishMetrics(&metrics)
+	return out, metrics, nil
+}
+
+// generateBlockVerify is GenerateSpeculative's batched verify lane (BlockVerify): each round runs the
+// boundary token + the whole draft block through ONE base forward (k+1 rows), walks the greedy chain
+// over the returned per-row hiddens, and commits the accepted prefix. On FULL acceptance the forward's
+// advanced state IS the committed state — kept, no rework, and the last row's hidden is the next
+// boundary (its greedy is the bonus). On a reject the recurrent state rolls back (Snapshot/Restore —
+// the Slice A primitive) and ONLY the committed prefix re-forwards, so the boundary every later token
+// derives from always comes from the state actually kept. The drafter is fed the committed pairs from
+// those same kept rows (the trained shape). Round cost: 1 forward on full accept, 2 on reject —
+// against len(committed) sequential steps on the per-token lane.
+func (p *SpeculativePair) generateBlockVerify(sess *ComposedSession, boundary []float32, g int32, maxNew, eosID, draftBlock int) ([]int32, SpeculativeMetrics, error) {
+	var metrics SpeculativeMetrics
+	D := p.Base.D
+	out := make([]int32, 0, maxNew)
+	ctrl := specctl.New(specctl.Controller{Min: 1, Max: draftBlock, Window: 8})
+	// emit appends committed tokens, honouring maxNew and eos; true = generation must stop. A stop
+	// mid-list leaves the session state unused, so callers return without repairing it.
+	emit := func(ids []int32) bool {
+		for _, id := range ids {
+			out = append(out, id)
+			if len(out) >= maxNew {
+				return true
+			}
+			if eosID >= 0 && int(id) == eosID {
+				return true
+			}
+		}
+		return false
+	}
+	for len(out) < maxNew {
+		k := ctrl.NextLength()
+		drafts, derr := p.drafter.draftBlock(g, boundary, k)
+		if derr != nil {
+			return out, metrics, derr
+		}
+		metrics.DraftCalls++
+		metrics.ProposedTokens += len(drafts)
+		block := make([]int32, 0, len(drafts)+1)
+		block = append(block, g)
+		block = append(block, drafts...)
+		snap := sess.Snapshot()
+		verifyRows, ferr := sess.forward(block) // ONE batched verify forward: k+1 rows
+		if ferr != nil {
+			return out, metrics, ferr
+		}
+		metrics.TargetVerifyCalls++
+		// Greedy-chain walk: verifyRows[i] is the hidden after block[i]; its argmax is the base's
+		// next token at that position, verifying drafts[i].
+		accepted := 0
+		for accepted < len(drafts) {
+			if drafts[accepted] != argmaxF32(sess.headLogits(verifyRows[accepted*D:(accepted+1)*D])) {
+				break
+			}
+			accepted++
+		}
+		metrics.AcceptedTokens += accepted
+		metrics.RejectedTokens += len(drafts) - accepted
+		ctrl.Record(len(drafts), accepted)
+		committed := block[:1+accepted]
+		// observe feeds the drafter the committed pairs from the kept rows: committed[0] (= g) was
+		// produced by the pre-forward boundary; committed[i] by row i-1.
+		observe := func(rows []float32) error {
+			if err := p.drafter.observe(committed[0], boundary); err != nil {
+				return err
+			}
+			for i := 1; i < len(committed); i++ {
+				if err := p.drafter.observe(committed[i], rows[(i-1)*D:i*D]); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if accepted == len(drafts) {
+			// Full accept: state already holds exactly the committed tokens — keep it.
+			if emit(committed) {
+				finishMetrics(&metrics)
+				return out, metrics, nil
+			}
+			if oerr := observe(verifyRows); oerr != nil {
+				return out, metrics, oerr
+			}
+			boundary = append(boundary[:0], verifyRows[(len(block)-1)*D:]...)
+			g = argmaxF32(sess.headLogits(boundary)) // the bonus: next round's commit
+			continue
+		}
+		if emit(committed) {
+			finishMetrics(&metrics)
+			return out, metrics, nil
+		}
+		// Reject: roll the recurrent state back and re-forward ONLY the committed prefix.
+		sess.Restore(snap)
+		keptRows, rerr := sess.forward(committed)
+		if rerr != nil {
+			return out, metrics, rerr
+		}
+		metrics.TargetVerifyCalls++
+		if oerr := observe(keptRows); oerr != nil {
+			return out, metrics, oerr
+		}
+		boundary = append(boundary[:0], keptRows[(len(committed)-1)*D:]...)
+		g = argmaxF32(sess.headLogits(boundary)) // the replacement, derived from the kept state
 	}
 	finishMetrics(&metrics)
 	return out, metrics, nil

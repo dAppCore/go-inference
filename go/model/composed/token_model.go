@@ -42,6 +42,10 @@ type ComposedTokenModel struct{ m *ComposedModel }
 // NewTokenModel adapts a loaded ComposedModel to the serve/generate contract.
 func NewTokenModel(m *ComposedModel) *ComposedTokenModel { return &ComposedTokenModel{m: m} }
 
+// Model returns the underlying ComposedModel — the seam a speculative pairing uses to reach the base
+// this wrapper serves (the wrapper owns the load lifecycle; the pair drives the model directly).
+func (tm *ComposedTokenModel) Model() *ComposedModel { return tm.m }
+
 func (tm *ComposedTokenModel) Vocab() int { return tm.m.Vocab }
 
 // RetainMmap is the mmap-retain handshake model.LoadComposedDir uses on a zero-copy load: it hands the

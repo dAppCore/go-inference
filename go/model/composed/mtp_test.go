@@ -429,3 +429,146 @@ func TestParseMTPAssistantConfigBad(t *testing.T) {
 		}
 	}
 }
+
+// TestSpeculativeBlockVerifyGreedyParityRealHead pins the block lane's mechanics on pure host math,
+// where a batched forward row is arithmetically identical to a sequential step (per-row dot products,
+// same order): BlockVerify output must byte-equal BOTH the per-token verify run and plain greedy
+// decode. (With device GEMM hooks bound the lane is token-identity tier — a live-model property,
+// documented on the BlockVerify field, deliberately not simulated here.)
+func TestSpeculativeBlockVerifyGreedyParityRealHead(t *testing.T) {
+	base := mkHybridComposedModel(8, 32, 16)
+	head := mkMTPHead(base, 1, 700)
+	prompt := []int32{1, 2, 3, 4, 5}
+	const maxNew, block = 24, 5
+
+	want, err := NewSession(base).Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("base Generate: %v", err)
+	}
+	perToken, err := NewSpeculativePair(base, head)
+	if err != nil {
+		t.Fatalf("NewSpeculativePair: %v", err)
+	}
+	gotSeq, _, err := perToken.GenerateSpeculative(prompt, maxNew, -1, block)
+	if err != nil {
+		t.Fatalf("GenerateSpeculative (per-token): %v", err)
+	}
+	blockPair, err := NewSpeculativePair(base, head)
+	if err != nil {
+		t.Fatalf("NewSpeculativePair (block): %v", err)
+	}
+	blockPair.BlockVerify = true
+	gotBlock, m, err := blockPair.GenerateSpeculative(prompt, maxNew, -1, block)
+	if err != nil {
+		t.Fatalf("GenerateSpeculative (block): %v", err)
+	}
+	if !sameSeq(gotBlock, want) {
+		t.Fatalf("block-verify output diverged from plain greedy:\n got  %v\n want %v", gotBlock, want)
+	}
+	if !sameSeq(gotBlock, gotSeq) {
+		t.Fatalf("block-verify output diverged from per-token verify:\n block %v\n seq   %v", gotBlock, gotSeq)
+	}
+	if m.ProposedTokens == 0 {
+		t.Fatal("block-verify did not engage (0 proposed)")
+	}
+	t.Logf("block lane: byte-identical to plain greedy and per-token over %d tokens; forwards=%d proposed=%d accepted=%d",
+		len(gotBlock), m.TargetVerifyCalls, m.ProposedTokens, m.AcceptedTokens)
+}
+
+// TestSpeculativeBlockVerifyOracleFewerForwards proves the lane's reason to exist: a perfect drafter
+// under block verify commits k+1 tokens per SINGLE base forward — so the forward count comes in well
+// under the token count (the per-token lane pays one forward per token). Output still byte-identical.
+func TestSpeculativeBlockVerifyOracleFewerForwards(t *testing.T) {
+	base := mkComposedModel(3, 8, 32, 16)
+	head := mkMTPHead(base, 1, 800)
+	prompt := []int32{7, 1, 4}
+	const maxNew, block = 20, 4
+
+	want, err := NewSession(base).Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("base Generate: %v", err)
+	}
+	p := pairWith(t, base, head, &oracleDrafter{seq: want})
+	p.BlockVerify = true
+	got, m, err := p.GenerateSpeculative(prompt, maxNew, -1, block)
+	if err != nil {
+		t.Fatalf("GenerateSpeculative: %v", err)
+	}
+	if !sameSeq(got, want) {
+		t.Fatalf("oracle block-verify diverged:\n got  %v\n want %v", got, want)
+	}
+	if m.AcceptedTokens != m.ProposedTokens || m.RejectedTokens != 0 {
+		t.Fatalf("oracle must be fully accepted: proposed=%d accepted=%d rejected=%d", m.ProposedTokens, m.AcceptedTokens, m.RejectedTokens)
+	}
+	if m.TargetVerifyCalls >= len(got) {
+		t.Fatalf("block verify spent %d base forwards for %d tokens — no better than per-token", m.TargetVerifyCalls, len(got))
+	}
+	t.Logf("oracle block: %d tokens in %d base forwards (%.2f tokens/forward), byte-identical",
+		len(got), m.TargetVerifyCalls, float64(len(got))/float64(m.TargetVerifyCalls))
+}
+
+// TestSpeculativeBlockVerifyAdversaryRestores drives the reject path every round: an always-wrong
+// drafter forces snapshot → batched verify → restore → committed-prefix re-forward each time, and the
+// output must STILL byte-equal plain greedy decode — the Snapshot/Restore rollback receipt.
+func TestSpeculativeBlockVerifyAdversaryRestores(t *testing.T) {
+	base := mkComposedModel(3, 8, 32, 16)
+	head := mkMTPHead(base, 1, 810)
+	prompt := []int32{2, 9, 6}
+	const maxNew, block = 20, 4
+
+	want, err := NewSession(base).Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("base Generate: %v", err)
+	}
+	p := pairWith(t, base, head, &adversaryDrafter{seq: want, vocab: base.Vocab})
+	p.BlockVerify = true
+	got, m, err := p.GenerateSpeculative(prompt, maxNew, -1, block)
+	if err != nil {
+		t.Fatalf("GenerateSpeculative: %v", err)
+	}
+	if !sameSeq(got, want) {
+		t.Fatalf("adversary block-verify diverged (restore path broken?):\n got  %v\n want %v", got, want)
+	}
+	if m.AcceptedTokens != 0 || m.RejectedTokens != m.ProposedTokens {
+		t.Fatalf("adversary must be fully rejected: proposed=%d accepted=%d rejected=%d", m.ProposedTokens, m.AcceptedTokens, m.RejectedTokens)
+	}
+	t.Logf("adversary block: byte-identical over %d tokens with every round restored (proposed=%d, all rejected)", len(got), m.ProposedTokens)
+}
+
+// TestSpeculativeBlockVerifyEOS proves the block lane stops on eos exactly as plain greedy does, even
+// when the eos lands mid-committed-block.
+func TestSpeculativeBlockVerifyEOS(t *testing.T) {
+	base := mkHybridComposedModel(8, 32, 16)
+	head := mkMTPHead(base, 1, 900)
+	prompt := []int32{3, 1, 4, 1, 5}
+	const maxNew, block = 32, 5
+
+	full, err := NewSession(base).Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("base Generate: %v", err)
+	}
+	if len(full) < 5 {
+		t.Fatalf("need a longer greedy run to pick an eos; got %d tokens", len(full))
+	}
+	eos := int(full[3])
+	want, err := NewSession(base).Generate(prompt, maxNew, eos)
+	if err != nil {
+		t.Fatalf("base Generate(eos): %v", err)
+	}
+	p, err := NewSpeculativePair(base, head)
+	if err != nil {
+		t.Fatalf("NewSpeculativePair: %v", err)
+	}
+	p.BlockVerify = true
+	got, _, err := p.GenerateSpeculative(prompt, maxNew, eos, block)
+	if err != nil {
+		t.Fatalf("GenerateSpeculative(eos): %v", err)
+	}
+	if !sameSeq(got, want) {
+		t.Fatalf("block-verify eos stop diverged:\n got  %v\n want %v", got, want)
+	}
+	if int(got[len(got)-1]) != eos {
+		t.Fatalf("block-verify run did not terminate on eos %d: %v", eos, got)
+	}
+	t.Logf("block eos parity: both runs stopped on token %d at length %d", eos, len(got))
+}
