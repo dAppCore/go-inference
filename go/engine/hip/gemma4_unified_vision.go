@@ -12,13 +12,14 @@ import (
 	"dappco.re/go/inference/model/gemma4/audio"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
+	"dappco.re/go/inference/model/vision"
 )
 
 // UnifiedVisionTower owns Gemma 4's encoder-free image/video projection
 // payload. Quantized linears are expanded once into system RAM; each image's
 // two matrix products use the portable rocBLAS seam when available.
 type UnifiedVisionTower struct {
-	loaded      *model.LoadedUnifiedVision
+	loaded      *vision.Unified
 	imageConfig *gemma4.Gemma4ImageFeatureConfig
 	mapping     *safetensors.DirMapping
 	gemm        audio.GEMM
@@ -79,7 +80,7 @@ func loadUnifiedVisionTowerWithGEMM(dir string, gemm audio.GEMM) (*UnifiedVision
 	return tower, nil
 }
 
-func newUnifiedVisionTowerFromLoaded(loaded *model.LoadedUnifiedVision, mapping *safetensors.DirMapping, gemm audio.GEMM, imageConfig *gemma4.Gemma4ImageFeatureConfig) (*UnifiedVisionTower, error) {
+func newUnifiedVisionTowerFromLoaded(loaded *vision.Unified, mapping *safetensors.DirMapping, gemm audio.GEMM, imageConfig *gemma4.Gemma4ImageFeatureConfig) (*UnifiedVisionTower, error) {
 	if loaded == nil {
 		return nil, core.NewError("hip.UnifiedVisionTower: loaded payload is nil")
 	}
@@ -129,7 +130,7 @@ func newUnifiedVisionTowerFromLoaded(loaded *model.LoadedUnifiedVision, mapping 
 	return tower, nil
 }
 
-func hipUnifiedVisionLinearWeights(linear model.LoadedVisionLinear) ([]float32, error) {
+func hipUnifiedVisionLinearWeights(linear vision.Linear) ([]float32, error) {
 	if linear.OutDim <= 0 || linear.InDim <= 0 || len(linear.Weight) == 0 {
 		return nil, core.NewError("hip.UnifiedVisionLinear: invalid linear geometry")
 	}

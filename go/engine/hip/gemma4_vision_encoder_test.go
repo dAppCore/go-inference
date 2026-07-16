@@ -13,8 +13,8 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/quant/mlxaffine"
+	"dappco.re/go/inference/model/vision"
 )
 
 func TestHIPVisionSDPA_Good(t *testing.T) {
@@ -65,25 +65,25 @@ func TestHIPVisionEncoderTowerProjectPatches_Good(t *testing.T) {
 		0, 1, 0, 0,
 		0, 0, 1, 0,
 	}
-	loaded := &model.LoadedVision{
+	loaded := &vision.Loaded{
 		PatchEmbedding: hipUnifiedVisionTestBF16(patchWeight),
 		PostLayernorm:  ones,
-		Layers: []model.LoadedVisionLayer{{
+		Layers: []vision.Layer{{
 			InputNorm: ones, PostAttnNorm: ones, PreFFNorm: ones, PostFFNorm: ones,
-			Q:     model.LoadedVisionLinear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
-			K:     model.LoadedVisionLinear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
-			V:     model.LoadedVisionLinear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
-			O:     model.LoadedVisionLinear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
+			Q:     vision.Linear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
+			K:     vision.Linear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
+			V:     vision.Linear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
+			O:     vision.Linear{Weight: zeros(hidden * hidden), OutDim: hidden, InDim: hidden},
 			QNorm: hipUnifiedVisionTestBF16([]float32{1, 1, 1, 1}),
 			KNorm: hipUnifiedVisionTestBF16([]float32{1, 1, 1, 1}),
-			Gate:  model.LoadedVisionLinear{Weight: zeros(ffDim * hidden)},
-			Up:    model.LoadedVisionLinear{Weight: zeros(ffDim * hidden)},
-			Down:  model.LoadedVisionLinear{Weight: zeros(hidden * ffDim)},
+			Gate:  vision.Linear{Weight: zeros(ffDim * hidden)},
+			Up:    vision.Linear{Weight: zeros(ffDim * hidden)},
+			Down:  vision.Linear{Weight: zeros(hidden * ffDim)},
 		}},
-		Projector: model.LoadedVisionProjector{Projection: model.LoadedVisionLinear{
+		Projector: vision.Projector{Projection: vision.Linear{
 			Weight: hipUnifiedVisionTestBF16(projection), OutDim: textHidden, InDim: hidden,
 		}},
-		Cfg: model.LoadedVisionConfig{
+		Cfg: vision.Config{
 			Hidden: hidden, PatchDim: patchDim, NumLayers: 1,
 			NumHeads: heads, NumKVHeads: heads, HeadDim: headDim,
 			RMSNormEps: 1e-6, PoolKernel: 2, EmbeddingScale: 2,
@@ -119,10 +119,10 @@ func TestHIPVisionEncoderTowerProjectPatches_Good(t *testing.T) {
 
 func TestHIPVisionEncoderTowerQuantizedLinears_Good(t *testing.T) {
 	const patchDim, hidden, ffDim, textHidden, groupSize, bits = 8, 8, 8, 4, 8, 4
-	quantized := func(values []float32, outDim, inDim int) model.LoadedVisionLinear {
+	quantized := func(values []float32, outDim, inDim int) vision.Linear {
 		packed, scales, biases, err := mlxaffine.QuantizeTensor(values, outDim, inDim, bits, groupSize)
 		core.RequireNoError(t, err)
-		return model.LoadedVisionLinear{
+		return vision.Linear{
 			Weight: packed, Scales: scales, Biases: biases,
 			OutDim: outDim, InDim: inDim, GroupSize: groupSize, Bits: bits, Kind: mlxaffine.Mode,
 		}
@@ -132,9 +132,9 @@ func TestHIPVisionEncoderTowerQuantizedLinears_Good(t *testing.T) {
 	hiddenValues := hipUnifiedVisionTestValues(hidden*hidden, 0.02, -0.4)
 	ffValues := hipUnifiedVisionTestValues(ffDim*hidden, 0.015, -0.3)
 	projectionValues := hipUnifiedVisionTestValues(textHidden*hidden, 0.03, -0.4)
-	loaded := &model.LoadedVision{
+	loaded := &vision.Loaded{
 		PatchProjection: quantized(patchValues, hidden, patchDim),
-		Layers: []model.LoadedVisionLayer{{
+		Layers: []vision.Layer{{
 			InputNorm: ones, PostAttnNorm: ones, PreFFNorm: ones, PostFFNorm: ones,
 			Q: quantized(hiddenValues, hidden, hidden), K: quantized(hiddenValues, hidden, hidden),
 			V: quantized(hiddenValues, hidden, hidden), O: quantized(hiddenValues, hidden, hidden),
@@ -142,8 +142,8 @@ func TestHIPVisionEncoderTowerQuantizedLinears_Good(t *testing.T) {
 			Gate: quantized(ffValues, ffDim, hidden), Up: quantized(ffValues, ffDim, hidden),
 			Down: quantized(hiddenValues, hidden, ffDim),
 		}},
-		Projector: model.LoadedVisionProjector{Projection: quantized(projectionValues, textHidden, hidden)},
-		Cfg: model.LoadedVisionConfig{
+		Projector: vision.Projector{Projection: quantized(projectionValues, textHidden, hidden)},
+		Cfg: vision.Config{
 			Hidden: hidden, PatchDim: patchDim, NumLayers: 1,
 			NumHeads: 1, NumKVHeads: 1, HeadDim: hidden,
 			RMSNormEps: 1e-6, PoolKernel: 1, EmbeddingScale: 1,
