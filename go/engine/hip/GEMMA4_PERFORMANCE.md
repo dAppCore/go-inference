@@ -17,7 +17,7 @@ discrete card is measured.
 | GPU | AMD Radeon RX 7800 XT, gfx1100, 16,368 MiB reported VRAM |
 | CPU / RAM | AMD Ryzen 9 9950X / 128 GB |
 | ROCm | 7.2.26015 |
-| go-inference | `240ca410173f5a92f378f6d42ea553f26889b575` |
+| go-inference | `8bec8394a37ca014b3ef78829bff32838bfd768f` |
 | llama.cpp oracle | `c7d8722922a2599dc4d77f8808d8e6c2fde5e7a2` |
 
 ## Short-context board
@@ -33,7 +33,7 @@ is not a numerical parity comparison against Q4_K_M.
 |---|---:|---:|---:|---:|---:|---|
 | E2B | **159.5** | 138.7 | 5,611.78 | 150.25 | -7.7% | native lane frozen above 100 tok/s |
 | E4B | 79.88 | **82.17** | 3,202.18 | 94.61 | -13.2% | active short-context gap |
-| 12B | **53.74** | **43.77** | 1,425.00 | 50.20 | -12.8% | portable GGUF gap narrowed; 50 tok/s floor remains active |
+| 12B | **53.74** | **44.75** | 1,425.00 | 50.20 | -10.9% | portable GGUF gap narrowed; 50 tok/s floor remains active |
 | 26B-A4B | n/a | **56.80** | 806.55 | 62.25 | -8.8% | 50 tok/s floor met; deep-context row remains active |
 
 The converted-pack column preserves older format-oracle receipts. Those packs
@@ -67,14 +67,37 @@ The portable 12B row improved from 36.93 tok/s to 41.90 tok/s when
 `8e34edde` stopped sending single-token mixed Q/K/V projections through batch
 kernels. The exact 15,360 by 3,840 fused gate/up geometries then measured a
 three-run mean of 43.25 tok/s for row16 and 43.75 tok/s for row8. `240ca410`
-promotes row8 as the default, and its no-override receipt is 43.77 tok/s. That
-is an 18.5% improvement over the previous board and reduces the same-GGUF gap
-to llama.cpp from 26.4% to 12.8%.
+promotes row8 as the default. `31c7948d` then routes the exact 3,840 by 15,360
+down projection through its Q4 group32 kernel. The resulting no-override
+receipt is 44.75 tok/s. That is a 21.2% improvement over the 36.93 tok/s
+starting point and reduces the same-GGUF gap to llama.cpp from 26.4% to 10.9%.
 
 The generic, row16, and row8 HIP++ kernels pass the same RX 7800 XT output
 oracle to 0.001. Internal affine kernel names describe the synthesized device
 layout produced after loading GGUF; they do not make this an MLX platform or
 an MLX model lane.
+
+### Native Q4_K experiment
+
+`8bec8394` adds an explicit `GO_ROCM_GEMMA4_DENSE_Q4_K=1` experiment for the
+12B gate/up pair. It expands only Q4_K metadata on device, keeps the packed
+weights native, quantizes activations to Q8_1, and uses the portable HIP++ dot
+path. The expanded representation uses 152 bytes per 256 weights instead of
+the affine lane's 160 bytes. Across both gate/up tensors and 48 layers this
+saves 168.75 MiB of device memory.
+
+The isolated single-token pair measured about 123.9 us versus 135.2 us for
+affine, including activation quantization. The 512-token prefill pair measured
+27.9 ms versus 28.9 ms for affine with a 16-token tile. Those local wins did
+not survive the full decode pipeline: a matched `tg512` A/B measured 43.64
+tok/s native versus 44.58 tok/s affine, 2.1% slower. Emitting Q8_1 directly
+from the preceding residual-add/RMSNorm kernel removed 3,024 decode-time
+quantizer launches; only the 48 batched prefill launches remain. Spreading the
+fused reduction over 15 workgroups measured 43.54 tok/s and was rejected.
+
+The native route therefore remains opt-in. An unset environment uses affine;
+its post-change production receipt is 44.75 tok/s. Keep this decision until a
+native route beats affine end to end, not merely in an isolated kernel.
 
 ## Context growth
 
