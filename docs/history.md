@@ -172,3 +172,38 @@ overtaken by the consolidation:
 The genuinely open contract questions (streaming batch, aggregated stats) now
 follow the in-repo optional-interface pattern rather than a cross-repo rollout —
 see [architecture.md](architecture.md).
+
+## Release-day support: the gemma4 2026-07-15 update
+
+Google refreshed the gemma4 family repos on 15 July 2026 (canonical chat
+template + README/model-card). go-inference absorbed it same-day, ~12 hours
+after the upstream commits:
+
+- **Canonical chat template** (published 2026-07-09, shipped 07-15): the
+  semantics overlapping our native dialect were ported — reasoning
+  preservation on post-last-user turns (`reasoning`/`reasoning_content` now
+  parse; `chat_template_kwargs.preserve_thinking` extends it to tool-call
+  turns), adjacent-assistant turn folding (turn-tag balance), and the port
+  flushed out a live bug: inbound `tool_calls` on replayed history were
+  dropped by the hand-rolled decoder, so the stateless tool-history re-render
+  could never fire. Null tool-argument rendering already matched.
+- **OCR soft-token budget (1120)**: per-request budget override end-to-end —
+  `mm_processor_kwargs.max_soft_tokens` (vLLM convention) and OpenAI-native
+  `image_url.detail` (low→70, high→1120) → `WithVisionBudget` → the neutral
+  `VisionBudgetTokenModel.ProjectImageAt` seam → the metal binding cloning the
+  retained feature config per projection. Live receipt: the same 896×1152
+  test sheet costs 290 prompt tokens at default and 1111 at `detail:"high"`
+  on the 26B — the budget engages through every layer. The vendored reference
+  docs confirm the sizing rule (budget×9 max patches, aspect-preserving
+  resize, 3×3 mean-pool) matches the documented pipeline exactly.
+- **FA4/Blackwell**: a transformers-side CUDA kernel lane, not an attention-
+  scheme change — config.json and generation_config are byte-stable across
+  the update, so the metal kernels (already implementing the declared scheme)
+  need nothing.
+
+Known follow-ups from the live receipt, tracked as tasks: the metal encoder
+tower's feature quality degrades at large budget grids (readable at 280,
+"illegible" verdict at 1120 on the same image — position-table handling or a
+kernel grid assumption; the pure-Go host tower is the divergence reference),
+and the 12B unified (encoder-free) lane declines image prefill under chat's
+chunked prefill entirely.
