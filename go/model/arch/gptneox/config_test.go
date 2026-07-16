@@ -46,6 +46,32 @@ func TestConfig_Arch_Ugly(t *testing.T) {
 	}
 }
 
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// zero-rounded-rotary-dimension guard — distinct from _Bad's all-zero rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{ModelType: "gpt_neox", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 9, RotaryPct: 0.1}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("zero-rounded rotary dimension became valid after InferFromWeights")
+	}
+}
+
 func TestConfig_GPTJ_Good(t *testing.T) {
 	cfg := parseConfig(t, `{"model_type":"gptj","n_embd":4096,"n_inner":16384,"n_layer":28,"n_head":16,"vocab_size":50400,"rotary_dim":64,"layer_norm_epsilon":1e-5}`)
 	a, err := cfg.Arch()

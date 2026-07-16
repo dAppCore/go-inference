@@ -11,3 +11,10 @@ func ExampleConfig_Arch() {
 	// Output:
 	// 64 16
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := Config{HiddenSize: 512}
+	cfg.InferFromWeights(nil) // no-op: GPT-NeoX/J/Neo declare every dim in config.json
+	core.Println(cfg.HiddenSize)
+	// Output: 512
+}
