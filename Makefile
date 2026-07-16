@@ -234,11 +234,12 @@ rocr-cmake-shims:
 		'  set_target_properties(llvm-objcopy PROPERTIES IMPORTED_LOCATION "$(ROCR_LLVM_OBJCOPY)")' \
 		'endif()' > "$(ROCR_CMAKE_SHIM_DIR_ABS)/llvm/LLVMConfig.cmake"
 
-hsa-static-archive: rocr-cmake-shims
-	@test -d "$(ROCR_RUNTIME_SOURCE_DIR_ABS)" || { echo "missing ROCr runtime source submodule: $(ROCR_RUNTIME_SOURCE_DIR)"; exit 1; }
+hsa-static-archive:
+	@test -f "$(ROCR_RUNTIME_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "ROCr runtime source submodule is not initialized: $(ROCR_RUNTIME_SOURCE_DIR)"; exit 1; }
 	@test -n "$(DRM_AMDGPU_STATIC_ARCHIVE)" || { echo "missing static libdrm_amdgpu.a; install libdrm-amdgpu-dev"; exit 1; }
 	@test -n "$(DRM_STATIC_ARCHIVE)" || { echo "missing static libdrm.a; install libdrm-dev"; exit 1; }
 	@test -n "$(ELF_STATIC_ARCHIVE)" || { echo "missing static libelf.a; install libelf-dev"; exit 1; }
+	$(MAKE) --no-print-directory rocr-cmake-shims
 	$(CMAKE) -S "$(ROCR_RUNTIME_SOURCE_DIR_ABS)" -B "$(ROCR_RUNTIME_BUILD_DIR_ABS)" -G "$(CMAKE_GENERATOR)" \
 		-DBUILD_SHARED_LIBS=OFF \
 		-DClang_DIR="$(ROCR_CMAKE_SHIM_DIR_ABS)/clang" \
@@ -251,8 +252,8 @@ hsa-static-archive: rocr-cmake-shims
 	@test -s "$(ROCR_HSAKMT_STATIC_ARCHIVE)" || { echo "expected static HSAKMT archive was not produced: $(ROCR_HSAKMT_STATIC_ARCHIVE)"; exit 1; }
 
 hip-static-archive:
-	@test -d "$(HIP_API_SOURCE_DIR_ABS)" || { echo "missing HIP API source submodule: $(HIP_API_SOURCE_DIR)"; exit 1; }
-	@test -d "$(HIP_RUNTIME_SOURCE_DIR_ABS)" || { echo "missing HIP runtime source submodule: $(HIP_RUNTIME_SOURCE_DIR)"; exit 1; }
+	@test -f "$(HIP_API_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "HIP API source submodule is not initialized: $(HIP_API_SOURCE_DIR)"; exit 1; }
+	@test -f "$(HIP_RUNTIME_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "HIP runtime source submodule is not initialized: $(HIP_RUNTIME_SOURCE_DIR)"; exit 1; }
 	$(CMAKE) -S "$(HIP_RUNTIME_SOURCE_DIR_ABS)" -B "$(HIP_RUNTIME_BUILD_DIR_ABS)" -G "$(CMAKE_GENERATOR)" \
 		-DCLR_BUILD_HIP=ON \
 		-DCLR_BUILD_OCL=OFF \
