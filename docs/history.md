@@ -225,3 +225,29 @@ causal embedding lanes with their legal sequential fallback. Receipts: q8-on
 answers the giant-letter probes byte-equal to the q8-off baseline at temp 0;
 two new q8 bidir tests pin engagement and split routing; full metal suite
 green.
+
+## 2026-07-16 — Qwen MTP joins the ONE speculative route (#7)
+
+The Qwen 3.5/3.6 multi-token-prediction head now pairs with its base
+through the same declare/bind route gemma4's assistants use — four
+slices on dev: `df7f79a` (composed Snapshot/Restore), `7d64182`
+(declare + trained-shape pairing), `82d263d` (block-verify lane,
+measured), `bd5ef1cc` (the serve seam). The drafter runs the trained
+shape verified against vLLM's proposer — each head row pairs a token
+with the base hidden that PRODUCED it, in a persistent head session at
+true positions; the rejected earlier draft of the pairing had both
+wrong, and the difference is 61-65% real acceptance on the 27B versus
+the 7% a random head scores. Per-token verify is byte-identical to
+plain greedy by construction; block-verify (one batched base forward
+per round, Snapshot/Restore on reject) is mechanically proven — the
+oracle fixture commits 20 tokens in 4 forwards — but ships OFF: on the
+host lane a 4-row batched forward costs ~3x a single step, so the
+forward-count win inverts (48 tokens: 15.7s per-token vs 21.1s block).
+Its flip-levers, in order: truncate-on-restore for attention KV, #8-B
+quant tails, an MoE base, the GPU decode lane. Live serve receipt:
+`lem serve --model Qwen3.6-27B-4bit --draft Qwen3.6-27B-MTP-4bit`
+announces the lane, answers ChatML at temp 0, and LTHN_MTP_DIAG shows
+the pair carrying requests at 65.2% acceptance. Follow-ups filed in
+the task: the in-checkpoint mtp.* layout (the 35B-A3B MoE convention)
+as an auto-detect rung, and speculative continuity for BOTH pair
+families.

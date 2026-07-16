@@ -2,14 +2,19 @@
 
 //go:build darwin && arm64
 
-// MTP speculative decoding as a library caller: a Gemma 4 target paired with
-// its drafter runs draft -> verify -> accept forwards instead of one token
-// per forward. The pairing convention is a fixed suffix on the target's own
-// name — target "gemma-4-<size>-it" pairs with drafter
-// "gemma-4-<size>-it-assistant" (or a quantised variant such as
-// "...-assistant-bf16"); LoadSpeculativePair takes the two directories
-// directly rather than auto-detecting the pair (that ladder is serve/generate's
-// job, not the library seam).
+// MTP speculative decoding as a library caller: a target paired with its
+// drafter runs draft -> verify -> accept forwards instead of one token per
+// forward. LoadSpeculativePair takes the two directories directly rather than
+// auto-detecting the pair (that ladder is serve/generate's job, not the
+// library seam), and FAMILY-DISPATCHES on the target:
+//
+//   - a Gemma 4 target ("gemma-4-<size>-it") pairs with its "-assistant"
+//     drafter (or a quantised variant such as "...-assistant-bf16") through
+//     the metal ArchSession AssistantPair;
+//   - a composed/hybrid target (Qwen 3.5/3.6 — e.g. "Qwen3.6-27B-4bit")
+//     pairs with its separate MTP head checkpoint ("Qwen3.6-27B-MTP-4bit",
+//     model_type qwen3_5_mtp) through the composed pairing — same call,
+//     same TextModel, different physics underneath.
 //
 // The speculative lane only engages fully greedy: at temperature 0 the verify
 // is exact (byte-identical to plain decode, just faster), so this example
@@ -21,6 +26,7 @@
 // serving.SpeculativeLoader.
 //
 //	go run ./pkg/chat/mtp -model ~/models/gemma-4-e2b-it-bf16 -draft ~/models/gemma-4-e2b-it-assistant-bf16
+//	go run ./pkg/chat/mtp -model ~/models/Qwen3.6-27B-4bit -draft ~/models/Qwen3.6-27B-MTP-4bit
 package main
 
 import (
