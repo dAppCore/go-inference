@@ -21,7 +21,7 @@ func tensor(values []float32, shape ...int) safetensors.Tensor {
 	return safetensors.Tensor{Dtype: "F32", Shape: shape, Data: data}
 }
 
-func TestNormalizeWeights_Good(t *testing.T) {
+func TestRegister_NormalizeWeights_Good(t *testing.T) {
 	cfg := &Config{HiddenSize: 2, IntermediateSize: 3, NumHiddenLayers: 1, NumLocalExperts: 2}
 	in := map[string]safetensors.Tensor{
 		"model.layers.0.block_sparse_moe.input_linear.weight":  tensor(make([]float32, 24), 2, 6, 2),
@@ -37,13 +37,13 @@ func TestNormalizeWeights_Good(t *testing.T) {
 	}
 }
 
-func TestNormalizeWeights_Bad(t *testing.T) {
+func TestRegister_NormalizeWeights_Bad(t *testing.T) {
 	if _, err := NormalizeWeights(map[string]safetensors.Tensor{}, &Config{NumHiddenLayers: 1, NumLocalExperts: 2}); err == nil {
 		t.Fatal("NormalizeWeights accepted missing packed weights")
 	}
 }
 
-func TestNormalizeWeights_Ugly(t *testing.T) {
+func TestRegister_NormalizeWeights_Ugly(t *testing.T) {
 	cfg := &Config{HiddenSize: 2, IntermediateSize: 3, NumHiddenLayers: 1, NumLocalExperts: 2}
 	in := map[string]safetensors.Tensor{
 		"model.layers.0.block_sparse_moe.input_linear.weight":  tensor(nil, 2, 5, 2),

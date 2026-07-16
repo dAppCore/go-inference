@@ -52,9 +52,16 @@ func TestGatedDeltaL1ClosedForm(t *testing.T) {
 	t.Log("gated delta L=1 matches the closed form β·scale·(q·k̂)·v")
 }
 
-// TestGatedDeltaChunkCarry proves the decode-boundary invariant: one pass over a sequence equals two
-// chunks carrying the [H,D,D] delta state across the boundary — BIT-EXACT, the Qwen 3.6 decode correctness.
-func TestGatedDeltaChunkCarry(t *testing.T) {
+func TestDeltanet_GatedDeltaRuleF32_Bad(t *testing.T) {
+	if _, _, err := GatedDeltaRuleF32(nil, nil, nil, nil, nil, nil, 0, 1, 1, 0.5, testEps); err == nil {
+		t.Fatal("L=0 accepted")
+	}
+}
+
+// TestDeltanet_GatedDeltaRuleF32_Ugly proves the decode-boundary invariant: one pass over a sequence
+// equals two chunks carrying the [H,D,D] delta state across the boundary — BIT-EXACT, the Qwen 3.6
+// decode correctness. A genuine distinct edge from the single-step closed-form / golden-bits cases.
+func TestDeltanet_GatedDeltaRuleF32_Ugly(t *testing.T) {
 	const L, split, H, D = 7, 4, 2, 5
 	const scale = float32(0.4472136) // 1/√5
 	q := syn(L*H*D, 1)
@@ -98,9 +105,10 @@ func TestGatedDeltaChunkCarry(t *testing.T) {
 	t.Logf("gated delta chunk-carry bit-exact: split %d|%d, o and delta state identical to the one-pass run", split, rem)
 }
 
-// TestGatedDeltaRuleF32_Golden pins the exact f32 bit-pattern of the recurrence outputs (o and the advanced
-// state) for a fixed input, gating alloc-reduction refactors on bit-identical behaviour.
-func TestGatedDeltaRuleF32_Golden(t *testing.T) {
+// TestDeltanet_GatedDeltaRuleF32_Good pins the exact f32 bit-pattern of the recurrence outputs (o and
+// the advanced state) for a fixed input, gating alloc-reduction refactors on bit-identical behaviour —
+// a golden bit-pattern pin over real outputs IS the AX-7 "documented happy path with real assertions".
+func TestDeltanet_GatedDeltaRuleF32_Good(t *testing.T) {
 	const L, H, D = 3, 2, 4
 	alpha := syn(L*H, 23)
 	for i := range alpha {

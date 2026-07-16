@@ -12,7 +12,7 @@ import (
 // Fixtures are architecture fields from the named public checkpoints:
 // https://huggingface.co/CohereLabs/c4ai-command-r-v01/blob/main/config.json
 // https://huggingface.co/CohereLabs/c4ai-command-r7b-12-2024/blob/main/config.json
-func TestConfig_RealCheckpointFixtures_Good(t *testing.T) {
+func TestConfig_Arch_Good(t *testing.T) {
 	checks := []struct {
 		file  string
 		want  model.AttentionType
@@ -41,15 +41,42 @@ func TestConfig_RealCheckpointFixtures_Good(t *testing.T) {
 	}
 }
 
-func TestConfig_RealCheckpointFixtures_Bad(t *testing.T) {
+func TestConfig_Arch_Bad(t *testing.T) {
 	if _, err := (&Config{}).Arch(); err == nil {
 		t.Fatal("empty config accepted")
 	}
 }
 
-func TestConfig_RealCheckpointFixtures_Ugly(t *testing.T) {
+func TestConfig_Arch_Ugly(t *testing.T) {
 	if _, err := (&Config{HiddenSize: 7, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 1}).Arch(); err == nil {
 		t.Fatal("indivisible attention geometry accepted")
+	}
+}
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// indivisible-attention-geometry guard — distinct from _Bad's all-zero
+// rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{HiddenSize: 7, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 1}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("indivisible attention geometry became valid after InferFromWeights")
 	}
 }
 

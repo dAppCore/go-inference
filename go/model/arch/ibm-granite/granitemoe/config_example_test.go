@@ -20,3 +20,10 @@ func ExampleConfig_Arch() {
 	core.Println(err == nil, arch.Experts, arch.TopK, arch.NormaliseMoETopK)
 	// Output: true 4 2 true
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := granitemoe.Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil) // no-op: GraniteMoE declares its geometry
+	core.Println(cfg.HiddenSize)
+	// Output: 8
+}

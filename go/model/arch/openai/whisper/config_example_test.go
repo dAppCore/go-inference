@@ -16,3 +16,10 @@ func ExampleConfig_Arch() {
 	core.Println(err != nil)
 	// Output: true
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := Config{DModel: 384}
+	cfg.InferFromWeights(nil) // no-op: Whisper declares every encoder/decoder dim in config.json
+	core.Println(cfg.DModel)
+	// Output: 384
+}

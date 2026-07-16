@@ -25,7 +25,7 @@ func readConfigFixture(t *testing.T, name string) Config {
 }
 
 // Fixture source: https://huggingface.co/Qwen/Qwen1.5-MoE-A2.7B/blob/main/config.json
-func TestConfig_Arch_Good(t *testing.T) {
+func TestQwenmoe_Config_Arch_Good(t *testing.T) {
 	cfg := readConfigFixture(t, "Qwen-Qwen1.5-MoE-A2.7B-config.json")
 	arch, err := cfg.Arch()
 	if err != nil {
@@ -39,21 +39,21 @@ func TestConfig_Arch_Good(t *testing.T) {
 	}
 }
 
-func TestConfig_Arch_Bad(t *testing.T) {
+func TestQwenmoe_Config_Arch_Bad(t *testing.T) {
 	cfg := Config{}
 	if _, err := cfg.Arch(); err == nil {
 		t.Fatal("empty config accepted")
 	}
 }
 
-func TestConfig_Arch_Ugly(t *testing.T) {
+func TestQwenmoe_Config_Arch_Ugly(t *testing.T) {
 	cfg := Config{HiddenSize: 8, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 16, NumExperts: 2, NumExpertsPerTok: 3, MoEIntermediateSize: 4}
 	if _, err := cfg.Arch(); err == nil {
 		t.Fatal("top-k greater than expert count accepted")
 	}
 }
 
-func TestConfig_InferFromWeights_Good(t *testing.T) {
+func TestQwenmoe_Config_InferFromWeights_Good(t *testing.T) {
 	cfg := Config{NumHiddenLayers: 1, NumAttentionHeads: 2}
 	cfg.InferFromWeights(map[string]safetensors.Tensor{
 		"model.layers.0.self_attn.q_proj.weight": {Shape: []int{16, 8}},
@@ -64,7 +64,7 @@ func TestConfig_InferFromWeights_Good(t *testing.T) {
 	}
 }
 
-func TestConfig_InferFromWeights_Bad(t *testing.T) {
+func TestQwenmoe_Config_InferFromWeights_Bad(t *testing.T) {
 	cfg := Config{}
 	cfg.InferFromWeights(nil)
 	if cfg.HeadDim != 0 || cfg.VocabSize != 0 {
@@ -72,7 +72,7 @@ func TestConfig_InferFromWeights_Bad(t *testing.T) {
 	}
 }
 
-func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+func TestQwenmoe_Config_InferFromWeights_Ugly(t *testing.T) {
 	cfg := Config{NumHiddenLayers: 1, NumAttentionHeads: 3}
 	cfg.InferFromWeights(map[string]safetensors.Tensor{"model.layers.0.self_attn.q_proj.weight": {Shape: []int{8, 8}}})
 	if cfg.HeadDim != 0 {
@@ -81,7 +81,7 @@ func TestConfig_InferFromWeights_Ugly(t *testing.T) {
 }
 
 // Fixture source: https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json
-func TestConfig_Arch_Qwen3(t *testing.T) {
+func TestQwenmoe_Config_Arch_Qwen3(t *testing.T) {
 	cfg := readConfigFixture(t, "Qwen-Qwen3-30B-A3B-config.json")
 	arch, err := cfg.Arch()
 	if err != nil {

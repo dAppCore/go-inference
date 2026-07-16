@@ -34,11 +34,11 @@ func TestYaRNInvFreqs_FactorOne_PlainRope_Good(t *testing.T) {
 	}
 }
 
-// TestYaRNInvFreqs_Ministral_Good pins the NTK-by-parts split against the real
+// TestYarn_YaRNInvFreqs_Good pins the NTK-by-parts split against the real
 // Ministral-3 params: high-frequency dims extrapolate (== plain rope), low-
 // frequency dims interpolate (== plain rope / factor), every dim stays within
 // [interpolated, extrapolated], and the sequence is monotonically non-increasing.
-func TestYaRNInvFreqs_Ministral_Good(t *testing.T) {
+func TestYarn_YaRNInvFreqs_Good(t *testing.T) {
 	const base, factor, dim = 1e6, 16.0, 128
 	const betaFast, betaSlow, origMax = 32.0, 1.0, 16384
 	got := mistral.YaRNInvFreqs(base, factor, betaFast, betaSlow, origMax, dim)
@@ -70,10 +70,12 @@ func TestYaRNInvFreqs_Ministral_Good(t *testing.T) {
 	}
 }
 
-// TestYaRNInvFreqs_RampBetween_Good proves the transition dims are a genuine blend
-// — strictly below plain rope (interpolated down) yet strictly above the fully-
-// interpolated value — so the ramp actually ramps rather than stepping.
-func TestYaRNInvFreqs_RampBetween_Good(t *testing.T) {
+// TestYarn_YaRNInvFreqs_Ugly proves the transition dims are a genuine blend —
+// strictly below plain rope (interpolated down) yet strictly above the fully-
+// interpolated value — so the ramp actually ramps rather than stepping. A
+// distinct edge from the plain happy path: it pins the mid-ramp behaviour the
+// extrapolate/interpolate boundary tests don't reach.
+func TestYarn_YaRNInvFreqs_Ugly(t *testing.T) {
 	const base, factor, dim = 1e6, 16.0, 128
 	got := mistral.YaRNInvFreqs(base, factor, 32, 1, 16384, dim)
 	rampSeen := false
@@ -86,5 +88,14 @@ func TestYaRNInvFreqs_RampBetween_Good(t *testing.T) {
 	}
 	if !rampSeen {
 		t.Fatal("no ramp dims found — YaRN degenerated to a hard extra/inter step")
+	}
+}
+
+// TestYarn_YaRNInvFreqs_Bad drives the malformed dim=0 input: half becomes 0,
+// so the function must degrade gracefully to an empty slice rather than panic.
+func TestYarn_YaRNInvFreqs_Bad(t *testing.T) {
+	got := mistral.YaRNInvFreqs(1_000_000, 16, 32, 1, 16384, 0)
+	if len(got) != 0 {
+		t.Fatalf("dim=0 produced %d freqs, want 0 (graceful degenerate)", len(got))
 	}
 }

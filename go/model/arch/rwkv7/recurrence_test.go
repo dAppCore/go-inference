@@ -16,9 +16,9 @@ func syn(n, seed int) []float32 {
 	return out
 }
 
-// TestWKV7L1ClosedForm checks the recurrence against the closed form for a single step from a zero state:
-// S=k⊗v (Sa=0, decay·0=0), so o[v]=Σ_k r[k]·k[k]·v[v]=(r·k)·v[v] per head.
-func TestWKV7L1ClosedForm(t *testing.T) {
+// TestRecurrence_WKV7F32_Good checks the recurrence against the closed form for a single step from a
+// zero state: S=k⊗v (Sa=0, decay·0=0), so o[v]=Σ_k r[k]·k[k]·v[v]=(r·k)·v[v] per head.
+func TestRecurrence_WKV7F32_Good(t *testing.T) {
 	const H, K, V = 3, 5, 4
 	r := syn(H*K, 1)
 	w := syn(H*K, 2)
@@ -45,10 +45,17 @@ func TestWKV7L1ClosedForm(t *testing.T) {
 	t.Log("WKV7 L=1 matches the closed form (r·k)·v")
 }
 
-// TestWKV7ChunkCarry proves the decode-boundary invariant: running a sequence in one pass equals running
-// it as two chunks where the first chunk's final [H,K,V] state is carried into the second. BIT-EXACT (the
-// per-step recurrence is identical regardless of the boundary) — what makes RWKV-7 decode correct.
-func TestWKV7ChunkCarry(t *testing.T) {
+func TestRecurrence_WKV7F32_Bad(t *testing.T) {
+	if _, _, err := WKV7F32(nil, nil, nil, nil, nil, nil, nil, 0, 1, 1, 1); err == nil {
+		t.Fatal("L=0 accepted")
+	}
+}
+
+// TestRecurrence_WKV7F32_Ugly proves the decode-boundary invariant: running a sequence in one pass
+// equals running it as two chunks where the first chunk's final [H,K,V] state is carried into the
+// second. BIT-EXACT (the per-step recurrence is identical regardless of the boundary) — what makes
+// RWKV-7 decode correct. A genuine distinct edge from the single-step closed-form _Good case.
+func TestRecurrence_WKV7F32_Ugly(t *testing.T) {
 	const L, split, H, K, V = 7, 4, 2, 3, 5
 	r := syn(L*H*K, 1)
 	w := syn(L*H*K, 2)

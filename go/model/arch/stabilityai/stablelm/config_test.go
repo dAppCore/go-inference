@@ -42,6 +42,32 @@ func TestConfig_Arch_Ugly(t *testing.T) {
 	}
 }
 
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// fractional-rotary-dimension guard — distinct from _Bad's all-zero rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{ModelType: "stablelm", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, NumKeyValueHeads: 1, VocabSize: 8, PartialRotaryFactor: .3}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("fractional rotary dimension became valid after InferFromWeights")
+	}
+}
+
 // TestTinyStableLMForward_Good uses varied seeded weights and partial rotary.
 func TestTinyStableLMForward_Good(t *testing.T) {
 	syn := func(n, seed int) []float32 {

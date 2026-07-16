@@ -7,10 +7,84 @@ import (
 	"testing"
 )
 
+func TestGatedDelta_GatedDeltaConfig_QDim_Good(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, HeadDim: 4}
+	if got := cfg.QDim(); got != 8 {
+		t.Fatalf("QDim = %d, want 8 (2*4)", got)
+	}
+}
+
+func TestGatedDelta_GatedDeltaConfig_QDim_Bad(t *testing.T) {
+	if got := (GatedDeltaConfig{}).QDim(); got != 0 {
+		t.Fatalf("QDim = %d, want 0 for an unconfigured layer", got)
+	}
+}
+
+// TestGatedDelta_GatedDeltaConfig_QDim_Ugly pins the extreme-GQA edge:
+// KeyHeads=1 (every value head reads the same single key head).
+func TestGatedDelta_GatedDeltaConfig_QDim_Ugly(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 1, HeadDim: 128}
+	if got := cfg.QDim(); got != 128 {
+		t.Fatalf("QDim = %d, want 128 (1*128)", got)
+	}
+}
+
+func TestGatedDelta_GatedDeltaConfig_VDim_Good(t *testing.T) {
+	cfg := GatedDeltaConfig{ValueHeads: 4, HeadDim: 4}
+	if got := cfg.VDim(); got != 16 {
+		t.Fatalf("VDim = %d, want 16 (4*4)", got)
+	}
+}
+
+func TestGatedDelta_GatedDeltaConfig_VDim_Bad(t *testing.T) {
+	if got := (GatedDeltaConfig{}).VDim(); got != 0 {
+		t.Fatalf("VDim = %d, want 0 for an unconfigured layer", got)
+	}
+}
+
+// TestGatedDelta_GatedDeltaConfig_VDim_Ugly proves VDim is independent of
+// KeyHeads — unlike QDim, which scales with KeyHeads, not ValueHeads.
+func TestGatedDelta_GatedDeltaConfig_VDim_Ugly(t *testing.T) {
+	cfg := GatedDeltaConfig{ValueHeads: 8, HeadDim: 4, KeyHeads: 2}
+	if got := cfg.VDim(); got != 32 {
+		t.Fatalf("VDim = %d, want 32 (8*4, independent of KeyHeads=2)", got)
+	}
+}
+
+// TestGatedDelta_GatedDeltaConfig_ConvDim_Good pins the q|k|v packed width
+// formula (2*qDim + vDim) for a plain MHA-shaped config (KeyHeads == ValueHeads,
+// no GQA repeat).
+func TestGatedDelta_GatedDeltaConfig_ConvDim_Good(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 4}
+	if got, want := cfg.ConvDim(), 2*cfg.QDim()+cfg.VDim(); got != want {
+		t.Fatalf("ConvDim = %d, want %d (2*qDim + vDim)", got, want)
+	}
+}
+
+func TestGatedDelta_GatedDeltaConfig_ConvDim_Bad(t *testing.T) {
+	if got := (GatedDeltaConfig{}).ConvDim(); got != 0 {
+		t.Fatalf("ConvDim = %d, want 0 for an unconfigured layer", got)
+	}
+}
+
+// TestGatedDelta_GatedDeltaConfig_ConvDim_Ugly proves ConvDim packs q|k at the
+// COMPRESSED KeyHeads width, not value-head-expanded by the GQA repeat factor
+// — the conv projects the pre-repeat q/k, matching qDim()'s own KeyHeads-based
+// formula, never the fully-expanded ValueHeads width.
+func TestGatedDelta_GatedDeltaConfig_ConvDim_Ugly(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 8, HeadDim: 4} // GQA: 4x repeat
+	qDim, vDim := cfg.QDim(), cfg.VDim()
+	want := 2*qDim + vDim
+	if got := cfg.ConvDim(); got != want || got == 2*vDim+vDim {
+		t.Fatalf("ConvDim = %d, want %d (packs the compressed q|k width, never the GQA-expanded one)", got, want)
+	}
+}
+
 // TestGatedDeltaForwardF32_Golden pins the exact f32 bit-pattern of the block's three outputs (out plus
 // both advanced states) for a fixed input, gating alloc-reduction refactors on bit-identical behaviour:
-// any change that shifts an output bit fails here.
-func TestGatedDeltaForwardF32_Golden(t *testing.T) {
+// any change that shifts an output bit fails here. Renamed to TestGatedDelta_GatedDeltaForwardF32_Good:
+// a golden bit-pattern pin over real outputs IS the AX-7 "documented happy path with real assertions".
+func TestGatedDelta_GatedDeltaForwardF32_Good(t *testing.T) {
 	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
@@ -79,10 +153,17 @@ func TestGatedDeltaForwardShape(t *testing.T) {
 	t.Logf("qwen3 gated-delta block: [%d,%d] in → out, conv-state %d + delta-state %d advanced", L, D, len(nc), len(nd))
 }
 
-// TestGatedDeltaForwardCarry is the full-block decode invariant: one pass over a sequence is BIT-EXACT to
-// two chunks carrying BOTH the conv-state ring AND the delta state across the boundary — Qwen 3.6 streaming
-// decode reproduces prefill.
-func TestGatedDeltaForwardCarry(t *testing.T) {
+func TestGatedDelta_GatedDeltaForwardF32_Bad(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	if _, _, _, err := GatedDeltaForwardF32(gdSyn(3*6, 1), nil, cfg, nil, nil, 3, 6); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestGatedDelta_GatedDeltaForwardF32_Ugly is the full-block decode invariant: one pass over a sequence is
+// BIT-EXACT to two chunks carrying BOTH the conv-state ring AND the delta state across the boundary — Qwen
+// 3.6 streaming decode reproduces prefill. A genuine distinct edge from the single-pass _Good case.
+func TestGatedDelta_GatedDeltaForwardF32_Ugly(t *testing.T) {
 	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	const L, split, D = 7, 4, 8
 	w := mkGatedDeltaWeights(cfg, D)
@@ -112,4 +193,174 @@ func TestGatedDeltaForwardCarry(t *testing.T) {
 		}
 	}
 	t.Logf("qwen3 gated-delta decode invariant: split %d|%d, conv + delta state carry → output bit-exact to one-pass", split, rem)
+}
+
+// TestGatedDelta_GatedDeltaForwardScratchF32_Good proves a caller-supplied *GatedDeltaScratch
+// produces bit-identical output to the nil-scratch (GatedDeltaForwardF32) path, and that the
+// scratch's out buffer is populated for reuse.
+func TestGatedDelta_GatedDeltaForwardScratchF32_Good(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	const L, D = 3, 6
+	w := mkGatedDeltaWeights(cfg, D)
+	x := gdSyn(L*D, 1)
+	wantOut, wantNC, wantND, err := GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
+	if err != nil {
+		t.Fatalf("reference GatedDeltaForwardF32: %v", err)
+	}
+	sc := &GatedDeltaScratch{}
+	out, nc, nd, err := GatedDeltaForwardScratchF32(x, w, cfg, nil, nil, L, D, sc)
+	if err != nil {
+		t.Fatalf("GatedDeltaForwardScratchF32: %v", err)
+	}
+	for i := range out {
+		if out[i] != wantOut[i] {
+			t.Fatalf("scratch out[%d] = %v, want bit-identical %v", i, out[i], wantOut[i])
+		}
+	}
+	if len(nc) != len(wantNC) || len(nd) != len(wantND) {
+		t.Fatalf("state shapes: conv %d/%d delta %d/%d", len(nc), len(wantNC), len(nd), len(wantND))
+	}
+	if len(sc.out) == 0 {
+		t.Fatal("scratch.out was not populated for reuse")
+	}
+}
+
+func TestGatedDelta_GatedDeltaForwardScratchF32_Bad(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	if _, _, _, err := GatedDeltaForwardScratchF32(gdSyn(3*6, 1), nil, cfg, nil, nil, 3, 6, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestGatedDelta_GatedDeltaForwardScratchF32_Ugly proves scratch-buffer REUSE across successive
+// calls doesn't corrupt correctness: a second call sharing the same *GatedDeltaScratch (fed the
+// first call's advanced state) stays bit-identical to the no-scratch reference — the buffers are
+// overwritten, not stale-read.
+func TestGatedDelta_GatedDeltaForwardScratchF32_Ugly(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	const L, D = 3, 6
+	w := mkGatedDeltaWeights(cfg, D)
+	x1, x2 := gdSyn(L*D, 1), gdSyn(L*D, 2)
+	sc := &GatedDeltaScratch{}
+	_, nc1, nd1, err := GatedDeltaForwardScratchF32(x1, w, cfg, nil, nil, L, D, sc)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	out2, _, _, err := GatedDeltaForwardScratchF32(x2, w, cfg, nc1, nd1, L, D, sc)
+	if err != nil {
+		t.Fatalf("second call (reused scratch): %v", err)
+	}
+	wantOut2, _, _, err := GatedDeltaForwardF32(x2, w, cfg, nc1, nd1, L, D)
+	if err != nil {
+		t.Fatalf("reference second call: %v", err)
+	}
+	for i := range out2 {
+		if out2[i] != wantOut2[i] {
+			t.Fatalf("reused-scratch out[%d] = %v, want %v", i, out2[i], wantOut2[i])
+		}
+	}
+}
+
+// TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Good proves the NoProj variant's pre-projection
+// gated output, when projected through out_proj manually, round-trips to EXACTLY the wrapper's
+// (GatedDeltaForwardF32's) output bits — the wrapper is nothing more than NoProjF32 + one GEMM.
+func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Good(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	const L, D = 3, 6
+	w := mkGatedDeltaWeights(cfg, D)
+	x := gdSyn(L*D, 1)
+	gated, vDim, nc, nd, err := GatedDeltaForwardScratchNoProjF32(x, w, cfg, nil, nil, L, D, nil)
+	if err != nil {
+		t.Fatalf("GatedDeltaForwardScratchNoProjF32: %v", err)
+	}
+	if vDim != cfg.VDim() {
+		t.Fatalf("vDim = %d, want %d", vDim, cfg.VDim())
+	}
+	wantOut, wantNC, wantND, err := GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
+	if err != nil {
+		t.Fatalf("reference: %v", err)
+	}
+	gotOut := matNT(gated, w.OutProj, L, vDim, D)
+	for i := range gotOut {
+		if gotOut[i] != wantOut[i] {
+			t.Fatalf("projected gated[%d] = %v, want %v (out_proj applied manually must match the wrapper)", i, gotOut[i], wantOut[i])
+		}
+	}
+	if len(nc) != len(wantNC) || len(nd) != len(wantND) {
+		t.Fatalf("state shapes: conv %d/%d delta %d/%d", len(nc), len(wantNC), len(nd), len(wantND))
+	}
+}
+
+func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Bad(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	if _, _, _, _, err := GatedDeltaForwardScratchNoProjF32(gdSyn(3*6, 1), nil, cfg, nil, nil, 3, 6, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Ugly rejects a non-GQA-divisible geometry
+// (ValueHeads not a multiple of KeyHeads) — distinct from _Bad's nil-weights rejection.
+func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Ugly(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 3, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5} // 4 % 3 != 0
+	w := mkGatedDeltaWeights(cfg, 6)
+	if _, _, _, _, err := GatedDeltaForwardScratchNoProjF32(gdSyn(3*6, 1), w, cfg, nil, nil, 3, 6, nil); err == nil {
+		t.Fatal("non-GQA-divisible KeyHeads/ValueHeads accepted")
+	}
+}
+
+// TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Good proves calling FromInputF32 directly
+// with manually-computed input projections (qkv/z/alpha/beta, via the same matNT the package uses
+// internally) reproduces EXACTLY the gated output GatedDeltaForwardScratchNoProjF32 gets by
+// computing those same projections itself — the two entry points differ only in HOW the inputs
+// were produced.
+func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Good(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	const L, D = 3, 6
+	w := mkGatedDeltaWeights(cfg, D)
+	x := gdSyn(L*D, 1)
+	vDim, convDim := cfg.vDim(), cfg.convDim()
+	qkv := matNT(x, w.InProjQKV, L, D, convDim)
+	alpha := matNT(x, w.InProjA, L, D, cfg.ValueHeads)
+	beta := matNT(x, w.InProjB, L, D, cfg.ValueHeads)
+	zProj := matNT(x, w.InProjZ, L, D, vDim)
+
+	gated, gotVDim, nc, nd, err := GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta, w, cfg, nil, nil, L, D, nil)
+	if err != nil {
+		t.Fatalf("GatedDeltaForwardScratchFromInputF32: %v", err)
+	}
+	if gotVDim != vDim {
+		t.Fatalf("vDim = %d, want %d", gotVDim, vDim)
+	}
+	wantGated, wantVDim, wantNC, wantND, err := GatedDeltaForwardScratchNoProjF32(x, w, cfg, nil, nil, L, D, nil)
+	if err != nil {
+		t.Fatalf("reference NoProjF32: %v", err)
+	}
+	if wantVDim != vDim {
+		t.Fatalf("reference vDim = %d, want %d", wantVDim, vDim)
+	}
+	for i := range gated {
+		if gated[i] != wantGated[i] {
+			t.Fatalf("gated[%d] = %v, want %v (must match NoProjF32 computing the same inputs internally)", i, gated[i], wantGated[i])
+		}
+	}
+	if len(nc) != len(wantNC) || len(nd) != len(wantND) {
+		t.Fatalf("state shapes: conv %d/%d delta %d/%d", len(nc), len(wantNC), len(nd), len(wantND))
+	}
+}
+
+func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Bad(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	if _, _, _, _, err := GatedDeltaForwardScratchFromInputF32(nil, nil, nil, nil, nil, cfg, nil, nil, 3, 6, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Ugly rejects a non-GQA-divisible geometry
+// before ever touching the (here nil) input projections — distinct from _Bad's nil-weights case.
+func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Ugly(t *testing.T) {
+	cfg := GatedDeltaConfig{KeyHeads: 3, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5} // 4 % 3 != 0
+	w := mkGatedDeltaWeights(cfg, 6)
+	if _, _, _, _, err := GatedDeltaForwardScratchFromInputF32(nil, nil, nil, nil, w, cfg, nil, nil, 3, 6, nil); err == nil {
+		t.Fatal("non-GQA-divisible KeyHeads/ValueHeads accepted")
+	}
 }

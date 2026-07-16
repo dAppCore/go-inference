@@ -20,3 +20,10 @@ func ExampleConfig_Arch() {
 	core.Println(arch.HeadDim, arch.KVHeads)
 	// Output: 4 1
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := dbrx.Config{DModel: 8}
+	cfg.InferFromWeights(nil) // no-op: DBRX declares its geometry
+	core.Println(cfg.DModel)
+	// Output: 8
+}

@@ -16,3 +16,10 @@ func ExampleConfig_Arch() {
 	core.Println(err != nil)
 	// Output: true
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := Config{HiddenSize: 640}
+	cfg.InferFromWeights(nil) // no-op: openai/privacy-filter declares every dim in config.json
+	core.Println(cfg.HiddenSize)
+	// Output: 640
+}

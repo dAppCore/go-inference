@@ -13,3 +13,10 @@ func ExampleConfig_Arch() {
 	core.Println(err == nil, arch.Experts, arch.TopK)
 	// Output: true 2 1
 }
+
+func ExampleConfig_InferFromWeights() {
+	cfg := jetmoe.Config{HiddenSize: 8}
+	cfg.InferFromWeights(nil) // no-op: published JetMoE configs declare their geometry
+	core.Println(cfg.HiddenSize)
+	// Output: 8
+}

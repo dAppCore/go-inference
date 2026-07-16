@@ -38,7 +38,10 @@ func TestBlockForwardShape(t *testing.T) {
 	t.Logf("mamba2 block: [%d,%d] in → out, conv-state %d + ssm-state %d advanced", L, D, len(nc), len(ns))
 }
 
-func TestBlockForwardScratchFromInputF32_Parity(t *testing.T) {
+// TestBlock_BlockForwardScratchFromInputF32_Good proves calling FromInputF32 with a manually-computed
+// in_proj output (via the same matNT the package uses internally) reproduces EXACTLY what
+// BlockForwardScratchNoProjF32 gets by computing that projection itself.
+func TestBlock_BlockForwardScratchFromInputF32_Good(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
 	const L, D = 5, 8
 	w, x := mkBlockWeights(cfg, D), syn(L*D, 21)
@@ -57,6 +60,26 @@ func TestBlockForwardScratchFromInputF32_Parity(t *testing.T) {
 				t.Fatalf("%s[%d] = %v, want %v", name, i, pair[0][i], pair[1][i])
 			}
 		}
+	}
+}
+
+func TestBlock_BlockForwardScratchFromInputF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	if _, _, _, _, err := BlockForwardScratchFromInputF32(nil, nil, cfg, nil, nil, 5, 8, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardScratchFromInputF32_Ugly rejects a non-divisible NumHeads/NumGroups geometry
+// — distinct from _Bad's nil-weights case. proj is correctly SIZED (zero-valued) so the size-mismatch
+// guard doesn't fire first; the test genuinely exercises the head/group-divisibility branch.
+func TestBlock_BlockForwardScratchFromInputF32_Ugly(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 3, HeadDim: 8, StateDim: 8, NumGroups: 2, ConvKernel: 4, Eps: 1e-5} // 3 % 2 != 0
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	proj := make([]float32, L*cfg.projDim())
+	if _, _, _, _, err := BlockForwardScratchFromInputF32(proj, w, cfg, nil, nil, L, D, nil); err == nil {
+		t.Fatal("non-divisible NumHeads/NumGroups accepted")
 	}
 }
 
@@ -153,11 +176,18 @@ func TestBlockForwardGatedNormReference(t *testing.T) {
 	t.Logf("block matches the independent reference: split, %d-group expansion, softplus(dt+bias), −exp(A_log), gate-BEFORE-norm all pinned", G)
 }
 
-// TestBlockForwardCarry is the full-block decode invariant: running the block over a sequence in one
-// pass is BIT-EXACT to running it as two chunks that carry BOTH the conv-state ring AND the SSM state
-// across the boundary — so streaming Mamba-2 decode (state resident across calls) reproduces the
-// one-pass prefill exactly.
-func TestBlockForwardCarry(t *testing.T) {
+func TestBlock_BlockForwardF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	if _, _, _, err := BlockForwardF32(syn(5*8, 1), nil, cfg, nil, nil, 5, 8); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardF32_Ugly is the full-block decode invariant: running the block over a sequence
+// in one pass is BIT-EXACT to running it as two chunks that carry BOTH the conv-state ring AND the SSM
+// state across the boundary — so streaming Mamba-2 decode (state resident across calls) reproduces the
+// one-pass prefill exactly. A genuine distinct edge from the single-pass golden-bits _Good case.
+func TestBlock_BlockForwardF32_Ugly(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
 	const L, split, D = 7, 4, 8
 	w := mkBlockWeights(cfg, D)
@@ -189,10 +219,11 @@ func TestBlockForwardCarry(t *testing.T) {
 	t.Logf("mamba2 block decode invariant: split %d|%d, conv-state + SSM-state carry → output bit-exact to one-pass", split, rem)
 }
 
-// TestBlockForwardF32_Golden pins the exact f32 bit-pattern of the block's three outputs (out plus the
-// advanced conv-state ring and SSM state) for a fixed input, gating alloc-reduction refactors of the
+// TestBlock_BlockForwardF32_Good pins the exact f32 bit-pattern of the block's three outputs (out plus
+// the advanced conv-state ring and SSM state) for a fixed input, gating alloc-reduction refactors of the
 // projection/head-split scratch on bit-identical behaviour (the reference test above is 1e-5 tolerant).
-func TestBlockForwardF32_Golden(t *testing.T) {
+// A golden bit-pattern pin over real outputs IS the AX-7 "documented happy path with real assertions".
+func TestBlock_BlockForwardF32_Good(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
 	const L, D = 3, 8
 	w := mkBlockWeights(cfg, D)
@@ -214,7 +245,7 @@ func TestBlockForwardF32_Golden(t *testing.T) {
 // relies on: mixerHidden (the returned `gated`) @ projW (OutProj) must equal what the full forward computes
 // internally, so folding the projection into the FFN-tail command buffer changes WHERE the GEMM runs, never
 // its result. H=4, G=2 exercises the non-trivial group expansion the same as TestBlockForwardGatedNormReference.
-func TestBlockForwardScratchNoProjF32_Parity(t *testing.T) {
+func TestBlock_BlockForwardScratchNoProjF32_Good(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 4, HeadDim: 4, StateDim: 4, NumGroups: 2, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 5, 8
 	w := mkBlockWeights(cfg, D)
@@ -259,6 +290,89 @@ func TestBlockForwardScratchNoProjF32_Parity(t *testing.T) {
 		}
 	}
 	t.Logf("mamba2 forwardNoProj+host out_proj byte-identical to full BlockForwardF32 over [%d,%d], dInner=%d", L, D, dInner)
+}
+
+func TestBlock_BlockForwardScratchNoProjF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	if _, _, _, _, err := BlockForwardScratchNoProjF32(syn(5*8, 1), nil, cfg, nil, nil, 5, 8, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardScratchNoProjF32_Ugly rejects a non-divisible NumHeads/NumGroups geometry —
+// distinct from _Bad's nil-weights case.
+func TestBlock_BlockForwardScratchNoProjF32_Ugly(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 3, HeadDim: 8, StateDim: 8, NumGroups: 2, ConvKernel: 4, Eps: 1e-5} // 3 % 2 != 0
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	if _, _, _, _, err := BlockForwardScratchNoProjF32(syn(L*D, 1), w, cfg, nil, nil, L, D, nil); err == nil {
+		t.Fatal("non-divisible NumHeads/NumGroups accepted")
+	}
+}
+
+// TestBlock_BlockForwardScratchF32_Good proves a caller-supplied *BlockScratch produces bit-identical
+// output to the nil-scratch (BlockForwardF32) path, and that the scratch's out buffer is populated for
+// reuse.
+func TestBlock_BlockForwardScratchF32_Good(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	x := syn(L*D, 1)
+	wantOut, wantConv, wantSSM, err := BlockForwardF32(x, w, cfg, nil, nil, L, D)
+	if err != nil {
+		t.Fatalf("reference BlockForwardF32: %v", err)
+	}
+	sc := &BlockScratch{}
+	out, nc, ns, err := BlockForwardScratchF32(x, w, cfg, nil, nil, L, D, sc)
+	if err != nil {
+		t.Fatalf("BlockForwardScratchF32: %v", err)
+	}
+	for i := range out {
+		if out[i] != wantOut[i] {
+			t.Fatalf("scratch out[%d] = %v, want bit-identical %v", i, out[i], wantOut[i])
+		}
+	}
+	if len(nc) != len(wantConv) || len(ns) != len(wantSSM) {
+		t.Fatalf("state shapes: conv %d/%d ssm %d/%d", len(nc), len(wantConv), len(ns), len(wantSSM))
+	}
+	if len(sc.out) == 0 {
+		t.Fatal("scratch.out was not populated for reuse")
+	}
+}
+
+func TestBlock_BlockForwardScratchF32_Bad(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	if _, _, _, err := BlockForwardScratchF32(syn(5*8, 1), nil, cfg, nil, nil, 5, 8, nil); err == nil {
+		t.Fatal("nil weights accepted")
+	}
+}
+
+// TestBlock_BlockForwardScratchF32_Ugly proves scratch-buffer REUSE across successive calls doesn't
+// corrupt correctness: a second call sharing the same *BlockScratch (fed the first call's advanced
+// state) stays bit-identical to the no-scratch reference.
+func TestBlock_BlockForwardScratchF32_Ugly(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	x1, x2 := syn(L*D, 1), syn(L*D, 2)
+	sc := &BlockScratch{}
+	_, nc1, ns1, err := BlockForwardScratchF32(x1, w, cfg, nil, nil, L, D, sc)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	out2, _, _, err := BlockForwardScratchF32(x2, w, cfg, nc1, ns1, L, D, sc)
+	if err != nil {
+		t.Fatalf("second call (reused scratch): %v", err)
+	}
+	wantOut2, _, _, err := BlockForwardF32(x2, w, cfg, nc1, ns1, L, D)
+	if err != nil {
+		t.Fatalf("reference second call: %v", err)
+	}
+	for i := range out2 {
+		if out2[i] != wantOut2[i] {
+			t.Fatalf("reused-scratch out[%d] = %v, want %v", i, out2[i], wantOut2[i])
+		}
+	}
 }
 
 func checkGoldenBits(t *testing.T, name string, got []float32, want []uint32) {
