@@ -782,9 +782,11 @@ func TestAttnBF16FoldDevice_Good(t *testing.T) {
 	}
 	savedF, savedT := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
 	savedL := qwen3.GatedDeltaBF16LayerDevice
+	savedFull := composed.AttnBF16FullLayerDevice
 	defer func() {
 		composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
 		qwen3.GatedDeltaBF16LayerDevice = savedL
+		composed.AttnBF16FullLayerDevice = savedFull
 	}()
 
 	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
@@ -802,9 +804,11 @@ func TestAttnBF16FoldDevice_Good(t *testing.T) {
 	}
 	composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
 	qwen3.GatedDeltaBF16LayerDevice = savedL
+	composed.AttnBF16FullLayerDevice = savedFull
 	fused := run()
 	composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = nil, nil
 	qwen3.GatedDeltaBF16LayerDevice = nil
+	composed.AttnBF16FullLayerDevice = nil
 	staged := run()
 	for i := range fused {
 		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])

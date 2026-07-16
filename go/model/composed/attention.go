@@ -61,6 +61,8 @@ type attnState struct {
 // grown KV cache are NOT scratch — they are per-token state that outlives the call or grows each step.
 type attnScratch struct {
 	qRaw, k, v, o []float32
+	// Device carries the engine resident KV handle when the full-layer device path is engaged.
+	Device any
 }
 
 // AttnQKVDevice is the fused q/k/v projection hook for the full-attention mixer: q_proj, k_proj and
@@ -104,6 +106,11 @@ func (m *attnMixer) CloneState(prior any) any {
 	st, ok := prior.(attnState)
 	if !ok {
 		return nil
+	}
+	if st.sc != nil && st.sc.Device != nil && AttnKVExportDevice != nil {
+		if k, v, n, ok := AttnKVExportDevice(st.sc.Device); ok {
+			return attnState{k: k, v: v, n: n}
+		}
 	}
 	return attnState{k: slices.Clone(st.k), v: slices.Clone(st.v), n: st.n}
 }
@@ -226,6 +233,15 @@ func (m *attnMixer) forwardQuantLayer(h, inputNorm, postNorm []float32, mlp *MLP
 	return y, nextState, true, nil
 }
 
+// AttnBF16FullLayerDevice is the WHOLE-attention-layer device seam (#26 device-KV): norm, q/k/v,
+// rope+norm prep, SDPA over the RESIDENT KV cache, sigma-gate, o_proj and the FFN tail in ONE
+// command buffer — only x and y cross the host. dev threads the engine opaque cache handle (nil
+// first call; primed from priorK/priorV when pos0 > 0). AX-8: declared here, bound by the backend.
+var AttnBF16FullLayerDevice func(dev any, x, inputNorm []float32, qw, kw, vw, ow *model.BF16Weight, qNormW, kNormW, postNorm []float32, gate, up, down *model.BF16Weight, priorK, priorV []float32, L, D, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) (y []float32, devOut any, err error)
+
+// AttnKVExportDevice reads a resident KV handle back into host slices — the snapshot/clone seam.
+var AttnKVExportDevice func(dev any) (k, v []float32, n int, ok bool)
+
 // forwardBF16Layer runs one WHOLE dense bf16 attention layer through the fold seams — [front CB]
 // → host rope/cache/SDPA → [tail CB] — engaging only when both seams are bound and every
 // projection carries its bf16 form. engaged=false leaves the per-stage path in charge. A front
@@ -243,6 +259,49 @@ func (m *attnMixer) forwardBF16Layer(h, inputNorm, postNorm []float32, mlp *MLP,
 		qCols = 2 * cfg.Heads * cfg.HeadDim
 	}
 	kvCols := cfg.KVHeads * cfg.HeadDim
+
+	// Device-KV full-layer path: the whole layer in one CB over the resident cache. Engagement
+	// mirrors the state contract: a first-call decline (dev still nil) falls to the two-CB fold;
+	// once the handle exists the device owns this sequence KV — propagate, never fall back.
+	if AttnBF16FullLayerDevice != nil && !cfg.ALiBi && cfg.QKVClip == 0 &&
+		cfg.QKNormalization != model.QKLayerNorm && cfg.RotaryDim%2 == 0 {
+		var st attnState
+		if p, ok := prior.(attnState); ok {
+			st = p
+		}
+		sc := st.sc
+		if sc == nil {
+			sc = &attnScratch{}
+		}
+		qkNorm := 0
+		switch {
+		case cfg.QKNormalization == model.QKL2Norm:
+			qkNorm = 2
+		case len(m.w.QNorm) > 0 && len(m.w.KNorm) > 0:
+			qkNorm = 1
+		}
+		gatedI := 0
+		if cfg.OutputGate {
+			gatedI = 1
+		}
+		theta := cfg.RopeTheta
+		if theta == 0 {
+			theta = 1e6
+		}
+		y, devOut, ferr := AttnBF16FullLayerDevice(sc.Device, h, inputNorm,
+			m.w.QProjB, m.w.KProjB, m.w.VProjB, m.w.OProjB, m.w.QNorm, m.w.KNorm, postNorm,
+			mlp.GateB, mlp.UpB, mlp.DownB, st.k, st.v,
+			L, D, cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim, st.n, cfg.SlidingWindow, gatedI, qkNorm, mlp.FF, eps, theta)
+		if ferr == nil {
+			sc.Device = devOut
+			return y, attnState{n: st.n + L, sc: sc}, true, nil
+		}
+		if sc.Device != nil {
+			return nil, nil, true, ferr
+		}
+		// first-call decline: the two-CB fold below serves
+	}
+
 	qRaw, k, v, ferr := AttnBF16FrontDevice(h, inputNorm, m.w.QProjB, m.w.KProjB, m.w.VProjB, L, D, qCols, kvCols, eps)
 	if ferr != nil {
 		return nil, nil, false, nil // nothing touched — the per-stage path serves this token
