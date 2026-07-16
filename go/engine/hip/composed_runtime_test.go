@@ -14,8 +14,8 @@ import (
 	rocmprofile "dappco.re/go/inference/engine/hip/profile"
 	"dappco.re/go/inference/kv"
 	sharedmodel "dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
