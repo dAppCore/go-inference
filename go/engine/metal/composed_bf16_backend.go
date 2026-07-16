@@ -42,6 +42,10 @@ func init() {
 			// LTHN_ATTN_DEVKV=0 is the same-binary A/B arm.
 			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice
 			composed.AttnKVExportDevice = attnKVExportHook
+			composed.ComposedChainBeginDevice = ComposedChainBeginDevice   // whole-token chain (#26): one upload, one wait
+			composed.ComposedChainEndDevice = ComposedChainEndDevice
+			composed.AttnBF16ChainLayerDevice = attnBF16ChainLayerDevice
+			qwen3.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice
 		}
 	}
 }

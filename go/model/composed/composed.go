@@ -568,6 +568,69 @@ type pendingGatedDeltaInput struct{ qkv, z, a, b []float32 }
 type pendingMamba2Input struct{ projected []float32 }
 type pendingRWKV7Input struct{ r, w, k, v, a, b []float32 }
 
+// ComposedChainBeginDevice / ComposedChainEndDevice bracket a whole-token chained forward (#26):
+// Begin uploads the hidden once and returns the opaque context every chained layer encodes into;
+// End commits, waits ONCE, and returns the final hidden. AX-8: declared here, bound by the backend.
+var ComposedChainBeginDevice func(h []float32, L, D int) (ctx any, err error)
+var ComposedChainEndDevice func(ctx any) (y []float32, err error)
+
+// chainableBF16 reports whether EVERY layer of this model can ride the chained device path — the
+// all-or-nothing v1 gate (mixed models keep the per-layer folds).
+func (s *ComposedSession) chainableBF16() bool {
+	if ComposedChainBeginDevice == nil || ComposedChainEndDevice == nil || s.m.residualScale() != 1 || s.m.LayerNorm {
+		return false
+	}
+	for li := range s.m.Layers {
+		layer := &s.m.Layers[li]
+		mlp, isDense := layer.MLP.(*MLP)
+		if !isDense {
+			return false
+		}
+		switch mx := layer.Mixer.(type) {
+		case *gatedDeltaMixer:
+			if !mx.chainableBF16(mlp) {
+				return false
+			}
+		case *attnMixer:
+			if !mx.chainableBF16(mlp) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// forwardChainBF16 runs the whole stack as ONE chained device forward: one upload, one wait. Any
+// error mid-chain aborts the forward — the device owns every layer's state by then.
+func (s *ComposedSession) forwardChainBF16(h []float32, L int) ([]float32, error) {
+	D, eps := s.m.D, s.m.Eps
+	ctx, err := ComposedChainBeginDevice(h, L, D)
+	if err != nil {
+		return nil, err
+	}
+	for li := range s.m.Layers {
+		layer := &s.m.Layers[li]
+		mlp := layer.MLP.(*MLP)
+		switch mx := layer.Mixer.(type) {
+		case *gatedDeltaMixer:
+			next, cerr := mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+			if cerr != nil {
+				return nil, cerr
+			}
+			s.states[li] = next
+		case *attnMixer:
+			next, cerr := mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+			if cerr != nil {
+				return nil, cerr
+			}
+			s.states[li] = next
+		}
+	}
+	return ComposedChainEndDevice(ctx)
+}
+
 // forwardEmb runs L input embeddings [L,D] through the stack, advancing each layer's mixer state, and
 // returns the output hiddens [L,D]. Serves both prefill (L>1) and decode (L=1).
 func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
@@ -578,6 +641,10 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 	// folded into the PREVIOUS layer's proj-fused tail command buffer, the symmetric collapse to the
 	// o_proj fuse below. At most one is ever set (a layer has exactly one mixer kind); both nil ⇒ this
 	// layer computes its input norm + projections fresh (always true for layer 0 — no predecessor tail).
+	if s.m.BF16Resident && s.chainableBF16() {
+		return s.forwardChainBF16(h, L)
+	}
+
 	var pendingAttn *pendingAttnQKV
 	var pendingGD *pendingGatedDeltaInput
 	var pendingMamba2 *pendingMamba2Input

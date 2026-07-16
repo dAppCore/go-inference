@@ -350,6 +350,11 @@ var GatedDeltaQuantLayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float3
 // AX-8: declared here, bound by the backend, nil ⇒ the per-stage path serves.
 var GatedDeltaBF16LayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, err error)
 
+// GatedDeltaBF16ChainLayerDevice encodes one dense bf16 gated-delta layer onto an open chain
+// context (composed.ComposedChainBeginDevice) — the whole-layer fold without its own command
+// buffer; the chain owns commit/wait. AX-8: declared here, bound by the backend.
+var GatedDeltaBF16ChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, priorConv, priorDelta []float32, FF int, eps float32) error
+
 // GatedDeltaBF16LayerDeviceTry mirrors GatedDeltaQuantLayerDeviceTry's engagement contract for the
 // dense bf16 whole-layer seam.
 func GatedDeltaBF16LayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, engaged bool, err error) {

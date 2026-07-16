@@ -242,6 +242,58 @@ var AttnBF16FullLayerDevice func(dev any, x, inputNorm []float32, qw, kw, vw, ow
 // AttnKVExportDevice reads a resident KV handle back into host slices — the snapshot/clone seam.
 var AttnKVExportDevice func(dev any) (k, v []float32, n int, ok bool)
 
+// AttnBF16ChainLayerDevice encodes one dense bf16 attention layer (device-KV) onto an open chain
+// context — AttnBF16FullLayerDevice without its own command buffer.
+var AttnBF16ChainLayerDevice func(ctx, dev any, inputNorm []float32, qw, kw, vw, ow *model.BF16Weight, qNormW, kNormW, postNorm []float32, gate, up, down *model.BF16Weight, priorK, priorV []float32, H, KVH, HD, RD, pos0, window, gated, qkNorm, FF int, eps, theta float32) (devOut any, err error)
+
+// chainableBF16 reports whether this attention layer can ride the chained device path — the same
+// conditions the full-layer arm checks, decided without touching state.
+func (m *attnMixer) chainableBF16(mlp *MLP) bool {
+	cfg := m.cfg
+	return AttnBF16ChainLayerDevice != nil && !cfg.ALiBi && cfg.QKVClip == 0 &&
+		cfg.QKNormalization != model.QKLayerNorm && cfg.RotaryDim%2 == 0 &&
+		m.w.QProjB != nil && m.w.KProjB != nil && m.w.VProjB != nil && m.w.OProjB != nil &&
+		mlp != nil && mlp.GateB != nil && mlp.UpB != nil && mlp.DownB != nil
+}
+
+// chainBF16Layer encodes this attention layer onto the chain and returns the advanced state. The
+// chain owns execution; an error here aborts the whole forward (the device owns the sequence).
+func (m *attnMixer) chainBF16Layer(ctx any, inputNorm, postNorm []float32, mlp *MLP, L, D int, eps float32, prior any) (next any, err error) {
+	cfg := m.cfg
+	var st attnState
+	if p, ok := prior.(attnState); ok {
+		st = p
+	}
+	sc := st.sc
+	if sc == nil {
+		sc = &attnScratch{}
+	}
+	qkNorm := 0
+	switch {
+	case cfg.QKNormalization == model.QKL2Norm:
+		qkNorm = 2
+	case len(m.w.QNorm) > 0 && len(m.w.KNorm) > 0:
+		qkNorm = 1
+	}
+	gatedI := 0
+	if cfg.OutputGate {
+		gatedI = 1
+	}
+	theta := cfg.RopeTheta
+	if theta == 0 {
+		theta = 1e6
+	}
+	devOut, ferr := AttnBF16ChainLayerDevice(ctx, sc.Device, inputNorm,
+		m.w.QProjB, m.w.KProjB, m.w.VProjB, m.w.OProjB, m.w.QNorm, m.w.KNorm, postNorm,
+		mlp.GateB, mlp.UpB, mlp.DownB, st.k, st.v,
+		cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim, st.n, cfg.SlidingWindow, gatedI, qkNorm, mlp.FF, eps, theta)
+	if ferr != nil {
+		return nil, ferr
+	}
+	sc.Device = devOut
+	return attnState{n: st.n + L, sc: sc}, nil
+}
+
 // forwardBF16Layer runs one WHOLE dense bf16 attention layer through the fold seams — [front CB]
 // → host rope/cache/SDPA → [tail CB] — engaging only when both seams are bound and every
 // projection carries its bf16 form. engaged=false leaves the per-stage path in charge. A front

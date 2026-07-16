@@ -185,6 +185,29 @@ func (m *gatedDeltaMixer) forwardBF16Layer(h, inputNorm, postNorm []float32, gat
 	return y, gatedDeltaState{sc: sc}, true, nil
 }
 
+// chainableBF16 reports whether this gated-delta layer can ride the chained device path.
+func (m *gatedDeltaMixer) chainableBF16(mlp *MLP) bool {
+	return qwen3.GatedDeltaBF16ChainLayerDevice != nil &&
+		m.w.InProjQKVB != nil && m.w.InProjAB != nil && m.w.InProjBB != nil && m.w.InProjZB != nil && m.w.OutProjB != nil &&
+		mlp != nil && mlp.GateB != nil && mlp.UpB != nil && mlp.DownB != nil
+}
+
+// chainBF16Layer encodes this gated-delta layer onto the chain and returns the advanced state.
+func (m *gatedDeltaMixer) chainBF16Layer(ctx any, inputNorm, postNorm []float32, mlp *MLP, eps float32, prior any) (next any, err error) {
+	var pc, pd []float32
+	var sc *qwen3.GatedDeltaScratch
+	if st, ok := prior.(gatedDeltaState); ok {
+		pc, pd, sc = st.conv, st.delta, st.sc
+	}
+	if sc == nil {
+		sc = &qwen3.GatedDeltaScratch{}
+	}
+	if cerr := qwen3.GatedDeltaBF16ChainLayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, mlp.GateB, mlp.UpB, mlp.DownB, pc, pd, mlp.FF, eps); cerr != nil {
+		return nil, cerr
+	}
+	return gatedDeltaState{sc: sc}, nil
+}
+
 // forwardQuantLayer runs one WHOLE packed gated-delta layer through the device layer seam
 // (qwen3.GatedDeltaQuantLayerDeviceTry): input norm, the five packed projections, the block and the
 // packed FFN tail in one command buffer, x in / y out, state device-resident. engaged=false leaves

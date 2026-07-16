@@ -944,9 +944,13 @@ func TestAttnDevKVRealShape_AB(t *testing.T) {
 			}
 			savedFull, savedExp := composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice
 			savedF, savedT := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
+			savedBegin, savedEnd := composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice
+			savedChainA, savedChainG := composed.AttnBF16ChainLayerDevice, qwen3.GatedDeltaBF16ChainLayerDevice
 			defer func() {
 				composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice = savedFull, savedExp
 				composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
+				composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = savedBegin, savedEnd
+				composed.AttnBF16ChainLayerDevice, qwen3.GatedDeltaBF16ChainLayerDevice = savedChainA, savedChainG
 			}()
 			steps := [][]int32{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}, {18}, {19}}
 			run := func() [][]float32 {
@@ -961,11 +965,17 @@ func TestAttnDevKVRealShape_AB(t *testing.T) {
 				}
 				return outs
 			}
-			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice // explicit: the opt-in path under test
+			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice // explicit: the path under test
 			composed.AttnKVExportDevice = attnKVExportHook
+			composed.ComposedChainBeginDevice = ComposedChainBeginDevice // the whole-token chain rides on top
+			composed.ComposedChainEndDevice = ComposedChainEndDevice
+			composed.AttnBF16ChainLayerDevice = attnBF16ChainLayerDevice
+			qwen3.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice
 			devKV := run()
 			composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice = nil, nil
 			composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = nil, nil
+			composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = nil, nil
+			composed.AttnBF16ChainLayerDevice, qwen3.GatedDeltaBF16ChainLayerDevice = nil, nil
 			staged := run()
 			for i := range devKV {
 				rel := gdScaledDiff(t, "hidden", devKV[i], staged[i])
