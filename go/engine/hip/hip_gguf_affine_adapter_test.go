@@ -10,7 +10,58 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference"
 )
+
+func TestHIPGemma4GGUFAffineSynthesis_Good_ReleasesSourceAllocations(t *testing.T) {
+	driver := &fakeHIPDriver{available: true, maxLiveBytes: 464}
+	tensors := make(map[string]hipTensor, 2)
+	for _, name := range []string{"blk.0.attn_q.weight", "blk.0.attn_k.weight"} {
+		payload := make([]byte, hipGGUFQ4KBlockBytes)
+		pointer, err := driver.Malloc(uint64(len(payload)))
+		core.RequireNoError(t, err)
+		core.RequireNoError(t, driver.CopyHostToDevice(pointer, payload))
+		tensors[name] = hipTensor{
+			info: nativeTensorInfo{
+				Name:       name,
+				Dimensions: []uint64{hipGGUFQ4KBlockSize, 1},
+				Type:       hipGGUFQ4KTensorType,
+				TypeName:   "Q4_K",
+				ByteSize:   uint64(len(payload)),
+			},
+			pointer: pointer,
+		}
+	}
+	model := &hipLoadedModel{
+		driver:      driver,
+		modelInfo:   inference.ModelInfo{Architecture: "gemma4"},
+		modelLabels: map[string]string{"gemma4_source_format": "gguf"},
+		tensors:     tensors,
+		hostTensors: map[string]nativeTensorInfo{},
+	}
+
+	core.RequireNoError(t, model.synthesizeGemma4GGUFAffineTensors())
+	core.AssertEqual(t, uint64(320), driver.liveBytes)
+	core.AssertEqual(t, 2, len(driver.frees))
+	for _, name := range []string{"blk.0.attn_q.weight", "blk.0.attn_k.weight"} {
+		if _, ok := model.tensors[name]; ok {
+			t.Fatalf("source tensor %q remains resident after affine synthesis", name)
+		}
+	}
+	for _, base := range []string{
+		"language_model.model.layers.0.self_attn.q_proj",
+		"language_model.model.layers.0.self_attn.k_proj",
+	} {
+		for _, suffix := range []string{".weight", ".scales", ".biases"} {
+			if _, ok := model.tensors[base+suffix]; !ok {
+				t.Fatalf("synthesized tensor %q is missing", base+suffix)
+			}
+		}
+	}
+
+	core.RequireNoError(t, model.Close())
+	core.AssertEqual(t, len(driver.allocations), len(driver.frees))
+}
 
 func TestHIPGemma4GGUFQ4KAffineRepack_Good(t *testing.T) {
 	block := make([]byte, hipGGUFQ4KBlockBytes)

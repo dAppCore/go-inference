@@ -72,6 +72,7 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFAffineTensors() error {
 		return nil
 	}
 	type sourceTensor struct {
+		name   string
 		base   string
 		tensor hipTensor
 	}
@@ -81,14 +82,30 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFAffineTensors() error {
 		if !ok || !hipNativeTensorInfoCanRepackAsAffine(tensor.info) {
 			continue
 		}
-		sources = append(sources, sourceTensor{base: base, tensor: tensor})
+		sources = append(sources, sourceTensor{name: name, base: base, tensor: tensor})
 	}
 	for _, source := range sources {
 		if err := model.synthesizeGemma4GGUFAffineTensor(source.base, source.tensor); err != nil {
 			return err
 		}
+		if err := model.releaseSynthesizedGemma4GGUFSource(source.name, source.tensor); err != nil {
+			return err
+		}
 	}
 	return model.synthesizeGemma4GGUFBF16AliasTensors()
+}
+
+func (model *hipLoadedModel) releaseSynthesizedGemma4GGUFSource(name string, source hipTensor) error {
+	const operation = "rocm.hip.GGUFAffine"
+	resident, ok := model.tensors[name]
+	if !ok || resident.pointer != source.pointer {
+		return core.E(operation, "synthesized GGUF source ownership changed for "+name, nil)
+	}
+	if err := model.driver.Free(source.pointer); err != nil {
+		return core.E(operation, "free synthesized GGUF source "+name, err)
+	}
+	delete(model.tensors, name)
+	return nil
 }
 
 func (model *hipLoadedModel) synthesizeGemma4GGUFAffineTensor(baseName string, tensor hipTensor) error {
@@ -139,6 +156,7 @@ func (model *hipLoadedModel) uploadSyntheticHIPTensor(name string, tensorType ui
 
 func (model *hipLoadedModel) synthesizeGemma4GGUFBF16AliasTensors() error {
 	type sourceTensor struct {
+		source string
 		name   string
 		tensor hipTensor
 	}
@@ -148,7 +166,7 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFBF16AliasTensors() error {
 		if !ok || !hipNativeTensorInfoCanAliasAsBF16(tensor.info) {
 			continue
 		}
-		sources = append(sources, sourceTensor{name: canonical, tensor: tensor})
+		sources = append(sources, sourceTensor{source: name, name: canonical, tensor: tensor})
 	}
 	for _, source := range sources {
 		data := make([]byte, int(source.tensor.info.ByteSize))
@@ -160,6 +178,9 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFBF16AliasTensors() error {
 			return err
 		}
 		if err := model.uploadSyntheticHIPTensor(source.name, tensorType, typeName, dimensions, payload); err != nil {
+			return err
+		}
+		if err := model.releaseSynthesizedGemma4GGUFSource(source.source, source.tensor); err != nil {
 			return err
 		}
 	}
