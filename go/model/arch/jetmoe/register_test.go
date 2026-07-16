@@ -9,7 +9,7 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
-func TestRegister_JetMoE_Good(t *testing.T) {
+func TestRegister_LookupArch_Good(t *testing.T) {
 	spec, ok := model.LookupArch("jetmoe")
 	if !ok {
 		t.Fatal("jetmoe architecture not registered")
@@ -23,7 +23,7 @@ func TestRegister_JetMoE_Good(t *testing.T) {
 	}
 }
 
-func TestRegister_JetMoE_Bad(t *testing.T) {
+func TestRegister_LookupArch_Bad(t *testing.T) {
 	spec, _ := model.LookupArch("jetmoe")
 	if _, err := spec.Parse([]byte(`{"model_type":`)); err == nil {
 		t.Fatal("malformed config accepted")

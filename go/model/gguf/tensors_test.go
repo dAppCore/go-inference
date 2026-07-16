@@ -200,9 +200,10 @@ func TestTensors_GgufTensorNativeStorage_Bad(t *testing.T) {
 	}
 }
 
-// TestTensors_GgufTensorNativeBlockStorage_Bad pins the block-alignment guard:
-// an element count not divisible by the block size is rejected.
-func TestTensors_GgufTensorNativeBlockStorage_Bad(t *testing.T) {
+// TestTensors_GgufTensorNativeBlockStorage_TensorInfo_Bad pins the
+// block-alignment guard: an element count not divisible by the block size is
+// rejected.
+func TestTensors_GgufTensorNativeBlockStorage_TensorInfo_Bad(t *testing.T) {
 	_, _, err := ggufTensorNativeStorage(TensorInfo{Name: "w", Type: TensorTypeQ4_0}, 5)
 	if err == nil {
 		t.Fatal("ggufTensorNativeStorage(Q4_0, 5 elements) = nil error, want block-alignment rejection")

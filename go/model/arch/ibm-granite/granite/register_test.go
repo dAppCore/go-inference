@@ -11,7 +11,7 @@ import (
 
 // TestRegister_WeightIndex_Good pins the Llama-shaped dense mapping from:
 // https://huggingface.co/ibm-granite/granite-3.3-2b-base/blob/main/model.safetensors.index.json
-func TestRegister_WeightIndex_Good(t *testing.T) {
+func TestRegister_WeightMap_Good(t *testing.T) {
 	data := core.ReadFile(core.PathJoin("testdata", "ibm-granite-granite-3.3-2b-base-model.safetensors.index.json"))
 	if !data.OK {
 		t.Fatal("read Granite weight index fixture")
@@ -36,7 +36,7 @@ func TestRegister_WeightIndex_Good(t *testing.T) {
 	}
 }
 
-func TestRegister_MoEHybrid_Bad(t *testing.T) {
+func TestRegister_LookupArch_Bad(t *testing.T) {
 	for _, modelType := range []string{"granitemoe", "granitemoehybrid"} {
 		if _, ok := model.LookupArch(modelType); ok {
 			t.Fatalf("out-of-scope %s registered", modelType)

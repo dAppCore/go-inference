@@ -139,7 +139,7 @@ func TestProfileModel_Chat_AppliesPreset_Good(t *testing.T) {
 // AND the caller both set the same knob, the caller wins (Go options are
 // last-set-wins and the preset is prepended). A profile establishes defaults a
 // request can still override — the subtle correctness the whole design rests on.
-func TestProfileModel_CallerWins_Ugly(t *testing.T) {
+func TestProfileModel_CallerWins_WrapProfile_Ugly(t *testing.T) {
 	spy := newPresetSpy()
 	preset := ProfileConfig{Temperature: ptrFloat32(0.2), MaxTokens: ptrInt(100)}.Options()
 	wrapped := wrapProfile(spy, preset)
@@ -157,7 +157,7 @@ func TestProfileModel_CallerWins_Ugly(t *testing.T) {
 // TestProfileModel_ClassifyBatch_ApplyPreset_Good covers the remaining two
 // option-taking methods so the decorator is proven complete, not just on the two
 // streaming paths.
-func TestProfileModel_ClassifyBatch_ApplyPreset_Good(t *testing.T) {
+func TestProfileModel_ClassifyBatch_ApplyPreset_WrapProfile_Good(t *testing.T) {
 	spy := newPresetSpy()
 	wrapped := wrapProfile(spy, ProfileConfig{MaxTokens: ptrInt(11)}.Options())
 
@@ -182,7 +182,7 @@ func (mediaCapableFake) AcceptsAudio() bool  { return true }
 // the wrapped checkpoint's media capabilities — the serve handler gates image /
 // audio input on these assertions and the embedded interface does not widen the
 // decorator's method set by itself.
-func TestProfileModel_ForwardsCapabilityGates_Good(t *testing.T) {
+func TestProfileModel_ForwardsCapabilityGates_WrapProfile_Good(t *testing.T) {
 	inner := mediaCapableFake{TextModel: &mockTextModel{}}
 	wrapped := wrapProfile(inner, ProfileConfig{MaxTokens: ptrInt(4)}.Options())
 	v, ok := wrapped.(inference.VisionModel)

@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestRegister_Qwen3QuantizeLane_Good(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Good(t *testing.T) {
 	root := t.TempDir()
 	if r := core.WriteFile(core.PathJoin(root, "tokenizer.json"), []byte(`{"model":{"vocab":{"a":0},"merges":[]}}`), 0o600); !r.OK {
 		t.Fatal(r.Err())
@@ -31,12 +31,12 @@ func TestRegister_Qwen3QuantizeLane_Good(t *testing.T) {
 		t.Fatalf("architecture = %v", meta[0].Value)
 	}
 }
-func TestRegister_Qwen3QuantizeLane_Bad(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Bad(t *testing.T) {
 	if basegguf.NewTransformerQuantizeLane(qwen3Spec).Detect([]byte(`{"model_type":"qwen3_moe"}`)) {
 		t.Fatal("MoE detected as dense qwen3")
 	}
 }
-func TestRegister_Qwen3QuantizeLane_Ugly(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Ugly(t *testing.T) {
 	if basegguf.NewTransformerQuantizeLane(qwen3Spec).SupportsFormat(basegguf.QuantizeQ4_0) {
 		t.Fatal("q4_0 unexpectedly supported")
 	}

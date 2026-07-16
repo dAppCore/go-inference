@@ -101,7 +101,7 @@ func drainChat(m inference.TextModel, messages []inference.Message) string {
 
 // TestServing_WelfareGuard_Chat_Good pins the clean-turn path: no hostility,
 // no mediation — the conversation reaches the inner model untouched.
-func TestServing_WelfareGuard_Chat_Good(t *testing.T) {
+func TestServing_WelfareGuard_Chat_WrapWelfare_Good(t *testing.T) {
 	fake := &welfareFakeModel{convoTokens: []string{"hello", " there"}}
 	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
 	msgs := []inference.Message{{Role: "user", Content: "morning!"}}
@@ -120,7 +120,7 @@ func TestServing_WelfareGuard_Chat_Good(t *testing.T) {
 // turn is mediated on the inner model (never this wrapper), the model's
 // rewording replaces the latest user text, and the caller's slice is not
 // mutated.
-func TestServing_WelfareGuard_Chat_Rephrase_Good(t *testing.T) {
+func TestServing_WelfareGuard_Chat_Rephrase_WrapWelfare_Good(t *testing.T) {
 	fake := &welfareFakeModel{
 		mediationReply: `{"tool":"lem_rephrase","params":{"text":"please fix this properly"}}`,
 		convoTokens:    []string{"on it"},
@@ -189,7 +189,7 @@ func TestServing_WelfareGuard_Chat_End_Ugly(t *testing.T) {
 // TestServing_WelfareGuard_Chat_Bad pins the fail-safe: mediation returning
 // junk proceeds with the original turn — the guard never breaks a
 // conversation.
-func TestServing_WelfareGuard_Chat_Bad(t *testing.T) {
+func TestServing_WelfareGuard_Chat_WrapWelfare_Bad(t *testing.T) {
 	fake := &welfareFakeModel{mediationReply: "no json here", convoTokens: []string{"still here"}}
 	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
 	if got := drainChat(m, hostileConversation()); got != "still here" {
@@ -246,7 +246,7 @@ func drainSchedule(t *testing.T, m inference.TextModel, msgs []inference.Message
 // scheduled model presents the guard's OWN Schedule (inference.As stops at the
 // wrapper, not the inner scheduler the compat mux would otherwise reach past),
 // and a clean turn reaches the inner scheduler unchanged with no mediation.
-func TestServing_WelfareGuard_Schedule_CleanTurn_Good(t *testing.T) {
+func TestServing_WelfareGuard_Schedule_CleanTurn_WrapWelfare_Good(t *testing.T) {
 	fake := &welfareFakeScheduler{welfareFakeModel: welfareFakeModel{convoTokens: []string{"hello", " there"}}}
 	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
 	if _, ok := m.(*welfareSchedulerModel); !ok {
@@ -461,7 +461,7 @@ func TestServing_WelfareHostility_Good(t *testing.T) {
 // conversation with no user turn (an empty latest) skips the guard entirely and
 // delegates straight to the wrapped model, so a system-only priming call is
 // never dragged into mediation.
-func TestServing_WelfareGuard_Chat_NoUserTurn_Good(t *testing.T) {
+func TestServing_WelfareGuard_Chat_NoUserTurn_WrapWelfare_Good(t *testing.T) {
 	fake := &welfareFakeModel{convoTokens: []string{"primed"}}
 	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
 	msgs := []inference.Message{{Role: "system", Content: "be terse"}}
@@ -479,7 +479,7 @@ func TestServing_WelfareGuard_Chat_NoUserTurn_Good(t *testing.T) {
 // TestServing_WelfareGuard_Chat_FalsePositive_AppendsCorpus_Good pins the lem_ok
 // arm reached THROUGH Chat: a triggered turn the model clears (lem_ok) proceeds
 // to the conversation AND records the false flag to the on-device corpus.
-func TestServing_WelfareGuard_Chat_FalsePositive_AppendsCorpus_Good(t *testing.T) {
+func TestServing_WelfareGuard_Chat_FalsePositive_AppendsCorpus_WrapWelfare_Good(t *testing.T) {
 	corpus := core.PathJoin(t.TempDir(), "welfare", "feedback.jsonl")
 	fake := &welfareFakeModel{
 		mediationReply: `{"tool":"lem_ok","params":{"reason":"benign frustration, not directed"}}`,
@@ -507,7 +507,7 @@ func TestServing_WelfareGuard_Chat_FalsePositive_AppendsCorpus_Good(t *testing.T
 // arm of the audit-only output read: a caller that stops iterating after the
 // first token halts the wrapped stream cleanly (the audit fold never sees the
 // full reply), so a client disconnect is not a leak.
-func TestServing_WelfareGuard_DetectOutput_EarlyAbort_Good(t *testing.T) {
+func TestServing_WelfareGuard_DetectOutput_EarlyAbort_WrapWelfare_Good(t *testing.T) {
 	fake := &welfareFakeModel{convoTokens: []string{"first", "second", "third"}}
 	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
 	var got []string

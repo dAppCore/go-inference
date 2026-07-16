@@ -10,18 +10,21 @@ import (
 	basegguf "dappco.re/go/inference/model/gguf"
 )
 
-func TestRegister_MistralQuantizeLane_Good(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Good(t *testing.T) {
+	if !basegguf.NewTransformerQuantizeLane(mistralSpec).Detect([]byte(`{"model_type":"mistral3"}`)) {
+		t.Fatal("mistral3 config not detected")
+	}
 	testMistralLane(t, basegguf.QuantizeQ4_K_M, basegguf.TensorTypeQ4K)
 	testMistralLane(t, basegguf.QuantizeQ8_0, basegguf.TensorTypeQ8_0)
 }
 
-func TestRegister_MistralQuantizeLane_Bad(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Bad(t *testing.T) {
 	if basegguf.NewTransformerQuantizeLane(mistralSpec).SupportsFormat(basegguf.QuantizeQ6_K) {
 		t.Fatal("q6_k unexpectedly supported")
 	}
 }
 
-func TestRegister_MistralQuantizeLane_Ugly(t *testing.T) {
+func TestRegister_TransformerQuantizeLane_Ugly(t *testing.T) {
 	if basegguf.NewTransformerQuantizeLane(mistralSpec).Detect([]byte(`{`)) {
 		t.Fatal("malformed config detected")
 	}

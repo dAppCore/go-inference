@@ -60,7 +60,7 @@ func TestTinyMPTForward_Good(t *testing.T) {
 }
 
 // Source: https://huggingface.co/adamrb/mpt-30b-chat-safetensors/blob/main/model.safetensors.index.json
-func TestRegister_WeightIndex_Good(t *testing.T) {
+func TestRegister_WeightMap_Good(t *testing.T) {
 	b := core.ReadFile(core.PathJoin("testdata", "adamrb-mpt-30b-chat-index-receipt.json"))
 	if !b.OK {
 		t.Fatal("read index receipt")
