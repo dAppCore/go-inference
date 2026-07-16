@@ -153,7 +153,15 @@ func visionProj(tensors map[string]safetensors.Tensor, name string, t safetensor
 		}
 		return visionLinear{WQ: qw, Out: outDim, In: inDim}, aliased, nil
 	}
-	f, err := tensorF32(t)
+	ft := t
+	if len(ft.Shape) > 2 {
+		// The real layout's patch_embed ships >2-D dense ([Hidden,Temporal,
+		// PatchH,PatchW,Channel]); its row-major bytes ARE the flat
+		// [outDim, inDim] form (see the file doc comment), so resolve through
+		// a reshaped VIEW of the same bytes — tensorF32 validates 2-D shapes.
+		ft.Shape = []int{outDim, inDim}
+	}
+	f, err := tensorF32(ft)
 	if err != nil {
 		return visionLinear{}, false, err
 	}
