@@ -128,7 +128,67 @@ type composedTextModel struct {
 var (
 	_ engine.TokenModel           = (*composedTextModel)(nil)
 	_ engine.ChatTemplateDeclarer = (*composedTextModel)(nil)
+	_ engine.VisionTokenModel     = (*composedTextModel)(nil)
 )
+
+// visionModel probes the underlying composed model for the vision capability.
+// model/composed implements the engine.VisionTokenModel method set BY SHAPE
+// (it cannot import engine — AX-8), so the bridge forwards each method through
+// this one assertion. A text-only composed checkpoint (or a build predating
+// the vision tower) answers false and the serve path's image-refusal is
+// unchanged.
+func (m *composedTextModel) visionModel() (engine.VisionTokenModel, bool) {
+	if m == nil || m.sm == nil {
+		return nil, false
+	}
+	v, ok := m.sm.(engine.VisionTokenModel)
+	return v, ok
+}
+
+// AcceptsImageInput forwards the composed model's vision declaration: true only
+// when the loaded checkpoint shipped a vision tower (engine.VisionTokenModel).
+func (m *composedTextModel) AcceptsImageInput() bool {
+	v, ok := m.visionModel()
+	return ok && v.AcceptsImageInput()
+}
+
+// ImagePlaceholderTokenID forwards the composed image token id; 0 (counts as
+// no placeholder in the neutral splice) when the model carries no vision tower.
+func (m *composedTextModel) ImagePlaceholderTokenID() int32 {
+	if v, ok := m.visionModel(); ok {
+		return v.ImagePlaceholderTokenID()
+	}
+	return 0
+}
+
+// ImagePlaceholderBlock forwards the composed placeholder block; empty when the
+// model carries no vision tower (the splice never asks in that case — see
+// AcceptsImageInput).
+func (m *composedTextModel) ImagePlaceholderBlock(softTokens int) string {
+	if v, ok := m.visionModel(); ok {
+		return v.ImagePlaceholderBlock(softTokens)
+	}
+	return ""
+}
+
+// ProjectImage forwards image projection through the composed vision tower.
+func (m *composedTextModel) ProjectImage(image []byte) ([]byte, int, error) {
+	v, ok := m.visionModel()
+	if !ok {
+		return nil, 0, core.NewError("native.composedTextModel.ProjectImage: model carries no vision tower")
+	}
+	return v.ProjectImage(image)
+}
+
+// TokenEmbeddingsWithFeatures forwards the spliced-embedding build (text rows
+// with projected features over the placeholder span) to the composed model.
+func (m *composedTextModel) TokenEmbeddingsWithFeatures(ids []int32, imageFeatures, audioFeatures, videoFeatures []byte) ([][]byte, error) {
+	v, ok := m.visionModel()
+	if !ok {
+		return nil, core.NewError("native.composedTextModel.TokenEmbeddingsWithFeatures: model carries no vision tower")
+	}
+	return v.TokenEmbeddingsWithFeatures(ids, imageFeatures, audioFeatures, videoFeatures)
+}
 
 // OpenEngineSession opens a fresh composed decode session bridged to engine.Session. The bridge threads
 // the composed model's own tested token loop (model.Generate*), so no decode logic is re-rolled here.
@@ -194,9 +254,19 @@ type composedEngineSession struct {
 	prompt    []int32
 	arch      string // config.json model_type — stamped on the snapshot (informational; restore is token-based)
 	numLayers int    // composed block count — stamped on the snapshot for parity with the native path
+	// embRows holds a multimodal turn's spliced embedding rows (one per prompt
+	// token, projected image features over the placeholder span) between
+	// PrefillTokenEmbeddings and the generate that consumes them. Rows are NOT
+	// token-replayable — while held, continuity appends and -state capture
+	// refuse (the gemma4 metal lane's v1 bounds: an image turn is a stateless
+	// turn).
+	embRows [][]byte
 }
 
-var _ engine.Session = (*composedEngineSession)(nil)
+var (
+	_ engine.Session       = (*composedEngineSession)(nil)
+	_ engine.VisionSession = (*composedEngineSession)(nil)
+)
 
 // PrefillTokens stores the prompt tokens; the composed loop re-runs prefill inside the generate delegate
 // (one prefill per stateless request), so the stored prompt is the whole retained state.
@@ -207,9 +277,31 @@ func (s *composedEngineSession) PrefillTokens(ids []int32) error {
 }
 
 // AppendTokens extends the stored prompt (the recurrent state carries no separate replay-free append).
+// A session holding multimodal rows refuses: appended tokens have no spliced rows, so the row/token
+// equality the embeddings replay depends on would silently break — an image turn is a stateless turn.
 func (s *composedEngineSession) AppendTokens(ids []int32) error {
+	if len(s.embRows) > 0 {
+		return core.NewError("native.composedEngineSession.AppendTokens: session holds multimodal prefill rows; an image turn does not continue")
+	}
 	memWatermarkReset() // a continuity turn's high-water starts here (#1843)
 	s.prompt = append(s.prompt, ids...)
+	return nil
+}
+
+// PrefillTokenEmbeddings stores a multimodal turn's prompt: the token ids (position/budget accounting —
+// Pos, stop handling) plus the spliced embedding rows the generate replays through the composed model's
+// batch prefill (engine.VisionSession; rows come from TokenEmbeddingsWithFeatures). The composed session
+// stays stateless-replay — the rows ARE the retained state for this turn, consumed by the next generate.
+func (s *composedEngineSession) PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) error {
+	if len(ids) != len(embeddings) {
+		return core.NewError("native.composedEngineSession.PrefillTokenEmbeddings: token and embedding counts differ")
+	}
+	if len(ids) == 0 {
+		return core.NewError("native.composedEngineSession.PrefillTokenEmbeddings: empty prompt")
+	}
+	memWatermarkReset() // the multimodal operation's memory high-water starts here (#1843)
+	s.prompt = append(s.prompt[:0], ids...)
+	s.embRows = embeddings
 	return nil
 }
 
@@ -224,12 +316,20 @@ func (s *composedEngineSession) GenerateFromCacheEach(maxNew, eosID int, yield f
 	if eosID >= 0 {
 		stops = []int32{int32(eosID)}
 	}
+	if len(s.embRows) > 0 {
+		return model.GenerateSampledFromEmbeddingsEach(s.sm, model.NewSampler(0), model.SampleParams{}, s.prompt, s.embRows, maxNew, stops, nil, yield)
+	}
 	return model.GenerateSampledWithStopTokensTransformEach(s.sm, model.NewSampler(0), model.SampleParams{}, s.prompt, maxNew, stops, nil, yield)
 }
 
 // GenerateSampledFromCacheEach decodes up to maxNew tokens with the sampler + params, honouring stopTokens
 // and the optional per-token transform — delegated wholesale to the composed model's tested sampled loop.
+// A multimodal turn (PrefillTokenEmbeddings) replays its spliced rows through the batch-prefill entry
+// instead of re-embedding token ids, so the projected image features reach the recurrent stack.
 func (s *composedEngineSession) GenerateSampledFromCacheEach(maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error) {
+	if len(s.embRows) > 0 {
+		return model.GenerateSampledFromEmbeddingsEach(s.sm, sampler, params, s.prompt, s.embRows, maxNew, stopTokens, transform, yield)
+	}
 	return model.GenerateSampledWithStopTokensTransformEach(s.sm, sampler, params, s.prompt, maxNew, stopTokens, transform, yield)
 }
 
@@ -240,6 +340,12 @@ func (s *composedEngineSession) GenerateSampledFromCacheEach(maxNew int, stopTok
 func (s *composedEngineSession) CaptureKVWithOptions(kv.CaptureOptions) (*kv.Snapshot, error) {
 	if s == nil {
 		return nil, core.NewError("native.composedEngineSession.CaptureKV: nil session")
+	}
+	if len(s.embRows) > 0 {
+		// A token-prefix snapshot cannot reproduce spliced image rows on
+		// restore (replay re-embeds ids, losing the projected features) — so a
+		// multimodal turn refuses capture rather than resuming corrupted.
+		return nil, core.NewError("native.composedEngineSession.CaptureKV: session holds multimodal prefill rows; token-prefix capture would drop them")
 	}
 	if len(s.prompt) == 0 {
 		return nil, core.NewError("native.composedEngineSession.CaptureKV: empty session (nothing prefilled)")
@@ -278,6 +384,11 @@ func (s *composedEngineSession) RangeKVBlocks(blockSize int, opts kv.CaptureOpti
 	}
 	if opts.BlockStartToken < 0 {
 		return core.NewError("native.composedEngineSession.RangeKVBlocks: block start token must be >= 0")
+	}
+	if len(s.embRows) > 0 {
+		// Same refusal as CaptureKVWithOptions: token blocks cannot carry the
+		// spliced image rows, so a multimodal turn never sleeps.
+		return core.NewError("native.composedEngineSession.RangeKVBlocks: session holds multimodal prefill rows; token-prefix blocks would drop them")
 	}
 	position := len(s.prompt)
 	if position == 0 {

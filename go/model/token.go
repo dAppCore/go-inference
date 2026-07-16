@@ -240,6 +240,15 @@ func generateStepwiseWithSession(m SessionModel, sess DecodeStepper, promptIDs [
 			}
 		}
 	}
+	return decodeFromHiddenWithSession(vocab, hidden, maxNew, stop, transform, tokenTransform, pick, yield, step, headOf)
+}
+
+// decodeFromHiddenWithSession is the decode loop shared by every stepwise
+// session entry: the caller has already prefilled the session (from token ids
+// or from spliced embedding rows) and hands over the LAST prefill row's hidden
+// state; the loop heads it into logits, picks, streams, and steps the session
+// forward one committed token at a time until maxNew/stop/yield ends it.
+func decodeFromHiddenWithSession(vocab int, hidden []byte, maxNew int, stop func(int32) bool, transform logitsTransform, tokenTransform TokenTransform, pick func(logits []byte, vocab int) (int32, error), yield func(int32) bool, step func(int32) ([]byte, error), headOf func([]byte) ([]byte, error)) ([]int32, error) {
 	gen := make([]int32, 0, maxNew)
 	history := make([]int32, 0, maxNew)
 	for len(gen) < maxNew {
@@ -279,6 +288,73 @@ func generateStepwiseWithSession(m SessionModel, sess DecodeStepper, promptIDs [
 		}
 	}
 	return gen, nil
+}
+
+// GenerateSampledFromEmbeddingsEach decodes from ALREADY-COMPUTED embedding
+// rows instead of token ids — the multimodal prefill entry: a spliced prompt's
+// rows (text embeddings with projected image features over the placeholder
+// span, [VisionTokenModel-shaped models produce them]) prefill the session in
+// ONE batch, then the decode loop continues exactly as
+// [GenerateSampledWithStopTokensTransformEach]. ids carries the prompt's token
+// identity purely for length validation — rows cannot replay per-id, so the
+// opened session must be a [BatchPrefillStepper] and must not demand
+// StepWithID for its prefill.
+//
+//	gen, err := model.GenerateSampledFromEmbeddingsEach(sm, model.NewSampler(0), model.SampleParams{}, ids, rows, 256, stops, nil, yield)
+func GenerateSampledFromEmbeddingsEach(m SessionModel, s *Sampler, p SampleParams, ids []int32, embeddings [][]byte, maxNew int, stopTokens []int32, tokenTransform TokenTransform, yield func(int32) bool) ([]int32, error) {
+	if s == nil {
+		return nil, core.NewError("model.GenerateSampledFromEmbeddings: nil sampler")
+	}
+	if m == nil {
+		return nil, core.NewError("model.GenerateSampledFromEmbeddings: nil model")
+	}
+	if len(embeddings) == 0 {
+		return nil, core.NewError("model.GenerateSampledFromEmbeddings: empty embedding rows")
+	}
+	if len(ids) != len(embeddings) {
+		return nil, core.NewError("model.GenerateSampledFromEmbeddings: token and embedding counts differ")
+	}
+	if maxNew <= 0 {
+		return nil, core.NewError("model.GenerateSampledFromEmbeddings: maxNew must be > 0")
+	}
+	sess, err := m.OpenSession()
+	if err != nil {
+		return nil, err
+	}
+	if c, ok := sess.(interface{ Close() error }); ok {
+		defer func() { _ = c.Close() }()
+	}
+	bp, ok := sess.(BatchPrefillStepper)
+	if !ok {
+		return nil, core.NewError("model.GenerateSampledFromEmbeddings: session cannot prefill embedding rows (no BatchPrefillStepper)")
+	}
+	step := func(id int32) ([]byte, error) {
+		emb, err := m.Embed(id)
+		if err != nil {
+			return nil, err
+		}
+		return sess.Step(emb)
+	}
+	headOf := m.Head
+	if sh, ok := sess.(LMHead); ok {
+		headOf = sh.Head
+	}
+	hidden, err := bp.PrefillBatch(embeddings)
+	if err != nil {
+		return nil, err
+	}
+	generated := 0
+	return decodeFromHiddenWithSession(m.Vocab(), hidden, maxNew, stopSet(stopTokens), repeatPenaltyTransform(p), tokenTransform, func(logits []byte, vocab int) (int32, error) {
+		pickParams := p
+		if p.MinTokensBeforeStop > 0 && generated < p.MinTokensBeforeStop {
+			pickParams.SuppressTokens = appendSuppressionTokens(p.SuppressTokens, stopTokens)
+		}
+		next, err := s.Sample(logits, vocab, pickParams)
+		if err == nil {
+			generated++
+		}
+		return next, err
+	}, yield, step, headOf)
 }
 
 // generateWholeSeq is the fallback for a backend without a persistent-cache
