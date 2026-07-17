@@ -49,7 +49,7 @@ func TestRecordSchemas_Good(t *testing.T) {
 					"mode": "string", "generation_json": "string", "tools_json": "string",
 					"created_at": "time", "updated_at": "time", "last_opened_at": "time",
 					"archived": "bool", "archived_at": "time",
-				}, "id"),
+				}, "id", "preferred_model"),
 				indexes: [][]string{{"archived", "last_opened_at"}},
 			},
 		},
@@ -63,7 +63,7 @@ func TestRecordSchemas_Good(t *testing.T) {
 					"visible": "string", "thought": "string", "tool_name": "string",
 					"tool_call_json": "string", "tool_result_json": "string", "model": "string",
 					"created_at": "time", "updated_at": "time",
-				}, "id"),
+				}, "id", "visible", "thought", "tool_name", "tool_call_json", "tool_result_json", "model"),
 				indexes: [][]string{{"session_id", "sequence"}},
 			},
 		},
@@ -76,7 +76,7 @@ func TestRecordSchemas_Good(t *testing.T) {
 					"id": "string", "session_id": "string", "work_item_id": "string", "job_id": "string",
 					"kind": "string", "status": "string", "title": "string", "detail": "string",
 					"payload_json": "string", "created_at": "time",
-				}, "id"),
+				}, "id", "work_item_id", "job_id", "detail", "payload_json"),
 				indexes: [][]string{{"session_id", "created_at"}},
 			},
 		},
@@ -89,7 +89,7 @@ func TestRecordSchemas_Good(t *testing.T) {
 					"id": "string", "session_id": "string", "prompt_turn_id": "string",
 					"answer_turn_id": "string", "status": "string", "model": "string", "error": "string",
 					"metrics_json": "string", "created_at": "time", "started_at": "time", "finished_at": "time",
-				}, "id"),
+				}, "id", "prompt_turn_id", "answer_turn_id", "model", "error", "metrics_json"),
 				indexes: [][]string{{"session_id", "status", "created_at"}},
 			},
 		},
@@ -104,7 +104,7 @@ func TestRecordSchemas_Good(t *testing.T) {
 					"branch": "string", "runtime": "string", "question": "string", "pr_url": "string",
 					"session_id": "string", "started_at": "time", "updated_at": "time", "archived": "bool",
 					"archived_at": "time",
-				}, "id", "external_id"),
+				}, "id", "external_id", "agent", "repo", "org", "task", "branch", "runtime", "question", "pr_url", "session_id"),
 				indexes: [][]string{{"archived", "status", "updated_at"}},
 			},
 		},
@@ -117,7 +117,7 @@ func TestRecordSchemas_Good(t *testing.T) {
 					"id": "string", "session_id": "string", "work_item_id": "string", "kind": "string",
 					"path": "string", "title": "string", "metadata_json": "string", "created_at": "time",
 					"archived": "bool", "archived_at": "time",
-				}, "id"),
+				}, "id", "work_item_id", "metadata_json"),
 				indexes: [][]string{{"session_id", "created_at"}},
 			},
 		},
@@ -130,7 +130,7 @@ func TestRecordSchemas_Good(t *testing.T) {
 					"id": "string", "session_id": "string", "source_path": "string", "title": "string",
 					"content_hash": "string", "snapshot": "string", "added_at": "time",
 					"last_checked_at": "time", "stale": "bool", "archived": "bool", "archived_at": "time",
-				}, "id"),
+				}, "id", "content_hash", "snapshot"),
 				indexes: [][]string{{"session_id", "archived", "added_at"}},
 			},
 		},
@@ -159,14 +159,20 @@ func TestUnsetRecordTime_Good(t *testing.T) {
 	}
 }
 
-func requiredRecordFields(fields map[string]string, primaryKey string) map[string]schemaFieldExpectation {
-	return requiredRecordFieldsWithUnique(fields, primaryKey, "")
+func requiredRecordFields(fields map[string]string, primaryKey string, optional ...string) map[string]schemaFieldExpectation {
+	return requiredRecordFieldsWithUnique(fields, primaryKey, "", optional...)
 }
 
-func requiredRecordFieldsWithUnique(fields map[string]string, primaryKey, unique string) map[string]schemaFieldExpectation {
+func requiredRecordFieldsWithUnique(fields map[string]string, primaryKey, unique string, optional ...string) map[string]schemaFieldExpectation {
 	want := make(map[string]schemaFieldExpectation, len(fields))
 	for name, typ := range fields {
 		constraints := []string{"notnull"}
+		for _, optionalName := range optional {
+			if name == optionalName {
+				constraints = nil
+				break
+			}
+		}
 		if name == primaryKey {
 			constraints = []string{"pk", "notnull"}
 		}
