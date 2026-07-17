@@ -5,9 +5,13 @@
 package native
 
 import (
+	"strings"
 	"testing"
 
+	core "dappco.re/go"
+	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/internal/enginegate"
+	"dappco.re/go/inference/model"
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"
 )
 
@@ -59,4 +63,36 @@ func TestRealCheckpointGPU_ArgmaxParis_Good(t *testing.T) {
 		t.Fatalf("GPU forward argmax = %v, want first id 12095 (' Paris', mlx-lm reference) — the qwen2 GPU decode regressed", gen)
 	}
 	t.Logf("GPU generated ids: %v", gen)
+}
+
+// TestRealCheckpointGPU_Bonsai1BitRepack_Good locks #24's other half end-to-end: the 1-bit
+// affine checkpoint (prism-ml/Bonsai-27B-mlx-1bit, qwen3_5 hybrid — the composed lane) loads
+// through the b1→b2 exact repack (mlxaffine.RepackB1ToB2: no b_1 kernel ships, and mlx-lm
+// itself REJECTS bits=1 outright) and answers the capital question sanely on the GPU. The
+// repack's exactness has its own unit gate (TestRepackB1ToB2_ExactDequant); this is the
+// real-artefact receipt that the width serves, not hangs. Skips when the checkpoint is not
+// in the local HF cache.
+func TestRealCheckpointGPU_Bonsai1BitRepack_Good(t *testing.T) {
+	dir := enginegate.HFModelPath(t, "prism-ml/Bonsai-27B-mlx-1bit")
+	tok, err := tokenizer.LoadTokenizer(core.PathJoin(dir, "tokenizer.json"))
+	if err != nil {
+		t.Fatalf("LoadTokenizer: %v", err)
+	}
+	ids := tok.Encode("The capital of France is")
+	tm, err := LoadTokenModelDir(dir, 64)
+	if err != nil {
+		t.Fatalf("LoadTokenModelDir: %v", err)
+	}
+	if c, ok := tm.(interface{ Close() error }); ok {
+		defer func() { _ = c.Close() }()
+	}
+	gen, err := model.Generate(tm, ids, 4, -1)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	text := tok.Decode(gen)
+	if !strings.Contains(text, "Paris") {
+		t.Fatalf("1-bit Bonsai continuation %q (ids %v) does not name Paris — the b1→b2 repack lane regressed", text, gen)
+	}
+	t.Logf("Bonsai continuation: %q", text)
 }

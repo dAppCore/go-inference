@@ -76,14 +76,15 @@ Numbers: M3 Ultra, `lem bench` tg-512 greedy, 2026-07-16.
 | Qwen3.5 4B | `mlx-community/Qwen3.5-4B-OptiQ-4bit` | 256K | 3.27 GB | 20.4 | ✓ sane — the low-RAM sweet spot today |
 | Qwen3.6 27B | `mlx-community/Qwen3.6-27B-4bit` | 256K | 16.1 GB | 7.3 chat-lane / **15.05 raw session** | ✓ sane; perf campaign #18 in flight (4.63 → 15.05; target ≥40 — mlx-lm 41.3). The chat-vs-session ×2 gap is board #25 |
 | Qwen3.5 2B / 4B / 9B (official bf16) | `Qwen/Qwen3.5-{2B,4B,9B}` | 256K | 4.6 / 9.3 / 19.3 GB | 20.1 / 10.6 / 8.2 | ✓ sane ("Paris" answered, mlx-lm argmax parity). bf16 source form — heavier per token than the 4-bit conversions by sheer byte mass; serve the conversions, eval against these |
-| Bonsai 27B 1-bit | `prism-ml/Bonsai-27B-mlx-1bit` | 256K | 5 GB | — | ✗ 1-bit affine width is outside the shipped kernel set (2/3/4/5/6/8) — warm-up hangs on the host fallback. 5 GB for a 27B is exactly the low-end story; needs the 1-bit qmv kernel first (#24) |
+| Bonsai 27B 1-bit | `prism-ml/Bonsai-27B-mlx-1bit` | 256K | 5 GB | 33.4 | ✓ sane ("Paris", coherent prose) — loads through the exact b1→b2 repack (`RepackB1ToB2`), no b_1 kernel needed; receipt `TestRealCheckpointGPU_Bonsai1BitRepack_Good`. mlx-lm REJECTS bits=1 outright, so this engine is the only local server for it. 5 GB checkpoint for a 27B = the low-end story (#24 closed) |
 | Qwen2.5-Coder 3B (base) | `mlx-community/Qwen2.5-Coder-3B-4bit` | 32K | 2 GB | 161–166 | ✓ engine exonerated (#24: GPU argmaxes " Paris" like mlx-lm — `TestRealCheckpointGPU_ArgmaxParis_Good`). The "garble" was chat-framing the BASE model — degenerate on any engine, mlx-lm included. Completion use only; serve chat wants the `-Instruct` variant. Gap: our ChatML render omits Qwen's default-system block |
 | Qwen3.6-35B-A3B | (not yet local) | — | — | — | the MoE hybrid target — pulls with the #17/#18 follow-on |
 
 Low-end/home serving guidance from the rows above: today's honest recommendations are the
 **gemma4 E2B-4bit (3.6 GB, 170 tok/s)** and **Qwen3.5-4B-OptiQ (3.3 GB, 20.4 and climbing with
-#18)** — both fit an 8 GB machine's model budget. The 0.8B runs anywhere. Sub-4-GB 27B-class
-(Bonsai 1-bit) is real hardware relief once the 1-bit kernel lands.
+#18)** — both fit an 8 GB machine's model budget. The 0.8B runs anywhere. The 27B-class-in-5-GB
+(Bonsai 1-bit, 33.4 tok/s) now serves — hardware relief no other local engine offers
+(mlx-lm rejects the width).
 
 ## Legacy
 
