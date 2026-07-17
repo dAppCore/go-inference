@@ -659,12 +659,14 @@ func repeatPenaltyTransform(p SampleParams) logitsTransform {
 	if p.RepeatPenalty <= 1 {
 		return nil
 	}
-	// One scratch buffer per generation, grown to the vocab on the first token
-	// and reused for the rest — the decode loop no longer allocates a vocab-sized
-	// logits copy every token. Held in the closure, so it is per-request (not
-	// shared), matching the Sampler's own scratch discipline.
+	// Two scratch buffers per generation, grown once and reused for every token —
+	// the vocab-sized logits copy and the (lengthening) history working set — so
+	// the decode loop's repeat-penalty step is zero-alloc after warmup. Held in
+	// the closure, so they are per-request (not shared), matching the Sampler's
+	// own scratch discipline.
 	var scratch []byte
+	var idScratch []int32
 	return func(logits []byte, vocab int, history []int32) ([]byte, error) {
-		return applyRepeatPenaltyBF16Into(&scratch, logits, vocab, history, p.RepeatPenalty)
+		return applyRepeatPenaltyBF16Into(&scratch, &idScratch, logits, vocab, history, p.RepeatPenalty)
 	}
 }

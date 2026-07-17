@@ -667,11 +667,12 @@ func TestApplyRepeatPenaltyBF16Into_ReusedScratch(t *testing.T) {
 		{[]float32{10, -10, 10, -10, 10}, nil}, // no history → passthrough, input returned
 	}
 	var scratch []byte
+	var idScratch []int32
 	for i, c := range cases {
 		vocab := len(c.vals)
 		logits := bf16Bytes(c.vals)
 		want, werr := applyRepeatPenaltyBF16(logits, vocab, c.history, 2) // fresh-alloc reference
-		got, gerr := applyRepeatPenaltyBF16Into(&scratch, logits, vocab, c.history, 2)
+		got, gerr := applyRepeatPenaltyBF16Into(&scratch, &idScratch, logits, vocab, c.history, 2)
 		if (werr == nil) != (gerr == nil) {
 			t.Fatalf("case %d: err mismatch got=%v want=%v", i, gerr, werr)
 		}
@@ -698,10 +699,11 @@ func BenchmarkRepeatPenalty_ReuseScratch(b *testing.B) {
 	logits := benchLogits(benchVocab)
 	history := benchRepeatHistory(256, benchVocab)
 	var scratch []byte
+	var idScratch []int32
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		out, err := applyRepeatPenaltyBF16Into(&scratch, logits, benchVocab, history, 1.1)
+		out, err := applyRepeatPenaltyBF16Into(&scratch, &idScratch, logits, benchVocab, history, 1.1)
 		if err != nil {
 			b.Fatal(err)
 		}

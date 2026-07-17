@@ -456,29 +456,33 @@ func topMappedSuppressed(logits []byte, ids []int32, vocab int, suppress []int32
 // a reused scratch to avoid a vocab-sized allocation every token.
 func applyRepeatPenaltyBF16(logits []byte, vocab int, history []int32, penalty float32) ([]byte, error) {
 	var scratch []byte
-	return applyRepeatPenaltyBF16Into(&scratch, logits, vocab, history, penalty)
+	var idScratch []int32
+	return applyRepeatPenaltyBF16Into(&scratch, &idScratch, logits, vocab, history, penalty)
 }
 
 // applyRepeatPenaltyBF16Into writes the repeat-penalised logits into *scratch,
 // grown to the vocab ONCE and reused on every later call, so a decode loop under
 // repeat_penalty pays the vocab-sized buffer once rather than allocating ≈512 KB
-// per token on a 256k-vocab model (the AX-11 win). The input logits are left
-// untouched, and a no-op penalty returns logits directly with no copy. Only the
-// deduped history positions are rewritten over a fresh full copy, so the result
-// is byte-identical to allocating a new buffer each call.
-func applyRepeatPenaltyBF16Into(scratch *[]byte, logits []byte, vocab int, history []int32, penalty float32) ([]byte, error) {
+// per token on a 256k-vocab model (the AX-11 win). *idScratch is the same
+// grow-once reuse for the history working set (which lengthens with the
+// generation), so the whole path is zero-alloc after warmup. The input logits
+// are left untouched, and a no-op penalty returns logits directly with no copy.
+// Only the deduped history positions are rewritten over a fresh full copy, so the
+// result is byte-identical to allocating new buffers each call.
+func applyRepeatPenaltyBF16Into(scratch *[]byte, idScratch *[]int32, logits []byte, vocab int, history []int32, penalty float32) ([]byte, error) {
 	if len(logits) != vocab*bf16Size {
 		return nil, core.NewError("model.applyRepeatPenalty: logits must be vocab bf16 bytes")
 	}
 	if penalty <= 1 || len(history) == 0 {
 		return logits, nil
 	}
-	ids := make([]int32, 0, len(history))
+	ids := (*idScratch)[:0] // reuse the grown backing array — no per-token history copy
 	for _, id := range history {
 		if id >= 0 && int(id) < vocab {
 			ids = append(ids, id)
 		}
 	}
+	*idScratch = ids
 	if len(ids) == 0 {
 		return logits, nil
 	}
