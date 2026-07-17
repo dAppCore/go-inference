@@ -45,6 +45,10 @@ func init() {
 			composed.AttnKVExportDevice = attnKVExportHook
 			composed.ComposedChainBeginDevice = ComposedChainBeginDevice   // whole-token chain (#26): one upload, one wait
 			composed.ComposedChainEndDevice = ComposedChainEndDevice
+			if os.Getenv("LTHN_CHAIN_HEAD") != "0" { // same-binary A/B arm, LTHN_ATTN_DEVKV pattern
+				composed.ComposedChainHeadDevice = ComposedChainHeadDevice // head fold (#18): terminal norm + LM head on the chain
+				composed.ComposedChainTakeLogits = ComposedChainTakeLogits
+			}
 			composed.AttnBF16ChainLayerDevice = attnBF16ChainLayerDevice
 			composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice // the packed chain twin
 			qwen3.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice

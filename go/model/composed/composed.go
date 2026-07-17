@@ -574,6 +574,15 @@ type pendingRWKV7Input struct{ r, w, k, v, a, b []float32 }
 var ComposedChainBeginDevice func(h []float32, L, D int) (ctx any, err error)
 var ComposedChainEndDevice func(ctx any) (y []float32, err error)
 
+// ComposedChainHeadDevice folds the MODEL's terminal stage onto the chain (#18 head fold): the
+// final RMSNorm of the LAST row + the LM head projection (bf16-resident OR packed form), encoded
+// onto the SAME retained command buffer after the last layer — so the head's own separate command
+// buffer + wait (ComposedSession.headLogits, called by the stepper's Head) disappears from the
+// chained decode. ComposedChainTakeLogits hands the logits back AFTER ComposedChainEndDevice's
+// wait (nil when the head was never encoded). AX-8: declared here, bound by the backend.
+var ComposedChainHeadDevice func(ctx any, normF []float32, headB *model.BF16Weight, headQ *model.QuantWeight, D, Vocab int, eps float32) error
+var ComposedChainTakeLogits func(ctx any) []float32
+
 // chainable reports whether EVERY layer of this model can ride the chained device path — the
 // all-or-nothing v1 gate (mixed models keep the per-layer folds). Form-agnostic (#26 QUANT): each
 // layer qualifies by carrying EITHER its bf16 form OR its packed form ready for the chain step —
@@ -644,7 +653,40 @@ func (s *ComposedSession) forwardChain(h []float32, L int) ([]float32, error) {
 			s.states[li] = next
 		}
 	}
-	return ComposedChainEndDevice(ctx)
+	// Head fold (#18): encode the model's terminal RMSNorm + LM head onto the same chain before the
+	// one commit, so the stepper's Head call reuses these logits instead of paying its own command
+	// buffer + wait. Only the B/Q head forms ride the chain (an f32-widened head never coexists with
+	// a chainable model — chainable requires every layer in B/Q form); an encode error just leaves
+	// the head computed separately, exactly as before the fold.
+	headB, headQ := s.m.OutputB, s.m.OutputQ
+	if headB == nil && headQ == nil && s.m.Output == nil { // tied head
+		headB, headQ = s.m.EmbedB, s.m.EmbedQ
+	}
+	headEncoded := false
+	if ComposedChainHeadDevice != nil && ComposedChainTakeLogits != nil && (headB != nil || headQ != nil) {
+		headEncoded = ComposedChainHeadDevice(ctx, s.m.NormF, headB, headQ, D, s.m.Vocab, eps) == nil
+	}
+	y, err := ComposedChainEndDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if headEncoded {
+		if logits := ComposedChainTakeLogits(ctx); logits != nil {
+			// scaling parity with headLogits — the host tail the fold replaces.
+			if s.m.LogitScale != 0 {
+				for i := range logits {
+					logits[i] *= s.m.LogitScale
+				}
+			}
+			if s.m.LogitsScaling != 0 && s.m.LogitsScaling != 1 {
+				for i := range logits {
+					logits[i] /= s.m.LogitsScaling
+				}
+			}
+			s.pendingHeadLogits = logits
+		}
+	}
+	return y, nil
 }
 
 // forwardEmb runs L input embeddings [L,D] through the stack, advancing each layer's mixer state, and

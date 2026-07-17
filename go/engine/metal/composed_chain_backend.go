@@ -5,6 +5,7 @@
 package native
 
 import (
+	"sync"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -28,6 +29,11 @@ type composedChainCtx struct {
 	gdSc     *gatedDeltaQuantLayerScratch
 	gdKey    gatedDeltaQuantLayerKey
 	attnPins []*pinnedNoCopyBytes
+	// head fold (#18): the terminal RMSNorm + LM head encoded onto this chain's CB by
+	// ComposedChainHeadDevice. headSc holds the staging + the logits pin ComposedChainTakeLogits
+	// reads after End's wait; returned to its pool at take (or at End when never taken).
+	headSc    *chainHeadScratch
+	headVocab int
 }
 
 func (c *composedChainCtx) cur() *pinnedNoCopyBytes {
@@ -90,6 +96,124 @@ func ComposedChainEndDevice(ctxAny any) ([]float32, error) {
 		ctx.gdSc = nil
 	}
 	return y, nil
+}
+
+// chainHeadScratch is the head fold's staging: the last row's normed output (f32 + its bf16
+// cast), the logits (bf16 staging + f32 result pin). Pooled by (D, Vocab).
+type chainHeadScratch struct {
+	normed, nBF, logitsBF, logits *pinnedNoCopyBytes
+}
+
+type chainHeadKey struct{ D, Vocab int }
+
+var chainHeadPools sync.Map // chainHeadKey -> *sync.Pool
+
+func getChainHeadScratch(D, Vocab int) (*chainHeadScratch, error) {
+	key := chainHeadKey{D, Vocab}
+	poolAny, ok := chainHeadPools.Load(key)
+	if !ok {
+		poolAny, _ = chainHeadPools.LoadOrStore(key, &sync.Pool{})
+	}
+	if v := poolAny.(*sync.Pool).Get(); v != nil {
+		return v.(*chainHeadScratch), nil
+	}
+	sc := &chainHeadScratch{}
+	var err error
+	alloc := func(n int) *pinnedNoCopyBytes {
+		if err != nil {
+			return nil
+		}
+		var b *pinnedNoCopyBytes
+		b, err = newPinnedNoCopyBytes(n)
+		return b
+	}
+	sc.normed = alloc(D * 4)
+	sc.nBF = alloc(D * bf16Size)
+	sc.logitsBF = alloc(Vocab * bf16Size)
+	sc.logits = alloc(Vocab * 4)
+	if err != nil {
+		return nil, err
+	}
+	return sc, nil
+}
+
+func putChainHeadScratch(D, Vocab int, sc *chainHeadScratch) {
+	if v, ok := chainHeadPools.Load(chainHeadKey{D, Vocab}); ok {
+		v.(*sync.Pool).Put(sc)
+	}
+}
+
+// ComposedChainHeadDevice encodes the model's terminal stage onto the chain's retained command
+// buffer (#18 head fold): RMSNorm(cur[L-1,:], normF) → LM head projection (bf16-resident or
+// packed form via the same f32-activation emitters the chain layers use) → f32 logits, all
+// ordered after the last layer by the encoder boundary. The logits land in a pinned buffer
+// ComposedChainTakeLogits reads AFTER ComposedChainEndDevice's wait. The head stages write only
+// this scratch — never the hidden pins — so an encode error leaves the chain itself intact and
+// the caller falls back to the separate head exactly as before.
+func ComposedChainHeadDevice(ctxAny any, normF []float32, headB *model.BF16Weight, headQ *model.QuantWeight, D, Vocab int, eps float32) error {
+	ctx, ok := ctxAny.(*composedChainCtx)
+	if !ok || ctx.cb.GetID() == 0 {
+		return core.NewError("native.ComposedChainHeadDevice: not a chain context")
+	}
+	if ctx.headSc != nil {
+		return core.NewError("native.ComposedChainHeadDevice: head already encoded on this chain")
+	}
+	if len(normF) != D {
+		return core.NewError("native.ComposedChainHeadDevice: normF size mismatch")
+	}
+	if headQ != nil {
+		if !quantGeometryOK(headQ, Vocab, D) {
+			return core.NewError("native.ComposedChainHeadDevice: unsupported packed head geometry")
+		}
+	} else if !bf16GeometryOK(headB, Vocab, D) {
+		return core.NewError("native.ComposedChainHeadDevice: unsupported bf16 head geometry")
+	}
+	rmsName := "rmsfloat32"
+	if D > rmsLoopedLimit {
+		rmsName = "rms_loopedfloat32"
+	}
+	psoRMS, err := pipelineFor(rmsName)
+	if err != nil {
+		return err
+	}
+	sc, err := getChainHeadScratch(D, Vocab)
+	if err != nil {
+		return err
+	}
+	var encErr error
+	withAutoreleasePool(func() {
+		normFBuf := residentFloat32(normF)
+		lastRowOff := uint((ctx.L - 1) * ctx.D * 4)
+		enc := computeCommandEncoderFast(ctx.cb)
+		emitRMSNormAt(encSink{enc}, psoRMS, ctx.cur().buf, normFBuf, sc.normed.buf, lastRowOff, 0, 0, D, eps, rmsThreadgroup(D, psoRMS))
+		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
+		if headQ != nil {
+			encErr = encProjQuantF32(enc, headQ, sc.normed.buf, sc.nBF.buf, sc.logitsBF.buf, sc.logits.buf, 1, Vocab, D)
+		} else {
+			encErr = encProjBF16F32(enc, headB, sc.normed.buf, sc.nBF.buf, sc.logitsBF.buf, sc.logits.buf, 1, Vocab, D)
+		}
+		endEncodingFast(enc)
+	})
+	if encErr != nil {
+		putChainHeadScratch(D, Vocab, sc)
+		return encErr
+	}
+	ctx.headSc, ctx.headVocab = sc, Vocab
+	return nil
+}
+
+// ComposedChainTakeLogits hands back the head-fold logits after ComposedChainEndDevice's wait
+// (nil when no head was encoded) and returns the staging to its pool.
+func ComposedChainTakeLogits(ctxAny any) []float32 {
+	ctx, ok := ctxAny.(*composedChainCtx)
+	if !ok || ctx.headSc == nil {
+		return nil
+	}
+	logits := make([]float32, ctx.headVocab)
+	copy(logits, unsafe.Slice((*float32)(unsafe.Pointer(&ctx.headSc.logits.bytes[0])), ctx.headVocab))
+	putChainHeadScratch(ctx.D, ctx.headVocab, ctx.headSc)
+	ctx.headSc = nil
+	return logits
 }
 
 // gatedDeltaBF16ChainLayerDevice encodes one dense bf16 gated-delta layer onto the chain — the
