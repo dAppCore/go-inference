@@ -87,13 +87,15 @@ type batchEngine struct {
 
 // newBatchEngine builds a live batch engine from cfg and starts its loop.
 func newBatchEngine(_ *Model, cfg Config) *batchEngine {
+	concurrency := maxOrDefault(cfg.MaxConcurrent, 1)
+	queueDepth := maxOrDefault(cfg.MaxQueue, 1)
 	e := &batchEngine{
-		cap:          maxOrDefault(cfg.MaxConcurrent, 1),
-		maxQueue:     maxOrDefault(cfg.MaxQueue, 1),
+		cap:          concurrency,
+		maxQueue:     queueDepth,
 		maxTokens:    cfg.MaxBatchTokens,
 		streamBuffer: max(cfg.StreamBuffer, 0),
 		submitCh:     make(chan *batchReq),
-		cancelCh:     make(chan string),
+		cancelCh:     make(chan string, concurrency+queueDepth),
 		closeCh:      make(chan struct{}),
 		doneCh:       make(chan struct{}),
 	}
@@ -213,15 +215,18 @@ func (e *batchEngine) submit(ctx context.Context, br *batchReq) (<-chan inferenc
 // channel closes with zero tokens), an active one observes ctx.Done() at its
 // next round. Unknown/finished ids are harmless no-ops.
 func (e *batchEngine) cancel(id string) inference.RequestCancelResult {
-	// The coordinator may be blocked delivering this request's next token to a
-	// full output channel. Cancel its context directly so that delivery select
-	// can retire it; cancelCh still removes queued requests promptly.
+	// The coordinator may be blocked delivering any request's next token to a
+	// full output channel. Cancel the target context directly, then notify the
+	// coordinator without waiting for its control loop. The bounded notification
+	// is only a prompt queue-removal hint: the cancelled context remains the
+	// source of truth if duplicate notifications fill the buffer.
 	if value, ok := e.requests.Load(id); ok {
 		value.(*batchReq).cancel()
 	}
 	select {
 	case e.cancelCh <- id:
 	case <-e.doneCh:
+	default:
 	}
 	return inference.RequestCancelResult{ID: id, Cancelled: true, Reason: "cancelled"}
 }
