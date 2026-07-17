@@ -159,6 +159,18 @@ func (s *Sampler) sampleMapped(logits []byte, ids []int32, vocab int, p SamplePa
 	}
 	probs := s.probs[:vocab]
 
+	// FAST PATH — when top-k caps the kept set, rank the survivors on the raw
+	// temperature-scaled logits (exp is monotonic, so the logit order IS the
+	// probability order) and exp ONLY those survivors, skipping the full-vocab
+	// exp pass — ≈256k math.Exp/token on a Qwen vocab, the dominant host-sampler
+	// cost. Byte-identical to the full path: the top-k tokens carry the same
+	// exp(v−max) weights in the same order, and any 0-mass tail token whose order
+	// differs under an exp-underflow tie is cut by top-p/min-p or never reached
+	// by the draw (acc only advances on real mass).
+	if rankFilter && p.TopK > 0 && p.TopK < vocab {
+		return s.sampleTopKFirst(logits, ids, vocab, temp, p)
+	}
+
 	// temperature-scaled logits + their max (for a stable softmax).
 	maxL := float32(math.Inf(-1))
 	allowed := 0
@@ -199,25 +211,64 @@ func (s *Sampler) sampleMapped(logits []byte, ids []int32, vocab int, p SamplePa
 		return s.sampleMappedInVocabOrder(probs, ids, vocab, sum)
 	}
 
-	// rank by probability, descending (top-k + top-p both work over this order). Only
-	// the top `keep` entries are ever read below, so when top-k caps the set we select
-	// just those instead of sorting the whole vocab: a bounded O(vocab + keep·log keep)
-	// heap select produces the identical prefix a full stable sort would, without paying
-	// O(vocab·log vocab) to read 64 rows out of 256k. Top-p / min-p alone can walk the
-	// entire ordering, so those keep the full sort.
+	// top-p / min-p without a top-k cap can walk the whole ordering, so the kept
+	// set is the full vocab ranked by a stable descending sort. (A top-k cap took
+	// the fast path above.)
 	keep := vocab
-	if p.TopK > 0 && p.TopK < keep {
-		keep = p.TopK
+	order := s.order[:keep]
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return probs[order[a]] > probs[order[b]] })
+	return s.drawFromRanked(order, probs, ids, keep, vocab, sum, p)
+}
+
+// sampleTopKFirst is Sample's fast path when top-k caps the kept set: it ranks
+// the top-k on the raw temperature-scaled logits (monotone in probability) and
+// exps only those survivors, avoiding the full-vocab softmax. See the FAST PATH
+// note in sampleMapped for the byte-identity argument.
+func (s *Sampler) sampleTopKFirst(logits []byte, ids []int32, vocab int, temp float32, p SampleParams) (int32, error) {
+	// probs doubles as the vals scratch: it holds the temperature-scaled logits
+	// through the select, then the exp weights for the kept survivors.
+	vals := s.probs[:vocab]
+	allowed := 0
+	for i := range vocab {
+		id := int32(i)
+		if ids != nil {
+			id = ids[i]
+		}
+		if tokenSuppressed(id, p.SuppressTokens) {
+			vals[i] = float32(math.Inf(-1)) // ranks below every real token; exps to 0 if ever kept
+			continue
+		}
+		vals[i] = bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]) / temp
+		allowed++
+	}
+	if allowed == 0 {
+		return 0, core.NewError("model.Sample: all tokens are suppressed")
+	}
+	keep := p.TopK
+	if keep > vocab {
+		keep = vocab
 	}
 	order := s.order[:keep]
-	if keep == vocab {
-		for i := range order {
-			order[i] = i
-		}
-		sort.SliceStable(order, func(a, b int) bool { return probs[order[a]] > probs[order[b]] })
-	} else {
-		selectTopKDesc(order, probs, vocab)
+	selectTopKDesc(order, vals, vocab)
+	// exp the survivors, stabilised by the global max (the top-ranked survivor).
+	// Read the max before overwriting vals[order[0]].
+	maxL := vals[order[0]]
+	for i := 0; i < keep; i++ {
+		vals[order[i]] = float32(math.Exp(float64(vals[order[i]] - maxL)))
 	}
+	return s.drawFromRanked(order, vals, ids, keep, vocab, 0, p)
+}
+
+// drawFromRanked applies the top-p (nucleus) then min-p cut over the kept order
+// (descending by probability), renormalises the survivors and draws one with
+// this sampler's RNG. sum is the full-vocab mass, used as the top-p base only
+// when keep == vocab (the whole vocab is kept); a top-k-capped set recomputes its
+// own kept mass. Shared by Sample's full and fast paths so the cut + draw
+// arithmetic has one implementation.
+func (s *Sampler) drawFromRanked(order []int, probs []float32, ids []int32, keep, vocab int, sum float32, p SampleParams) (int32, error) {
 	if p.TopP > 0 && p.TopP < 1 {
 		keptMass := sum
 		if keep != vocab {

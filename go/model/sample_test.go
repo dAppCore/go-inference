@@ -539,3 +539,115 @@ func BenchmarkSamplerCandidatesTopKOneCold(b *testing.B) {
 		sampleBenchSink = tok
 	}
 }
+
+// referenceTopKSample is the full-softmax algorithm Sample's fast path replaces: exp the
+// WHOLE vocab, rank, then draw. It shares the production cut+draw tail (drawFromRanked), so
+// only the exp-everything vs exp-the-survivors difference is under test. Assumes a top-k cap
+// and at least one unsuppressed token (the fuzz below guarantees both).
+func referenceTopKSample(s *Sampler, logits []byte, vocab int, p SampleParams) int32 {
+	temp := p.Temperature
+	if temp <= 0 {
+		temp = 1
+	}
+	probs := make([]float32, vocab)
+	maxL := float32(math.Inf(-1))
+	for i := 0; i < vocab; i++ {
+		if tokenSuppressed(int32(i), p.SuppressTokens) {
+			continue
+		}
+		v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]) / temp
+		if v > maxL {
+			maxL = v
+		}
+	}
+	var sum float32
+	for i := 0; i < vocab; i++ {
+		if tokenSuppressed(int32(i), p.SuppressTokens) {
+			probs[i] = 0
+			continue
+		}
+		v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]) / temp
+		e := float32(math.Exp(float64(v - maxL)))
+		probs[i] = e
+		sum += e
+	}
+	keep := p.TopK
+	if keep > vocab {
+		keep = vocab
+	}
+	order := make([]int, keep)
+	selectTopKDesc(order, probs, vocab)
+	tok, _ := s.drawFromRanked(order, probs, nil, keep, vocab, sum, p)
+	return tok
+}
+
+// TestSampleTopKFirst_ParityWithFullExp locks Sample's fast top-k path — rank on the raw
+// logits, exp only the survivors — byte-identical to the full-softmax reference it replaces,
+// across a deterministic fuzz of vocab, temperature, top-k/top-p/min-p and suppression. Case
+// 0 is an exp-underflow stress (far fewer real peaks than TopK over a sub-underflow floor) so
+// the top-k dips into the 0-mass tail the two paths order differently: the test proves that
+// tail can never change the drawn token. A divergence would mean the ≈256k-exp/token saving
+// silently alters generations.
+func TestSampleTopKFirst_ParityWithFullExp(t *testing.T) {
+	rng := uint64(0x243f6a8885a308d3) // splitmix64 — hermetic, no math/rand import
+	next := func() uint64 {
+		rng += 0x9e3779b97f4a7c15
+		z := rng
+		z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+		z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+		z ^= z >> 31
+		return z
+	}
+	nextInt := func(n int) int { return int(next() % uint64(n)) }
+	nextF := func() float32 { return float32(next()>>40) / float32(1<<24) }
+
+	for c := 0; c < 4000; c++ {
+		vocab := 16 + nextInt(2048)
+		vals := make([]float32, vocab)
+		switch c % 5 {
+		case 0: // exp-underflow floor + a few real peaks
+			for i := range vals {
+				vals[i] = -300
+			}
+			for k, n := 0, 1+nextInt(20); k < n; k++ {
+				vals[nextInt(vocab)] = nextF()*12 - 2
+			}
+		case 1: // near-flat tiny range → frequent bf16 ties
+			for i := range vals {
+				vals[i] = float32(nextInt(4)) * 0.1
+			}
+		default: // realistic spread
+			spread := 1 + nextF()*8
+			for i := range vals {
+				vals[i] = (nextF()*2 - 1) * spread
+			}
+		}
+		logits := bf16Bytes(vals)
+
+		p := SampleParams{
+			Temperature: 0.4 + nextF()*1.6,
+			TopK:        2 + nextInt(vocab-2), // 2..vocab-1 → always caps → fast path
+		}
+		if nextInt(2) == 0 {
+			p.TopP = 0.4 + nextF()*0.59
+		}
+		if nextInt(3) == 0 {
+			p.MinP = nextF() * 0.4
+		}
+		if nextInt(3) == 0 {
+			for k, n := 0, nextInt(6); k < n; k++ {
+				p.SuppressTokens = append(p.SuppressTokens, int32(nextInt(vocab)))
+			}
+		}
+
+		seed := next()
+		got, gerr := NewSampler(seed).Sample(logits, vocab, p)
+		if gerr != nil {
+			t.Fatalf("case %d: fast path errored: %v (vocab=%d p=%+v)", c, gerr, vocab, p)
+		}
+		want := referenceTopKSample(NewSampler(seed), logits, vocab, p)
+		if got != want {
+			t.Fatalf("case %d: token mismatch got=%d want=%d (vocab=%d p=%+v seed=%d)", c, got, want, vocab, p, seed)
+		}
+	}
+}
