@@ -42,6 +42,17 @@ func attnGatePipeline() (metal.MTLComputePipelineState, error) {
 	return attnGatePSO, attnGateErr
 }
 
+var (
+	attnVAppendOnce sync.Once
+	attnVAppendPSO  metal.MTLComputePipelineState
+	attnVAppendErr  error
+)
+
+func attnVAppendPipeline() (metal.MTLComputePipelineState, error) {
+	attnVAppendOnce.Do(func() { gdPlainPipeline("lthn_attn_vappend_f32", &attnVAppendPSO, &attnVAppendErr) })
+	return attnVAppendPSO, attnVAppendErr
+}
+
 // attnCoreUsable reports whether the device attention core serves this geometry: HD within the
 // kernels' 256-wide threadgroup staging and a resolvable pipeline set. The customLibrary check
 // runs FIRST (the #23 pre-init lesson).

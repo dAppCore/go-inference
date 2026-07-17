@@ -49,6 +49,12 @@ func init() {
 				composed.ComposedChainHeadDevice = ComposedChainHeadDevice // head fold (#18): terminal norm + LM head on the chain
 				composed.ComposedChainTakeLogits = ComposedChainTakeLogits
 			}
+			if os.Getenv("LTHN_CHAIN_ICB") != "0" { // CB recording (#18): record the L=1 stream once, replay per token
+				composed.ComposedChainRecordBegin = ComposedChainRecordBegin
+				composed.ComposedChainRecordEnd = ComposedChainRecordEnd
+				composed.ComposedChainReplayDevice = ComposedChainReplayDevice
+				composed.ComposedChainRecordingRelease = ComposedChainRecordingRelease
+			}
 			composed.AttnBF16ChainLayerDevice = attnBF16ChainLayerDevice
 			composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice // the packed chain twin
 			qwen3.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice

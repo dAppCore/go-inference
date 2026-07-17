@@ -512,6 +512,12 @@ type ComposedSession struct {
 	// Reset to nil at the top of every forwardEmb call, so a stale value never survives past the call
 	// that didn't produce one. See PendingHeadLogits.
 	pendingHeadLogits []float32
+
+	// chainRec is the backend's recorded L=1 decode stream (#18 CB recording) — replayed per
+	// token by forwardChain; nil until recorded, dropped when stale. chainRecFailed remembers
+	// a stack that cannot record (a bf16-form layer), so the session doesn't retry per token.
+	chainRec       any
+	chainRecFailed bool
 }
 
 // PendingHeadLogits returns the vocab logits the MOST RECENT forwardEmb call (Forward/forward) computed
@@ -583,6 +589,17 @@ var ComposedChainEndDevice func(ctx any) (y []float32, err error)
 var ComposedChainHeadDevice func(ctx any, normF []float32, headB *model.BF16Weight, headQ *model.QuantWeight, D, Vocab int, eps float32) error
 var ComposedChainTakeLogits func(ctx any) []float32
 
+// CB recording (#18): the L=1 chained decode's command stream is fixed across tokens, so the
+// backend records it once into an indirect command buffer and replays it per token — one
+// execute call instead of re-encoding every dispatch. RecordBegin returns a ctx the NORMAL
+// per-layer chain walk drives (nothing executes); RecordEnd hands back the opaque recording;
+// ReplayDevice re-issues it (ok=false = stale — cache grew/realloc'd — release and re-record).
+// AX-8: declared here, bound by the backend.
+var ComposedChainRecordBegin func(L, D, nLayers int) (ctx any, err error)
+var ComposedChainRecordEnd func(ctx any) (rec any, err error)
+var ComposedChainReplayDevice func(rec any, h []float32) (y []float32, logits []float32, ok bool, err error)
+var ComposedChainRecordingRelease func(rec any)
+
 // chainable reports whether EVERY layer of this model can ride the chained device path — the
 // all-or-nothing v1 gate (mixed models keep the per-layer folds). Form-agnostic (#26 QUANT): each
 // layer qualifies by carrying EITHER its bf16 form OR its packed form ready for the chain step —
@@ -613,55 +630,135 @@ func (s *ComposedSession) chainable() bool {
 	return true
 }
 
-// forwardChain runs the whole stack as ONE chained device forward: one upload, one wait. Each
-// layer dispatches to its bf16 or packed chain step depending on which weight form it carries
-// (chainable already proved every layer is ready in one form or the other). Any error mid-chain
-// aborts the forward — the device owns every layer's state by then.
-func (s *ComposedSession) forwardChain(h []float32, L int) ([]float32, error) {
+// chainWalk drives every layer's chain step over ctx — the ONE walk both the live chained
+// forward and the CB-recording pass run (the recording pass encodes into an ICB and must see
+// exactly the live stream). commit=false leaves s.states untouched (a recording executes
+// nothing, so state handles must not be replaced — they are the same objects anyway, but the
+// walk stays visibly side-effect-free).
+func (s *ComposedSession) chainWalk(ctx any, L int, commit bool) error {
 	D, eps := s.m.D, s.m.Eps
-	ctx, err := ComposedChainBeginDevice(h, L, D)
-	if err != nil {
-		return nil, err
-	}
 	for li := range s.m.Layers {
 		layer := &s.m.Layers[li]
 		mlp := layer.MLP.(*MLP)
+		var next any
+		var cerr error
 		switch mx := layer.Mixer.(type) {
 		case *gatedDeltaMixer:
-			var next any
-			var cerr error
 			if mx.chainableBF16(mlp) {
 				next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
 			} else {
 				next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
 			}
-			if cerr != nil {
-				return nil, cerr
-			}
-			s.states[li] = next
 		case *attnMixer:
-			var next any
-			var cerr error
 			if mx.chainableBF16(mlp) {
 				next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
 			} else {
 				next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
 			}
-			if cerr != nil {
-				return nil, cerr
-			}
+		}
+		if cerr != nil {
+			return cerr
+		}
+		if commit {
 			s.states[li] = next
 		}
+	}
+	return nil
+}
+
+// chainHeadWeights resolves the head form the chain fold serves (untied B/Q, else the tied
+// embedding's B/Q form); both nil = no foldable head.
+func (s *ComposedSession) chainHeadWeights() (*model.BF16Weight, *model.QuantWeight) {
+	headB, headQ := s.m.OutputB, s.m.OutputQ
+	if headB == nil && headQ == nil && s.m.Output == nil { // tied head
+		headB, headQ = s.m.EmbedB, s.m.EmbedQ
+	}
+	return headB, headQ
+}
+
+// applyLogitScaling is headLogits' scaling tail, applied to fold/replay logits so every lane
+// scales identically.
+func (s *ComposedSession) applyLogitScaling(logits []float32) {
+	if s.m.LogitScale != 0 {
+		for i := range logits {
+			logits[i] *= s.m.LogitScale
+		}
+	}
+	if s.m.LogitsScaling != 0 && s.m.LogitsScaling != 1 {
+		for i := range logits {
+			logits[i] /= s.m.LogitsScaling
+		}
+	}
+}
+
+// forwardChain runs the whole stack as ONE chained device forward: one upload, one wait. Each
+// layer dispatches to its bf16 or packed chain step depending on which weight form it carries
+// (chainable already proved every layer is ready in one form or the other). Any error mid-chain
+// aborts the forward — the device owns every layer's state by then.
+//
+// CB recording (#18): at L=1 a valid recording replays instead — one executeCommandsInBuffer,
+// no per-layer re-encode. A stale recording (the KV cache grew past its recorded capacity, or
+// its pins were reallocated) is released and the token falls back to the re-encode chain; the
+// NEXT token records fresh. Recording happens BEFORE a live token's own encode (states not yet
+// advanced, so the recorded desync checks see the same position the live pass uses); a stack
+// with any non-recordable layer (bf16 form) simply never records.
+func (s *ComposedSession) forwardChain(h []float32, L int) ([]float32, error) {
+	D, eps := s.m.D, s.m.Eps
+	headB, headQ := s.chainHeadWeights()
+	if L == 1 && s.chainRec != nil && ComposedChainReplayDevice != nil {
+		y, logits, ok, rerr := ComposedChainReplayDevice(s.chainRec, h)
+		if rerr == nil && ok {
+			// the replay advanced the DEVICE state (KV rows, recurrent state, ring); the
+			// model-side attention positions must advance in lockstep or the next live
+			// re-encode (after an invalidation) sees a position desync.
+			for li := range s.m.Layers {
+				if _, isAttn := s.m.Layers[li].Mixer.(*attnMixer); isAttn {
+					if st, okSt := s.states[li].(attnState); okSt {
+						st.n += L
+						s.states[li] = st
+					}
+				}
+			}
+			if logits != nil {
+				s.applyLogitScaling(logits)
+				s.pendingHeadLogits = logits
+			}
+			return y, nil
+		}
+		if ComposedChainRecordingRelease != nil {
+			ComposedChainRecordingRelease(s.chainRec)
+		}
+		s.chainRec = nil // stale or failed — re-encode this token, re-record on a later one
+	}
+	if L == 1 && s.chainRec == nil && ComposedChainRecordBegin != nil && ComposedChainRecordEnd != nil && !s.chainRecFailed {
+		if rctx, rerr := ComposedChainRecordBegin(L, D, len(s.m.Layers)); rerr == nil {
+			recErr := s.chainWalk(rctx, L, false)
+			if recErr == nil && ComposedChainHeadDevice != nil && ComposedChainTakeLogits != nil && (headB != nil || headQ != nil) {
+				recErr = ComposedChainHeadDevice(rctx, s.m.NormF, headB, headQ, D, s.m.Vocab, eps)
+			}
+			if recErr == nil {
+				if rec, eerr := ComposedChainRecordEnd(rctx); eerr == nil {
+					s.chainRec = rec
+				}
+			} else {
+				// a non-recordable layer (bf16 form) or a recording failure: don't retry
+				// every token — the stack won't change shape mid-session.
+				s.chainRecFailed = true
+			}
+		}
+	}
+	ctx, err := ComposedChainBeginDevice(h, L, D)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.chainWalk(ctx, L, true); err != nil {
+		return nil, err
 	}
 	// Head fold (#18): encode the model's terminal RMSNorm + LM head onto the same chain before the
 	// one commit, so the stepper's Head call reuses these logits instead of paying its own command
 	// buffer + wait. Only the B/Q head forms ride the chain (an f32-widened head never coexists with
 	// a chainable model — chainable requires every layer in B/Q form); an encode error just leaves
 	// the head computed separately, exactly as before the fold.
-	headB, headQ := s.m.OutputB, s.m.OutputQ
-	if headB == nil && headQ == nil && s.m.Output == nil { // tied head
-		headB, headQ = s.m.EmbedB, s.m.EmbedQ
-	}
 	headEncoded := false
 	if ComposedChainHeadDevice != nil && ComposedChainTakeLogits != nil && (headB != nil || headQ != nil) {
 		headEncoded = ComposedChainHeadDevice(ctx, s.m.NormF, headB, headQ, D, s.m.Vocab, eps) == nil
@@ -672,17 +769,7 @@ func (s *ComposedSession) forwardChain(h []float32, L int) ([]float32, error) {
 	}
 	if headEncoded {
 		if logits := ComposedChainTakeLogits(ctx); logits != nil {
-			// scaling parity with headLogits — the host tail the fold replaces.
-			if s.m.LogitScale != 0 {
-				for i := range logits {
-					logits[i] *= s.m.LogitScale
-				}
-			}
-			if s.m.LogitsScaling != 0 && s.m.LogitsScaling != 1 {
-				for i := range logits {
-					logits[i] /= s.m.LogitsScaling
-				}
-			}
+			s.applyLogitScaling(logits) // scaling parity with headLogits — the host tail the fold replaces
 			s.pendingHeadLogits = logits
 		}
 	}

@@ -72,9 +72,9 @@ Numbers: M3 Ultra, `lem bench` tg-512 greedy, 2026-07-16.
 
 | model | HF repo | ctx | weights | decode | status |
 |-------|---------|----:|--------:|-------:|--------|
-| Qwen3.5 0.8B | `mlx-community/Qwen3.5-0.8B-OptiQ-4bit` | 256K | 0.65 GB | 51.9 | ✓ sane — the smallest servable hybrid (also the lane's test fixture) |
+| Qwen3.5 0.8B | `mlx-community/Qwen3.5-0.8B-OptiQ-4bit` | 256K | 0.65 GB | 148.0 | ✓ sane — the smallest servable hybrid (also the lane's test fixture); ICB replay on (`LTHN_CHAIN_ICB=0` arm: 135.8) |
 | Qwen3.5 4B | `mlx-community/Qwen3.5-4B-OptiQ-4bit` | 256K | 3.27 GB | 20.4 | ✓ sane — the low-RAM sweet spot today |
-| Qwen3.6 27B | `mlx-community/Qwen3.6-27B-4bit` | 256K | 16.1 GB | 26.8 chat / 27.7 session | ✓ sane; #18 campaign 4.63 → 27.7 (target ≥40 — mlx-lm 41.3); chat ≈ session since the stateful serve sessions (#25) |
+| Qwen3.6 27B | `mlx-community/Qwen3.6-27B-4bit` | 256K | 16.1 GB | 24.9 | ✓ sane; #18 campaign 4.63 → 24.9 (target ≥40 — mlx-lm 41.3); ICB replay on (off arm 23.9); chat ≈ session (#25) |
 | Qwen3.5 2B / 4B / 9B (official bf16) | `Qwen/Qwen3.5-{2B,4B,9B}` | 256K | 4.6 / 9.3 / 19.3 GB | 20.1 / 10.6 / 8.2 | ✓ sane ("Paris" answered, mlx-lm argmax parity). bf16 source form — heavier per token than the 4-bit conversions by sheer byte mass; serve the conversions, eval against these |
 | Bonsai 27B 1-bit | `prism-ml/Bonsai-27B-mlx-1bit` | 256K | 5 GB | 33.4 | ✓ b1→b2 repack (`RepackB1ToB2`); WebGPU serves this artefact 100+ (target); `TestRealCheckpointGPU_Bonsai1BitRepack_Good` |
 | Qwen2.5-Coder 3B (base) | `mlx-community/Qwen2.5-Coder-3B-4bit` | 32K | 2 GB | 161–166 | ✓ completion only — base model, chat needs `-Instruct` (#24, `TestRealCheckpointGPU_ArgmaxParis_Good`) |

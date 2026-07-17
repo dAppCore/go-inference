@@ -23,17 +23,142 @@ import (
 // pool-boundary trap: an autoreleased cb dies when a step's pool drains, and a later wait hangs).
 type composedChainCtx struct {
 	cb       metal.MTLCommandBufferObject
+	rec      *composedChainRecording // non-nil = RECORDING mode: bodies land in the ICB, cb is unused
 	hA, hB   *pinnedNoCopyBytes
 	curIsA   bool
 	L, D     int
 	gdSc     *gatedDeltaQuantLayerScratch
 	gdKey    gatedDeltaQuantLayerKey
 	attnPins []*pinnedNoCopyBytes
+	// posBuf is the per-token POSITION every position-dependent attention command binds
+	// (qprep/kprep/vappend/sdpa read `constant int&` from it): the live path writes it per
+	// forward; a replayed recording bumps the recording's own copy. One buffer per ctx —
+	// every layer of one token shares the same position.
+	posBuf metal.MTLBuffer
+	posPtr *int32
+	// attnSc pools the attention layers' staging per geometry — every same-shaped attn layer
+	// of the chain shares one set (encoder/barrier ordering serialises reuse), replacing the
+	// per-call pin churn. A recording owns its scratch for its lifetime.
+	attnSc map[attnChainKey]*attnChainLayerScratch
 	// head fold (#18): the terminal RMSNorm + LM head encoded onto this chain's CB by
 	// ComposedChainHeadDevice. headSc holds the staging + the logits pin ComposedChainTakeLogits
 	// reads after End's wait; returned to its pool at take (or at End when never taken).
 	headSc    *chainHeadScratch
 	headVocab int
+}
+
+// layerTarget hands a chain body its dispatch target: recording mode shares the recording
+// target (no encoders — ICB commands); live mode opens a fresh encoder on the chain CB, and
+// done() closes it (the encoder boundary that orders this layer after the previous one).
+func (c *composedChainCtx) layerTarget() (t *chainTarget, done func(), err error) {
+	if c.rec != nil {
+		t = &chainTarget{rec: c.rec}
+		// a layer boundary is a dependency edge in the recorded stream
+		t.pending = true
+		return t, func() {}, nil
+	}
+	enc := computeCommandEncoderFast(c.cb)
+	t = &chainTarget{enc: enc}
+	return t, func() { endEncodingFast(enc) }, nil
+}
+
+// attnChainKey identifies one attention-layer staging geometry.
+type attnChainKey struct{ L, D, qCols, kvDim, mixCols, FF int }
+
+// attnChainLayerScratch is the pooled staging for one attention chain layer shape.
+type attnChainLayerScratch struct {
+	normed, nBF                *pinnedNoCopyBytes
+	qRaw, qRawBF               *pinnedNoCopyBytes
+	kRaw, kRawBF, vRaw, vRawBF *pinnedNoCopyBytes
+	qPrep, gateBuf, attnOut    *pinnedNoCopyBytes
+	attnBF, mix, mixBF         *pinnedNoCopyBytes
+	gFF, gFFBF, uFF, uFFBF     *pinnedNoCopyBytes
+	sFF                        *pinnedNoCopyBytes
+}
+
+var attnChainLayerPools sync.Map // attnChainKey -> *sync.Pool
+
+func getAttnChainLayerScratch(k attnChainKey) (*attnChainLayerScratch, error) {
+	poolAny, ok := attnChainLayerPools.Load(k)
+	if !ok {
+		poolAny, _ = attnChainLayerPools.LoadOrStore(k, &sync.Pool{})
+	}
+	if v := poolAny.(*sync.Pool).Get(); v != nil {
+		return v.(*attnChainLayerScratch), nil
+	}
+	sc := &attnChainLayerScratch{}
+	var err error
+	alloc := func(n int) *pinnedNoCopyBytes {
+		if err != nil {
+			return nil
+		}
+		var b *pinnedNoCopyBytes
+		b, err = newPinnedNoCopyBytes(n)
+		return b
+	}
+	sc.normed = alloc(k.L * k.D * 4)
+	sc.nBF = alloc(k.L * max(k.D, k.FF) * bf16Size)
+	sc.qRaw = alloc(k.L * k.qCols * 4)
+	sc.qRawBF = alloc(k.L * k.qCols * bf16Size)
+	sc.kRaw = alloc(k.L * k.kvDim * 4)
+	sc.kRawBF = alloc(k.L * k.kvDim * bf16Size)
+	sc.vRaw = alloc(k.L * k.kvDim * 4)
+	sc.vRawBF = alloc(k.L * k.kvDim * bf16Size)
+	sc.qPrep = alloc(k.L * k.mixCols * 4)
+	sc.gateBuf = alloc(k.L * k.mixCols * 4)
+	sc.attnOut = alloc(k.L * k.mixCols * 4)
+	sc.attnBF = alloc(k.L * k.mixCols * bf16Size)
+	sc.mix = alloc(k.L * k.D * 4)
+	sc.mixBF = alloc(k.L * k.D * bf16Size)
+	sc.gFF = alloc(k.L * k.FF * 4)
+	sc.gFFBF = alloc(k.L * k.FF * bf16Size)
+	sc.uFF = alloc(k.L * k.FF * 4)
+	sc.uFFBF = alloc(k.L * k.FF * bf16Size)
+	sc.sFF = alloc(k.L * k.FF * 4)
+	if err != nil {
+		return nil, err
+	}
+	return sc, nil
+}
+
+func putAttnChainLayerScratch(k attnChainKey, sc *attnChainLayerScratch) {
+	if sc == nil {
+		return
+	}
+	if v, ok := attnChainLayerPools.Load(k); ok {
+		v.(*sync.Pool).Put(sc)
+	}
+}
+
+// attnScratchFor resolves the shared attention staging for this geometry (one per ctx per
+// geometry — same-shaped layers share; ordering serialises reuse).
+func (c *composedChainCtx) attnScratchFor(k attnChainKey) (*attnChainLayerScratch, error) {
+	if c.attnSc == nil {
+		c.attnSc = make(map[attnChainKey]*attnChainLayerScratch, 2)
+	}
+	if sc, ok := c.attnSc[k]; ok {
+		return sc, nil
+	}
+	sc, err := getAttnChainLayerScratch(k)
+	if err != nil {
+		return nil, err
+	}
+	c.attnSc[k] = sc
+	return sc, nil
+}
+
+// releaseScratch returns the ctx's pooled staging (gd + attn + head) — the live End path.
+// A RECORDING ctx keeps everything: the recorded commands bind these buffers for the
+// recording's lifetime (composedChainRecording.release drops them).
+func (c *composedChainCtx) releaseScratch() {
+	if c.gdSc != nil {
+		putGatedDeltaQuantLayerScratch(c.gdKey, c.gdSc)
+		c.gdSc = nil
+	}
+	for k, sc := range c.attnSc {
+		putAttnChainLayerScratch(k, sc)
+	}
+	c.attnSc = nil
 }
 
 func (c *composedChainCtx) cur() *pinnedNoCopyBytes {
@@ -68,12 +193,14 @@ func ComposedChainBeginDevice(h []float32, L, D int) (any, error) {
 		return nil, err
 	}
 	copy(hA.bytes, float32Bytes(h))
+	posBuf := device.NewBufferWithLengthOptions(4, metal.MTLResourceStorageModeShared)
 	var cb metal.MTLCommandBufferObject
 	withAutoreleasePool(func() {
 		cb = commandBufferFast(queue)
 		cb.Retain() // survives the per-step autorelease pools until End releases it
 	})
-	return &composedChainCtx{cb: cb, hA: hA, hB: hB, curIsA: true, L: L, D: D}, nil
+	return &composedChainCtx{cb: cb, hA: hA, hB: hB, curIsA: true, L: L, D: D,
+		posBuf: posBuf, posPtr: (*int32)(posBuf.Contents())}, nil
 }
 
 // ComposedChainEndDevice commits the chained forward, waits once, and returns the final hidden.
@@ -91,11 +218,115 @@ func ComposedChainEndDevice(ctxAny any) ([]float32, error) {
 		ctx.cb.Release()
 		ctx.cb = metal.MTLCommandBufferObject{}
 	})
-	if ctx.gdSc != nil {
-		putGatedDeltaQuantLayerScratch(ctx.gdKey, ctx.gdSc)
-		ctx.gdSc = nil
-	}
+	ctx.releaseScratch()
 	return y, nil
+}
+
+// ComposedChainRecordBegin opens a RECORDING pass (#18 CB recording): the same per-layer chain
+// walk drives the returned ctx, but every dispatch lands in an MTLIndirectCommandBuffer instead
+// of a live encoder — nothing executes. ComposedChainRecordEnd hands back the finished
+// recording; composedChainReplay then re-issues it per token with one executeCommandsInBuffer.
+func ComposedChainRecordBegin(L, D, nLayers int) (any, error) {
+	if err := ensureInit(); err != nil {
+		return nil, err
+	}
+	if L != 1 {
+		return nil, core.NewError("native.ComposedChainRecordBegin: only the L=1 decode stream records")
+	}
+	hA, err := newPinnedNoCopyBytes(L * D * 4)
+	if err != nil {
+		return nil, err
+	}
+	hB, err := newPinnedNoCopyBytes(L * D * 4)
+	if err != nil {
+		return nil, err
+	}
+	posBuf := device.NewBufferWithLengthOptions(4, metal.MTLResourceStorageModeShared)
+	maxCmd := uint(nLayers*64 + 96)
+	var icb metal.MTLIndirectCommandBuffer
+	withAutoreleasePool(func() {
+		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
+		icbDesc.SetInheritBuffers(false)
+		icbDesc.SetInheritPipelineState(false)
+		icbDesc.SetMaxKernelBufferBindCount(16)
+		icb = device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, maxCmd, metal.MTLResourceStorageModeShared)
+	})
+	if icb == nil {
+		return nil, core.NewError("native.ComposedChainRecordBegin: ICB allocation failed")
+	}
+	rec := &composedChainRecording{
+		icb: icb, maxCmd: maxCmd,
+		posBuf: posBuf, posPtr: (*int32)(posBuf.Contents()),
+		hA: hA, hB: hB, D: D,
+		resourceSet: make(map[uintptr]struct{}, nLayers*24),
+	}
+	rec.track(posBuf)
+	rec.pins = append(rec.pins, hA, hB)
+	rec.track(hA.buf)
+	rec.track(hB.buf)
+	return &composedChainCtx{rec: rec, hA: hA, hB: hB, curIsA: true, L: L, D: D,
+		posBuf: posBuf, posPtr: rec.posPtr}, nil
+}
+
+// ComposedChainRecordEnd finalises a recording pass: the final-hidden pin is whichever
+// ping-pong the last layer wrote, the ctx's scratch ownership moves to the recording (its
+// commands bind those buffers for the recording's lifetime), and the recording is handed back.
+func ComposedChainRecordEnd(ctxAny any) (any, error) {
+	ctx, ok := ctxAny.(*composedChainCtx)
+	if !ok || ctx.rec == nil {
+		return nil, core.NewError("native.ComposedChainRecordEnd: not a recording context")
+	}
+	rec := ctx.rec
+	if rec.count == 0 {
+		return nil, core.NewError("native.ComposedChainRecordEnd: nothing recorded")
+	}
+	rec.final = ctx.cur()
+	// scratch moves to the recording: gd staging by handle (returned to its pool on release),
+	// attn staging + head pins by ownership of the pins slice.
+	rec.gdScratch, rec.gdKey, rec.hasGD = ctx.gdSc, ctx.gdKey, ctx.gdSc != nil
+	ctx.gdSc = nil
+	for _, sc := range ctx.attnSc {
+		rec.pins = append(rec.pins,
+			sc.normed, sc.nBF, sc.qRaw, sc.qRawBF, sc.kRaw, sc.kRawBF, sc.vRaw, sc.vRawBF,
+			sc.qPrep, sc.gateBuf, sc.attnOut, sc.attnBF, sc.mix, sc.mixBF,
+			sc.gFF, sc.gFFBF, sc.uFF, sc.uFFBF, sc.sFF)
+	}
+	ctx.attnSc = nil
+	if ctx.headSc != nil { // the head fold's staging + logits pin belong to the recording too
+		rec.pins = append(rec.pins, ctx.headSc.normed, ctx.headSc.nBF, ctx.headSc.logitsBF, ctx.headSc.logits)
+		rec.logitsPin = ctx.headSc.logits
+		rec.headVocab = ctx.headVocab
+		ctx.headSc = nil
+	}
+	return rec, nil
+}
+
+// ComposedChainReplayDevice re-issues a recorded chain for one token — the model-side hook.
+// The position comes from the recording's own attention states (they all sit at the same
+// position; a desync or a capacity/realloc mismatch declines with ok=false and the caller
+// re-records after the live pass).
+func ComposedChainReplayDevice(recAny any, h []float32) (y []float32, logits []float32, ok bool, err error) {
+	rec, isRec := recAny.(*composedChainRecording)
+	if !isRec {
+		return nil, nil, false, core.NewError("native.ComposedChainReplayDevice: not a recording")
+	}
+	if len(h) != rec.D {
+		return nil, nil, false, core.NewError("native.ComposedChainReplayDevice: hidden size mismatch")
+	}
+	pos := 0
+	if len(rec.attnStates) > 0 {
+		pos = rec.attnStates[0].n
+	}
+	return composedChainReplay(rec, h, pos)
+}
+
+// ComposedChainRecordingRelease drops a recording (stale after a cache realloc / geometry
+// change): pooled gd staging returns, pins and the ICB release with the reference.
+func ComposedChainRecordingRelease(recAny any) {
+	if rec, ok := recAny.(*composedChainRecording); ok {
+		rec.release()
+	}
 }
 
 // chainHeadScratch is the head fold's staging: the last row's normed output (f32 + its bf16
@@ -152,7 +383,7 @@ func putChainHeadScratch(D, Vocab int, sc *chainHeadScratch) {
 // the caller falls back to the separate head exactly as before.
 func ComposedChainHeadDevice(ctxAny any, normF []float32, headB *model.BF16Weight, headQ *model.QuantWeight, D, Vocab int, eps float32) error {
 	ctx, ok := ctxAny.(*composedChainCtx)
-	if !ok || ctx.cb.GetID() == 0 {
+	if !ok || (ctx.rec == nil && ctx.cb.GetID() == 0) {
 		return core.NewError("native.ComposedChainHeadDevice: not a chain context")
 	}
 	if ctx.headSc != nil {
@@ -172,10 +403,6 @@ func ComposedChainHeadDevice(ctxAny any, normF []float32, headB *model.BF16Weigh
 	if D > rmsLoopedLimit {
 		rmsName = "rms_loopedfloat32"
 	}
-	psoRMS, err := pipelineFor(rmsName)
-	if err != nil {
-		return err
-	}
 	sc, err := getChainHeadScratch(D, Vocab)
 	if err != nil {
 		return err
@@ -184,15 +411,27 @@ func ComposedChainHeadDevice(ctxAny any, normF []float32, headB *model.BF16Weigh
 	withAutoreleasePool(func() {
 		normFBuf := residentFloat32(normF)
 		lastRowOff := uint((ctx.L - 1) * ctx.D * 4)
-		enc := computeCommandEncoderFast(ctx.cb)
-		emitRMSNormAt(encSink{enc}, psoRMS, ctx.cur().buf, normFBuf, sc.normed.buf, lastRowOff, 0, 0, D, eps, rmsThreadgroup(D, psoRMS))
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if headQ != nil {
-			encErr = encProjQuantF32(enc, headQ, sc.normed.buf, sc.nBF.buf, sc.logitsBF.buf, sc.logits.buf, 1, Vocab, D)
-		} else {
-			encErr = encProjBF16F32(enc, headB, sc.normed.buf, sc.nBF.buf, sc.logitsBF.buf, sc.logits.buf, 1, Vocab, D)
+		t, done, terr := ctx.layerTarget()
+		if terr != nil {
+			encErr = terr
+			return
 		}
-		endEncodingFast(enc)
+		defer done()
+		psoRMS, perr := t.pso(rmsName)
+		if perr != nil {
+			encErr = perr
+			return
+		}
+		emitRMSNormAt(t.cmd(), psoRMS, ctx.cur().buf, normFBuf, sc.normed.buf, lastRowOff, 0, 0, D, eps, rmsThreadgroup(D, psoRMS))
+		t.barrier()
+		if headQ != nil {
+			encErr = chainProjQuantF32(t, headQ, sc.normed.buf, sc.nBF.buf, sc.logitsBF.buf, sc.logits.buf, 1, Vocab, D)
+		} else {
+			encErr = chainProjBF16F32(t, headB, sc.normed.buf, sc.nBF.buf, sc.logitsBF.buf, sc.logits.buf, 1, Vocab, D)
+		}
+		if encErr == nil && t.err != nil {
+			encErr = t.err
+		}
 	})
 	if encErr != nil {
 		putChainHeadScratch(D, Vocab, sc)
@@ -223,6 +462,11 @@ func gatedDeltaBF16ChainLayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, inp
 	ctx, ok := ctxAny.(*composedChainCtx)
 	if !ok {
 		return core.NewError("native.gatedDeltaBF16ChainLayerDevice: not a chain context")
+	}
+	if ctx.rec != nil {
+		// the bf16 chain bodies are not target-converted yet — a bf16 layer declines the
+		// recording pass (the model keeps the re-encode chain; only all-quant stacks record).
+		return core.NewError("native.gatedDeltaBF16ChainLayerDevice: bf16 layers do not record")
 	}
 	h, _ := sc.Device.(*gatedDeltaDeviceState)
 	if h == nil {
@@ -380,10 +624,6 @@ func gatedDeltaQuantChainLayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, in
 	if D > rmsLoopedLimit {
 		rmsName = "rms_loopedfloat32"
 	}
-	psoRMS, err := pipelineFor(rmsName)
-	if err != nil {
-		return err
-	}
 	var encErr error
 	withAutoreleasePool(func() {
 		wConv := residentFloat32(w.ConvWeight)
@@ -393,33 +633,43 @@ func gatedDeltaQuantChainLayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, in
 			wBias = residentFloat32(w.ConvBias)
 			hasBias = 1
 		}
-		enc := computeCommandEncoderFast(ctx.cb)
-		fail := func(err error) { encErr = err; endEncodingFast(enc) }
-		emitRMSNormRows(encSink{enc}, psoRMS, ctx.cur().buf, residentFloat32(inputNorm), gsc.normed1.buf, 0, 0, 0, D, eps, L, rmsThreadgroup(D, psoRMS))
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encNarrowF32ToBF16(enc, gsc.normed1.buf, gsc.n1BF.buf, L*D); err != nil {
+		t, done, terr := ctx.layerTarget()
+		if terr != nil {
+			encErr = terr
+			return
+		}
+		defer done()
+		fail := func(err error) { encErr = err }
+		psoRMS, perr := t.pso(rmsName)
+		if perr != nil {
+			fail(perr)
+			return
+		}
+		emitRMSNormRows(t.cmd(), psoRMS, ctx.cur().buf, residentFloat32(inputNorm), gsc.normed1.buf, 0, 0, 0, D, eps, L, rmsThreadgroup(D, psoRMS))
+		t.barrier()
+		if err := chainNarrowF32ToBF16(t, gsc.normed1.buf, gsc.n1BF.buf, L*D); err != nil {
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encProjQuantBF16In(enc, w.InProjQKVQ, gsc.n1BF.buf, gsc.qkvBF.buf, gsc.qkv.buf, L, convDim, D); err != nil {
+		t.barrier()
+		if err := chainProjQuantBF16In(t, w.InProjQKVQ, gsc.n1BF.buf, gsc.qkvBF.buf, gsc.qkv.buf, L, convDim, D); err != nil {
 			fail(err)
 			return
 		}
-		if err := encProjQuantBF16In(enc, w.InProjZQ, gsc.n1BF.buf, gsc.zBF.buf, gsc.z.buf, L, vDim, D); err != nil {
+		if err := chainProjQuantBF16In(t, w.InProjZQ, gsc.n1BF.buf, gsc.zBF.buf, gsc.z.buf, L, vDim, D); err != nil {
 			fail(err)
 			return
 		}
-		if err := encProjQuantBF16In(enc, w.InProjAQ, gsc.n1BF.buf, gsc.aBF.buf, gsc.a.buf, L, h.Hv, D); err != nil {
+		if err := chainProjQuantBF16In(t, w.InProjAQ, gsc.n1BF.buf, gsc.aBF.buf, gsc.a.buf, L, h.Hv, D); err != nil {
 			fail(err)
 			return
 		}
-		if err := encProjQuantBF16In(enc, w.InProjBQ, gsc.n1BF.buf, gsc.bBF.buf, gsc.b.buf, L, h.Hv, D); err != nil {
+		if err := chainProjQuantBF16In(t, w.InProjBQ, gsc.n1BF.buf, gsc.bBF.buf, gsc.b.buf, L, h.Hv, D); err != nil {
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encGatedDeltaBlockStages(enc, h, gdBlockStageBufs{
+		t.barrier()
+		if err := chainGatedDeltaBlockStages(t, h, gdBlockStageBufs{
 			qkv: gsc.qkv.buf, z: gsc.z.buf, a: gsc.a.buf, b: gsc.b.buf,
 			qN: gsc.qN.buf, kN: gsc.kN.buf, vN: gsc.vN.buf, g: gsc.g.buf, beta: gsc.beta.buf,
 			gated: gsc.gated.buf,
@@ -427,20 +677,22 @@ func gatedDeltaQuantChainLayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, in
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encProjQuantF32(enc, w.OutProjQ, gsc.gated.buf, gsc.gatedBF.buf, gsc.mixBF.buf, gsc.mix.buf, L, D, vDim); err != nil {
+		t.barrier()
+		if err := chainProjQuantF32(t, w.OutProjQ, gsc.gated.buf, gsc.gatedBF.buf, gsc.mixBF.buf, gsc.mix.buf, L, D, vDim); err != nil {
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encResidualNormMLPQuantTail(enc, quantTailBufs{
+		t.barrier()
+		if err := chainResidualNormMLPQuantTail(t, quantTailBufs{
 			h: ctx.cur().buf, mix: gsc.mix.buf, normed: gsc.normed2.buf, nBF: gsc.n2BF.buf,
 			g: gsc.gFF.buf, gBF: gsc.gFFBF.buf, u: gsc.uFF.buf, uBF: gsc.uFFBF.buf, s: gsc.sFF.buf, out: ctx.next().buf,
 		}, residentFloat32(postNorm), gate, up, down, L, D, FF, eps); err != nil {
 			fail(err)
 			return
 		}
-		endEncodingFast(enc)
+		if t.err != nil {
+			fail(t.err)
+		}
 	})
 	if encErr != nil {
 		return encErr
@@ -456,6 +708,10 @@ func attnBF16ChainLayerDevice(ctxAny, dev any, inputNorm []float32, qw, kw, vw, 
 	ctx, ok := ctxAny.(*composedChainCtx)
 	if !ok {
 		return dev, core.NewError("native.attnBF16ChainLayerDevice: not a chain context")
+	}
+	if ctx.rec != nil {
+		// not target-converted yet — a bf16 layer declines the recording pass (see the gd twin).
+		return dev, core.NewError("native.attnBF16ChainLayerDevice: bf16 layers do not record")
 	}
 	L, D := ctx.L, ctx.D
 	if !attnCoreUsable(H, KVH, HD, RD) {
@@ -656,41 +912,13 @@ func attnQuantChainLayerDevice(ctxAny, dev any, inputNorm []float32, qw, kw, vw,
 	if h.n != pos0 {
 		return h, core.NewError("native.attnQuantChainLayerDevice: position desync with resident cache")
 	}
+	sc, err := ctx.attnScratchFor(attnChainKey{L: L, D: D, qCols: qCols, kvDim: KVH * HD, mixCols: mixCols, FF: FF})
+	if err != nil {
+		return h, err
+	}
+	*ctx.posPtr = int32(pos0) // every layer of this token shares the position (idempotent)
 	var encErr error
 	withAutoreleasePool(func() {
-		alloc := func(nBytes int) *pinnedNoCopyBytes {
-			if encErr != nil {
-				return nil
-			}
-			b, err := newPinnedNoCopyBytes(nBytes)
-			if err != nil {
-				encErr = err
-			}
-			ctx.attnPins = append(ctx.attnPins, b)
-			return b
-		}
-		normed := alloc(L * D * 4)
-		nBF := alloc(L * max(D, FF) * bf16Size)
-		qRaw := alloc(L * qCols * 4)
-		qRawBF := alloc(L * qCols * bf16Size)
-		kRaw := alloc(L * KVH * HD * 4)
-		kRawBF := alloc(L * KVH * HD * bf16Size)
-		vRaw := alloc(L * KVH * HD * 4)
-		vRawBF := alloc(L * KVH * HD * bf16Size)
-		qPrep := alloc(L * H * HD * 4)
-		gateBuf := alloc(L * H * HD * 4)
-		attnOut := alloc(L * H * HD * 4)
-		attnBF := alloc(L * mixCols * bf16Size)
-		mix := alloc(L * D * 4)
-		mixBF := alloc(L * D * bf16Size)
-		gFF := alloc(L * FF * 4)
-		gFFBF := alloc(L * FF * bf16Size)
-		uFF := alloc(L * FF * 4)
-		uFFBF := alloc(L * FF * bf16Size)
-		sFF := alloc(L * FF * 4)
-		if encErr != nil {
-			return
-		}
 		inNormBuf := residentFloat32(inputNorm)
 		postNormBuf := residentFloat32(postNorm)
 		normQ, normK := inNormBuf, inNormBuf
@@ -702,81 +930,97 @@ func attnQuantChainLayerDevice(ctxAny, dev any, inputNorm []float32, qw, kw, vw,
 		if D > rmsLoopedLimit {
 			rmsName = "rms_loopedfloat32"
 		}
-		psoRMS, perr := pipelineFor(rmsName)
+		t, done, terr := ctx.layerTarget()
+		if terr != nil {
+			encErr = terr
+			return
+		}
+		defer done()
+		fail := func(err error) { encErr = err }
+		psoRMS, perr := t.pso(rmsName)
 		if perr != nil {
-			encErr = perr
+			fail(perr)
 			return
 		}
-		enc := computeCommandEncoderFast(ctx.cb)
-		fail := func(err error) { encErr = err; endEncodingFast(enc) }
-		emitRMSNormRows(encSink{enc}, psoRMS, ctx.cur().buf, inNormBuf, normed.buf, 0, 0, 0, D, eps, L, rmsThreadgroup(D, psoRMS))
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encNarrowF32ToBF16(enc, normed.buf, nBF.buf, L*D); err != nil {
+		emitRMSNormRows(t.cmd(), psoRMS, ctx.cur().buf, inNormBuf, sc.normed.buf, 0, 0, 0, D, eps, L, rmsThreadgroup(D, psoRMS))
+		t.barrier()
+		if err := chainNarrowF32ToBF16(t, sc.normed.buf, sc.nBF.buf, L*D); err != nil {
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encProjQuantBF16In(enc, qw, nBF.buf, qRawBF.buf, qRaw.buf, L, qCols, D); err != nil {
+		t.barrier()
+		if err := chainProjQuantBF16In(t, qw, sc.nBF.buf, sc.qRawBF.buf, sc.qRaw.buf, L, qCols, D); err != nil {
 			fail(err)
 			return
 		}
-		if err := encProjQuantBF16In(enc, kw, nBF.buf, kRawBF.buf, kRaw.buf, L, KVH*HD, D); err != nil {
+		if err := chainProjQuantBF16In(t, kw, sc.nBF.buf, sc.kRawBF.buf, sc.kRaw.buf, L, KVH*HD, D); err != nil {
 			fail(err)
 			return
 		}
-		if err := encProjQuantBF16In(enc, vw, nBF.buf, vRawBF.buf, vRaw.buf, L, KVH*HD, D); err != nil {
+		if err := chainProjQuantBF16In(t, vw, sc.nBF.buf, sc.vRawBF.buf, sc.vRaw.buf, L, KVH*HD, D); err != nil {
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encAttnQPrep(enc, qRaw.buf, normQ, qPrep.buf, gateBuf.buf, L, H, HD, RD, gated, qkNorm, eps, theta, pos0); err != nil {
+		t.barrier()
+		if err := chainAttnQPrep(t, sc.qRaw.buf, normQ, sc.qPrep.buf, sc.gateBuf.buf, ctx.posBuf, L, H, HD, RD, gated, qkNorm, eps, theta, pos0); err != nil {
 			fail(err)
 			return
 		}
-		if err := encAttnKPrep(enc, kRaw.buf, normK, h.kBuf.buf, L, KVH, HD, RD, qkNorm, eps, theta, pos0); err != nil {
+		if err := chainAttnKPrep(t, sc.kRaw.buf, normK, h.kBuf.buf, ctx.posBuf, L, KVH, HD, RD, qkNorm, eps, theta, pos0); err != nil {
 			fail(err)
 			return
 		}
-		endEncodingFast(enc)
-		blit := blitCommandEncoderFast(ctx.cb)
-		blit.CopyFromBufferSourceOffsetToBufferDestinationOffsetSize(vRaw.buf, 0, h.vBuf.buf, uint(pos0*KVH*HD*4), uint(L*KVH*HD*4))
-		endBlitEncodingFast(blit)
-		enc = computeCommandEncoderFast(ctx.cb)
-		if err := encAttnSDPA(enc, qPrep.buf, h.kBuf.buf, h.vBuf.buf, attnOut.buf, L, H, KVH, HD, pos0, window); err != nil {
+		// V lands through the position-indexed compute append (the blit's ICB-recordable twin).
+		if err := chainAttnVAppend(t, sc.vRaw.buf, h.vBuf.buf, ctx.posBuf, L, KVH*HD, pos0); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainAttnSDPA(t, sc.qPrep.buf, h.kBuf.buf, h.vBuf.buf, sc.attnOut.buf, ctx.posBuf, L, H, KVH, HD, pos0, window); err != nil {
 			fail(err)
 			return
 		}
 		if gated != 0 {
-			memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-			if err := encAttnGateSilu(enc, attnOut.buf, gateBuf.buf, L*H*HD); err != nil {
+			t.barrier()
+			if err := chainAttnGateSilu(t, sc.attnOut.buf, sc.gateBuf.buf, L*H*HD); err != nil {
 				fail(err)
 				return
 			}
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encNarrowF32ToBF16(enc, attnOut.buf, attnBF.buf, L*mixCols); err != nil {
+		t.barrier()
+		if err := chainNarrowF32ToBF16(t, sc.attnOut.buf, sc.attnBF.buf, L*mixCols); err != nil {
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encProjQuantBF16In(enc, ow, attnBF.buf, mixBF.buf, mix.buf, L, D, mixCols); err != nil {
+		t.barrier()
+		if err := chainProjQuantBF16In(t, ow, sc.attnBF.buf, sc.mixBF.buf, sc.mix.buf, L, D, mixCols); err != nil {
 			fail(err)
 			return
 		}
-		memoryBarrier(enc, metal.MTLBarrierScopeBuffers)
-		if err := encResidualNormMLPQuantTail(enc, quantTailBufs{
-			h: ctx.cur().buf, mix: mix.buf, normed: normed.buf, nBF: nBF.buf,
-			g: gFF.buf, gBF: gFFBF.buf, u: uFF.buf, uBF: uFFBF.buf, s: sFF.buf, out: ctx.next().buf,
+		t.barrier()
+		if err := chainResidualNormMLPQuantTail(t, quantTailBufs{
+			h: ctx.cur().buf, mix: sc.mix.buf, normed: sc.normed.buf, nBF: sc.nBF.buf,
+			g: sc.gFF.buf, gBF: sc.gFFBF.buf, u: sc.uFF.buf, uBF: sc.uFFBF.buf, s: sc.sFF.buf, out: ctx.next().buf,
 		}, postNormBuf, gate, up, down, L, D, FF, eps); err != nil {
 			fail(err)
 			return
 		}
-		endEncodingFast(enc)
+		if t.err != nil {
+			fail(t.err)
+		}
 	})
 	if encErr != nil {
 		return h, encErr
 	}
-	h.n = pos0 + L
+	if ctx.rec != nil {
+		// recording pass: nothing executed — the cache position must not advance, and the
+		// recording binds THIS state's pins (replay checks identity + capacity).
+		ctx.rec.attnStates = append(ctx.rec.attnStates, h)
+		ctx.rec.attnKPins = append(ctx.rec.attnKPins, uintptr(unsafe.Pointer(h.kBuf)))
+		ctx.rec.attnVPins = append(ctx.rec.attnVPins, uintptr(unsafe.Pointer(h.vBuf)))
+	} else {
+		h.n = pos0 + L
+	}
 	ctx.curIsA = !ctx.curIsA
 	return h, nil
 }
