@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
@@ -21,6 +22,7 @@ import (
 
 // turn is one rendered element in the transcript.
 type turn struct {
+	id      string
 	role    string // "user" | "assistant" | "tool"
 	thought string
 	text    string
@@ -32,6 +34,7 @@ type app struct {
 	inspectorOpen bool
 	styles        uiStyles
 	keys          keyMap
+	markdown      *markdownRenderer
 
 	picker  list.Model
 	spin    spinner.Model
@@ -57,6 +60,9 @@ type app struct {
 	turns      []turn
 	gen        *generation
 	generating bool
+	follow     bool
+	newOutput  bool
+	refreshAt  time.Time
 	toolHops   int // auto-continuations this turn chain (bounded)
 	lastTokS   float64
 	errText    string
@@ -114,6 +120,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		activePanel: panelModels,
 		styles:      styles,
 		keys:        newKeyMap(),
+		markdown:    newMarkdownRenderer(styles.theme.name),
 		picker:      newPicker(styles),
 		spin:        sp,
 		input:       in,
@@ -124,6 +131,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		jobs:        newJobManager(ctx),
 		cancel:      cancel,
 		sessionID:   newRecordID(),
+		follow:      true,
 	}
 	if modelPath != "" {
 		a.activePanel = panelChat
@@ -143,13 +151,18 @@ func (a app) Init() tea.Cmd {
 func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		offset := a.view.YOffset
 		a.width, a.height = msg.Width, msg.Height
 		metrics := measureFrame(msg.Width, msg.Height, a.inspectorOpen)
 		a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
 		a.input.SetWidth(max(1, metrics.mainWidth-4))
 		a.view = viewport.New(max(1, metrics.mainWidth), a.transcriptHeight())
 		a.view.SetContent(a.renderTranscript())
-		a.view.GotoBottom()
+		if a.follow {
+			a.view.GotoBottom()
+		} else {
+			a.view.SetYOffset(offset)
+		}
 		a.ready = true
 		return a, nil
 
@@ -193,6 +206,14 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamMsg:
 		return a.onStream(msg)
 
+	case streamRefreshMsg:
+		if a.gen == nil || msg.SessionID != a.gen.SessionID || msg.JobID != a.gen.JobID {
+			return a, nil
+		}
+		a.refreshAt = time.Time{}
+		a.refreshTranscriptOutput()
+		return a, waitEvent(a.gen)
+
 	case serviceMsg:
 		a.svc.finish(msg.ev.err)
 		return a, nil
@@ -229,17 +250,20 @@ func (a app) onStream(ev streamMsg) (tea.Model, tea.Cmd) {
 		a.errText = ev.err.Error()
 	}
 	if !ev.done {
-		a.refreshTranscript()
-		return a, waitEvent(a.gen)
+		if a.refreshAt.IsZero() {
+			a.refreshAt = time.Now().Add(streamRefreshInterval)
+		}
+		return a, waitEventOrRefresh(a.gen, a.refreshAt)
 	}
+	a.refreshAt = time.Time{}
 	a.generating = false
 	a.gen = nil
 	if cmd := a.runToolLoop(); cmd != nil {
-		a.refreshTranscript()
+		a.refreshTranscriptOutput()
 		return a, cmd
 	}
 	a.toolHops = 0
-	a.refreshTranscript()
+	a.refreshTranscriptOutput()
 	return a, nil
 }
 
@@ -262,9 +286,9 @@ func (a *app) runToolLoop() tea.Cmd {
 	for _, call := range calls {
 		result := a.tools.execute(call)
 		last.calls = append(last.calls, call.Name+" → "+result)
-		a.turns = append(a.turns, turn{role: "tool", text: parser.RenderGemmaToolResponse(result)})
+		a.turns = append(a.turns, turn{id: newRecordID(), role: "tool", text: parser.RenderGemmaToolResponse(result)})
 	}
-	a.turns = append(a.turns, turn{role: "assistant"})
+	a.turns = append(a.turns, turn{id: newRecordID(), role: "assistant"})
 	a.toolHops++
 	return a.beginGeneration()
 }
@@ -278,6 +302,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.input.SetWidth(max(1, metrics.mainWidth-4))
 			a.view.Width = max(1, metrics.mainWidth)
 			a.view.Height = a.transcriptHeight()
+			a.refreshTranscript()
 		}
 		return a, nil
 	}
@@ -313,6 +338,19 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.cfg.thinkIdx = 2
 		}
 		return a, nil
+	case "end":
+		if a.activePanel == panelChat {
+			a.view.GotoBottom()
+			a.follow = true
+			a.newOutput = false
+			return a, nil
+		}
+	case "home":
+		if a.activePanel == panelChat {
+			a.view.GotoTop()
+			a.follow = false
+			return a, nil
+		}
 	}
 
 	switch a.activePanel {
@@ -356,7 +394,12 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 			a.input.Reset()
-			a.turns = append(a.turns, turn{role: "user", text: prompt}, turn{role: "assistant"})
+			a.turns = append(a.turns,
+				turn{id: newRecordID(), role: "user", text: prompt},
+				turn{id: newRecordID(), role: "assistant"},
+			)
+			a.follow = true
+			a.newOutput = false
 			a.toolHops = 0
 			a.errText = ""
 			cmd := a.beginGeneration()
@@ -374,13 +417,67 @@ func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case panelModels:
 		a.picker, cmd = a.picker.Update(msg)
 	case panelChat:
-		if a.generating {
-			a.view, cmd = a.view.Update(msg)
+		_, mouse := msg.(tea.MouseMsg)
+		if a.generating || mouse || isTranscriptPageKey(msg) {
+			cmd = a.updateTranscriptViewport(msg)
 		} else {
 			a.input, cmd = a.input.Update(msg)
 		}
 	}
 	return a, cmd
+}
+
+func (a *app) updateTranscriptViewport(msg tea.Msg) tea.Cmd {
+	before := a.view.YOffset
+	var cmd tea.Cmd
+	a.view, cmd = a.view.Update(msg)
+	if a.view.YOffset < before || scrollsTranscriptUp(msg) {
+		a.follow = false
+	}
+	if a.view.AtBottom() && scrollsTranscriptDown(msg) {
+		a.follow = true
+		a.newOutput = false
+	}
+	return cmd
+}
+
+func isTranscriptPageKey(msg tea.Msg) bool {
+	keyMsg, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return false
+	}
+	switch keyMsg.String() {
+	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
+		return true
+	default:
+		return false
+	}
+}
+
+func scrollsTranscriptUp(msg tea.Msg) bool {
+	switch value := msg.(type) {
+	case tea.KeyMsg:
+		switch value.String() {
+		case "up", "k", "pgup", "ctrl+u":
+			return true
+		}
+	case tea.MouseMsg:
+		return value.Action == tea.MouseActionPress && value.Button == tea.MouseButtonWheelUp && !value.Shift
+	}
+	return false
+}
+
+func scrollsTranscriptDown(msg tea.Msg) bool {
+	switch value := msg.(type) {
+	case tea.KeyMsg:
+		switch value.String() {
+		case "down", "j", "pgdown", "ctrl+d":
+			return true
+		}
+	case tea.MouseMsg:
+		return value.Action == tea.MouseActionPress && value.Button == tea.MouseButtonWheelDown && !value.Shift
+	}
+	return false
 }
 
 // chatModel is always the application's shared serial lane. Starting or
@@ -433,12 +530,29 @@ func (a app) history() []inference.Message {
 }
 
 func (a *app) refreshTranscript() {
+	a.updateTranscript(false)
+}
+
+func (a *app) refreshTranscriptOutput() {
+	a.updateTranscript(true)
+}
+
+func (a *app) updateTranscript(hasOutput bool) {
 	if !a.ready {
 		return
 	}
+	offset := a.view.YOffset
 	a.view.Height = a.transcriptHeight()
 	a.view.SetContent(a.renderTranscript())
-	a.view.GotoBottom()
+	if a.follow {
+		a.view.GotoBottom()
+		a.newOutput = false
+		return
+	}
+	a.view.SetYOffset(offset)
+	if hasOutput {
+		a.newOutput = true
+	}
 }
 
 func (a app) contentHeight() int {
@@ -468,7 +582,24 @@ func (a app) renderTranscript() string {
 			if t.thought != "" {
 				b.WriteString(a.styles.thought.Render("· thinking · "+strings.TrimSpace(t.thought)) + "\n")
 			}
-			b.WriteString(a.styles.assistant.Render(a.modelName+" ") + a.styles.answer.Render(t.text))
+			label := a.modelName
+			if label == "" {
+				label = "assistant"
+			}
+			b.WriteString(a.styles.assistant.Render(label))
+			streaming := a.generating && i == len(a.turns)-1
+			if t.text != "" {
+				b.WriteString("\n")
+				if streaming {
+					b.WriteString(a.styles.answer.Render(t.text))
+				} else {
+					turnID := t.id
+					if turnID == "" {
+						turnID = core.Sprintf("transcript-%d", i)
+					}
+					b.WriteString(a.markdown.Render(turnID, t.text, max(1, a.view.Width-2)))
+				}
+			}
 			for _, c := range t.calls {
 				b.WriteString("\n" + a.styles.thought.Render("→ "+c))
 			}
@@ -482,10 +613,16 @@ func (a app) renderTranscript() string {
 
 func (a app) statusLine() string {
 	parts := []string{}
+	if a.errText != "" {
+		parts = append(parts, a.styles.err.Render("error: "+a.errText))
+	}
+	if a.newOutput {
+		parts = append(parts, a.styles.attention.Render("↓ new output"))
+	}
 	if a.modelName != "" {
 		parts = append(parts, a.modelName)
 	} else {
-		parts = append(parts, "no model — pick one in Models")
+		parts = append(parts, "○ no model")
 	}
 	parts = append(parts, "mode "+a.modes.current().name, "thinking "+thinkNames[a.cfg.thinkIdx])
 	if a.tools.enabled {
@@ -502,9 +639,6 @@ func (a app) statusLine() string {
 	}
 	if a.generating {
 		parts = append(parts, a.spin.View()+" generating (esc cancels)")
-	}
-	if a.errText != "" {
-		parts = append(parts, a.styles.err.Render("error: "+a.errText))
 	}
 	return a.styles.status.Render(strings.Join(parts, "  ·  "))
 }

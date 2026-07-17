@@ -236,6 +236,93 @@ func TestAppServiceUsesLoadedLaneWithoutOwningIt(t *testing.T) {
 	}
 }
 
+func TestTranscriptFollow_Good(t *testing.T) {
+	a := transcriptTestApp(t)
+	a.follow = true
+	a.refreshTranscriptOutput()
+	if !a.view.AtBottom() || !a.follow || a.newOutput {
+		t.Fatalf("follow refresh: bottom=%v follow=%v marker=%v", a.view.AtBottom(), a.follow, a.newOutput)
+	}
+	a.turns[len(a.turns)-1].text += "\nnew streamed line"
+	a.refreshTranscriptOutput()
+	if !a.view.AtBottom() || a.newOutput {
+		t.Fatalf("streamed follow: bottom=%v marker=%v", a.view.AtBottom(), a.newOutput)
+	}
+}
+
+func TestTranscriptFollow_Bad(t *testing.T) {
+	a := transcriptTestApp(t)
+	a.generating = true // keep the last assistant in streaming/plain render mode
+	a.follow = true
+	a.refreshTranscriptOutput()
+	if !a.view.AtBottom() || a.view.YOffset == 0 {
+		t.Fatalf("fixture did not overflow viewport: bottom=%v offset=%d", a.view.AtBottom(), a.view.YOffset)
+	}
+
+	m, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	a = m.(app)
+	if a.follow {
+		t.Fatal("scrolling upward left transcript follow enabled")
+	}
+	offset := a.view.YOffset
+	a.turns[len(a.turns)-1].text += "\noutput while reading older text"
+	a.refreshTranscriptOutput()
+	if a.view.YOffset != offset || !a.newOutput {
+		t.Fatalf("scrolled refresh: offset=%d want=%d marker=%v", a.view.YOffset, offset, a.newOutput)
+	}
+	if !strings.Contains(a.View(), "new output") {
+		t.Fatal("scrolled transcript did not render its new-output marker")
+	}
+
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	a = m.(app)
+	if !a.follow || !a.view.AtBottom() || a.newOutput {
+		t.Fatalf("End: follow=%v bottom=%v marker=%v", a.follow, a.view.AtBottom(), a.newOutput)
+	}
+}
+
+func TestTranscriptFollow_Ugly(t *testing.T) {
+	manager := openTestSessionManager(t, sequenceIDs("session-active", "session-hidden"))
+	if result := manager.Create(); !result.OK {
+		t.Fatalf("create active session: %v", result.Value)
+	}
+	if result := manager.Create(); !result.OK {
+		t.Fatalf("create hidden session: %v", result.Value)
+	}
+	if result := manager.Switch("session-active"); !result.OK {
+		t.Fatalf("switch active session: %v", result.Value)
+	}
+	if result := manager.SetViewport("session-active", 13, false); !result.OK {
+		t.Fatalf("set active viewport: %v", result.Value)
+	}
+	if result := manager.Complete("session-hidden"); !result.OK {
+		t.Fatalf("complete hidden session: %v", result.Value)
+	}
+	active := manager.Active()
+	if active.Record.ID != "session-active" || active.ViewportOffset != 13 || active.Follow {
+		t.Fatalf("hidden completion moved active viewport: %#v", active)
+	}
+	if !manager.sessions["session-hidden"].Attention {
+		t.Fatal("hidden completion did not mark the session for attention")
+	}
+}
+
+func transcriptTestApp(t *testing.T) app {
+	t.Helper()
+	a := newApp("", 0, 64)
+	m, _ := a.Update(tea.WindowSizeMsg{Width: 72, Height: 18})
+	a = m.(app)
+	a.activePanel = panelChat
+	a.turns = make([]turn, 0, 24)
+	for i := 0; i < 12; i++ {
+		a.turns = append(a.turns,
+			turn{id: benchmarkTurnID(i * 2), role: "user", text: "Question with enough words to occupy a transcript line"},
+			turn{id: benchmarkTurnID(i*2 + 1), role: "assistant", text: "Answer with enough words to occupy another transcript line"},
+		)
+	}
+	return a
+}
+
 // errFor builds a plain error for transition tests.
 func errFor(text string) error { return &driveErr{text} }
 
