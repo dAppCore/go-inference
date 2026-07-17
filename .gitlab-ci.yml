@@ -40,6 +40,8 @@ compile:linux:
 .release-cli:
   stage: release
   tags: [homelab]
+  interruptible: true            # a newer dev push auto-cancels an in-flight build
+                                 # (project setting: auto-cancel redundant pipelines)
   variables:
     GOTOOLCHAIN: "auto"
   artifacts:
