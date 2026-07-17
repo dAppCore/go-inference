@@ -256,7 +256,7 @@ hsa-static-archive:
 	@test -s "$(ROCR_HSAKMT_STATIC_ARCHIVE)" || { echo "expected static HSAKMT archive was not produced: $(ROCR_HSAKMT_STATIC_ARCHIVE)"; exit 1; }
 
 hip-static-archive:
-	@test -f "$(HIP_API_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "HIP API source submodule is not initialized: $(HIP_API_SOURCE_DIR)"; exit 1; }
+	@test -d "$(HIP_API_SOURCE_DIR_ABS)/include" || { echo "HIP API source submodule not checked out: $(HIP_API_SOURCE_DIR) (ROCm/HIP is the HIP_COMMON_DIR headers repo — it has no CMakeLists.txt)"; exit 1; }
 	@test -f "$(HIP_RUNTIME_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "HIP runtime source submodule is not initialized: $(HIP_RUNTIME_SOURCE_DIR)"; exit 1; }
 	$(CMAKE) -S "$(HIP_RUNTIME_SOURCE_DIR_ABS)" -B "$(HIP_RUNTIME_BUILD_DIR_ABS)" -G "$(CMAKE_GENERATOR)" \
 		-DCLR_BUILD_HIP=ON \
