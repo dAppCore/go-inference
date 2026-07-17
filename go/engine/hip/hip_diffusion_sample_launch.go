@@ -17,7 +17,9 @@ const (
 	hipDiffusionSampleLaunchArgsBytes          = 72
 	hipDiffusionSampleResultBytes              = 16
 	hipDiffusionSampleBlockSize                = 32
+	hipDiffusionSampleWideBlockSize            = 512
 	hipDiffusionSampleStatusOK          uint32 = 0x44534653
+	hipDisableDiffusionSampleWideEnv           = "GO_ROCM_DISABLE_DIFFUSION_SAMPLE_WIDE"
 )
 
 type hipDiffusionSampleResult struct {
@@ -93,13 +95,19 @@ func hipDiffusionSampleLaunchConfig(args []byte, rows int) (hipKernelLaunchConfi
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}
+	kernelName := hipKernelNameDiffusionSampleProbabilitiesWide
+	blockX := uint32(hipDiffusionSampleWideBlockSize)
+	if core.Env(hipDisableDiffusionSampleWideEnv) == "1" {
+		kernelName = hipKernelNameDiffusionSampleProbabilities
+		blockX = hipDiffusionSampleBlockSize
+	}
 	return hipKernelLaunchConfig{
-		Name:   hipKernelNameDiffusionSampleProbabilities,
+		Name:   kernelName,
 		Args:   args,
 		GridX:  gridX,
 		GridY:  1,
 		GridZ:  1,
-		BlockX: hipDiffusionSampleBlockSize,
+		BlockX: blockX,
 		BlockY: 1,
 		BlockZ: 1,
 	}, nil

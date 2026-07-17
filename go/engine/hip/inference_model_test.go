@@ -14,6 +14,7 @@ import (
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine"
 	sharedmodel "dappco.re/go/inference/model"
+	modelvision "dappco.re/go/inference/model/vision"
 )
 
 type hipKVCaptureTokenModel struct{}
@@ -97,7 +98,7 @@ func TestHIPInferenceModel_AudioContract_Good(t *testing.T) {
 func TestHIPInferenceModel_UnifiedVisionContract_Good(t *testing.T) {
 	tokenModel := newHipTokenModel(&hipLoadedModel{
 		unifiedVision: &UnifiedVisionTower{
-			loaded: &sharedmodel.LoadedUnifiedVision{Cfg: sharedmodel.LoadedUnifiedVisionConfig{
+			loaded: &modelvision.Unified{Cfg: modelvision.UnifiedConfig{
 				ImageTokenID:         22,
 				ImageBeginToken:      "<|image>",
 				ImageToken:           "<|image|>",
@@ -126,7 +127,7 @@ func TestHIPInferenceModel_UnifiedVisionContract_Good(t *testing.T) {
 
 func TestHIPInferenceModel_EncoderVisionContract_Good(t *testing.T) {
 	tokenModel := newHipTokenModel(&hipLoadedModel{
-		vision: &HIPVisionEncoderTower{loaded: &sharedmodel.LoadedVision{Cfg: sharedmodel.LoadedVisionConfig{
+		vision: &HIPVisionEncoderTower{loaded: &modelvision.Loaded{Cfg: modelvision.Config{
 			ImageTokenID:    31,
 			ImageBeginToken: "<|image>",
 			ImageToken:      "<|image|>",

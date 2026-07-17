@@ -113,6 +113,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`,
 		`extern "C" __global__ void rocm_vector_add`,
 		`extern "C" __global__ void rocm_vector_add_scaled`,
@@ -122,8 +123,11 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_gelu_tanh_multiply`,
 		`extern "C" __global__ void rocm_moe_router`,
 		`extern "C" __global__ void rocm_moe_lazy_experts`,
+		`extern "C" __global__ void rocm_q8_1_quantize_f32`,
 		`extern "C" __global__ void rocm_gguf_q4_0_projection`,
 		`extern "C" __global__ void rocm_gguf_q4_0_gelu_tanh_gate_up`,
+		`extern "C" __global__ void rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_row8`,
+		`extern "C" __global__ void rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_batch_row8`,
 		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_gate_up`,
 		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_down`,
 		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_gate_up_pair16`,
@@ -150,6 +154,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_tile32x64`,
 		`extern "C" __global__ void rocm_diffusion_sample_probabilities`,
+		`extern "C" __global__ void rocm_diffusion_sample_probabilities_wide`,
 		`extern "C" __global__ void rocm_embedding_mean_pool`,
 		`extern "C" __global__ void rocm_rerank_cosine`,
 		`extern "C" __global__ void rocm_tiny_prefill`,
@@ -310,6 +315,10 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_MOE_ROUTER_LAUNCH_ARGS_BYTES = %d", hipMoERouterLaunchArgsBytes),
 		core.Sprintf("ROCM_MOE_LAZY_LAUNCH_ARGS_VERSION = %d", hipMoELazyLaunchArgsVersion),
 		core.Sprintf("ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES = %d", hipMoELazyLaunchArgsBytes),
+		core.Sprintf("ROCM_Q8_1_QUANTIZE_LAUNCH_ARGS_VERSION = %d", hipQ8_1QuantizeLaunchArgsVersion),
+		core.Sprintf("ROCM_Q8_1_QUANTIZE_LAUNCH_ARGS_BYTES = %d", hipQ8_1QuantizeLaunchArgsBytes),
+		core.Sprintf("ROCM_GGUF_Q4_K_Q8_1_GATE_UP_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4KQ8_1GateUpLaunchArgsVersion),
+		core.Sprintf("ROCM_GGUF_Q4_K_Q8_1_GATE_UP_LAUNCH_ARGS_BYTES = %d", hipGGUFQ4KQ8_1GateUpLaunchArgsBytes),
 		core.Sprintf("ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4_0ProjectionLaunchArgsVersion),
 		core.Sprintf("ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES = %d", hipGGUFQ4_0ProjectionLaunchArgsBytes),
 		core.Sprintf("ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4KExpandLaunchArgsVersion),
@@ -435,6 +444,8 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64Probabilit
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4`)
 
+	core.AssertTrue(t, strings.Contains(kernel, `blockDim.x != ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_COMPACT_BLOCK_SIZE`), "probability-tiled subgroup kernel must use compact blocks for scheduler occupancy")
+	core.AssertTrue(t, strings.Contains(kernel, `blockIdx.y * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_COMPACT_ROWS_PER_BLOCK`), "probability-tiled subgroup kernel must advance by its compact row span")
 	core.AssertTrue(t, strings.Contains(kernel, `token_base += ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS`), "probability-tiled subgroup kernel must advance one coalesced token tile")
 	core.AssertTrue(t, strings.Contains(kernel, `const uint32_t probability_row = lane / ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS`), "probability-tiled subgroup kernel must spread each row's consecutive probabilities across adjacent lanes")
 	core.AssertTrue(t, strings.Contains(kernel, `row_lane * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS + token_lane`), "probability-tiled subgroup kernel must broadcast from the coalesced source lane")
@@ -464,6 +475,17 @@ func TestHIPKernelSource_DiffusionSampleProbabilitiesKeepsLogitsOnDevice_Good(t 
 	core.AssertTrue(t, strings.Contains(kernel, `rocm_float_to_bfloat16`), "diffusion sampler must preserve host BF16 temperature shaping")
 	core.AssertTrue(t, strings.Contains(kernel, `logits[col] = probability / total`), "diffusion sampler must normalize probabilities in the logits buffer")
 	core.AssertTrue(t, strings.Contains(kernel, `rocm_shfl_float`), "diffusion sampler must sample in vocabulary order without host logits")
+}
+
+func TestHIPKernelSource_DiffusionSampleProbabilitiesWide_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_sample_probabilities_wide`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `blockDim.x != ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE`), "wide diffusion sampler must pin one wide block per row")
+	core.AssertTrue(t, strings.Contains(kernel, `__shared__ float ordered_values[ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE]`), "wide diffusion sampler must stage values in vocabulary order")
+	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_WIDE_BLOCK_SIZE; ++source)`), "wide diffusion sampler must retain ordered reductions")
+	core.AssertTrue(t, strings.Contains(kernel, `logits[col] = probability / total`), "wide diffusion sampler must leave normalized probabilities resident")
 }
 
 func TestHIPKernelSource_AMDBuildDefaultsO3_Good(t *testing.T) {
@@ -498,6 +520,16 @@ func TestHIPKernelSource_RMSNormResidualAddNormUsesInverseRMS_Good(t *testing.T)
 	core.AssertTrue(t, strings.Contains(kernel, `residual_output[i] * norm_inv_rms * weight`), "next-layer normalization must multiply by its shared inverse RMS")
 	core.AssertTrue(t, !strings.Contains(kernel, `input[i] / rms`), "first normalization must not repeat division in its vector pass")
 	core.AssertTrue(t, !strings.Contains(kernel, `residual_output[i] / norm_rms`), "next-layer normalization must not repeat division in its vector pass")
+}
+
+func TestHIPKernelSource_RMSNormResidualAddNormEmitsQ8_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_rms_norm_residual_add_norm`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `args.q8_output_pointer`), "fused residual-add-norm must honor the optional Q8 output")
+	core.AssertTrue(t, strings.Contains(kernel, `rocm_q8_1_block *q8_output`), "fused residual-add-norm must write Q8_1 blocks directly")
+	core.AssertTrue(t, strings.Contains(kernel, `q8_output[block_index].scaled_sum`), "fused residual-add-norm must preserve the Q4_K correction sum")
 }
 
 func TestHIPKernelSource_RMSNormResidualAddUsesInverseRMS_Good(t *testing.T) {
@@ -1031,6 +1063,8 @@ func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testin
 	core.AssertEqual(t, 2, strings.Count(gqa2Stage1, `rocm_attention_heads_batch_chunked_device_kv_page(args, token)`))
 	core.AssertTrue(t, strings.Contains(gqa2Stage1, `query_values0[dim] * quantized_key`), "GQA2 stage1 must reuse each K element for the first query head")
 	core.AssertTrue(t, strings.Contains(gqa2Stage1, `query_values1[dim] * quantized_key`), "GQA2 stage1 must reuse each K element for the second query head")
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `rocm_attention_block_reduce_max_pair(local_max0, local_max1`), "GQA2 stage1 must reduce both head maxima in one synchronized pass")
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `rocm_attention_block_reduce_sum_pair(local_sum0, local_sum1`), "GQA2 stage1 must reduce both head sums in one synchronized pass")
 	core.AssertTrue(t, strings.Contains(gqa2Stage1, `const unsigned char packed = values[dim0 >> 1u]`), "GQA2 stage1 must load each packed V pair once")
 	core.AssertTrue(t, strings.Contains(gqa2Stage1, `rocm_attention_heads_batch_chunked_visible_tokens(args, query_row)`), "GQA2 stage1 must share capped K/V scans")
 	gqa4Stage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4`)
@@ -1038,6 +1072,12 @@ func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testin
 	core.AssertTrue(t, strings.Contains(gqa4Stage1, `quantized_dots[head] += query_values[head][dim] * quantized_key`), "GQA4 stage1 must reuse each K element across four query heads")
 	core.AssertTrue(t, strings.Contains(gqa4Stage1, `const unsigned char packed = values[dim0 >> 1u]`), "GQA4 stage1 must load each packed V pair once")
 	core.AssertTrue(t, strings.Contains(gqa4Stage1, `rocm_attention_heads_batch_chunked_visible_tokens(args, query_row)`), "GQA4 stage1 must share capped K/V scans")
+	gqa8Stage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8`)
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `constexpr uint32_t group_size = 8u`), "GQA8 stage1 must own eight query heads per block")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `const int32_t packed_key = *reinterpret_cast<const int32_t *>(key_values + dim)`), "GQA8 stage1 must load adjacent q8 key values as one portable packed word")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `quantized_dots[head] += query_values[head][dim] * quantized_key`), "GQA8 stage1 must reuse each K element across eight query heads")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `const unsigned char packed = values[dim0 >> 1u]`), "GQA8 stage1 must load each packed V pair once")
+	core.AssertTrue(t, strings.Contains(gqa8Stage1, `rocm_attention_heads_batch_chunked_visible_tokens(args, query_row)`), "GQA8 stage1 must share capped K/V scans")
 	batchStage2 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`)
 	core.AssertTrue(t, strings.Contains(batchStage2, `const bool cached_chunk_weights = chunk_count <= threads`), "batch stage2 must cache per-chunk softmax weights when they fit in shared scratch")
 	heads := hipKernelSourceFunctionBodyForTest(t, source, `__device__ void rocm_run_single_head_attention_token_parallel`)
@@ -1139,6 +1179,7 @@ func TestHIPKernelSource_AttentionReductionBlockSizeGuards_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa4`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa8`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`,
 	} {
 		body := hipKernelSourceFunctionBodyForTest(t, source, marker)

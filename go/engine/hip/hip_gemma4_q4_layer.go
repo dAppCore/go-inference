@@ -53,9 +53,34 @@ type hipGemma4Q4Layer0Config struct {
 	OutputProjection hipMLXQ4DeviceWeightConfig
 	GateProjection   hipMLXQ4DeviceWeightConfig
 	UpProjection     hipMLXQ4DeviceWeightConfig
+	GGUFQ4KGateUp    hipGemma4Q4NativeQ4KGateUpConfig
 	DownProjection   hipMLXQ4DeviceWeightConfig
 	LMHeadProjection hipMLXQ4DeviceWeightConfig
 	MoE              *hipGemma4MoELayerConfig
+}
+
+type hipGemma4Q4NativeQ4KGateUpConfig struct {
+	GatePointer nativeDevicePointer
+	UpPointer   nativeDevicePointer
+	GateBytes   uint64
+	UpBytes     uint64
+	Rows        int
+	Cols        int
+}
+
+func (cfg hipGemma4Q4NativeQ4KGateUpConfig) available() bool {
+	return cfg.GatePointer != 0 || cfg.UpPointer != 0 || cfg.GateBytes != 0 || cfg.UpBytes != 0 || cfg.Rows != 0 || cfg.Cols != 0
+}
+
+func (cfg hipGemma4Q4NativeQ4KGateUpConfig) validate() error {
+	if cfg.GatePointer == 0 || cfg.UpPointer == 0 || cfg.Rows <= 0 || cfg.Cols <= 0 || cfg.Cols%hipGGUFQ4KBlockSize != 0 {
+		return core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up pointers and aligned dimensions are required", nil)
+	}
+	wantBytes := uint64(cfg.Rows) * uint64(cfg.Cols/hipGGUFQ4KBlockSize) * hipGGUFQ4KExpandedBlockBytes
+	if cfg.GateBytes != wantBytes || cfg.UpBytes != wantBytes {
+		return core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up byte count mismatch", nil)
+	}
+	return nil
 }
 
 type hipBF16DeviceWeightConfig struct {
@@ -389,13 +414,26 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfigWithSharedKV(layer int, sh
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	gate, gateRows, gateCols, err := model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.gate_proj", "mlp.gate_proj", groupSize)
+	nativeGateUp, nativeGateUpOK, err := model.loadedGemma4Q4NativeQ4KGateUpConfig(layerPrefix + ".mlp")
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	up, upRows, upCols, err := model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.up_proj", "mlp.up_proj", groupSize)
-	if err != nil {
-		return hipGemma4Q4Layer0Config{}, err
+	var gate, up hipMLXQ4DeviceWeightConfig
+	var gateRows, gateCols, upRows, upCols int
+	if nativeGateUpOK {
+		gateRows, gateCols = nativeGateUp.Rows, nativeGateUp.Cols
+		upRows, upCols = nativeGateUp.Rows, nativeGateUp.Cols
+		gate = hipMLXQ4DeviceWeightConfig{Rows: gateRows, Cols: gateCols, GroupSize: hipGGUFQ4KGroupSize, Bits: 4}
+		up = gate
+	} else {
+		gate, gateRows, gateCols, err = model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.gate_proj", "mlp.gate_proj", groupSize)
+		if err != nil {
+			return hipGemma4Q4Layer0Config{}, err
+		}
+		up, upRows, upCols, err = model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.up_proj", "mlp.up_proj", groupSize)
+		if err != nil {
+			return hipGemma4Q4Layer0Config{}, err
+		}
 	}
 	down, downRows, downCols, err := model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.down_proj", "mlp.down_proj", groupSize)
 	if err != nil {
@@ -495,6 +533,7 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfigWithSharedKV(layer int, sh
 		OutputProjection:    output,
 		GateProjection:      gate,
 		UpProjection:        up,
+		GGUFQ4KGateUp:       nativeGateUp,
 		DownProjection:      down,
 		LMHeadProjection:    lmHead,
 	}
@@ -1895,6 +1934,7 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 	preFeedForwardNormCfg.Epsilon = req.Epsilon
 	var attentionResidualBuffer *hipDeviceByteBuffer
 	var preFeedForwardBuffer *hipDeviceByteBuffer
+	var preFeedForwardQ8Buffer *hipDeviceByteBuffer
 	if req.AttentionWorkspace != nil && req.OmitDebugTensors {
 		attentionResidualBuffer, err = req.AttentionWorkspace.EnsureRMSResidualOutput(driver, postAttentionNormCfg.Count)
 		if err != nil {
@@ -1904,7 +1944,13 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 		if err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
-		if err := hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputWithWorkspace(ctx, driver, attentionProjectionBuffer, inputBuffer, postAttentionNormCfg, preFeedForwardNormCfg, attentionResidualBuffer, preFeedForwardBuffer, 1, req.AttentionWorkspace); err != nil {
+		if cfg.GGUFQ4KGateUp.available() {
+			preFeedForwardQ8Buffer, err = req.AttentionWorkspace.EnsureQ8_1Input(driver, 1, cfg.HiddenSize)
+			if err != nil {
+				return hipGemma4Q4DecoderLayerResult{}, err
+			}
+		}
+		if err := hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputQ8WithWorkspace(ctx, driver, attentionProjectionBuffer, inputBuffer, postAttentionNormCfg, preFeedForwardNormCfg, attentionResidualBuffer, preFeedForwardBuffer, preFeedForwardQ8Buffer, 1, req.AttentionWorkspace); err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
 	} else {
@@ -1929,6 +1975,14 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
 		defer mlpOutputBuffer.Close()
+	} else if cfg.GGUFQ4KGateUp.available() && req.AttentionWorkspace != nil && req.OmitDebugTensors {
+		mlpOutputBuffer, err = req.AttentionWorkspace.EnsureProjectionOutput(driver, cfg.DownProjection.Rows)
+		if err != nil {
+			return hipGemma4Q4DecoderLayerResult{}, err
+		}
+		if err := hipRunGemma4Q4NativeQ4KMLPWithQuantizedDeviceInputOutput(ctx, driver, preFeedForwardQ8Buffer, cfg.GGUFQ4KGateUp, cfg.DownProjection, mlpOutputBuffer, req.AttentionWorkspace); err != nil {
+			return hipGemma4Q4DecoderLayerResult{}, err
+		}
 	} else if req.AttentionWorkspace != nil && req.OmitDebugTensors {
 		mlpOutputBuffer, err = req.AttentionWorkspace.EnsureProjectionOutput(driver, cfg.DownProjection.Rows)
 		if err != nil {
@@ -1937,6 +1991,12 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 		if err := hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInputOutput(ctx, driver, preFeedForwardBuffer, cfg.GateProjection, cfg.UpProjection, cfg.DownProjection, mlpOutputBuffer, req.AttentionWorkspace); err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
+	} else if cfg.GGUFQ4KGateUp.available() {
+		mlpOutputBuffer, err = hipRunGemma4Q4NativeQ4KMLPWithDeviceInput(ctx, driver, preFeedForwardBuffer, cfg.GGUFQ4KGateUp, cfg.DownProjection)
+		if err != nil {
+			return hipGemma4Q4DecoderLayerResult{}, err
+		}
+		defer mlpOutputBuffer.Close()
 	} else {
 		mlpOutputBuffer, err = hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInput(ctx, driver, preFeedForwardBuffer, cfg.GateProjection, cfg.UpProjection, cfg.DownProjection)
 		if err != nil {
@@ -2192,6 +2252,133 @@ func hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInputOutput(ctx context.Context, d
 	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, activated, downCfg, output, workspace)
 }
 
+func hipRunGemma4Q4NativeQ4KGateUpWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipGemma4Q4NativeQ4KGateUpConfig, batch int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
+	if err := hipContextErr(ctx); err != nil {
+		return nil, err
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "HIP driver is not available", nil)
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	if batch <= 0 || input == nil || input.Pointer() == 0 || input.Count() != batch*cfg.Cols || input.SizeBytes() != uint64(batch)*uint64(cfg.Cols)*4 {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up input shape mismatch", nil)
+	}
+	var quantized *hipDeviceByteBuffer
+	var err error
+	if workspace != nil {
+		quantized, err = workspace.EnsureQ8_1Input(driver, batch, cfg.Cols)
+	} else {
+		blocks := batch * (cfg.Cols / hipQ8_1BlockSize)
+		quantized, err = hipAllocateByteBuffer(driver, hipGemma4Q4Layer0Operation, "native Q4_K Q8_1 input", uint64(blocks)*hipQ8_1BlockBytes, blocks)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if workspace == nil {
+		defer quantized.Close()
+	}
+	var quantizeArgs []byte
+	if workspace != nil {
+		quantizeArgs = workspace.Q8_1QuantizeArgs[:]
+	}
+	if err := hipRunQ8_1QuantizeKernelWithArgs(ctx, driver, input, batch, cfg.Cols, quantized, quantizeArgs); err != nil {
+		return nil, err
+	}
+	return hipRunGemma4Q4NativeQ4KGateUpWithQuantizedDeviceInput(ctx, driver, quantized, cfg, batch, workspace)
+}
+
+func hipRunGemma4Q4NativeQ4KGateUpWithQuantizedDeviceInput(ctx context.Context, driver nativeHIPDriver, quantized *hipDeviceByteBuffer, cfg hipGemma4Q4NativeQ4KGateUpConfig, batch int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
+	if err := hipContextErr(ctx); err != nil {
+		return nil, err
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "HIP driver is not available", nil)
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	wantQuantizedBytes := uint64(batch) * uint64(cfg.Cols/hipQ8_1BlockSize) * hipQ8_1BlockBytes
+	if batch <= 0 || quantized == nil || quantized.Pointer() == 0 || quantized.SizeBytes() != wantQuantizedBytes {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "native Q4_K Q8_1 input shape mismatch", nil)
+	}
+	var activation *hipDeviceByteBuffer
+	var err error
+	if workspace != nil {
+		activation, err = workspace.EnsureActivationOutput(driver, batch*cfg.Rows)
+	} else {
+		activation, err = hipAllocateByteBuffer(driver, hipGemma4Q4Layer0Operation, "native Q4_K gate/up activation", uint64(batch)*uint64(cfg.Rows)*4, batch*cfg.Rows)
+	}
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if workspace == nil && !success {
+			_ = activation.Close()
+		}
+	}()
+	var gateUpArgs []byte
+	if workspace != nil {
+		gateUpArgs = workspace.GGUFQ4KQ8_1GateUpArgs[:]
+	}
+	blockCount := cfg.Rows * (cfg.Cols / hipGGUFQ4KBlockSize)
+	gate := hipBorrowDeviceByteBufferValue(driver, "native expanded Q4_K gate", cfg.GatePointer, cfg.GateBytes, blockCount)
+	up := hipBorrowDeviceByteBufferValue(driver, "native expanded Q4_K up", cfg.UpPointer, cfg.UpBytes, blockCount)
+	kernelName := hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8
+	tokensPerBlock := uint32(1)
+	if batch > 1 {
+		kernelName = hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8
+		tokensPerBlock = hipGGUFQ4KQ8_1GateUpBatchTokensPerBlock
+	}
+	if err := hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometryWithArgs(ctx, driver, kernelName, hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock, tokensPerBlock, hipGGUFQ4KExpandedBlockBytes, quantized, &gate, &up, cfg.Rows, cfg.Cols, batch, activation, gateUpArgs); err != nil {
+		return nil, err
+	}
+	success = true
+	return activation, nil
+}
+
+func hipRunGemma4Q4NativeQ4KMLPWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateUpCfg hipGemma4Q4NativeQ4KGateUpConfig, downCfg hipMLXQ4DeviceWeightConfig) (*hipDeviceByteBuffer, error) {
+	output, err := hipAllocateByteBuffer(driver, hipGemma4Q4Layer0Operation, "native Q4_K MLP output", uint64(downCfg.Rows)*4, downCfg.Rows)
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = output.Close()
+		}
+	}()
+	if err := hipRunGemma4Q4NativeQ4KMLPWithDeviceInputOutput(ctx, driver, input, gateUpCfg, downCfg, output, nil); err != nil {
+		return nil, err
+	}
+	success = true
+	return output, nil
+}
+
+func hipRunGemma4Q4NativeQ4KMLPWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateUpCfg hipGemma4Q4NativeQ4KGateUpConfig, downCfg hipMLXQ4DeviceWeightConfig, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	activation, err := hipRunGemma4Q4NativeQ4KGateUpWithDeviceInput(ctx, driver, input, gateUpCfg, 1, workspace)
+	if err != nil {
+		return err
+	}
+	if workspace == nil {
+		defer activation.Close()
+	}
+	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, activation, downCfg, output, workspace)
+}
+
+func hipRunGemma4Q4NativeQ4KMLPWithQuantizedDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, quantized *hipDeviceByteBuffer, gateUpCfg hipGemma4Q4NativeQ4KGateUpConfig, downCfg hipMLXQ4DeviceWeightConfig, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	activation, err := hipRunGemma4Q4NativeQ4KGateUpWithQuantizedDeviceInput(ctx, driver, quantized, gateUpCfg, 1, workspace)
+	if err != nil {
+		return err
+	}
+	if workspace == nil {
+		defer activation.Close()
+	}
+	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, activation, downCfg, output, workspace)
+}
+
 func hipRunGemma4Q4DeviceGELUTanhProjection(ctx context.Context, driver nativeHIPDriver, input, multiplyBy []float32, gateCfg, projectionCfg hipMLXQ4DeviceWeightConfig) ([]float32, error) {
 	inputBuffer, err := hipUploadGemma4Q4Float32Input(driver, "GELU tanh projection input", input)
 	if err != nil {
@@ -2329,7 +2516,7 @@ func (cfg hipGemma4Q4Layer0Config) validate() error {
 		cfg.LMHeadProjection.Rows != cfg.VocabSize {
 		return core.E(hipGemma4Q4Layer0Operation, "projection row counts do not match Gemma4 layer geometry", nil)
 	}
-	for label, projection := range map[string]struct {
+	projections := map[string]struct {
 		cfg  hipMLXQ4DeviceWeightConfig
 		cols int
 	}{
@@ -2337,11 +2524,27 @@ func (cfg hipGemma4Q4Layer0Config) validate() error {
 		"k_proj":               {cfg: cfg.KeyProjection, cols: cfg.HiddenSize},
 		"v_proj":               {cfg: cfg.ValueProjection, cols: cfg.HiddenSize},
 		"o_proj":               {cfg: cfg.OutputProjection, cols: cfg.QueryHeads * cfg.HeadDim},
-		"mlp.gate_proj":        {cfg: cfg.GateProjection, cols: cfg.HiddenSize},
-		"mlp.up_proj":          {cfg: cfg.UpProjection, cols: cfg.HiddenSize},
 		"mlp.down_proj":        {cfg: cfg.DownProjection, cols: cfg.IntermediateSize},
 		"embed_tokens_lm_head": {cfg: cfg.LMHeadProjection, cols: cfg.HiddenSize},
-	} {
+	}
+	if cfg.GGUFQ4KGateUp.available() {
+		if err := cfg.GGUFQ4KGateUp.validate(); err != nil {
+			return err
+		}
+		if cfg.GGUFQ4KGateUp.Rows != cfg.IntermediateSize || cfg.GGUFQ4KGateUp.Cols != cfg.HiddenSize {
+			return core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up dimensions do not match Gemma4 layer geometry", nil)
+		}
+	} else {
+		projections["mlp.gate_proj"] = struct {
+			cfg  hipMLXQ4DeviceWeightConfig
+			cols int
+		}{cfg: cfg.GateProjection, cols: cfg.HiddenSize}
+		projections["mlp.up_proj"] = struct {
+			cfg  hipMLXQ4DeviceWeightConfig
+			cols int
+		}{cfg: cfg.UpProjection, cols: cfg.HiddenSize}
+	}
+	for label, projection := range projections {
 		if err := projection.cfg.validateInputCount(projection.cols); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, label+" config", err)
 		}
@@ -3868,6 +4071,39 @@ func (model *hipLoadedModel) loadedGemma4Q4ProjectionConfig(baseName, label stri
 		return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine config", err)
 	}
 	return cfg, rows, cols, nil
+}
+
+func (model *hipLoadedModel) loadedGemma4Q4NativeQ4KGateUpConfig(mlpBase string) (hipGemma4Q4NativeQ4KGateUpConfig, bool, error) {
+	const suffix = ".q4_k_expanded"
+	gate, gateOK := model.tensors[mlpBase+".gate_proj"+suffix]
+	up, upOK := model.tensors[mlpBase+".up_proj"+suffix]
+	if !gateOK && !upOK {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, nil
+	}
+	if !gateOK || !upOK {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up pair is incomplete", nil)
+	}
+	validTensor := func(tensor hipTensor) bool {
+		return tensor.pointer != 0 &&
+			tensor.info.Type == hipNativeTensorTypeQ4KExpanded &&
+			core.Upper(tensor.info.TypeName) == "Q4_K_EXPANDED" &&
+			len(tensor.info.Dimensions) == 2
+	}
+	if !validTensor(gate) || !validTensor(up) || gate.info.Dimensions[0] != up.info.Dimensions[0] || gate.info.Dimensions[1] != up.info.Dimensions[1] {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up tensor shape/type mismatch", nil)
+	}
+	cfg := hipGemma4Q4NativeQ4KGateUpConfig{
+		GatePointer: gate.pointer,
+		UpPointer:   up.pointer,
+		GateBytes:   gate.info.ByteSize,
+		UpBytes:     up.info.ByteSize,
+		Rows:        int(gate.info.Dimensions[1]),
+		Cols:        int(gate.info.Dimensions[0]),
+	}
+	if err := cfg.validate(); err != nil {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, err
+	}
+	return cfg, true, nil
 }
 
 func hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases hipTensor, groupSize, preferredBits int, label string) (int, int, int, int, int, int, error) {

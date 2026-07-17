@@ -62,9 +62,15 @@ func TestHIPDiffusionSampleLaunchArgs_Binary_Bad(t *testing.T) {
 func TestHIPDiffusionSampleLaunchConfig_Good(t *testing.T) {
 	config, err := hipDiffusionSampleLaunchConfig(make([]byte, hipDiffusionSampleLaunchArgsBytes), 256)
 	core.RequireNoError(t, err)
-	core.AssertEqual(t, hipKernelNameDiffusionSampleProbabilities, config.Name)
+	core.AssertEqual(t, "rocm_diffusion_sample_probabilities_wide", config.Name)
 	core.AssertEqual(t, uint32(256), config.GridX)
 	core.AssertEqual(t, uint32(1), config.GridY)
+	core.AssertEqual(t, uint32(512), config.BlockX)
+
+	t.Setenv("GO_ROCM_DISABLE_DIFFUSION_SAMPLE_WIDE", "1")
+	config, err = hipDiffusionSampleLaunchConfig(make([]byte, hipDiffusionSampleLaunchArgsBytes), 256)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameDiffusionSampleProbabilities, config.Name)
 	core.AssertEqual(t, uint32(hipDiffusionSampleBlockSize), config.BlockX)
 }
 
@@ -87,7 +93,7 @@ func TestHIPDiffusionSampleKernel_Good_KeepsLogitsOnDevice(t *testing.T) {
 	core.AssertEqual(t, float32(0.25), got[0].Entropy)
 	core.AssertEqual(t, int32(2), got[1].Sampled)
 	core.AssertEqual(t, 1, len(base.launches))
-	core.AssertEqual(t, hipKernelNameDiffusionSampleProbabilities, base.launches[0].Name)
+	core.AssertEqual(t, hipKernelNameDiffusionSampleProbabilitiesWide, base.launches[0].Name)
 	core.AssertEqual(t, []uint64{8, 32}, base.copies)
 }
 
@@ -107,7 +113,8 @@ type hipDiffusionSampleStubDriver struct {
 }
 
 func (driver *hipDiffusionSampleStubDriver) LaunchKernel(config hipKernelLaunchConfig) error {
-	if err := driver.fakeHIPDriver.LaunchKernel(config); err != nil || config.Name != hipKernelNameDiffusionSampleProbabilities {
+	if err := driver.fakeHIPDriver.LaunchKernel(config); err != nil ||
+		(config.Name != hipKernelNameDiffusionSampleProbabilities && config.Name != "rocm_diffusion_sample_probabilities_wide") {
 		return err
 	}
 	rows := binary.LittleEndian.Uint32(config.Args[32:])

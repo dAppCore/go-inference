@@ -271,6 +271,80 @@ func TestHIPGGUFQ4_0ProjectionLaunchArgs_Good(t *testing.T) {
 	core.AssertEqual(t, uint32(704*4), binary.LittleEndian.Uint32(payload[56:]))
 }
 
+func TestHIPQ8_1QuantizeLaunchArgs_Good(t *testing.T) {
+	args := hipQ8_1QuantizeLaunchArgs{
+		InputPointer:  11,
+		OutputPointer: 22,
+		Rows:          1,
+		Cols:          3840,
+		InputBytes:    3840 * 4,
+		OutputBytes:   (3840 / hipQ8_1BlockSize) * hipQ8_1BlockBytes,
+	}
+	payload, err := args.Binary()
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipQ8_1QuantizeLaunchArgsBytes, len(payload))
+	core.AssertEqual(t, hipQ8_1QuantizeLaunchArgsVersion, binary.LittleEndian.Uint32(payload[0:]))
+	core.AssertEqual(t, uint32(hipQ8_1QuantizeLaunchArgsBytes), binary.LittleEndian.Uint32(payload[4:]))
+	core.AssertEqual(t, uint64(11), binary.LittleEndian.Uint64(payload[8:]))
+	core.AssertEqual(t, uint64(22), binary.LittleEndian.Uint64(payload[16:]))
+	core.AssertEqual(t, uint32(1), binary.LittleEndian.Uint32(payload[24:]))
+	core.AssertEqual(t, uint32(3840), binary.LittleEndian.Uint32(payload[28:]))
+	core.AssertEqual(t, uint64(3840*4), binary.LittleEndian.Uint64(payload[32:]))
+	core.AssertEqual(t, uint64((3840/hipQ8_1BlockSize)*hipQ8_1BlockBytes), binary.LittleEndian.Uint64(payload[40:]))
+}
+
+func TestHIPGGUFQ4KQ8_1GateUpLaunchArgs_Good(t *testing.T) {
+	args := hipGGUFQ4KQ8_1GateUpLaunchArgs{
+		InputPointer:  11,
+		GatePointer:   22,
+		UpPointer:     33,
+		OutputPointer: 44,
+		Rows:          15360,
+		Cols:          3840,
+		Batch:         1,
+		InputBytes:    (3840 / hipQ8_1BlockSize) * hipQ8_1BlockBytes,
+		GateBytes:     15360 * (3840 / hipGGUFQ4KBlockSize) * hipGGUFQ4KBlockBytes,
+		UpBytes:       15360 * (3840 / hipGGUFQ4KBlockSize) * hipGGUFQ4KBlockBytes,
+		OutputBytes:   15360 * 4,
+	}
+	payload, err := args.Binary()
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipGGUFQ4KQ8_1GateUpLaunchArgsBytes, len(payload))
+	core.AssertEqual(t, hipGGUFQ4KQ8_1GateUpLaunchArgsVersion, binary.LittleEndian.Uint32(payload[0:]))
+	core.AssertEqual(t, uint32(hipGGUFQ4KQ8_1GateUpLaunchArgsBytes), binary.LittleEndian.Uint32(payload[4:]))
+	core.AssertEqual(t, uint64(11), binary.LittleEndian.Uint64(payload[8:]))
+	core.AssertEqual(t, uint64(22), binary.LittleEndian.Uint64(payload[16:]))
+	core.AssertEqual(t, uint64(33), binary.LittleEndian.Uint64(payload[24:]))
+	core.AssertEqual(t, uint64(44), binary.LittleEndian.Uint64(payload[32:]))
+	core.AssertEqual(t, uint32(15360), binary.LittleEndian.Uint32(payload[40:]))
+	core.AssertEqual(t, uint32(3840), binary.LittleEndian.Uint32(payload[44:]))
+	core.AssertEqual(t, uint32(1), binary.LittleEndian.Uint32(payload[48:]))
+	core.AssertEqual(t, uint32((3840/hipQ8_1BlockSize)*hipQ8_1BlockBytes), binary.LittleEndian.Uint32(payload[56:]))
+	core.AssertEqual(t, uint32(15360*(3840/hipGGUFQ4KBlockSize)*hipGGUFQ4KBlockBytes), binary.LittleEndian.Uint32(payload[60:]))
+	core.AssertEqual(t, uint32(15360*(3840/hipGGUFQ4KBlockSize)*hipGGUFQ4KBlockBytes), binary.LittleEndian.Uint32(payload[64:]))
+	core.AssertEqual(t, uint32(15360*4), binary.LittleEndian.Uint32(payload[68:]))
+}
+
+func TestHIPGGUFQ4KQ8_1GateUpLaunchArgs_Good_Expanded(t *testing.T) {
+	args := hipGGUFQ4KQ8_1GateUpLaunchArgs{
+		InputPointer:  11,
+		GatePointer:   22,
+		UpPointer:     33,
+		OutputPointer: 44,
+		Rows:          8,
+		Cols:          256,
+		Batch:         1,
+		InputBytes:    8 * hipQ8_1BlockBytes,
+		GateBytes:     8 * hipGGUFQ4KExpandedBlockBytes,
+		UpBytes:       8 * hipGGUFQ4KExpandedBlockBytes,
+		OutputBytes:   8 * 4,
+	}
+	payload, err := args.Binary()
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, uint32(8*hipGGUFQ4KExpandedBlockBytes), binary.LittleEndian.Uint32(payload[60:]))
+	core.AssertEqual(t, uint32(8*hipGGUFQ4KExpandedBlockBytes), binary.LittleEndian.Uint32(payload[64:]))
+}
+
 func TestHIPGGUFQ4KExpandLaunchArgs_Good(t *testing.T) {
 	args := hipGGUFQ4KExpandLaunchArgs{
 		RawPointer:      11,
@@ -595,6 +669,65 @@ func TestHIPGGUFQ4_0ProjectionLaunch_Good(t *testing.T) {
 	core.AssertEqual(t, hipKernelNameGGUFQ4_0Projection, driver.launches[0].Name)
 	core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
 	core.AssertEqual(t, uint32(1), driver.launches[0].GridX)
+}
+
+func TestHIPGGUFQ4KQ8_1GateUpLaunch_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	input := hipBorrowDeviceByteBufferValue(driver, "input", 11, 256*4, 256)
+	quantized := hipBorrowDeviceByteBufferValue(driver, "quantized", 22, 8*hipQ8_1BlockBytes, 8)
+	gate := hipBorrowDeviceByteBufferValue(driver, "expanded gate", 33, 4*hipGGUFQ4KExpandedBlockBytes, 4)
+	up := hipBorrowDeviceByteBufferValue(driver, "expanded up", 44, 4*hipGGUFQ4KExpandedBlockBytes, 4)
+	output := hipBorrowDeviceByteBufferValue(driver, "output", 55, 4*4, 4)
+
+	core.RequireNoError(t, hipRunQ8_1QuantizeKernel(context.Background(), driver, &input, 1, 256, &quantized))
+	core.RequireNoError(t, hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometry(context.Background(), driver, hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8, hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock, 1, hipGGUFQ4KExpandedBlockBytes, &quantized, &gate, &up, 4, 256, 1, &output))
+	core.AssertEqual(t, 2, len(driver.launches))
+	core.AssertEqual(t, hipKernelNameQ8_1QuantizeF32, driver.launches[0].Name)
+	core.AssertEqual(t, uint32(hipQ8_1QuantizeBlockSize), driver.launches[0].BlockX)
+	core.AssertEqual(t, uint32(1), driver.launches[0].GridX)
+	core.AssertEqual(t, hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8, driver.launches[1].Name)
+	core.AssertEqual(t, uint32(hipGGUFQ4_0ProjectionBlockSize), driver.launches[1].BlockX)
+	core.AssertEqual(t, uint32(1), driver.launches[1].GridX)
+}
+
+func TestHIPGGUFQ4KQ8_1GateUpBatchLaunch_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	const batch = 17
+	quantized := hipBorrowDeviceByteBufferValue(driver, "quantized batch", 22, batch*8*hipQ8_1BlockBytes, batch*8)
+	gate := hipBorrowDeviceByteBufferValue(driver, "expanded gate", 33, 8*hipGGUFQ4KExpandedBlockBytes, 8)
+	up := hipBorrowDeviceByteBufferValue(driver, "expanded up", 44, 8*hipGGUFQ4KExpandedBlockBytes, 8)
+	output := hipBorrowDeviceByteBufferValue(driver, "batch output", 55, batch*8*4, batch*8)
+
+	core.RequireNoError(t, hipRunGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchKernel(context.Background(), driver, &quantized, &gate, &up, 8, 256, batch, &output))
+	core.AssertEqual(t, 1, len(driver.launches))
+	core.AssertEqual(t, hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8, driver.launches[0].Name)
+	core.AssertEqual(t, uint32(hipGGUFQ4_0ProjectionBlockSize), driver.launches[0].BlockX)
+	core.AssertEqual(t, uint32(1), driver.launches[0].GridX)
+	core.AssertEqual(t, uint32(2), driver.launches[0].GridY)
+}
+
+func TestHIPGemma4Q4NativeQ4KGateUpBatch_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+	const (
+		rows  = 8
+		cols  = 256
+		batch = 17
+	)
+	weightBytes := uint64(rows * (cols / hipGGUFQ4KBlockSize) * hipGGUFQ4KExpandedBlockBytes)
+	cfg := hipGemma4Q4NativeQ4KGateUpConfig{
+		GatePointer: 33, UpPointer: 44, GateBytes: weightBytes, UpBytes: weightBytes, Rows: rows, Cols: cols,
+	}
+	input := hipBorrowDeviceByteBufferValue(driver, "native batch input", 11, batch*cols*4, batch*cols)
+
+	activation, err := hipRunGemma4Q4NativeQ4KGateUpWithDeviceInput(context.Background(), driver, &input, cfg, batch, workspace)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, batch*rows, activation.Count())
+	core.AssertEqual(t, 2, len(driver.launches))
+	core.AssertEqual(t, hipKernelNameQ8_1QuantizeF32, driver.launches[0].Name)
+	core.AssertEqual(t, hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8, driver.launches[1].Name)
+	core.AssertEqual(t, uint32(2), driver.launches[1].GridY)
 }
 
 func TestHIPGGUFQ4_0ProjectionLaunch_Bad(t *testing.T) {
@@ -1040,9 +1173,9 @@ func TestHIPGemma4ExpertCache_Good_AdaptiveCacheSuppressesTransientPool(t *testi
 }
 
 func TestHIPGemma4ExpertCacheBudget_Good(t *testing.T) {
-	core.AssertEqual(t, uint64(10*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
-	core.AssertEqual(t, uint64(9*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
-	core.AssertEqual(t, uint64(5*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
+	core.AssertEqual(t, uint64(11*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
+	core.AssertEqual(t, uint64(10*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
+	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
 	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true}))
 }
 

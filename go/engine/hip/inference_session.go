@@ -771,7 +771,7 @@ func (s *hipEngineSession) restoreFromKVLocked(ctx context.Context, snapshot *kv
 		s.boundaryLogitShape = boundaryLogitShape
 		s.boundaryLogits = boundaryLogits
 	}
-	if s.mode == rocmKVCacheModeQ8 || s.mode == rocmKVCacheModeKQ8VQ4 {
+	if forwarded > 0 && (s.mode == rocmKVCacheModeQ8 || s.mode == rocmKVCacheModeKQ8VQ4) && !hipSnapshotHasDeviceKVPayloads(snapshot) {
 		s.engine.DisableBatchedPrefill = true
 	}
 	return ctx.Err()

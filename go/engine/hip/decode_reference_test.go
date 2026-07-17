@@ -1368,7 +1368,7 @@ func TestDecodeHelpers_Bad_PlanAttachedDrafterRejectsGemma4NonLinkedTargetPack(t
 					VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
 				},
 			},
-			want: "target Gemma4 pack is not linked for generation",
+			want: "target Gemma4 pack is not runnable on this card",
 		},
 		{
 			name: "31b_status_only",

@@ -14,9 +14,9 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gemma4"
 	"dappco.re/go/inference/model/quant/mlxaffine"
+	"dappco.re/go/inference/model/vision"
 )
 
 func TestUnifiedVisionTowerProjectPatches_Good(t *testing.T) {
@@ -34,19 +34,19 @@ func TestUnifiedVisionTowerProjectPatches_Good(t *testing.T) {
 	posb := hipUnifiedVisionTestValues(embedDim, 0.015, -0.02)
 	projectionW := hipUnifiedVisionTestValues(hidden*embedDim, 0.025, -0.15)
 
-	uv := &model.LoadedUnifiedVision{
+	uv := &vision.Unified{
 		PatchLN1W: hipUnifiedVisionTestBF16(ln1w), PatchLN1B: hipUnifiedVisionTestBF16(ln1b),
-		PatchDense: model.LoadedVisionLinear{
+		PatchDense: vision.Linear{
 			Weight: hipUnifiedVisionTestBF16(denseW), Bias: hipUnifiedVisionTestBF16(denseB),
 			OutDim: embedDim, InDim: patchDim,
 		},
 		PatchLN2W: hipUnifiedVisionTestBF16(ln2w), PatchLN2B: hipUnifiedVisionTestBF16(ln2b),
 		PosEmbedding: hipUnifiedVisionTestBF16(pos),
 		PosNormW:     hipUnifiedVisionTestBF16(posw), PosNormB: hipUnifiedVisionTestBF16(posb),
-		Projection: model.LoadedVisionLinear{
+		Projection: vision.Linear{
 			Weight: hipUnifiedVisionTestBF16(projectionW), OutDim: hidden, InDim: embedDim,
 		},
-		Cfg: model.LoadedUnifiedVisionConfig{
+		Cfg: vision.UnifiedConfig{
 			MMEmbedDim: embedDim, TextHidden: hidden, PosembSize: posemb,
 			PatchSize: 1, ModelPatchSize: 2, PoolKernel: 2,
 			LayerNormEps: 1e-5, RMSNormEps: 1e-6,
@@ -83,7 +83,7 @@ func TestUnifiedVisionTowerQuantizedLinear_Good(t *testing.T) {
 	values := hipUnifiedVisionTestValues(outDim*inDim, 0.125, -1)
 	packed, scales, biases, err := mlxaffine.QuantizeTensor(values, outDim, inDim, bits, groupSize)
 	core.RequireNoError(t, err)
-	linear := model.LoadedVisionLinear{
+	linear := vision.Linear{
 		Weight: packed, Scales: scales, Biases: biases,
 		OutDim: outDim, InDim: inDim, Bits: bits, GroupSize: groupSize, Kind: mlxaffine.Mode,
 	}

@@ -40,6 +40,7 @@ type ScheduledModel struct {
 	closeOne sync.Once
 	closeErr error
 	lastErr  error
+	workerWG sync.WaitGroup
 }
 
 type scheduledWork struct {
@@ -49,6 +50,27 @@ type scheduledWork struct {
 	cancel   context.CancelFunc
 	out      chan inference.ScheduledToken
 	enqueued time.Time
+}
+
+type serializedHIPProbeSink struct {
+	mu   sync.Mutex
+	sink inference.ProbeSink
+}
+
+func (sink *serializedHIPProbeSink) EmitProbe(event inference.ProbeEvent) {
+	if sink == nil || sink.sink == nil {
+		return
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.sink.EmitProbe(event)
+}
+
+func serializeHIPProbeSink(sink inference.ProbeSink) inference.ProbeSink {
+	if sink == nil {
+		return nil
+	}
+	return &serializedHIPProbeSink{sink: sink}
 }
 
 // NewScheduledModel selects continuous lane scheduling when the loaded model
@@ -87,6 +109,7 @@ func NewScheduledModel(model inference.TextModel, cfg SchedulerConfig) (*Schedul
 		}
 	}
 	scheduled.queue = make(chan *scheduledWork, cfg.QueueSize)
+	scheduled.workerWG.Add(1)
 	go scheduled.run()
 	return scheduled, nil
 }
@@ -233,14 +256,15 @@ func (m *ScheduledModel) SetProbeSink(sink inference.ProbeSink) {
 	if m == nil {
 		return
 	}
+	delivery := serializeHIPProbeSink(sink)
 	m.mu.Lock()
-	m.sink = sink
+	m.sink = delivery
 	m.mu.Unlock()
 	if m.continuous != nil {
-		m.continuous.SetProbeSink(sink)
+		m.continuous.SetProbeSink(delivery)
 	}
 	if probeable, ok := m.model.(inference.ProbeableModel); ok {
-		probeable.SetProbeSink(sink)
+		probeable.SetProbeSink(delivery)
 	}
 }
 
@@ -474,6 +498,7 @@ func (m *ScheduledModel) Close() core.Result {
 		}
 		if queue != nil {
 			close(queue)
+			m.workerWG.Wait()
 		}
 		if model != nil {
 			if r := model.Close(); !r.OK {
@@ -485,6 +510,7 @@ func (m *ScheduledModel) Close() core.Result {
 }
 
 func (m *ScheduledModel) run() {
+	defer m.workerWG.Done()
 	for work := range m.queue {
 		m.process(work)
 	}

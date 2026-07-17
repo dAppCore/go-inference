@@ -161,6 +161,8 @@ type hipRMSNormResidualAddNormLaunchArgs struct {
 	NormWeightEncoding    uint32
 	NormFlags             uint32
 	OutputScale           float32
+	Q8OutputBytes         uint64
+	Q8OutputPointer       nativeDevicePointer
 }
 
 type hipRMSNormHeadsLaunchArgs struct {
@@ -1087,6 +1089,19 @@ func (args hipRMSNormResidualAddNormLaunchArgs) BinaryInto(payload []byte) ([]by
 	if err != nil {
 		return nil, core.E("rocm.hip.RMSNormResidualAddNormLaunch", "norm output byte count", err)
 	}
+	var q8OutputBytes uint32
+	if args.Q8OutputPointer != 0 || args.Q8OutputBytes != 0 {
+		if args.Q8OutputPointer == 0 || args.Q8OutputBytes == 0 {
+			return nil, core.E("rocm.hip.RMSNormResidualAddNormLaunch", "Q8_1 output pointer and byte count must be provided together", nil)
+		}
+		if count%hipQ8_1BlockSize != 0 {
+			return nil, core.E("rocm.hip.RMSNormResidualAddNormLaunch", "Q8_1 output requires a block-aligned count", nil)
+		}
+		q8OutputBytes, err = hipExactUint32Bytes("Q8_1 output", args.Q8OutputBytes, uint64(count/hipQ8_1BlockSize)*hipQ8_1BlockBytes)
+		if err != nil {
+			return nil, core.E("rocm.hip.RMSNormResidualAddNormLaunch", "Q8_1 output byte count", err)
+		}
+	}
 	if cap(payload) < hipRMSNormResAddNormArgsBytes {
 		payload = hipBorrowLaunchPacket(hipRMSNormResAddNormArgsBytes)
 	} else {
@@ -1117,6 +1132,8 @@ func (args hipRMSNormResidualAddNormLaunchArgs) BinaryInto(payload []byte) ([]by
 	if args.OutputScale != 0 && args.OutputScale != 1 {
 		binary.LittleEndian.PutUint32(payload[108:], math.Float32bits(args.OutputScale))
 	}
+	binary.LittleEndian.PutUint32(payload[112:], q8OutputBytes)
+	binary.LittleEndian.PutUint64(payload[120:], uint64(args.Q8OutputPointer))
 	return payload, nil
 }
 

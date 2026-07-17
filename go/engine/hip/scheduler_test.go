@@ -8,6 +8,7 @@ import (
 	"context"
 	"iter"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -639,6 +640,40 @@ func TestScheduler_Good_CloseIsIdempotent(t *testing.T) {
 	core.AssertEqual(t, 1, fake.closeCalls)
 }
 
+func TestScheduler_Good_CloseWaitsForFallbackWorker(t *testing.T) {
+	fake := newSchedulerCloseOrderModel()
+	model, err := NewScheduledModel(fake, SchedulerConfig{QueueSize: 1})
+	core.RequireNoError(t, err)
+
+	_, stream, err := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "closing", Prompt: "hold"})
+	core.RequireNoError(t, err)
+	<-fake.started
+
+	closeDone := make(chan core.Result, 1)
+	go func() {
+		closeDone <- model.Close()
+	}()
+	<-fake.cancelled
+
+	closedBeforeWorkerExit := false
+	select {
+	case <-fake.closed:
+		closedBeforeWorkerExit = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(fake.release)
+	_ = collectScheduledTokenText(stream)
+	core.RequireNoError(t, resultError(<-closeDone))
+	if closedBeforeWorkerExit {
+		t.Fatal("scheduler closed the wrapped model while its fallback worker was still generating")
+	}
+	select {
+	case <-fake.closed:
+	default:
+		t.Fatal("scheduler did not close the wrapped model after its fallback worker exited")
+	}
+}
+
 func TestScheduler_Bad_RejectsCancelledContextBeforeEnqueue(t *testing.T) {
 	model, err := NewScheduledModel(&schedulerFakeTextModel{tokens: []inference.Token{{Text: "ok"}}}, SchedulerConfig{QueueSize: 1})
 	core.RequireNoError(t, err)
@@ -791,6 +826,47 @@ func TestScheduler_Good_EmitsProbeEvents(t *testing.T) {
 	}
 }
 
+func TestScheduler_Good_SerializesProbeSinkDelivery(t *testing.T) {
+	generationRelease := make(chan struct{})
+	model, err := NewScheduledModel(&schedulerFakeTextModel{
+		tokens: []inference.Token{{Text: "a"}},
+		wait:   generationRelease,
+	}, SchedulerConfig{QueueSize: 1})
+	core.RequireNoError(t, err)
+	defer model.Close()
+
+	sink := newSchedulerBlockingProbeSink()
+	model.SetProbeSink(sink)
+	type scheduledResult struct {
+		stream <-chan inference.ScheduledToken
+		err    error
+	}
+	scheduled := make(chan scheduledResult, 1)
+	go func() {
+		_, stream, scheduleErr := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "serialized", Prompt: "x"})
+		scheduled <- scheduledResult{stream: stream, err: scheduleErr}
+	}()
+
+	first := <-sink.events
+	secondBeforeRelease := ""
+	select {
+	case secondBeforeRelease = <-sink.events:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(sink.release)
+	close(generationRelease)
+	result := <-scheduled
+	core.RequireNoError(t, result.err)
+	_ = collectScheduledTokenText(result.stream)
+
+	if secondBeforeRelease != "" {
+		t.Fatalf("probe sink entered concurrently for %q while %q was blocked", secondBeforeRelease, first)
+	}
+	if sink.concurrent.Load() {
+		t.Fatal("probe sink observed concurrent EmitProbe calls")
+	}
+}
+
 func TestScheduler_Good_RoutesRequestsThroughHIPLaneSet(t *testing.T) {
 	release := make(chan struct{})
 	barrier := &sync.WaitGroup{}
@@ -865,6 +941,68 @@ type schedulerFakeTextModel struct {
 	laneExecutor       hipLaneExecutor
 	laneSet            *hipLaneSet
 	openLaneSets       int
+}
+
+type schedulerCloseOrderModel struct {
+	*schedulerFakeTextModel
+	started   chan struct{}
+	cancelled chan struct{}
+	release   chan struct{}
+	exited    chan struct{}
+	closed    chan struct{}
+}
+
+func newSchedulerCloseOrderModel() *schedulerCloseOrderModel {
+	return &schedulerCloseOrderModel{
+		schedulerFakeTextModel: &schedulerFakeTextModel{},
+		started:                make(chan struct{}),
+		cancelled:              make(chan struct{}),
+		release:                make(chan struct{}),
+		exited:                 make(chan struct{}),
+		closed:                 make(chan struct{}),
+	}
+}
+
+func (m *schedulerCloseOrderModel) Generate(ctx context.Context, _ string, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		close(m.started)
+		<-ctx.Done()
+		close(m.cancelled)
+		<-m.release
+		close(m.exited)
+	}
+}
+
+func (m *schedulerCloseOrderModel) Close() core.Result {
+	close(m.closed)
+	return core.Ok(nil)
+}
+
+type schedulerBlockingProbeSink struct {
+	events     chan string
+	release    chan struct{}
+	entries    atomic.Int32
+	active     atomic.Int32
+	concurrent atomic.Bool
+}
+
+func newSchedulerBlockingProbeSink() *schedulerBlockingProbeSink {
+	return &schedulerBlockingProbeSink{
+		events:  make(chan string, 8),
+		release: make(chan struct{}),
+	}
+}
+
+func (sink *schedulerBlockingProbeSink) EmitProbe(event inference.ProbeEvent) {
+	if sink.active.Add(1) > 1 {
+		sink.concurrent.Store(true)
+	}
+	entry := sink.entries.Add(1)
+	sink.events <- event.Labels["event"]
+	if entry == 1 {
+		<-sink.release
+	}
+	sink.active.Add(-1)
 }
 
 func (m *schedulerFakeTextModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {

@@ -132,7 +132,7 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 		biasBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", label+" biases", biasPayload, len(biases))
 		core.RequireNoError(t, err)
 		defer biasBuffer.Close()
-		rowCounts := []int{33, 256}
+		rowCounts := []int{33, 64, 256}
 		for _, affineRows := range rowCounts {
 			probabilities := make([]float32, affineRows*affineVocab)
 			for row := 0; row < affineRows; row++ {
@@ -163,6 +163,25 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 				}
 			}
 			assertFloat32SlicesNearRelativeNamedForHardwareTest(t, core.Sprintf("diffusion expected embedding %s group64 rows%d", label, affineRows), want, got, 0.00001, 0.00001)
+			if bits == 8 && affineRows == 64 {
+				t.Setenv(hipDisableDiffusionExpectedEmbeddingSubgroupEnv, "1")
+				control, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{
+					EmbeddingPointer: embedding.Pointer(),
+					EmbeddingBytes:   embedding.SizeBytes(),
+					ScalePointer:     scaleBuffer.Pointer(),
+					ScaleBytes:       scaleBuffer.SizeBytes(),
+					BiasPointer:      biasBuffer.Pointer(),
+					BiasBytes:        biasBuffer.SizeBytes(),
+					TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
+					GroupSize:        affineGroupSize,
+					QuantBits:        bits,
+					VocabSize:        affineVocab,
+					HiddenSize:       affineHidden,
+				}, 2)
+				core.RequireNoError(t, err)
+				assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding q8 rows64 tile control", control, got, 0, 0)
+				t.Setenv(hipDisableDiffusionExpectedEmbeddingSubgroupEnv, "")
+			}
 			if bits == 8 && affineRows == 256 {
 				t.Setenv(hipDisableDiffusionExpectedEmbeddingProbability4Env, "1")
 				control, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{
@@ -248,6 +267,19 @@ func TestHIPHardwareDiffusionSampleProbabilities_Good(t *testing.T) {
 		core.AssertEqual(t, wantSampled[row], got[row].Sampled)
 		core.AssertEqual(t, wantGreedy[row], got[row].Greedy)
 		assertFloat32Near(t, wantEntropy[row], got[row].Entropy)
+	}
+
+	controlLogits, err := hipUploadGemma4Q4Float32Input(hipRuntime.driver, "diffusion sample hardware control logits", raw)
+	core.RequireNoError(t, err)
+	defer controlLogits.Close()
+	t.Setenv(hipDisableDiffusionSampleWideEnv, "1")
+	control, err := hipRunDiffusionSampleKernel(context.Background(), hipRuntime.driver, controlLogits, rows, vocab, temperature, softcap, draws)
+	core.RequireNoError(t, err)
+	controlProbabilities, err := hipReadFloat32DeviceOutput(controlLogits, "rocm.hip.DiffusionSampleHardware", "control probabilities", len(raw))
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion sample wide control", controlProbabilities, gotProbabilities, 0, 0)
+	for row := range rows {
+		core.AssertEqual(t, control[row], got[row])
 	}
 }
 
@@ -825,6 +857,175 @@ func TestHIPHardwareGGUFQ4_0ProjectionAndGateUp_Good(t *testing.T) {
 	assertFloat32SlicesNear(t, wantSelected, selectedPair16, 1e-4)
 }
 
+func TestHIPHardwareRMSNormResidualAddNormQ8_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatal("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+	const count = 3840
+	inputValues := make([]float32, count)
+	residualValues := make([]float32, count)
+	weights := make([]float32, count)
+	for index := range inputValues {
+		inputValues[index] = float32(math.Sin(float64(index)*0.017) * 0.75)
+		residualValues[index] = float32(math.Cos(float64(index)*0.011) * 0.125)
+		weights[index] = 1
+	}
+	input, err := hipUploadGemma4Q4Float32Input(hipRuntime.driver, "hardware fused Q8 RMS input", inputValues)
+	core.RequireNoError(t, err)
+	defer input.Close()
+	residual, err := hipUploadGemma4Q4Float32Input(hipRuntime.driver, "hardware fused Q8 RMS residual", residualValues)
+	core.RequireNoError(t, err)
+	defer residual.Close()
+	residualOutput, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormResidualAddNormLaunch", "hardware fused Q8 residual output", count*4, count)
+	core.RequireNoError(t, err)
+	defer residualOutput.Close()
+	normOutput, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormResidualAddNormLaunch", "hardware fused Q8 norm output", count*4, count)
+	core.RequireNoError(t, err)
+	defer normOutput.Close()
+	q8Bytes := uint64(count/hipQ8_1BlockSize) * hipQ8_1BlockBytes
+	q8Output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormResidualAddNormLaunch", "hardware fused Q8 output", q8Bytes, int(q8Bytes/4))
+	core.RequireNoError(t, err)
+	defer q8Output.Close()
+	cfg := hipRMSNormDeviceWeightConfig{Count: count, Epsilon: 1e-6, WeightEncoding: hipRMSNormWeightEncodingNone}
+
+	core.RequireNoError(t, hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputQ8WithWorkspace(
+		context.Background(), hipRuntime.driver, input, residual, cfg, cfg, residualOutput, normOutput, q8Output, 1, nil,
+	))
+
+	wantResidual, err := hipReferenceRMSNorm(inputValues, weights, cfg.Epsilon)
+	core.RequireNoError(t, err)
+	for index := range wantResidual {
+		wantResidual[index] += residualValues[index]
+	}
+	wantNorm, err := hipReferenceRMSNorm(wantResidual, weights, cfg.Epsilon)
+	core.RequireNoError(t, err)
+	gotResidual, err := hipReadFloat32DeviceOutput(residualOutput, "rocm.hip.RMSNormResidualAddNormLaunch", "hardware fused Q8 residual output", count)
+	core.RequireNoError(t, err)
+	gotNorm, err := hipReadFloat32DeviceOutput(normOutput, "rocm.hip.RMSNormResidualAddNormLaunch", "hardware fused Q8 norm output", count)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, wantResidual, gotResidual, 1e-5)
+	assertFloat32SlicesNear(t, wantNorm, gotNorm, 1e-5)
+	q8Payload := make([]byte, q8Bytes)
+	core.RequireNoError(t, hipRuntime.driver.CopyDeviceToHost(q8Output.Pointer(), q8Payload))
+	for block := 0; block < count/hipQ8_1BlockSize; block++ {
+		blockOffset := block * hipQ8_1BlockBytes
+		scale := math.Float32frombits(binary.LittleEndian.Uint32(q8Payload[blockOffset:]))
+		core.AssertTrue(t, scale > 0, "hardware fused Q8 scale must be positive")
+		for lane := 0; lane < hipQ8_1BlockSize; lane++ {
+			index := block*hipQ8_1BlockSize + lane
+			got := scale * float32(int8(q8Payload[blockOffset+8+lane]))
+			if math.Abs(float64(got-gotNorm[index])) > float64(scale)*0.51+1e-6 {
+				t.Fatalf("hardware fused Q8 value[%d] = %g, want %g within half scale %g", index, got, gotNorm[index], scale)
+			}
+		}
+	}
+}
+
+func TestHIPHardwareGGUFQ4KQ8_1GateUp_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatal("native ROCm runtime is not available")
+	}
+	const (
+		cols = 256
+		rows = 4
+	)
+	input := make([]float32, cols)
+	for index := range input {
+		input[index] = float32((index*37)%101-50) / 64
+	}
+	gateRows := make([][]byte, rows)
+	upRows := make([][]byte, rows)
+	gatePayload := make([]byte, 0, rows*hipGGUFQ4KBlockBytes)
+	upPayload := make([]byte, 0, rows*hipGGUFQ4KBlockBytes)
+	for row := 0; row < rows; row++ {
+		gateRows[row] = hipHardwareGGUFQ4KRow(0.00390625, 0.001953125, row*11+1)
+		upRows[row] = hipHardwareGGUFQ4KRow(0.005859375, 0.0009765625, row*13+3)
+		gatePayload = append(gatePayload, gateRows[row]...)
+		upPayload = append(upPayload, upRows[row]...)
+	}
+	inputPayload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware input", inputPayload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+	quantizedBuffer, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware Q8_1 input", (cols/hipQ8_1BlockSize)*hipQ8_1BlockBytes, cols/hipQ8_1BlockSize)
+	core.RequireNoError(t, err)
+	defer quantizedBuffer.Close()
+	expandedGatePayload := hipHardwareExpandGGUFQ4KMetadata(t, gatePayload)
+	expandedUpPayload := hipHardwareExpandGGUFQ4KMetadata(t, upPayload)
+	expandedGateBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware expanded gate", expandedGatePayload, len(expandedGatePayload))
+	core.RequireNoError(t, err)
+	defer expandedGateBuffer.Close()
+	expandedUpBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware expanded up", expandedUpPayload, len(expandedUpPayload))
+	core.RequireNoError(t, err)
+	defer expandedUpBuffer.Close()
+	outputBuffer, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware output", rows*4, rows)
+	core.RequireNoError(t, err)
+	defer outputBuffer.Close()
+
+	core.RequireNoError(t, hipRunQ8_1QuantizeKernel(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, 1, cols, quantizedBuffer))
+	quantizedInput := hipHardwareQ8_1Reconstruct(input)
+	wantGate := make([]float32, rows)
+	wantUp := make([]float32, rows)
+	for row := 0; row < rows; row++ {
+		wantGate[row] = hipHardwareGGUFQ4KDot(quantizedInput, gateRows[row])
+		wantUp[row] = hipHardwareGGUFQ4KDot(quantizedInput, upRows[row])
+	}
+	want := expectedGELUTanhMultiply(wantGate, wantUp)
+	core.RequireNoError(t, hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometry(context.Background(), runtime.(*hipRuntime).driver, hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8, hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock, 1, hipGGUFQ4KExpandedBlockBytes, quantizedBuffer, expandedGateBuffer, expandedUpBuffer, rows, cols, 1, outputBuffer))
+	got, err := hipReadFloat32DeviceOutput(outputBuffer, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware output", rows)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 2e-4)
+
+	t.Run("expanded-pair-batch-row8", func(t *testing.T) {
+		const batch = 3
+		batchInput := make([]float32, batch*cols)
+		wantBatch := make([]float32, batch*rows)
+		for token := 0; token < batch; token++ {
+			values := batchInput[token*cols : (token+1)*cols]
+			for index := range values {
+				values[index] = float32((index*(token+3)*29)%113-56) / 72
+			}
+			quantized := hipHardwareQ8_1Reconstruct(values)
+			gate := make([]float32, rows)
+			up := make([]float32, rows)
+			for row := 0; row < rows; row++ {
+				gate[row] = hipHardwareGGUFQ4KDot(quantized, gateRows[row])
+				up[row] = hipHardwareGGUFQ4KDot(quantized, upRows[row])
+			}
+			copy(wantBatch[token*rows:], expectedGELUTanhMultiply(gate, up))
+		}
+		batchPayload, payloadErr := hipFloat32Payload(batchInput)
+		core.RequireNoError(t, payloadErr)
+		batchInputBuffer, uploadErr := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware batch input", batchPayload, len(batchInput))
+		core.RequireNoError(t, uploadErr)
+		defer batchInputBuffer.Close()
+		batchQuantized, allocateErr := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware batch Q8_1 input", batch*(cols/hipQ8_1BlockSize)*hipQ8_1BlockBytes, batch*(cols/hipQ8_1BlockSize))
+		core.RequireNoError(t, allocateErr)
+		defer batchQuantized.Close()
+		batchOutput, allocateErr := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware batch output", batch*rows*4, batch*rows)
+		core.RequireNoError(t, allocateErr)
+		defer batchOutput.Close()
+		core.RequireNoError(t, hipRunQ8_1QuantizeKernel(context.Background(), runtime.(*hipRuntime).driver, batchInputBuffer, batch, cols, batchQuantized))
+		core.RequireNoError(t, hipRunGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchKernel(context.Background(), runtime.(*hipRuntime).driver, batchQuantized, expandedGateBuffer, expandedUpBuffer, rows, cols, batch, batchOutput))
+		gotBatch, readErr := hipReadFloat32DeviceOutput(batchOutput, "rocm.hip.GGUFQ4KQ8_1GateUp", "hardware batch output", batch*rows)
+		core.RequireNoError(t, readErr)
+		assertFloat32SlicesNear(t, wantBatch, gotBatch, 2e-4)
+	})
+}
+
 func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
@@ -1109,6 +1310,27 @@ func hipHardwareGGUFQ4KDot(input []float32, row []byte) float32 {
 		sum += inputValue * value
 	}
 	return sum
+}
+
+func hipHardwareQ8_1Reconstruct(input []float32) []float32 {
+	result := make([]float32, len(input))
+	for blockStart := 0; blockStart < len(input); blockStart += hipQ8_1BlockSize {
+		blockEnd := blockStart + hipQ8_1BlockSize
+		maxAbs := float32(0)
+		for _, value := range input[blockStart:blockEnd] {
+			maxAbs = max(maxAbs, float32(math.Abs(float64(value))))
+		}
+		scale := maxAbs / 127
+		if scale == 0 {
+			continue
+		}
+		for index, value := range input[blockStart:blockEnd] {
+			quant := int(math.RoundToEven(float64(value / scale)))
+			quant = max(-127, min(127, quant))
+			result[blockStart+index] = scale * float32(quant)
+		}
+	}
+	return result
 }
 
 func hipHardwareGGUFQ5_1Row(scale, minimum float32, salt int) []byte {
@@ -1956,6 +2178,81 @@ func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group64_Good(t *testing.T) {
 	testHIPHardwareMLXAffineQ4ProjectionCols2560(t, 64, 2048)
 }
 
+func TestHIPHardwareMLXAffineQ4Projection12BDownMatchesGeneric_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows         = 3840
+		cols         = 15360
+		groupSize    = 32
+		bits         = 4
+		groups       = cols / groupSize
+		packedPerRow = cols / 8
+	)
+	input := make([]float32, cols)
+	weights := make([]uint32, rows*packedPerRow)
+	scales := make([]uint16, rows*groups)
+	biases := make([]uint16, rows*groups)
+	for col := range input {
+		input[col] = float32((col%31)-15) / 128
+	}
+	for row := range rows {
+		for packed := range packedPerRow {
+			var word uint32
+			for lane := range 8 {
+				quant := uint32((row*3 + packed*5 + lane*7) & 0x0f)
+				word |= quant << (uint32(lane) * 4)
+			}
+			weights[row*packedPerRow+packed] = word
+		}
+		for group := range groups {
+			scale := float32((row+group)%7+1) / 2048
+			scales[row*groups+group] = hipFloat32ToBFloat16(scale)
+			biases[row*groups+group] = hipFloat32ToBFloat16(-3 * scale)
+		}
+	}
+	req := hipMLXQ4ProjectionRequest{
+		Input: input, Weight: weights, Scales: scales, Biases: biases,
+		Rows: rows, Cols: cols, GroupSize: groupSize, Bits: bits,
+	}
+	buffers, err := req.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer buffers.Close()
+	cfg := hipMLXQ4DeviceWeightConfig{
+		WeightPointer: buffers.Weight.Pointer(), ScalePointer: buffers.Scales.Pointer(), BiasPointer: buffers.Biases.Pointer(),
+		WeightBytes: buffers.Weight.SizeBytes(), ScaleBytes: buffers.Scales.SizeBytes(), BiasBytes: buffers.Biases.SizeBytes(),
+		Rows: rows, Cols: cols, GroupSize: groupSize, Bits: bits,
+	}
+
+	previousRoute := hipMLXQ4Projection12BDownRouteEnabled
+	t.Cleanup(func() {
+		hipMLXQ4Projection12BDownRouteEnabled = previousRoute
+	})
+	hipMLXQ4Projection12BDownRouteEnabled = false
+	core.RequireNoError(t, hipRunMLXQ4ProjectionKernelWithDeviceInputOutput(context.Background(), hipRuntime.driver, buffers.Input, cfg, buffers.Output))
+	generic, err := buffers.ReadOutput()
+	core.RequireNoError(t, err)
+
+	hipMLXQ4Projection12BDownRouteEnabled = true
+	core.RequireNoError(t, hipRunMLXQ4ProjectionKernelWithDeviceInputOutput(context.Background(), hipRuntime.driver, buffers.Input, cfg, buffers.Output))
+	exact, err := buffers.ReadOutput()
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, generic, exact, 0.001)
+}
+
 func testHIPHardwareMLXAffineQ4ProjectionCols2560(t *testing.T, groupSize, rows int) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
@@ -2268,11 +2565,18 @@ func TestHIPHardwareMLXAffineQ4GELUTanh12BRow8MatchesRow16_Good(t *testing.T) {
 
 	previousRoute := hipMLXQ4GELUTanh12BGateUpRouteEnabled
 	previousGeometry := hipMLXQ4GELUTanh12BGateUpGeometry
-	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
 	t.Cleanup(func() {
 		hipMLXQ4GELUTanh12BGateUpRouteEnabled = previousRoute
 		hipMLXQ4GELUTanh12BGateUpGeometry = previousGeometry
 	})
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled = false
+	genericOutput, err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(context.Background(), hipRuntime.driver, gateBuffers.Input, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers))
+	core.RequireNoError(t, err)
+	generic, err := hipReadFloat32DeviceOutput(genericOutput, hipGemma4Q4Layer0Operation, "hardware 12B generic GELU output", rows)
+	genericOutput.Close()
+	core.RequireNoError(t, err)
+
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
 	hipMLXQ4GELUTanh12BGateUpGeometry = ""
 	row16Output, err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(context.Background(), hipRuntime.driver, gateBuffers.Input, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers))
 	core.RequireNoError(t, err)
@@ -2287,6 +2591,7 @@ func TestHIPHardwareMLXAffineQ4GELUTanh12BRow8MatchesRow16_Good(t *testing.T) {
 	row8Output.Close()
 	core.RequireNoError(t, err)
 
+	assertFloat32SlicesNear(t, generic, row8, 0.001)
 	assertFloat32SlicesNear(t, row16, row8, 0.001)
 }
 
@@ -3060,6 +3365,82 @@ func TestNativeDecodeSmokeKernelStatus_Good(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestHIPGemma4Q4PrefillSharedSuffixSkipMatchesFullStack_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_MODEL_PATH"))
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_MODEL_PATH to a Gemma4 E-family MLX affine model pack")
+	}
+
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModel(modelPath, inference.WithContextLen(2048)))
+	if err != nil {
+		t.Fatalf("LoadModel(%q): %v", modelPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native model = %T, want linked *hipLoadedModel", rocmLoaded.native)
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded Gemma4 forward config: %v", err)
+	}
+	sharedSuffix := hipGemma4Q4PrefillSharedSuffixStart(hipGemma4Q4SharedKVSourceByLayer(cfg))
+	if sharedSuffix <= 0 {
+		t.Skipf("model has no clean trailing KV-shared suffix: sources=%v", cfg.SharedKVSources)
+	}
+
+	prefix := make([]int32, 100)
+	appendTokens := make([]int32, 1000)
+	for index := range prefix {
+		prefix[index] = []int32{2, 10979}[index&1]
+	}
+	for index := range appendTokens {
+		appendTokens[index] = []int32{2, 10979}[index&1]
+	}
+	run := func(disableSkip bool) []int32 {
+		engineConfig := loaded.gemma4Q4EngineConfig()
+		engineConfig.DisablePrefillSharedSuffixSkip = disableSkip
+		var retained *hipGemma4Q4DeviceDecodeState
+		prefixStream, prefixErr := hipGemma4Q4GenerateTokenSeqWithState(
+			context.Background(), loaded, cfg, prefix,
+			inference.GenerateConfig{MaxTokens: 1}, engineConfig, nil,
+			func(state *hipGemma4Q4DeviceDecodeState) error {
+				retained = state
+				return nil
+			},
+		)
+		for range prefixStream {
+		}
+		if err := prefixErr(); err != nil {
+			t.Fatalf("prefix Generate(disableSkip=%v): %v", disableSkip, err)
+		}
+		if retained == nil {
+			t.Fatalf("prefix Generate(disableSkip=%v) retained no device state", disableSkip)
+		}
+		stream, streamErr := hipGemma4Q4GenerateTokenSeqWithState(
+			context.Background(), loaded, cfg, appendTokens,
+			inference.GenerateConfig{MaxTokens: 8}, engineConfig, retained, nil,
+		)
+		tokens := inferenceTokenIDs(collectInferenceTokens(stream))
+		if err := streamErr(); err != nil {
+			t.Fatalf("append Generate(disableSkip=%v): %v", disableSkip, err)
+		}
+		return tokens
+	}
+
+	skipped := run(false)
+	full := run(true)
+	core.AssertEqual(t, full, skipped)
+	t.Logf("shared suffix starts at layer %d; exact tokens=%v", sharedSuffix, skipped)
 }
 
 func TestHIPHardwareGemma4BF16Generate_Good(t *testing.T) {
@@ -5714,29 +6095,31 @@ func assertLoadedGemma4MLXQ4EmbeddingLookupSmoke(t *testing.T, model *hipLoadedM
 		!hipMLXAffineSupportedBits(model.modelInfo.QuantBits) {
 		return nil
 	}
-	bits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
+	preferredBits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
 	weight, ok := model.tensors["language_model.model.embed_tokens.weight"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens packed weight tensor", bits)
+		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens packed weight tensor", preferredBits)
 	}
 	scales, ok := model.tensors["language_model.model.embed_tokens.scales"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens scales tensor", bits)
+		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens scales tensor", preferredBits)
 	}
 	biases, ok := model.tensors["language_model.model.embed_tokens.biases"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens biases tensor", bits)
+		t.Fatalf("loaded Gemma4 q%d model is missing embed_tokens biases tensor", preferredBits)
 	}
 	vocab := model.modelInfo.VocabSize
 	hidden := model.modelInfo.HiddenSize
-	groupSize := model.modelInfo.QuantGroup
-	if groupSize == 0 {
-		groupSize = 64
-	}
-	packedPerRow, err := hipMLXAffinePackedCols(hidden, bits)
+	bits, rows, cols, groupSize, groups, packedPerRow, err := hipInferMLXAffineBitsFromTensorShapes(
+		weight,
+		scales,
+		biases,
+		model.modelInfo.QuantGroup,
+		model.modelInfo.QuantBits,
+		"embed_tokens hardware smoke",
+	)
 	core.RequireNoError(t, err)
-	groups := hidden / groupSize
-	if vocab <= 0 || hidden <= 0 || groupSize <= 0 || hidden%groupSize != 0 {
+	if vocab <= 0 || hidden <= 0 || rows != vocab || cols != hidden || groupSize <= 0 || hidden%groupSize != 0 {
 		t.Fatalf("loaded Gemma4 q%d dimensions vocab=%d hidden=%d group=%d are not a valid affine layout", bits, vocab, hidden, groupSize)
 	}
 	if weight.info.TypeName != "U32" ||
@@ -6140,7 +6523,7 @@ func assertLoadedGemma4MLXQ4Layer0Smoke(t *testing.T, model *hipLoadedModel, emb
 		core.RequireNoError(t, deviceState.Close())
 		t.Logf("Gemma4 q4 %d-layer greedy decode prompt=%v generated tokens=%v", decodeLayers, promptTokens, hipGemma4Q4GreedyTokenIDs(decode.Generated))
 	}
-	if len(allLayers.Layers) > 15 {
+	if len(allLayers.Layers) == productionLaneGemma4E2BLayers && hidden == productionLaneGemma4E2BHiddenSize {
 		for _, check := range []struct {
 			layer        int
 			headDim      int
@@ -6600,22 +6983,24 @@ func assertLoadedGemma4MLXQ4AttentionProjectionSmoke(t *testing.T, model *hipLoa
 	if len(layerInput) != hidden {
 		t.Fatalf("Gemma4 q4 attention input length = %d, want %d", len(layerInput), hidden)
 	}
+	cfg, err := model.loadedGemma4Q4Layer0Config()
+	core.RequireNoError(t, err)
 	qOutput := assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "q_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.q_proj",
-		rows:       2048,
+		rows:       cfg.QueryProjection.Rows,
 		cols:       hidden,
 	}, layerInput)
 	kOutput := assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "k_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.k_proj",
-		rows:       256,
+		rows:       cfg.KeyProjection.Rows,
 		cols:       hidden,
 	}, layerInput)
 	vOutput := assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "v_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.v_proj",
-		rows:       256,
+		rows:       cfg.ValueProjection.Rows,
 		cols:       hidden,
 	}, layerInput)
 	return gemma4BF16AttentionProjectionOutputs{Query: qOutput, Key: kOutput, Value: vOutput}
@@ -6633,10 +7018,12 @@ func assertLoadedGemma4MLXQ4ProjectionSmoke(t *testing.T, model *hipLoadedModel)
 	for index := range input {
 		input[index] = float32((index%11)-5) * 0.0625
 	}
+	cfg, err := model.loadedGemma4Q4Layer0Config()
+	core.RequireNoError(t, err)
 	return assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t, model, gemma4MLXQ4ProjectionSpec{
 		label:      "q_proj",
 		tensorBase: "language_model.model.layers.0.self_attn.q_proj",
-		rows:       2048,
+		rows:       cfg.QueryProjection.Rows,
 		cols:       hidden,
 	}, input)
 }
@@ -6653,26 +7040,31 @@ func assertLoadedGemma4MLXQ4ProjectionTensorSmoke(t *testing.T, model *hipLoaded
 	if len(input) != spec.cols {
 		t.Fatalf("%s q4 input length = %d, want cols %d", spec.label, len(input), spec.cols)
 	}
-	bits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
+	preferredBits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
 	weight, ok := model.tensors[spec.tensorBase+".weight"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing %s packed weight tensor", bits, spec.label)
+		t.Fatalf("loaded Gemma4 q%d model is missing %s packed weight tensor", preferredBits, spec.label)
 	}
 	scales, ok := model.tensors[spec.tensorBase+".scales"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing %s scales tensor", bits, spec.label)
+		t.Fatalf("loaded Gemma4 q%d model is missing %s scales tensor", preferredBits, spec.label)
 	}
 	biases, ok := model.tensors[spec.tensorBase+".biases"]
 	if !ok {
-		t.Fatalf("loaded Gemma4 q%d model is missing %s biases tensor", bits, spec.label)
+		t.Fatalf("loaded Gemma4 q%d model is missing %s biases tensor", preferredBits, spec.label)
 	}
-	groupSize := model.modelInfo.QuantGroup
-	if groupSize == 0 {
-		groupSize = 64
-	}
-	packedPerRow, err := hipMLXAffinePackedCols(spec.cols, bits)
+	bits, rows, cols, groupSize, groups, packedPerRow, err := hipInferMLXAffineBitsFromTensorShapes(
+		weight,
+		scales,
+		biases,
+		model.modelInfo.QuantGroup,
+		model.modelInfo.QuantBits,
+		spec.label+" hardware smoke",
+	)
 	core.RequireNoError(t, err)
-	groups := spec.cols / groupSize
+	if rows != spec.rows || cols != spec.cols {
+		t.Fatalf("q%d %s inferred shape = [%d,%d], want [%d,%d]", bits, spec.label, rows, cols, spec.rows, spec.cols)
+	}
 	if weight.info.TypeName != "U32" ||
 		len(weight.info.Dimensions) != 2 ||
 		weight.info.Dimensions[0] != uint64(spec.rows) ||
@@ -7860,9 +8252,11 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 	}
 	previousGQA2 := hipAttentionHeadsBatchChunkedGQA2Enabled
 	previousGQA4 := hipAttentionHeadsBatchChunkedGQA4Enabled
+	previousGQA8 := hipAttentionHeadsBatchChunkedGQA8Enabled
 	t.Cleanup(func() {
 		hipAttentionHeadsBatchChunkedGQA2Enabled = previousGQA2
 		hipAttentionHeadsBatchChunkedGQA4Enabled = previousGQA4
+		hipAttentionHeadsBatchChunkedGQA8Enabled = previousGQA8
 	})
 
 	cases := []struct {
@@ -7884,6 +8278,24 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 			keyHeads:   1,
 			queryCount: 2,
 			blockSize:  hipGemma4Q4DeviceKVBlockSize(),
+		},
+		{
+			name:       "descriptor-pages-12b-global-dim512-gqa8",
+			dim:        512,
+			tokenCount: hipAttentionHeadsBatchChunkedGQA8MinChunks*hipAttentionHeadsDefaultChunkSize + 5,
+			headCount:  16,
+			keyHeads:   1,
+			queryCount: 2,
+			blockSize:  hipGemma4Q4DeviceKVBlockSize(),
+		},
+		{
+			name:       "direct-pages-26b-global-dim512-gqa8-deep",
+			dim:        512,
+			tokenCount: hipAttentionHeadsDeepChunkMinTokens + 5,
+			headCount:  16,
+			keyHeads:   2,
+			queryCount: 1,
+			blockSize:  1,
 		},
 		{
 			name:       "descriptor-pages-12b-global-dim512-gqa2",
@@ -7974,9 +8386,10 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 				WindowSize:       tc.windowSize,
 				Scale:            1,
 			}
-			run := func(enableGQA2, enableGQA4, useChunked bool, label string) []float32 {
+			run := func(enableGQA2, enableGQA4, enableGQA8, useChunked bool, label string) []float32 {
 				hipAttentionHeadsBatchChunkedGQA2Enabled = enableGQA2
 				hipAttentionHeadsBatchChunkedGQA4Enabled = enableGQA4
+				hipAttentionHeadsBatchChunkedGQA8Enabled = enableGQA8
 				output, err := hipAllocateByteBuffer(hipRuntime.driver, operation, label, uint64(len(queryValues)*4), len(queryValues))
 				core.RequireNoError(t, err)
 				defer output.Close()
@@ -7990,18 +8403,23 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing
 				core.RequireNoError(t, err)
 				return got
 			}
-			v2 := run(false, false, true, "v2 hardware output")
-			gqa2 := run(true, false, true, "GQA2 hardware output")
+			v2 := run(false, false, false, true, "v2 hardware output")
+			gqa2 := run(true, false, false, true, "GQA2 hardware output")
 			assertFloat32SlicesNear(t, v2, gqa2, 0.0001)
 			if tc.fullCaps {
-				fallback := run(false, false, false, "capped fallback hardware output")
+				fallback := run(false, false, false, false, "capped fallback hardware output")
 				assertFloat32SlicesNear(t, fallback, gqa2, 0.0001)
 			}
 			candidate := gqa2
 			if tc.headCount%tc.keyHeads == 0 && (tc.headCount/tc.keyHeads)%4 == 0 {
-				gqa4 := run(false, true, true, "GQA4 hardware output")
+				gqa4 := run(false, true, false, true, "GQA4 hardware output")
 				assertFloat32SlicesNear(t, v2, gqa4, 0.0001)
 				candidate = gqa4
+			}
+			if tc.headCount >= 16 && tc.headCount%tc.keyHeads == 0 && (tc.headCount/tc.keyHeads)%8 == 0 {
+				gqa8 := run(false, false, true, true, "GQA8 hardware output")
+				assertFloat32SlicesNear(t, v2, gqa8, 0.0001)
+				candidate = gqa8
 			}
 
 			restoredKeys, restoredValues, err := cache.Restore(0, tc.tokenCount)
@@ -8126,6 +8544,235 @@ func TestHIPHardwareAttentionHeadsIncrementalGQA2MatchesPerHead_Good(t *testing.
 }
 
 func BenchmarkHIPHardwareAttentionHeadsBatchChunked_E2B32K(b *testing.B) {
+	benchmarkHIPHardwareAttentionHeadsBatchChunked(b, 8, 1, 32*1024)
+}
+
+func BenchmarkHIPHardwareAttentionHeadsBatchChunked_12B2K(b *testing.B) {
+	benchmarkHIPHardwareAttentionHeadsBatchChunked(b, 16, 1, 2*1024)
+}
+
+func BenchmarkHIPHardwareAttentionHeadsBatchChunked_12B8K(b *testing.B) {
+	benchmarkHIPHardwareAttentionHeadsBatchChunked(b, 16, 1, 8*1024)
+}
+
+func BenchmarkHIPHardwareAttentionHeadsBatchChunked_12B16K(b *testing.B) {
+	benchmarkHIPHardwareAttentionHeadsBatchChunked(b, 16, 1, 16*1024)
+}
+
+func BenchmarkHIPHardwareAttentionHeadsBatchChunked_12B32K(b *testing.B) {
+	benchmarkHIPHardwareAttentionHeadsBatchChunked(b, 16, 1, 32*1024)
+}
+
+func BenchmarkHIPHardwareAttentionHeadsBatchChunked_26B32K(b *testing.B) {
+	benchmarkHIPHardwareAttentionHeadsBatchChunked(b, 16, 2, 32*1024)
+}
+
+func BenchmarkHIPHardwareGGUFQ4KQ8_1GateUp_12B(b *testing.B) {
+	if os.Getenv("GO_ROCM_RUN_HIP_Q4K_BENCHMARK") != "1" {
+		b.Skip("set GO_ROCM_RUN_HIP_Q4K_BENCHMARK=1 to run the Q4_K Q8_1 benchmark")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		b.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		b.Fatal("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		b.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+	const (
+		rows = 15360
+		cols = 3840
+	)
+	inputValues := make([]float32, cols)
+	for index := range inputValues {
+		inputValues[index] = float32(math.Sin(float64(index)*0.017) * 0.125)
+	}
+	inputPayload, err := hipFloat32Payload(inputValues)
+	core.RequireNoError(b, err)
+	blocksPerTensor := rows * (cols / hipGGUFQ4KBlockSize)
+	gatePayload := bytes.Repeat(hipHardwareGGUFQ4KRow(0.00390625, 0.001953125, 5), blocksPerTensor)
+	upPayload := bytes.Repeat(hipHardwareGGUFQ4KRow(0.005859375, 0.0009765625, 11), blocksPerTensor)
+	const operation = "rocm.hip.GGUFQ4KQ8_1GateUpBenchmark"
+	input, err := hipUploadByteBuffer(hipRuntime.driver, operation, "12B input", inputPayload, len(inputValues))
+	core.RequireNoError(b, err)
+	defer input.Close()
+	quantized, err := hipAllocateByteBuffer(hipRuntime.driver, operation, "12B Q8_1 input", (cols/hipQ8_1BlockSize)*hipQ8_1BlockBytes, cols/hipQ8_1BlockSize)
+	core.RequireNoError(b, err)
+	defer quantized.Close()
+	gate, err := hipUploadByteBuffer(hipRuntime.driver, operation, "12B Q4_K gate", gatePayload, len(gatePayload))
+	core.RequireNoError(b, err)
+	defer gate.Close()
+	up, err := hipUploadByteBuffer(hipRuntime.driver, operation, "12B Q4_K up", upPayload, len(upPayload))
+	core.RequireNoError(b, err)
+	defer up.Close()
+	expandedBytes := uint64(blocksPerTensor * hipGGUFQ4KExpandedBlockBytes)
+	expandedGate, err := hipAllocateByteBuffer(hipRuntime.driver, operation, "12B expanded Q4_K gate", expandedBytes, blocksPerTensor)
+	core.RequireNoError(b, err)
+	defer expandedGate.Close()
+	expandedUp, err := hipAllocateByteBuffer(hipRuntime.driver, operation, "12B expanded Q4_K up", expandedBytes, blocksPerTensor)
+	core.RequireNoError(b, err)
+	defer expandedUp.Close()
+	core.RequireNoError(b, hipRunGGUFQ4KExpandMetadataKernel(context.Background(), hipRuntime.driver, gate, uint64(len(gatePayload)), expandedGate, blocksPerTensor))
+	core.RequireNoError(b, hipRunGGUFQ4KExpandMetadataKernel(context.Background(), hipRuntime.driver, up, uint64(len(upPayload)), expandedUp, blocksPerTensor))
+	gateAffine, err := hipRepackGGUFQ4KToAffine(nativeTensorInfo{Dimensions: []uint64{cols, rows}, Type: hipGGUFQ4KTensorType, TypeName: "Q4_K", ByteSize: uint64(len(gatePayload))}, gatePayload)
+	core.RequireNoError(b, err)
+	upAffine, err := hipRepackGGUFQ4KToAffine(nativeTensorInfo{Dimensions: []uint64{cols, rows}, Type: hipGGUFQ4KTensorType, TypeName: "Q4_K", ByteSize: uint64(len(upPayload))}, upPayload)
+	core.RequireNoError(b, err)
+	uploadAffine := func(label string, payload hipGGUFQ4KAffinePayload) (hipMLXQ4DeviceWeightConfig, []*hipDeviceByteBuffer) {
+		b.Helper()
+		weights, uploadErr := hipUploadByteBuffer(hipRuntime.driver, operation, label+" weights", payload.Weights, len(payload.Weights)/4)
+		core.RequireNoError(b, uploadErr)
+		scales, uploadErr := hipUploadByteBuffer(hipRuntime.driver, operation, label+" scales", payload.Scales, len(payload.Scales)/2)
+		core.RequireNoError(b, uploadErr)
+		biases, uploadErr := hipUploadByteBuffer(hipRuntime.driver, operation, label+" biases", payload.Biases, len(payload.Biases)/2)
+		core.RequireNoError(b, uploadErr)
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: weights.Pointer(), ScalePointer: scales.Pointer(), BiasPointer: biases.Pointer(),
+			WeightBytes: weights.SizeBytes(), ScaleBytes: scales.SizeBytes(), BiasBytes: biases.SizeBytes(),
+			Rows: payload.Rows, Cols: payload.Cols, GroupSize: payload.GroupSize, Bits: payload.Bits,
+		}, []*hipDeviceByteBuffer{weights, scales, biases}
+	}
+	gateAffineConfig, gateAffineBuffers := uploadAffine("12B affine gate", gateAffine)
+	for _, buffer := range gateAffineBuffers {
+		defer buffer.Close()
+	}
+	upAffineConfig, upAffineBuffers := uploadAffine("12B affine up", upAffine)
+	for _, buffer := range upAffineBuffers {
+		defer buffer.Close()
+	}
+	output, err := hipAllocateByteBuffer(hipRuntime.driver, operation, "12B gate/up output", rows*4, rows)
+	core.RequireNoError(b, err)
+	defer output.Close()
+	for _, geometry := range []struct {
+		name         string
+		kernel       string
+		rowsPerBlock uint32
+		blockBytes   uint64
+		gate         *hipDeviceByteBuffer
+		up           *hipDeviceByteBuffer
+	}{
+		{name: "expanded-pair-row8", kernel: hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8, rowsPerBlock: hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock, blockBytes: hipGGUFQ4KExpandedBlockBytes, gate: expandedGate, up: expandedUp},
+	} {
+		b.Run(geometry.name, func(b *testing.B) {
+			run := func() {
+				b.Helper()
+				core.RequireNoError(b, hipRunQ8_1QuantizeKernel(context.Background(), hipRuntime.driver, input, 1, cols, quantized))
+				core.RequireNoError(b, hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometry(context.Background(), hipRuntime.driver, geometry.kernel, geometry.rowsPerBlock, 1, geometry.blockBytes, quantized, geometry.gate, geometry.up, rows, cols, 1, output))
+			}
+			run()
+			_, readErr := hipReadFloat32DeviceOutput(output, operation, "12B warmup output", rows)
+			core.RequireNoError(b, readErr)
+			b.SetBytes(int64(geometry.gate.SizeBytes() + geometry.up.SizeBytes()))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for iteration := 0; iteration < b.N; iteration++ {
+				run()
+			}
+			got, readErr := hipReadFloat32DeviceOutput(output, operation, "12B timed output", rows)
+			core.RequireNoError(b, readErr)
+			if len(got) != rows || math.IsNaN(float64(got[0])) {
+				b.Fatalf("12B gate/up output is invalid: len=%d first=%v", len(got), got[0])
+			}
+		})
+	}
+	b.Run("affine-row8", func(b *testing.B) {
+		previousRoute := hipMLXQ4GELUTanh12BGateUpRouteEnabled
+		previousGeometry := hipMLXQ4GELUTanh12BGateUpGeometry
+		hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
+		hipMLXQ4GELUTanh12BGateUpGeometry = "row8"
+		b.Cleanup(func() {
+			hipMLXQ4GELUTanh12BGateUpRouteEnabled = previousRoute
+			hipMLXQ4GELUTanh12BGateUpGeometry = previousGeometry
+		})
+		run := func() {
+			b.Helper()
+			core.RequireNoError(b, hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutput(context.Background(), hipRuntime.driver, input, gateAffineConfig, upAffineConfig, output))
+		}
+		run()
+		_, readErr := hipReadFloat32DeviceOutput(output, operation, "12B affine warmup output", rows)
+		core.RequireNoError(b, readErr)
+		b.SetBytes(int64(gateAffineConfig.WeightBytes + gateAffineConfig.ScaleBytes + gateAffineConfig.BiasBytes + upAffineConfig.WeightBytes + upAffineConfig.ScaleBytes + upAffineConfig.BiasBytes))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			run()
+		}
+		got, readErr := hipReadFloat32DeviceOutput(output, operation, "12B affine timed output", rows)
+		core.RequireNoError(b, readErr)
+		if len(got) != rows || math.IsNaN(float64(got[0])) {
+			b.Fatalf("12B affine gate/up output is invalid: len=%d first=%v", len(got), got[0])
+		}
+	})
+
+	const prefillBatch = hipGemma4Q4PrefillDefaultUBatchTokens
+	prefillValues := make([]float32, prefillBatch*cols)
+	for token := 0; token < prefillBatch; token++ {
+		for col := 0; col < cols; col++ {
+			prefillValues[token*cols+col] = float32(math.Sin(float64(token*cols+col)*0.00017) * 0.125)
+		}
+	}
+	prefillPayload, err := hipFloat32Payload(prefillValues)
+	core.RequireNoError(b, err)
+	prefillInput, err := hipUploadByteBuffer(hipRuntime.driver, operation, "12B prefill input", prefillPayload, len(prefillValues))
+	core.RequireNoError(b, err)
+	defer prefillInput.Close()
+	prefillQuantized, err := hipAllocateByteBuffer(hipRuntime.driver, operation, "12B prefill Q8_1 input", prefillBatch*(cols/hipQ8_1BlockSize)*hipQ8_1BlockBytes, prefillBatch*(cols/hipQ8_1BlockSize))
+	core.RequireNoError(b, err)
+	defer prefillQuantized.Close()
+	prefillOutput, err := hipAllocateByteBuffer(hipRuntime.driver, operation, "12B prefill gate/up output", prefillBatch*rows*4, prefillBatch*rows)
+	core.RequireNoError(b, err)
+	defer prefillOutput.Close()
+	for _, geometry := range []struct {
+		name           string
+		kernel         string
+		tokensPerBlock uint32
+	}{
+		{name: "prefill512-expanded-pair-batch16-row8", kernel: hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8, tokensPerBlock: hipGGUFQ4KQ8_1GateUpBatchTokensPerBlock},
+	} {
+		b.Run(geometry.name, func(b *testing.B) {
+			synchronizer, ok := hipRuntime.driver.(nativeHIPDeviceSynchronizer)
+			if !ok {
+				b.Fatal("HIP driver does not support device synchronization")
+			}
+			run := func() {
+				b.Helper()
+				core.RequireNoError(b, hipRunQ8_1QuantizeKernel(context.Background(), hipRuntime.driver, prefillInput, prefillBatch, cols, prefillQuantized))
+				core.RequireNoError(b, hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometry(context.Background(), hipRuntime.driver, geometry.kernel, hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock, geometry.tokensPerBlock, hipGGUFQ4KExpandedBlockBytes, prefillQuantized, expandedGate, expandedUp, rows, cols, prefillBatch, prefillOutput))
+				core.RequireNoError(b, synchronizer.DeviceSynchronize())
+			}
+			run()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for iteration := 0; iteration < b.N; iteration++ {
+				run()
+			}
+			b.ReportMetric(float64(prefillBatch)*float64(b.N)/b.Elapsed().Seconds(), "tokens/s")
+		})
+	}
+	b.Run("prefill512-affine", func(b *testing.B) {
+		synchronizer, ok := hipRuntime.driver.(nativeHIPDeviceSynchronizer)
+		if !ok {
+			b.Fatal("HIP driver does not support device synchronization")
+		}
+		run := func() {
+			b.Helper()
+			core.RequireNoError(b, hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(context.Background(), hipRuntime.driver, prefillInput, gateAffineConfig, upAffineConfig, prefillBatch, prefillOutput))
+			core.RequireNoError(b, synchronizer.DeviceSynchronize())
+		}
+		run()
+		b.ReportAllocs()
+		b.ResetTimer()
+		for iteration := 0; iteration < b.N; iteration++ {
+			run()
+		}
+		b.ReportMetric(float64(prefillBatch)*float64(b.N)/b.Elapsed().Seconds(), "tokens/s")
+	})
+}
+
+func benchmarkHIPHardwareAttentionHeadsBatchChunked(b *testing.B, headCount, keyHeads, tokenCount int) {
 	if os.Getenv("GO_ROCM_RUN_HIP_ATTENTION_BENCHMARK") != "1" {
 		b.Skip("set GO_ROCM_RUN_HIP_ATTENTION_BENCHMARK=1 to run the deep attention benchmark")
 	}
@@ -8141,12 +8788,7 @@ func BenchmarkHIPHardwareAttentionHeadsBatchChunked_E2B32K(b *testing.B) {
 		b.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
 	}
 
-	const (
-		dim        = 512
-		tokenCount = 32 * 1024
-		headCount  = 8
-		keyHeads   = 1
-	)
+	const dim = 512
 	kvWidth := keyHeads * dim
 	keyValues := make([]float32, tokenCount*kvWidth)
 	valueValues := make([]float32, tokenCount*kvWidth)
@@ -8197,7 +8839,7 @@ func BenchmarkHIPHardwareAttentionHeadsBatchChunked_E2B32K(b *testing.B) {
 	core.RequireNoError(b, err)
 
 	b.ReportAllocs()
-	b.ReportMetric(tokenCount, "context_tokens/op")
+	b.ReportMetric(float64(tokenCount), "context_tokens/op")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		core.RequireNoError(b, hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(context.Background(), hipRuntime.driver, req, query, output, workspace))

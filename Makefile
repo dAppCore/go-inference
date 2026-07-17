@@ -112,10 +112,13 @@ HIP_CPU_INCLUDE ?= /opt/hip-cpu/include
 HIP_CPU_CXX ?= g++
 HIP_CPU_AARCH64_CXX ?= aarch64-linux-gnu-g++
 HIP_CPU_STD ?= c++20
+HIP_PRODUCTION_GGUF ?=
+HIP_PRODUCTION_HSACO ?= $(AMD_KERNEL_MODULE)
+HIP_PRODUCTION_MOE ?= 0
 
 .PHONY: all help build build-cli lem-rocm lthn-rocm named-binaries release-binaries release-dependency-guard release-artifacts dist static-hip-binaries rocr-cmake-shims hsa-static-archive hip-static-archive require-static-hip-archive hip-link-info lem-amd lem-cuda lem-cpu-x86 lem-cpu-aarch64 lthn-amd lthn-cuda lthn-cpu-x86 lthn-cpu-aarch64 test test-cli test-all clean \
 	hip hip-amd hip-nvidia hip-cpu hip-cpu-x86_64 hip-cpu-aarch64 \
-	test-hip-amd test-hip-nvidia test-hip-cpu test-hip-cpu-runtime test-hip-cpu-kernel-runtime test-zluda-cuda \
+	test-hip-amd test-hip-nvidia test-hip-cpu test-hip-cpu-runtime test-hip-cpu-kernel-runtime test-zluda-cuda test-hip-production \
 	compile-matrix test-matrix
 
 all: build
@@ -131,6 +134,7 @@ help:
 		'  named-binaries     build all named release binaries' \
 		'  release-artifacts  build archives and checksums under $(DIST_DIR)' \
 		'  test               run the Go module test suite' \
+		'  test-hip-production run the AMD Gemma4 release receipt (set HIP_PRODUCTION_GGUF)' \
 		'  test-matrix        run the host suite plus every hip toolchain smoke, skipping what is absent' \
 		'  clean              remove $(BUILD_DIR)'
 
@@ -230,11 +234,12 @@ rocr-cmake-shims:
 		'  set_target_properties(llvm-objcopy PROPERTIES IMPORTED_LOCATION "$(ROCR_LLVM_OBJCOPY)")' \
 		'endif()' > "$(ROCR_CMAKE_SHIM_DIR_ABS)/llvm/LLVMConfig.cmake"
 
-hsa-static-archive: rocr-cmake-shims
-	@test -d "$(ROCR_RUNTIME_SOURCE_DIR_ABS)" || { echo "missing ROCr runtime source submodule: $(ROCR_RUNTIME_SOURCE_DIR)"; exit 1; }
+hsa-static-archive:
+	@test -f "$(ROCR_RUNTIME_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "ROCr runtime source submodule is not initialized: $(ROCR_RUNTIME_SOURCE_DIR)"; exit 1; }
 	@test -n "$(DRM_AMDGPU_STATIC_ARCHIVE)" || { echo "missing static libdrm_amdgpu.a; install libdrm-amdgpu-dev"; exit 1; }
 	@test -n "$(DRM_STATIC_ARCHIVE)" || { echo "missing static libdrm.a; install libdrm-dev"; exit 1; }
 	@test -n "$(ELF_STATIC_ARCHIVE)" || { echo "missing static libelf.a; install libelf-dev"; exit 1; }
+	$(MAKE) --no-print-directory rocr-cmake-shims
 	$(CMAKE) -S "$(ROCR_RUNTIME_SOURCE_DIR_ABS)" -B "$(ROCR_RUNTIME_BUILD_DIR_ABS)" -G "$(CMAKE_GENERATOR)" \
 		-DBUILD_SHARED_LIBS=OFF \
 		-DClang_DIR="$(ROCR_CMAKE_SHIM_DIR_ABS)/clang" \
@@ -247,8 +252,8 @@ hsa-static-archive: rocr-cmake-shims
 	@test -s "$(ROCR_HSAKMT_STATIC_ARCHIVE)" || { echo "expected static HSAKMT archive was not produced: $(ROCR_HSAKMT_STATIC_ARCHIVE)"; exit 1; }
 
 hip-static-archive:
-	@test -d "$(HIP_API_SOURCE_DIR_ABS)" || { echo "missing HIP API source submodule: $(HIP_API_SOURCE_DIR)"; exit 1; }
-	@test -d "$(HIP_RUNTIME_SOURCE_DIR_ABS)" || { echo "missing HIP runtime source submodule: $(HIP_RUNTIME_SOURCE_DIR)"; exit 1; }
+	@test -f "$(HIP_API_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "HIP API source submodule is not initialized: $(HIP_API_SOURCE_DIR)"; exit 1; }
+	@test -f "$(HIP_RUNTIME_SOURCE_DIR_ABS)/CMakeLists.txt" || { echo "HIP runtime source submodule is not initialized: $(HIP_RUNTIME_SOURCE_DIR)"; exit 1; }
 	$(CMAKE) -S "$(HIP_RUNTIME_SOURCE_DIR_ABS)" -B "$(HIP_RUNTIME_BUILD_DIR_ABS)" -G "$(CMAKE_GENERATOR)" \
 		-DCLR_BUILD_HIP=ON \
 		-DCLR_BUILD_OCL=OFF \
@@ -343,6 +348,34 @@ test-hip-cpu-kernel-runtime:
 
 test-zluda-cuda:
 	GO_ROCM_RUN_ZLUDA_CUDA_TESTS=1 CUDA_PATH="$(CUDA_PATH)" CUDA_HOME="$(CUDA_HOME)" $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_ZLUDACUDARuntimeSmoke_Good -count=1
+
+test-hip-production:
+	@test -n "$(strip $(HIP_PRODUCTION_GGUF))" || { echo "HIP_PRODUCTION_GGUF must name a local Gemma4 GGUF"; exit 1; }
+	@test -f "$(HIP_PRODUCTION_GGUF)" || { echo "HIP production GGUF not found: $(HIP_PRODUCTION_GGUF)"; exit 1; }
+	$(MAKE) --no-print-directory hip-amd
+	@test -f "$(HIP_PRODUCTION_HSACO)" || { echo "HIP production HSACO not found: $(HIP_PRODUCTION_HSACO)"; exit 1; }
+	$(GO) -C "$(GO_SUBTREE)" test ./engine/hip -count=1 -run '^TestScheduler_'
+	@set -o pipefail; \
+		gguf="$$(realpath "$(HIP_PRODUCTION_GGUF)")"; \
+		hsaco="$$(realpath "$(HIP_PRODUCTION_HSACO)")"; \
+		tests='TestNativeDecodeSmokeKernelStatus_Good|TestHIPGemma4ExactStateContinuityHardware_Good|TestHIPLaneSetE2BHardwareMatchesSingleLanes_Good'; \
+		if [ "$(HIP_PRODUCTION_MOE)" = "1" ]; then \
+			tests="$$tests|TestHIPLaneSet26BMoEHardwareMatchesSingleLanes_Good"; \
+		fi; \
+		log="$$(mktemp)"; \
+		trap 'rm -f "$$log"' EXIT; \
+		HIP_VISIBLE_DEVICES="$${HIP_VISIBLE_DEVICES:-0}" \
+		GO_ROCM_RUN_MODEL_TESTS=1 \
+		GO_ROCM_RUN_MOE_LANE_TESTS="$(HIP_PRODUCTION_MOE)" \
+		GO_ROCM_MODEL_PATH="$$gguf" \
+		GO_ROCM_KERNEL_HSACO="$$hsaco" \
+		$(GO) -C "$(GO_SUBTREE)" test ./engine/hip -count=1 -v -run "^($$tests)$$" | tee "$$log"; \
+		status="$${PIPESTATUS[0]}"; \
+		if grep -q -- '--- SKIP:' "$$log"; then \
+			echo "HIP production receipt skipped a required hardware test"; \
+			exit 1; \
+		fi; \
+		exit "$$status"
 
 # test-matrix aggregates the host suite plus every hip toolchain smoke behind
 # one command. Each leg probes its own toolchain first and skips with a

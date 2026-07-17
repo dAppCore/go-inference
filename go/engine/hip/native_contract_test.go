@@ -564,24 +564,28 @@ func TestNativeContract_CapabilityReportGenericReactiveRegistryLabels_Good(t *te
 		report.Labels["engine_feature_chat_template_id"] != "qwen" ||
 		report.Labels["engine_feature_reasoning_parser"] != "qwen" ||
 		report.Labels["engine_feature_tool_parser"] != "qwen" ||
-		report.Labels["engine_feature_text_generate"] != "false" ||
-		report.Labels["engine_feature_capabilities"] != "chat.template,reasoning.parse,tool.parse" ||
-		report.Labels["engine_load_status"] != string(ROCmModelLoadStagedNative) ||
+		report.Labels["engine_feature_text_generate"] != "true" ||
+		report.Labels["engine_feature_capabilities"] != "generate,chat.template,reasoning.parse,tool.parse" ||
+		report.Labels["engine_load_status"] != string(ROCmModelLoadStandaloneNative) ||
 		report.Labels["engine_load_target"] != "standalone" ||
-		report.Labels["engine_load_staged"] != "true" ||
-		report.Labels["engine_load_text_generate"] != "false" {
+		report.Labels["engine_load_staged"] != "false" ||
+		report.Labels["engine_load_native_runtime"] != "true" ||
+		report.Labels["engine_load_standalone"] != "true" ||
+		report.Labels["engine_load_text_generate"] != "true" {
 		t.Fatalf("report labels = %+v, want generic registry-derived Qwen engine feature labels", report.Labels)
 	}
 	modelLoad, ok := report.Capability(inference.CapabilityModelLoad)
 	if !ok ||
-		modelLoad.Labels["engine_load_status"] != string(ROCmModelLoadStagedNative) ||
+		modelLoad.Labels["engine_load_status"] != string(ROCmModelLoadStandaloneNative) ||
 		modelLoad.Labels["engine_load_target"] != "standalone" ||
-		modelLoad.Labels["engine_load_staged"] != "true" ||
-		modelLoad.Labels["engine_load_text_generate"] != "false" {
-		t.Fatalf("model-load capability = %+v ok=%v, want staged Qwen load-status labels", modelLoad, ok)
+		modelLoad.Labels["engine_load_staged"] != "false" ||
+		modelLoad.Labels["engine_load_native_runtime"] != "true" ||
+		modelLoad.Labels["engine_load_standalone"] != "true" ||
+		modelLoad.Labels["engine_load_text_generate"] != "true" {
+		t.Fatalf("model-load capability = %+v ok=%v, want standalone-native Qwen load-status labels", modelLoad, ok)
 	}
 	if cap, ok := report.Capability(inference.CapabilityGenerate); !ok || cap.Status != inference.CapabilityStatusPlanned {
-		t.Fatalf("generate capability = %+v ok=%v, staged Qwen must not claim linked generation", cap, ok)
+		t.Fatalf("generate capability = %+v ok=%v, registry-routed Qwen remains planned without linked kernels", cap, ok)
 	}
 	chatTemplate, ok := report.Capability(inference.CapabilityChatTemplate)
 	if !ok ||
@@ -1178,7 +1182,7 @@ func TestNativeContract_RocmGemma4Q6CapabilityLabels_Good(t *testing.T) {
 		generate.Labels["production_quant_product_default"] != "true" ||
 		generate.Labels["production_quant_model"] != ProductionLaneCurrentModelID ||
 		generate.Labels["production_quant_min_visible_tokens_per_sec"] != "100" ||
-		generate.Labels["production_quant_runnable_pack_count"] != "14" ||
+		generate.Labels["production_quant_runnable_pack_count"] != "15" ||
 		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "E4B:bf16") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E2B:mxfp8") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E4B:mxfp8") {

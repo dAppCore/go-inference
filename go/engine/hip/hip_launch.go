@@ -99,6 +99,7 @@ const (
 	hipKernelNameAttentionHeadsBatchChunkedStage1           = "rocm_attention_heads_batch_chunked_stage1_v2"
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA2       = "rocm_attention_heads_batch_chunked_stage1_gqa2"
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA4       = "rocm_attention_heads_batch_chunked_stage1_gqa4"
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA8       = "rocm_attention_heads_batch_chunked_stage1_gqa8"
 	hipKernelNameAttentionHeadsBatchChunkedStage2           = "rocm_attention_heads_batch_chunked_stage2"
 	hipKernelNameVectorAdd                                  = "rocm_vector_add"
 	hipKernelNameVectorAddScaled                            = "rocm_vector_add_scaled"
@@ -139,6 +140,7 @@ const (
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4  = "rocm_diffusion_expected_embedding_q8_g64_dims4_rows4"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64   = "rocm_diffusion_expected_embedding_q8_g64_tile32x64"
 	hipKernelNameDiffusionSampleProbabilities               = "rocm_diffusion_sample_probabilities"
+	hipKernelNameDiffusionSampleProbabilitiesWide           = "rocm_diffusion_sample_probabilities_wide"
 	hipKernelNameEmbedMean                                  = "rocm_embedding_mean_pool"
 	hipKernelNameRerank                                     = "rocm_rerank_cosine"
 	hipKernelNameTinyPrefill                                = "rocm_tiny_prefill"
@@ -154,6 +156,9 @@ const (
 	hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704                        = "rocm_mlx_q4_projection_batch_q4_g64_rows2816_cols704_row16_tokens16_shared"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64             = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4 = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4"
+	hipKernelNameQ8_1QuantizeF32                                           = "rocm_q8_1_quantize_f32"
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8                 = "rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_row8"
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8            = "rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_batch_row8"
 )
 
 func hipDecodeKernelBatchEnabled() bool {

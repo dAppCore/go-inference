@@ -78,6 +78,11 @@ func TestHIPGemma4Q4LaneForwardMatchesSerial_Good(t *testing.T) {
 	}
 }
 
+func TestHIPGemma4Q4LaneForceBatchedQKV_Good(t *testing.T) {
+	core.AssertEqual(t, false, hipGemma4Q4LaneForceBatchedQKV(hipGemma4Q4Layer0Config{}))
+	core.AssertEqual(t, true, hipGemma4Q4LaneForceBatchedQKV(hipGemma4Q4Layer0Config{MoE: &hipGemma4MoELayerConfig{}}))
+}
+
 func TestHIPGemma4Q4LaneForwardSharedKVPLEMatchesSerial_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	layer0, cleanup0 := hipGemma4Q4FixtureConfig(t, driver, 0, 8, 1, 8)

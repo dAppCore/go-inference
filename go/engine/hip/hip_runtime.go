@@ -388,6 +388,9 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameMoEBatchScatterRoutes,
 	hipKernelNameMoEBatchReduceRoutes,
 	hipKernelNameMoEMLXAffineRoutes,
+	hipKernelNameQ8_1QuantizeF32,
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8,
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8,
 	hipKernelNameGGUFQ4KExpandMetadata,
 	hipKernelNameAttentionHeads,
 	hipKernelNameAttentionHeadsBatchCausal,
@@ -398,6 +401,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameAttentionHeadsBatchChunkedStage1,
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA4,
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA8,
 	hipKernelNameAttentionHeadsBatchChunkedStage2,
 	hipKernelNameVectorAddScaled,
 	hipKernelNameVectorScale,
@@ -410,6 +414,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4,
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64,
 	hipKernelNameDiffusionSampleProbabilities,
+	hipKernelNameDiffusionSampleProbabilitiesWide,
 }
 
 func hipPrewarmGemma4Q4KernelFunctions(driver nativeHIPDriver) {
@@ -454,6 +459,8 @@ var hipGemma4Q4WarmLaunchPacketSizes = []int{
 	hipMoECombineNormsLaunchArgsBytes,
 	hipMoEBatchRouteRowsLaunchArgsBytes,
 	hipMoEBatchReduceLaunchArgsBytes,
+	hipQ8_1QuantizeLaunchArgsBytes,
+	hipGGUFQ4KQ8_1GateUpLaunchArgsBytes,
 	hipGGUFQ4KExpandLaunchArgsBytes,
 	hipAttentionHeadsLaunchArgsBytes,
 	hipAttentionHeadsBatchCausalLaunchArgsBytes,

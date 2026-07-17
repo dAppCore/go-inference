@@ -10,6 +10,7 @@ import (
 	"dappco.re/go/inference/model/gemma4"
 	"dappco.re/go/inference/model/gemma4/audio"
 	"dappco.re/go/inference/model/safetensors"
+	"dappco.re/go/inference/model/vision"
 )
 
 type hipVisionLinear struct {
@@ -39,7 +40,7 @@ type hipVisionEncoderLayer struct {
 // MLX-affine weights are expanded once into system RAM; matrix products use the
 // portable HIP rocBLAS seam when present and the same float32 layout on CPU.
 type HIPVisionEncoderTower struct {
-	loaded      *model.LoadedVision
+	loaded      *vision.Loaded
 	imageConfig *gemma4.Gemma4ImageFeatureConfig
 	mapping     *safetensors.DirMapping
 	gemm        audio.GEMM
@@ -97,7 +98,7 @@ func loadHIPVisionEncoderTowerWithGEMM(dir string, gemm audio.GEMM) (*HIPVisionE
 	return tower, nil
 }
 
-func newHIPVisionEncoderTowerFromLoaded(loaded *model.LoadedVision, mapping *safetensors.DirMapping, gemm audio.GEMM, imageConfig *gemma4.Gemma4ImageFeatureConfig) (*HIPVisionEncoderTower, error) {
+func newHIPVisionEncoderTowerFromLoaded(loaded *vision.Loaded, mapping *safetensors.DirMapping, gemm audio.GEMM, imageConfig *gemma4.Gemma4ImageFeatureConfig) (*HIPVisionEncoderTower, error) {
 	if loaded == nil {
 		return nil, core.NewError("hip.VisionEncoderTower: loaded payload is nil")
 	}
@@ -119,7 +120,7 @@ func newHIPVisionEncoderTowerFromLoaded(loaded *model.LoadedVision, mapping *saf
 		if len(payload) == 0 {
 			payload = loaded.PatchEmbedding
 		}
-		patch = model.LoadedVisionLinear{Weight: payload, OutDim: cfg.Hidden, InDim: cfg.PatchDim}
+		patch = vision.Linear{Weight: payload, OutDim: cfg.Hidden, InDim: cfg.PatchDim}
 	}
 	decodedPatch, err := hipVisionDecodeLinear(patch, cfg.Hidden, cfg.PatchDim, "vision patch projection")
 	if err != nil {
@@ -201,7 +202,7 @@ func newHIPVisionEncoderTowerFromLoaded(loaded *model.LoadedVision, mapping *saf
 	return tower, nil
 }
 
-func hipVisionDecodeLinear(linear model.LoadedVisionLinear, fallbackOut, fallbackIn int, label string) (hipVisionLinear, error) {
+func hipVisionDecodeLinear(linear vision.Linear, fallbackOut, fallbackIn int, label string) (hipVisionLinear, error) {
 	if linear.InDim <= 0 {
 		linear.InDim = fallbackIn
 	}
