@@ -42,6 +42,8 @@ type app struct {
 	help          *helpOverlay
 	sessions      *sessionManager
 	repository    workspaceRepository
+	preferences   preferenceStore
+	inspector     inspectorState
 
 	picker  list.Model
 	spin    spinner.Model
@@ -131,6 +133,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		markdown:    newMarkdownRenderer(styles.theme.name),
 		palette:     newCommandPalette(styles),
 		help:        newHelpOverlay(keys, styles),
+		inspector:   newInspector(),
 		picker:      newPicker(styles),
 		spin:        sp,
 		input:       in,
@@ -148,6 +151,43 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		a.loading = modelPath
 	}
 	return a
+}
+
+func (a *app) attachPreferences(preferences preferenceStore) {
+	if a == nil {
+		return
+	}
+	a.preferences = preferences
+	if preferences == nil {
+		return
+	}
+	values := preferences.Values()
+	a.cfg = a.cfg.withPreferenceValues(values)
+	selectedTheme := themeForName(values.Theme)
+	a.inspector.theme = selectedTheme.name
+	a.rebuildTheme(selectedTheme)
+}
+
+func (a *app) rebuildTheme(selected theme) {
+	if a == nil {
+		return
+	}
+	a.styles = newUIStyles(selected)
+	a.markdown = newMarkdownRenderer(selected.name)
+	a.picker.Styles.Title = a.styles.title
+	if a.palette != nil {
+		a.palette.list.Styles.Title = a.styles.title
+	}
+	if a.switcher != nil {
+		a.switcher.list.Styles.Title = a.styles.title
+	}
+	if a.search != nil {
+		a.search.list.Styles.Title = a.styles.title
+	}
+	a.help = newHelpOverlay(a.keys, a.styles)
+	if a.ready {
+		a.refreshTranscript()
+	}
 }
 
 func (a app) Init() tea.Cmd {
@@ -290,17 +330,93 @@ func (a *app) runToolLoop() tea.Cmd {
 	}
 	calls, visible := parser.ParseGemmaToolCalls(last.text)
 	if len(calls) == 0 {
+		if !core.Contains(last.text, parser.ToolCallOpenMarker) {
+			return nil
+		}
+		last.text = strings.TrimSpace(visible)
+		failure := "error: malformed tool call"
+		last.calls = append(last.calls, "malformed tool call → failed")
+		toolTurn := turn{id: newRecordID(), role: "tool", text: parser.RenderGemmaToolResponse(failure)}
+		a.turns = append(a.turns, toolTurn)
+		if result := a.persistToolInteraction(toolTurn, nil, failure, "tool.parse", "failed"); !result.OK {
+			a.errText = result.Error()
+		}
 		return nil
 	}
 	last.text = strings.TrimSpace(visible)
 	for _, call := range calls {
 		result := a.tools.execute(call)
 		last.calls = append(last.calls, call.Name+" → "+result)
-		a.turns = append(a.turns, turn{id: newRecordID(), role: "tool", text: parser.RenderGemmaToolResponse(result)})
+		toolTurn := turn{id: newRecordID(), role: "tool", text: parser.RenderGemmaToolResponse(result)}
+		a.turns = append(a.turns, toolTurn)
+		status := "completed"
+		if core.HasPrefix(result, "error:") {
+			status = "failed"
+		}
+		if persisted := a.persistToolInteraction(toolTurn, &call, result, "tool.call", status); !persisted.OK {
+			a.errText = persisted.Error()
+			return nil
+		}
 	}
 	a.turns = append(a.turns, turn{id: newRecordID(), role: "assistant"})
 	a.toolHops++
 	return a.beginGeneration()
+}
+
+func (a *app) persistToolInteraction(
+	toolTurn turn,
+	call *inference.ToolCall,
+	result string,
+	kind string,
+	status string,
+) core.Result {
+	if a == nil || a.repository == nil || core.Trim(a.sessionID) == "" {
+		return core.Ok(nil)
+	}
+	now := time.Now().UTC()
+	toolName := "parse"
+	callJSON := "{}"
+	if call != nil {
+		toolName = call.Name
+		callJSON = core.JSONMarshalString(call)
+	}
+	sequence := int64(len(a.turns))
+	if a.sessions != nil && a.sessions.Active() != nil {
+		sequence = int64(len(a.sessions.Active().Turns) + 1)
+	}
+	record := turnRecord{
+		ID:             toolTurn.id,
+		SessionID:      a.sessionID,
+		Sequence:       sequence,
+		Role:           toolTurn.role,
+		Visible:        toolTurn.text,
+		ToolName:       toolName,
+		ToolCallJSON:   callJSON,
+		ToolResultJSON: core.JSONMarshalString(map[string]any{"result": result, "status": status}),
+		Model:          a.modelName,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	var saved core.Result
+	if a.sessions != nil {
+		saved = a.sessions.AddTurn(record)
+	} else {
+		saved = a.repository.SaveTurn(record)
+	}
+	if !saved.OK {
+		return saved
+	}
+	event := eventRecord{
+		ID:          newRecordID(),
+		SessionID:   a.sessionID,
+		Kind:        kind,
+		Status:      status,
+		Title:       core.Concat("Tool ", toolName, " ", status),
+		Detail:      result,
+		PayloadJSON: callJSON,
+		CreatedAt:   now,
+	}
+	return a.repository.SaveEvent(event)
 }
 
 func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -355,7 +471,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if key.Matches(msg, a.keys.Save) {
-		if result := a.palette.Invoke(commandSaveSettings, &a); !result.OK {
+		if result := a.inspector.Save(&a); !result.OK {
 			a.errText = result.Error()
 		}
 		return a, nil
@@ -371,6 +487,31 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.refreshTranscript()
 		}
 		return a, nil
+	}
+	if a.inspectorOpen {
+		switch msg.String() {
+		case "up", "k":
+			a.inspector.Move(-1)
+			return a, nil
+		case "down", "j":
+			a.inspector.Move(1)
+			return a, nil
+		case "left", "h":
+			if result := a.inspector.Adjust(&a, -1); !result.OK {
+				a.errText = result.Error()
+			}
+			return a, nil
+		case "right", "l":
+			if result := a.inspector.Adjust(&a, 1); !result.OK {
+				a.errText = result.Error()
+			}
+			return a, nil
+		case "enter":
+			if result := a.inspector.Adjust(&a, 0); !result.OK {
+				a.errText = result.Error()
+			}
+			return a, nil
+		}
 	}
 	switch msg.String() {
 	case "ctrl+c":
@@ -925,29 +1066,16 @@ func (a app) sessionStrip() string {
 }
 
 func (a app) inspectorView() string {
-	model := "○ none loaded"
-	if a.modelName != "" {
-		model = "● " + a.modelName
+	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+	width := metrics.inspectorWidth
+	height := metrics.inspectorHeight
+	if width <= 0 {
+		width = metrics.innerWidth
 	}
-	generation := "○ idle"
-	if a.generating {
-		generation = "◉ generating"
+	if height <= 0 {
+		height = metrics.regionHeight
 	}
-	tools := "○ off"
-	if a.tools.enabled {
-		tools = "● on"
-	}
-	return strings.Join([]string{
-		a.styles.title.Render("INSPECTOR"),
-		"",
-		a.styles.accent.Render("SESSION") + "  ● active",
-		a.styles.accent.Render("MODEL") + "  " + model,
-		a.styles.accent.Render("GENERATION") + "  " + generation,
-		a.styles.accent.Render("MODE") + "  " + a.modes.current().name,
-		a.styles.accent.Render("TOOLS") + "  " + tools,
-		"",
-		a.styles.thought.Render("ctrl+o toggles this inspector"),
-	}, "\n")
+	return a.inspector.View(a, width, height)
 }
 
 func (a app) footerLine() string {

@@ -178,7 +178,9 @@ func defaultWorkspaceCommands() []workspaceCommand {
 		panelCommand(commandPanelWork, "Work panel", panelWork),
 		panelCommand(commandPanelModels, "Models panel", panelModels),
 		panelCommand(commandPanelService, "Service panel", panelService),
-		unavailable(commandSaveSettings, "Save settings", "Commit generation and appearance preferences", "preference editor not open"),
+		{ID: commandSaveSettings, Title: "Save settings", Description: "Commit generation and appearance preferences", Available: true, run: func(target *app) core.Result {
+			return target.inspector.Save(target)
+		}},
 		unavailable(commandExportMarkdown, "Export Markdown", "Export the active session as Markdown", "export adapter not connected"),
 		unavailable(commandExportJSON, "Export JSONL", "Export the active session as JSON Lines", "export adapter not connected"),
 		{ID: commandRefreshWork, Title: "Refresh work", Description: "Refresh local work snapshots", Available: true, run: noOpCommand},

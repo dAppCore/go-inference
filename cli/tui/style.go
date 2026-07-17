@@ -35,6 +35,26 @@ func midnightTheme() theme {
 	}
 }
 
+func themeForName(name string) theme {
+	switch name {
+	case "aurora":
+		value := midnightTheme()
+		value.name = "aurora"
+		value.focus = lipgloss.AdaptiveColor{Light: "#047857", Dark: "#5EEAD4"}
+		value.assistant = lipgloss.AdaptiveColor{Light: "#7E22CE", Dark: "#E879F9"}
+		value.attention = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FDE68A"}
+		return value
+	case "daylight":
+		value := midnightTheme()
+		value.name = "daylight"
+		value.focus = lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#7DD3FC"}
+		value.assistant = lipgloss.AdaptiveColor{Light: "#5B21B6", Dark: "#DDD6FE"}
+		return value
+	default:
+		return midnightTheme()
+	}
+}
+
 // uiStyles is owned by app. Components receive it explicitly, which lets a
 // future preference change rebuild the complete visual language in place.
 type uiStyles struct {

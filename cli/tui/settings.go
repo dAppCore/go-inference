@@ -29,6 +29,30 @@ func newSettings() settings {
 	return settings{maxTokIdx: 3} // 4096 — thinking spends from the budget
 }
 
+func (s settings) withPreferenceValues(values preferenceValues) settings {
+	for index, value := range ctxSteps {
+		if value == values.ContextLength {
+			s.ctxIdx = index
+			break
+		}
+	}
+	for index, value := range maxTokSteps {
+		if value == values.MaxTokens {
+			s.maxTokIdx = index
+			break
+		}
+	}
+	switch values.Thinking {
+	case "on":
+		s.thinkIdx = 1
+	case "off":
+		s.thinkIdx = 2
+	default:
+		s.thinkIdx = 0
+	}
+	return s
+}
+
 func (s settings) contextLen() int { return ctxSteps[s.ctxIdx] }
 func (s settings) maxTokens() int  { return maxTokSteps[s.maxTokIdx] }
 

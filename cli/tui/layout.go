@@ -68,7 +68,9 @@ func measureFrame(width, height int, inspectorOpen bool) frameMetrics {
 	case layoutOverlay:
 		if inspectorOpen {
 			metrics.inspectorWidth = metrics.innerWidth
-			metrics.inspectorHeight = min(7, max(3, metrics.regionHeight/3))
+			// Contextual inspectors carry several short sections. Give them room
+			// to remain useful while preserving a compact main-panel preview.
+			metrics.inspectorHeight = min(12, max(3, metrics.regionHeight-5))
 			metrics.mainHeight = max(1, metrics.regionHeight-metrics.inspectorHeight-1)
 		}
 	case layoutNarrow:

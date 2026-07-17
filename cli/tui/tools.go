@@ -57,6 +57,18 @@ func newTools() toolState {
 	}}
 }
 
+func (t *toolState) setEnabled(enabled bool) {
+	if t != nil {
+		t.enabled = enabled
+	}
+}
+
+func (t *toolState) toggle() {
+	if t != nil {
+		t.enabled = !t.enabled
+	}
+}
+
 // declarations renders the system-turn tool preamble for the enabled set.
 func (t toolState) declarations() string {
 	if !t.enabled {
