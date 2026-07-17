@@ -80,6 +80,7 @@ type batchEngine struct {
 	closeCh   chan struct{}
 	doneCh    chan struct{}
 	closeOnce sync.Once
+	requests  sync.Map // request ID -> *batchReq; permits cancellation under output backpressure
 
 	submitted, admitted, completed, cancelled, active, queued, maxRunning atomic.Int64
 }
@@ -192,14 +193,17 @@ func (e *batchEngine) submit(ctx context.Context, br *batchReq) (<-chan inferenc
 	br.ctx = reqCtx
 	br.cancel = cancel
 	br.out = make(chan inference.ScheduledToken, e.streamBuffer)
+	e.requests.Store(br.id, br)
 	select {
 	case e.submitCh <- br:
 		e.submitted.Add(1)
 		return br.out, nil
 	case <-ctx.Done():
+		e.requests.Delete(br.id)
 		cancel()
 		return nil, ctx.Err()
 	case <-e.closeCh:
+		e.requests.Delete(br.id)
 		cancel()
 		return nil, core.E("scheduler.batch.submit", "engine is closed", nil)
 	}
@@ -209,6 +213,12 @@ func (e *batchEngine) submit(ctx context.Context, br *batchReq) (<-chan inferenc
 // channel closes with zero tokens), an active one observes ctx.Done() at its
 // next round. Unknown/finished ids are harmless no-ops.
 func (e *batchEngine) cancel(id string) inference.RequestCancelResult {
+	// The coordinator may be blocked delivering this request's next token to a
+	// full output channel. Cancel its context directly so that delivery select
+	// can retire it; cancelCh still removes queued requests promptly.
+	if value, ok := e.requests.Load(id); ok {
+		value.(*batchReq).cancel()
+	}
 	select {
 	case e.cancelCh <- id:
 	case <-e.doneCh:
@@ -249,6 +259,7 @@ func (e *batchEngine) run() {
 	)
 
 	retire := func(req *batchReq, cancelled bool) {
+		e.requests.Delete(req.id)
 		req.cancel()
 		if req.stop != nil {
 			req.stop()
@@ -268,6 +279,7 @@ func (e *batchEngine) run() {
 			// Already cancelled while queued → retire without ever running it.
 			if req.ctx.Err() != nil {
 				queue = queue[1:]
+				e.requests.Delete(req.id)
 				req.cancel()
 				close(req.out)
 				e.cancelled.Add(1)
@@ -277,6 +289,7 @@ func (e *batchEngine) run() {
 			// (closed channel, no tokens) rather than wedge the queue head.
 			if e.maxTokens > 0 && req.promptTokens > e.maxTokens {
 				queue = queue[1:]
+				e.requests.Delete(req.id)
 				req.cancel()
 				close(req.out)
 				e.cancelled.Add(1)
@@ -306,6 +319,7 @@ func (e *batchEngine) run() {
 			if req.id == id {
 				req.cancel()
 				queue = append(queue[:i], queue[i+1:]...)
+				e.requests.Delete(req.id)
 				close(req.out)
 				e.cancelled.Add(1)
 				e.queued.Store(int64(len(queue)))
@@ -330,6 +344,7 @@ func (e *batchEngine) run() {
 			}
 		}
 		for _, req := range queue {
+			e.requests.Delete(req.id)
 			req.cancel()
 			close(req.out)
 			e.cancelled.Add(1)
