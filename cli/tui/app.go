@@ -44,6 +44,8 @@ type app struct {
 	repository    workspaceRepository
 	preferences   preferenceStore
 	inspector     inspectorState
+	agent         agentProvider
+	work          *workPanel
 
 	picker  list.Model
 	spin    spinner.Model
@@ -105,6 +107,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 	ctx, cancel := context.WithCancel(context.Background())
 	styles := newUIStyles(midnightTheme())
 	keys := newKeyMap()
+	agent := newUnavailableAgentProvider(defaultAgentUnavailableReason)
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 
@@ -134,6 +137,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		palette:     newCommandPalette(styles),
 		help:        newHelpOverlay(keys, styles),
 		inspector:   newInspector(),
+		agent:       agent,
 		picker:      newPicker(styles),
 		spin:        sp,
 		input:       in,
@@ -151,6 +155,24 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		a.loading = modelPath
 	}
 	return a
+}
+
+func (a *app) attachWork(repository workspaceRepository, provider agentProvider) core.Result {
+	if a == nil {
+		return core.Fail(core.E("tui.app.attachWork", "application is unavailable", nil))
+	}
+	if provider == nil {
+		provider = newUnavailableAgentProvider(defaultAgentUnavailableReason)
+	}
+	opened := newWorkPanel(repository, provider, nil, nil)
+	if !opened.OK {
+		return opened
+	}
+	a.repository = repository
+	a.agent = provider
+	a.work = opened.Value.(*workPanel)
+	a.palette.SetAgentCapabilities(provider.Capabilities())
+	return core.Ok(a.work)
 }
 
 func (a *app) attachPreferences(preferences preferenceStore) {
@@ -489,6 +511,30 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if a.inspectorOpen {
+		if a.activePanel == panelWork {
+			switch msg.String() {
+			case "up", "k":
+				if a.work != nil {
+					a.work.MoveAction(-1)
+				}
+				return a, nil
+			case "down", "j":
+				if a.work != nil {
+					a.work.MoveAction(1)
+				}
+				return a, nil
+			case "enter":
+				if a.work == nil {
+					a.errText = defaultAgentUnavailableReason
+				} else if result := a.work.ActivateSelectedAction(context.Background(), ""); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "left", "h", "right", "l":
+				// Work inspector actions do not edit Chat generation settings.
+				return a, nil
+			}
+		}
 		switch msg.String() {
 		case "up", "k":
 			a.inspector.Move(-1)
@@ -750,6 +796,10 @@ func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch a.activePanel {
 	case panelModels:
 		a.picker, cmd = a.picker.Update(msg)
+	case panelWork:
+		if a.work != nil {
+			cmd = a.work.Update(msg)
+		}
 	case panelChat:
 		_, mouse := msg.(tea.MouseMsg)
 		if a.generating || mouse || isTranscriptPageKey(msg) {
@@ -1001,12 +1051,19 @@ func (a app) panelView() string {
 	case panelService:
 		return a.svc.view(a.modelName, a.width, a.styles)
 	case panelWork:
-		return lipgloss.JoinVertical(lipgloss.Left,
-			a.styles.title.Render("Work"),
-			"",
-			a.styles.status.Render("○ no active work"),
-			a.styles.thought.Render("Local work tracking and agent capabilities arrive in the next workspace slice."),
-		)
+		if a.work == nil {
+			return lipgloss.JoinVertical(lipgloss.Left,
+				a.styles.title.Render("Work"),
+				"",
+				a.styles.status.Render("○ No work yet"),
+				a.styles.thought.Render("Local work becomes durable when the workspace store connects."),
+				"",
+				a.styles.attention.Render("Agent actions unavailable"),
+				a.styles.thought.Render(defaultAgentUnavailableReason),
+			)
+		}
+		metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+		return a.work.View(metrics.mainWidth, metrics.mainHeight, a.styles)
 	default: // chat
 		if a.model == nil && a.loading == "" {
 			return "\n  " + a.styles.status.Render("○ no model loaded — open Models and choose one")

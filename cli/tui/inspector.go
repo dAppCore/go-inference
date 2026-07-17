@@ -122,12 +122,7 @@ func (inspector inspectorState) View(target app, width, height int) string {
 	builder.WriteString(target.styles.title.Render("INSPECTOR") + "\n\n")
 	switch target.activePanel {
 	case panelWork:
-		builder.WriteString(target.styles.accent.Render("WORK DETAIL") + "\n")
-		builder.WriteString(target.styles.status.Render("○ no work item selected") + "\n\n")
-		builder.WriteString(target.styles.accent.Render("RUNTIME") + "\n")
-		builder.WriteString(target.styles.status.Render("○ detection pending") + "\n\n")
-		builder.WriteString(target.styles.accent.Render("AGENT CAPABILITY") + "\n")
-		builder.WriteString(target.styles.attention.Render("○ not installed"))
+		inspector.renderWork(&builder, target)
 	case panelModels:
 		builder.WriteString(target.styles.accent.Render("MODEL DETAIL") + "\n")
 		if selected, ok := target.picker.SelectedItem().(modelItem); ok {
@@ -158,6 +153,88 @@ func (inspector inspectorState) View(target app, width, height int) string {
 		inspector.renderChat(&builder, target)
 	}
 	return fitPane(builder.String(), width, height, target.styles.inspector)
+}
+
+func (inspector inspectorState) renderWork(builder *strings.Builder, target app) {
+	builder.WriteString(target.styles.accent.Render("WORK DETAIL") + "\n")
+	if target.work == nil {
+		builder.WriteString(target.styles.status.Render("○ no work item selected") + "\n\n")
+	} else if selected, ok := target.work.Selected(); ok {
+		builder.WriteString(target.styles.title.Render(selected.Title) + "\n")
+		builder.WriteString(target.styles.status.Render(workGlyph(selected.Status)+" "+core.Upper(selected.Status)) + "\n")
+		if selected.Repo != "" {
+			builder.WriteString(target.styles.thought.Render(selected.Repo+"  "+selected.Branch) + "\n")
+		}
+		if selected.Question != "" {
+			builder.WriteString(target.styles.attention.Render("? "+selected.Question) + "\n")
+		}
+		builder.WriteString("\n")
+	} else {
+		builder.WriteString(target.styles.status.Render("○ no work item selected") + "\n\n")
+	}
+
+	builder.WriteString(target.styles.accent.Render("RUNTIME") + "\n")
+	runtime := "○ detection pending"
+	if target.work != nil {
+		if selected, ok := target.work.Selected(); ok && selected.Runtime != "" {
+			runtime = "● " + selected.Runtime
+		}
+	}
+	builder.WriteString(target.styles.status.Render(runtime) + "\n\n")
+
+	capabilities := []agentCapability{}
+	if target.work != nil {
+		capabilities = target.work.Capabilities()
+	} else if target.agent != nil {
+		capabilities = target.agent.Capabilities()
+	}
+	byFeature := make(map[agentFeature]agentCapability, len(capabilities))
+	reason := defaultAgentUnavailableReason
+	for _, capability := range capabilities {
+		byFeature[capability.Feature] = capability
+		if !capability.Available && capability.Reason != "" {
+			reason = capability.Reason
+		}
+	}
+	builder.WriteString(target.styles.accent.Render("AGENT CAPABILITY") + "\n")
+	available := 0
+	for _, capability := range capabilities {
+		if capability.Available {
+			available++
+		}
+	}
+	if available == 0 {
+		builder.WriteString(target.styles.attention.Render("○ not installed") + "\n")
+		builder.WriteString(target.styles.thought.Render(reason) + "\n\n")
+	} else {
+		builder.WriteString(target.styles.success.Render(core.Sprintf("● %d actions available", available)) + "\n\n")
+	}
+
+	selectedFeature := agentFeature("")
+	if target.work != nil {
+		selectedFeature = target.work.SelectedAction().Feature
+	}
+	for _, group := range agentFeatureGroups {
+		builder.WriteString(target.styles.accent.Render(group.Title) + "\n")
+		for _, feature := range group.Features {
+			capability, exists := byFeature[feature]
+			if !exists {
+				capability = agentCapability{Feature: feature, Reason: reason}
+			}
+			cursor := "  "
+			if feature == selectedFeature {
+				cursor = "› "
+			}
+			glyph := "○"
+			style := target.styles.status
+			if capability.Available {
+				glyph = "●"
+				style = target.styles.success
+			}
+			builder.WriteString(cursor + style.Render(glyph+" "+agentFeatureTitle(feature)) + "\n")
+		}
+		builder.WriteString("\n")
+	}
 }
 
 func (inspector inspectorState) renderChat(builder *strings.Builder, target app) {

@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/help"
@@ -152,6 +153,28 @@ func (palette *commandPalette) View(width, height int) string {
 	return palette.list.View()
 }
 
+func (palette *commandPalette) SetAgentCapabilities(capabilities []agentCapability) {
+	if palette == nil {
+		return
+	}
+	commands := make([]workspaceCommand, 0, len(palette.commands)+len(capabilities))
+	for _, command := range palette.commands {
+		if !core.HasPrefix(string(command.ID), "agent.") {
+			commands = append(commands, command)
+		}
+	}
+	commands = append(commands, agentWorkspaceCommands(capabilities)...)
+	items := make([]list.Item, 0, len(commands))
+	byID := make(map[commandID]workspaceCommand, len(commands))
+	for _, command := range commands {
+		items = append(items, commandListItem{command: command})
+		byID[command.ID] = command
+	}
+	palette.commands = commands
+	palette.byID = byID
+	palette.list.SetItems(items)
+}
+
 func defaultWorkspaceCommands() []workspaceCommand {
 	panelCommand := func(id commandID, title string, panel panelID) workspaceCommand {
 		return workspaceCommand{ID: id, Title: title, Description: "Go to the " + panelNames[panel] + " panel", Available: true, run: func(target *app) core.Result {
@@ -162,7 +185,7 @@ func defaultWorkspaceCommands() []workspaceCommand {
 	unavailable := func(id commandID, title, description, reason string) workspaceCommand {
 		return workspaceCommand{ID: id, Title: title, Description: description, Reason: reason}
 	}
-	return []workspaceCommand{
+	commands := []workspaceCommand{
 		{ID: commandNewSession, Title: "New session", Description: "Create and open a blank chat session", Available: true, run: func(target *app) core.Result { return target.createSession() }},
 		{ID: commandSwitchSession, Title: "Switch session", Description: "Open the recent-session switcher", Available: true, run: func(target *app) core.Result { return target.openSessionSwitcher() }},
 		{ID: commandSearchHistory, Title: "Search history", Description: "Search durable chat titles and turns", Available: true, run: func(target *app) core.Result { return target.openHistorySearch() }},
@@ -183,13 +206,49 @@ func defaultWorkspaceCommands() []workspaceCommand {
 		}},
 		unavailable(commandExportMarkdown, "Export Markdown", "Export the active session as Markdown", "export adapter not connected"),
 		unavailable(commandExportJSON, "Export JSONL", "Export the active session as JSON Lines", "export adapter not connected"),
-		{ID: commandRefreshWork, Title: "Refresh work", Description: "Refresh local work snapshots", Available: true, run: noOpCommand},
+		{ID: commandRefreshWork, Title: "Refresh work", Description: "Refresh local work and provider snapshots", Available: true, run: func(target *app) core.Result {
+			if target == nil || target.work == nil {
+				return core.Fail(core.E("tui.command.refreshWork", "work panel is unavailable", nil))
+			}
+			return target.work.Refresh(context.Background())
+		}},
 		{ID: commandRefreshRuntimes, Title: "Refresh runtimes", Description: "Refresh local runtime capabilities", Available: true, run: noOpCommand},
 		{ID: commandRefreshKnowledge, Title: "Refresh knowledge", Description: "Refresh local knowledge packs", Available: true, run: noOpCommand},
 	}
+	return append(commands, agentWorkspaceCommands(agentFeatureCatalog(defaultAgentUnavailableReason))...)
 }
 
 func noOpCommand(*app) core.Result { return core.Ok(nil) }
+
+func agentCommandID(feature agentFeature) commandID {
+	return commandID(core.Concat("agent.", string(feature)))
+}
+
+func agentWorkspaceCommands(capabilities []agentCapability) []workspaceCommand {
+	commands := make([]workspaceCommand, 0, len(capabilities))
+	for _, capability := range capabilities {
+		capability := capability
+		commands = append(commands, workspaceCommand{
+			ID:          agentCommandID(capability.Feature),
+			Title:       agentFeatureTitle(capability.Feature),
+			Description: core.Concat("Agent capability · ", string(capability.Feature)),
+			Available:   capability.Available,
+			Reason:      capability.Reason,
+			run: func(target *app) core.Result {
+				if target == nil || target.work == nil {
+					return core.Fail(core.E("tui.agentCommand", "work panel is unavailable", nil))
+				}
+				if !target.work.SelectAction(capability.Feature) {
+					return core.Fail(core.E("tui.agentCommand", "agent action is unavailable", nil))
+				}
+				target.activePanel = panelWork
+				target.inspectorOpen = true
+				return core.Ok(nil)
+			},
+		})
+	}
+	return commands
+}
 
 type sessionSwitcherItem struct {
 	SessionID   string
