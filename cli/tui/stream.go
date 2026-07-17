@@ -16,32 +16,35 @@ import (
 // iterator to the update loop.
 
 type streamEvent struct {
-	visible string // answer text delta (thinking stripped)
-	thought string // reasoning text delta
-	done    bool
-	err     error
-	metrics *inference.GenerateMetrics
+	SessionID string
+	JobID     string
+	visible   string // answer text delta (thinking stripped)
+	thought   string // reasoning text delta
+	done      bool
+	err       error
+	metrics   *inference.GenerateMetrics
 }
 
 type streamMsg streamEvent
 
-// generation is one in-flight turn: its cancel func and event channel.
-type generation struct {
-	cancel context.CancelFunc
-	events chan streamEvent
-}
-
-// startGeneration launches m.Chat on its own goroutine, splitting the raw
-// stream through the family-aware reasoning parser (thinking → thought deltas,
-// the rest → visible deltas). genOpts carries the Modes preset + Settings
-// overrides; the metrics sink is appended here so every turn reports tok/s.
-func startGeneration(model inference.TextModel, history []inference.Message, genOpts []inference.GenerateOption) *generation {
-	ctx, cancel := context.WithCancel(context.Background())
-	g := &generation{cancel: cancel, events: make(chan streamEvent, 64)}
-
+// streamGeneration runs m.Chat, splitting the raw stream through the
+// family-aware reasoning parser (thinking → thought deltas, the rest →
+// visible deltas). The caller owns the context and registration lifecycle.
+func streamGeneration(ctx context.Context, g *generation, model inference.TextModel, history []inference.Message, genOpts []inference.GenerateOption, finish func()) {
+	tag := func(event streamEvent) streamEvent {
+		event.SessionID = g.SessionID
+		event.JobID = g.JobID
+		return event
+	}
+	emit := func(event streamEvent) {
+		select {
+		case g.events <- tag(event):
+		case <-ctx.Done():
+		}
+	}
 	proc := parser.NewProcessor(
 		parser.Config{Mode: inference.ThinkingCapture, Capture: func(c inference.ThinkingChunk) {
-			g.events <- streamEvent{thought: c.Text}
+			emit(streamEvent{thought: c.Text})
 		}},
 		parser.HintFromInference(model.Info()),
 	)
@@ -49,37 +52,48 @@ func startGeneration(model inference.TextModel, history []inference.Message, gen
 	opts := append([]inference.GenerateOption{}, genOpts...)
 	opts = append(opts, inference.WithMetricsSink(func(gm inference.GenerateMetrics) {
 		m := gm
-		g.events <- streamEvent{metrics: &m}
+		emit(streamEvent{metrics: &m})
 	}))
 
-	go func() {
-		defer close(g.events)
-		for tok := range model.Chat(ctx, history, opts...) {
-			if visible := proc.Process(tok.Text); visible != "" {
-				g.events <- streamEvent{visible: visible}
-			}
+	defer func() {
+		if finish != nil {
+			finish()
 		}
-		if tail := proc.Flush(); tail != "" {
-			g.events <- streamEvent{visible: tail}
-		}
-		ev := streamEvent{done: true}
-		if r := model.Err(); !r.OK {
-			if err, ok := r.Value.(error); ok {
-				ev.err = err
-			}
-		}
-		g.events <- ev
+		close(g.events)
 	}()
-	return g
+	for tok := range model.Chat(ctx, history, opts...) {
+		if visible := proc.Process(tok.Text); visible != "" {
+			emit(streamEvent{visible: visible})
+		}
+	}
+	if tail := proc.Flush(); tail != "" {
+		emit(streamEvent{visible: tail})
+	}
+	ev := streamEvent{done: true}
+	if r := model.Err(); !r.OK {
+		if err, ok := r.Value.(error); ok {
+			ev.err = err
+		}
+	}
+	// A cancelled stream may decline the send above; use a final non-blocking
+	// attempt so an attentive UI sees done immediately. Closing the channel is
+	// still the fallback completion signal when its buffer is full.
+	select {
+	case g.events <- tag(ev):
+	default:
+	}
 }
 
 // waitEvent yields the next stream event to the update loop; a closed channel
 // surfaces as a final done message.
 func waitEvent(g *generation) tea.Cmd {
 	return func() tea.Msg {
+		if g == nil {
+			return streamMsg{done: true}
+		}
 		ev, ok := <-g.events
 		if !ok {
-			return streamMsg{done: true}
+			return streamMsg{SessionID: g.SessionID, JobID: g.JobID, done: true}
 		}
 		return streamMsg(ev)
 	}

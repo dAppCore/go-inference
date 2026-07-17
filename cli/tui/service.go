@@ -13,14 +13,13 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/serving"
-	"dappco.re/go/inference/serving/scheduler"
 )
 
 // The Service tab hosts the OpenAI/Anthropic/Ollama-compatible HTTP API for
 // the model already loaded in the TUI — the same weights, not a second load.
-// The model is wrapped in a serial scheduler (one lane) shared by TUI chat and
-// HTTP requests, so a coding agent hitting the API and a turn typed in Chat
-// queue behind each other instead of racing the engine.
+// The application supplies its already-scheduled model lane, so a coding agent
+// hitting the API and a turn typed in Chat queue behind each other instead of
+// racing the engine. The service owns only its listener and context.
 
 // serviceAddrs are the listen presets cycled with ←/→ while stopped.
 var serviceAddrs = []struct{ addr, hint string }{
@@ -37,7 +36,6 @@ type serviceState struct {
 	custom   string // overrides the preset when non-empty (tests, future flag)
 
 	requests *atomic.Int64
-	sched    *scheduler.Model // the serial lane; TUI chat routes through it while running
 	cancel   context.CancelFunc
 	events   chan serviceEvent
 	note     string // status / error line for the tab
@@ -74,7 +72,7 @@ func (s serviceState) baseURL() string {
 	return "http://" + addr
 }
 
-// serviceResolver answers every model name with the one scheduled model — the
+// serviceResolver answers every model name with the supplied model lane — the
 // request's `model` field is cosmetic, exactly like `lem serve`. The counter
 // is the tab's requests-served receipt.
 type serviceResolver struct {
@@ -87,8 +85,8 @@ func (r serviceResolver) ResolveModel(context.Context, string) (inference.TextMo
 	return r.model, nil
 }
 
-// start wraps model in the serial lane and boots the HTTP listener on its own
-// goroutine. Listener failures (port in use) arrive as a serviceMsg.
+// start boots the HTTP listener on its own goroutine. Listener failures (port
+// in use) arrive as a serviceMsg. The model's lifecycle remains with app.
 func (s *serviceState) start(model inference.TextModel) tea.Cmd {
 	if s.running {
 		return nil
@@ -97,26 +95,15 @@ func (s *serviceState) start(model inference.TextModel) tea.Cmd {
 		s.note = "load a model first — pick one in Models"
 		return nil
 	}
-	sched, err := scheduler.New(model, scheduler.Config{
-		Mode:            scheduler.ModeSerial,
-		MaxConcurrent:   1, // one GPU, one lane: TUI turns and API requests queue
-		MaxQueue:        64,
-		StreamBuffer:    16,
-		RequestIDPrefix: "tui",
-	})
-	if err != nil {
-		s.note = err.Error()
-		return nil
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan serviceEvent, 1)
 	s.requests.Store(0)
-	resolver := serviceResolver{model: sched, n: s.requests}
+	resolver := serviceResolver{model: model, n: s.requests}
 	addr := s.addr()
 	go func() {
 		events <- serviceEvent{err: serving.Serve(ctx, addr, resolver)}
 	}()
-	s.sched, s.cancel, s.events = sched, cancel, events
+	s.cancel, s.events = cancel, events
 	s.running, s.stopping, s.note = true, false, ""
 	return tea.Batch(waitService(events), serviceTick())
 }
@@ -133,10 +120,6 @@ func (s *serviceState) stop() {
 // finish folds Serve's return into the tab — idempotent with teardown, so a
 // late serviceMsg after a synchronous teardown is absorbed cleanly.
 func (s *serviceState) finish(err error) {
-	if s.sched != nil {
-		s.sched.CloseEngine()
-		s.sched = nil
-	}
 	s.cancel = nil
 	s.running, s.stopping = false, false
 	if err != nil {
@@ -155,10 +138,7 @@ func (s *serviceState) teardown(reason string) {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	if s.sched != nil {
-		s.sched.CloseEngine()
-		s.sched = nil
-	}
+	s.cancel = nil
 	s.running, s.stopping = false, false
 	s.note = reason
 }

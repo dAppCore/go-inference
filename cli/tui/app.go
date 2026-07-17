@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"context"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -39,6 +40,10 @@ type app struct {
 
 	model     inference.TextModel
 	modelName string
+	lane      *modelLane
+	jobs      *jobManager
+	cancel    context.CancelFunc
+	sessionID string
 
 	cfg   settings
 	modes modeState
@@ -78,6 +83,7 @@ func loadModel(path string, ctxLen int) tea.Cmd {
 }
 
 func newApp(modelPath string, ctxLen, maxTokens int) app {
+	ctx, cancel := context.WithCancel(context.Background())
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 
@@ -108,6 +114,9 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		modes:     modeState{},
 		tools:     newTools(),
 		svc:       newService(),
+		jobs:      newJobManager(ctx),
+		cancel:    cancel,
+		sessionID: newRecordID(),
 	}
 	if modelPath != "" {
 		a.activeTab = tabChat
@@ -140,10 +149,22 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.picker.SetItems(msg.items)
 
 	case loadedMsg:
-		if a.model != nil {
-			_ = a.model.Close()
+		laneResult := newModelLane(msg.model, msg.name)
+		if !laneResult.OK {
+			if msg.model != nil {
+				_ = msg.model.Close()
+			}
+			a.errText = laneResult.Error()
+			a.loading = ""
+			a.activeTab = tabModels
+			return a, nil
 		}
-		a.model, a.modelName = msg.model, msg.name
+		_ = a.jobs.CancelAll()
+		if a.lane != nil {
+			_ = a.lane.Close()
+		}
+		a.lane = laneResult.Value.(*modelLane)
+		a.model, a.modelName = a.lane.Model(), msg.name
 		a.loading = ""
 		a.errText = ""
 		a.activeTab = tabChat
@@ -183,6 +204,9 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // onStream folds one generation event into the live assistant turn; on done it
 // runs the tool loop when armed.
 func (a app) onStream(ev streamMsg) (tea.Model, tea.Cmd) {
+	if a.gen == nil || ev.SessionID != a.gen.SessionID || ev.JobID != a.gen.JobID {
+		return a, nil
+	}
 	if len(a.turns) > 0 {
 		last := &a.turns[len(a.turns)-1]
 		if last.role == "assistant" {
@@ -234,20 +258,17 @@ func (a *app) runToolLoop() tea.Cmd {
 	}
 	a.turns = append(a.turns, turn{role: "assistant"})
 	a.toolHops++
-	a.generating = true
-	a.gen = startGeneration(a.chatModel(), a.history(), a.generateOpts())
-	return waitEvent(a.gen)
+	return a.beginGeneration()
 }
 
 func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		if a.gen != nil {
-			a.gen.cancel()
-		}
+		_ = a.jobs.CancelAll()
+		a.cancel()
 		a.svc.teardown("stopped (quit)")
-		if a.model != nil {
-			_ = a.model.Close()
+		if a.lane != nil {
+			_ = a.lane.Close()
 		}
 		return a, tea.Quit
 	case "tab", "shift+tab":
@@ -262,7 +283,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "esc":
 		if a.generating {
-			a.gen.cancel() // stops the turn; the stream drains to done
+			_ = a.jobs.Cancel(a.gen.SessionID) // stream drains to tagged done
 			return a, nil
 		}
 	case "ctrl+t":
@@ -346,12 +367,11 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			a.input.Reset()
 			a.turns = append(a.turns, turn{role: "user", text: prompt}, turn{role: "assistant"})
-			a.generating = true
 			a.toolHops = 0
 			a.errText = ""
-			a.gen = startGeneration(a.chatModel(), a.history(), a.generateOpts())
+			cmd := a.beginGeneration()
 			a.refreshTranscript()
-			return a, waitEvent(a.gen)
+			return a, cmd
 		}
 	}
 	return a.route(msg)
@@ -373,14 +393,25 @@ func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-// chatModel is the model TUI turns generate on: the service's serial lane
-// while the API is up (so terminal turns and HTTP requests queue, never race),
-// the raw model otherwise.
+// chatModel is always the application's shared serial lane. Starting or
+// stopping the HTTP service cannot change generation ownership or ordering.
 func (a app) chatModel() inference.TextModel {
-	if a.svc.running && a.svc.sched != nil {
-		return a.svc.sched
-	}
 	return a.model
+}
+
+// beginGeneration registers the active session turn with the job manager and
+// returns Bubble Tea's first wait command.
+func (a *app) beginGeneration() tea.Cmd {
+	result := a.jobs.Start(a.sessionID, newRecordID(), a.chatModel(), a.history(), a.generateOpts())
+	if !result.OK {
+		a.errText = result.Error()
+		a.generating = false
+		a.gen = nil
+		return nil
+	}
+	a.gen = result.Value.(*generation)
+	a.generating = true
+	return waitEvent(a.gen)
 }
 
 // generateOpts folds the Modes preset with the Settings overrides — an

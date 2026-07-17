@@ -109,7 +109,7 @@ func TestAppLiveChatDrive(t *testing.T) {
 	if a.activeTab != tabChat || a.model == nil {
 		t.Fatalf("tab = %d model=%v, want chat + loaded", a.activeTab, a.model != nil)
 	}
-	defer a.model.Close()
+	defer a.lane.Close()
 
 	a.cfg.thinkIdx = 2 // thinking off — deterministic short answers for the drive
 	a.input.SetValue("Say hello in exactly two words.")
@@ -158,7 +158,7 @@ func TestAppLiveServiceAPI(t *testing.T) {
 	}
 	m, _ = a.Update(loaded)
 	a = m.(app)
-	defer a.model.Close()
+	defer a.lane.Close()
 
 	const addr = "127.0.0.1:36917"
 	a.svc.custom = addr
@@ -209,8 +209,40 @@ func TestAppLiveServiceAPI(t *testing.T) {
 	}
 	m, _ = a.Update(waitService(a.svc.events)())
 	a = m.(app)
-	if a.svc.running || a.svc.sched != nil {
+	if a.svc.running {
 		t.Fatal("service did not finish cleanly")
+	}
+}
+
+func TestAppServiceUsesLoadedLaneWithoutOwningIt(t *testing.T) {
+	base := newFakeTextModel(map[string][]string{"hello": {"world"}})
+	a := newApp("", 0, 32)
+	m, _ := a.Update(loadedMsg{model: base, name: "fake"})
+	a = m.(app)
+	if a.lane == nil || a.model != a.lane.Model() {
+		t.Fatal("loaded model was not wrapped in the application lane")
+	}
+
+	a.svc.custom = "127.0.0.1:0"
+	cmd := a.svc.start(a.model)
+	if cmd == nil || !a.svc.running {
+		t.Fatalf("service did not start: running=%v note=%q", a.svc.running, a.svc.note)
+	}
+	a.svc.teardown("test stop")
+	select {
+	case event := <-a.svc.events:
+		a.svc.finish(event.err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("service listener did not stop")
+	}
+	if got := base.closes.Load(); got != 0 {
+		t.Fatalf("service stop closed the loaded model %d times", got)
+	}
+	if r := a.lane.Close(); !r.OK {
+		t.Fatalf("lane Close error = %s", r.Error())
+	}
+	if got := base.closes.Load(); got != 1 {
+		t.Fatalf("application lane closed base %d times, want 1", got)
 	}
 }
 
