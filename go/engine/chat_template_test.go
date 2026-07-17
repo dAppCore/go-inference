@@ -398,3 +398,39 @@ func TestExtractDefaultSystem_Ugly(t *testing.T) {
 		t.Fatalf("gemma template default = %q, want \"\"", got)
 	}
 }
+
+// chatMLQwenThinking is the Qwen3.5/3.6 ChatML dialect: the reasoning block rides the
+// generation cue — "<think>\n" opened when thinking is on, the pre-closed empty block when
+// off. Mirrors the composed serve template (engine/metal chatMLChatTemplate).
+func chatMLQwenThinking() ChatTemplate {
+	return ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+		Thinking:      &ChatThinking{OnSuffix: "<think>\n", OffSuffix: "<think>\n\n</think>\n\n"},
+	}
+}
+
+// TestRenderChatTemplate_ThinkingOnSuffix_Good: thinking ON opens the reasoning block after
+// the generation cue — byte-identical to Qwen3.5's apply_chat_template(enable_thinking=True).
+func TestRenderChatTemplate_ThinkingOnSuffix_Good(t *testing.T) {
+	on := true
+	got := renderChatTemplate(chatMLQwenThinking(), []inference.Message{{Role: "user", Content: "hi"}}, &on)
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+	if got != want {
+		t.Fatalf("thinking-on render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTemplate_ThinkingOnSuffix_Bad: thinking OFF pre-closes an empty reasoning
+// block — byte-identical to Qwen3.5's default / enable_thinking=False.
+func TestRenderChatTemplate_ThinkingOnSuffix_Bad(t *testing.T) {
+	off := false
+	got := renderChatTemplate(chatMLQwenThinking(), []inference.Message{{Role: "user", Content: "hi"}}, &off)
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+	if got != want {
+		t.Fatalf("thinking-off render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}

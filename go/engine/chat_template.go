@@ -108,6 +108,12 @@ type ChatThinking struct {
 	Prelude string
 	// OffSuffix is appended after the generation cue when thinking is off.
 	OffSuffix string
+	// OnSuffix is appended after the generation cue when thinking is ON — the
+	// ChatML/Qwen reasoning opener "<think>\n". Unlike gemma's Prelude (a leading
+	// system-turn switch), it rides the generation cue itself, so a chat with no
+	// system message still opens the reasoning block. gemma leaves it empty (its
+	// thinking-on switch is the system-turn Prelude).
+	OnSuffix string
 	// DefaultOn is the dialect's OWN thinking default, applied when a request
 	// leaves the flag unset (nil): gemma4 declares true — the vendor family
 	// default ("thinking is on by default") — so an explicit false is what
@@ -287,12 +293,13 @@ func writePlainTurns(out *strings.Builder, t ChatTemplate, messages []inference.
 // routed through here is byte-for-byte the old formatChatPrompt output.
 func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThinking *bool) string {
 	thinking := t.ResolveThinking(enableThinking)
-	prelude, offSuffix := "", ""
+	prelude, cueSuffix := "", ""
 	if t.Thinking != nil {
 		if thinking {
 			prelude = t.Thinking.Prelude
+			cueSuffix = t.Thinking.OnSuffix
 		} else {
-			offSuffix = t.Thinking.OffSuffix
+			cueSuffix = t.Thinking.OffSuffix
 		}
 	}
 	// A checkpoint carrying a DefaultSystem (Qwen2.5) frames it as a leading
@@ -317,7 +324,7 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 	// allocated ONCE (String() then hands it back without a copy), and write each
 	// turn's parts straight into it — the old loop concatenated a fresh per-turn
 	// string (one heap allocation per turn) only to copy it in and drop it.
-	size := plainTurnsSize(t, rest) + len(offSuffix)
+	size := plainTurnsSize(t, rest) + len(cueSuffix)
 	if leadingSystem {
 		size += len(t.Open) + len(t.SystemRole) + 1 + len(prelude) + len(sysContent) + len(t.Close) + 1
 	}
@@ -333,7 +340,7 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 		out.WriteString("\n")
 	}
 	writePlainTurns(&out, t, rest)
-	out.WriteString(offSuffix)
+	out.WriteString(cueSuffix)
 	return out.String()
 }
 

@@ -231,9 +231,10 @@ func (m *composedTextModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 }
 
 // chatMLChatTemplate is the ChatML dialect as an engine.ChatTemplate: <|im_start|>role\n…<|im_end|> turns,
-// an "assistant" generation cue, an in-place "system" turn (not folded), and the Qwen no-think block
-// "<think>\n\n</think>\n\n" appended after the cue when thinking is off. It matches the reference ChatML
-// rendering pinned in engine/chat_template_test.go.
+// an "assistant" generation cue, an in-place "system" turn (not folded), and the Qwen reasoning block
+// after the cue — "<think>\n" opened for the model to fill when thinking is on, the pre-closed empty
+// "<think>\n\n</think>\n\n" when it is off (Qwen3.5/3.6's default). Byte-identical to the checkpoint's
+// chat_template.jinja for both thinking states (verified against transformers.apply_chat_template).
 func chatMLChatTemplate() engine.ChatTemplate {
 	return engine.ChatTemplate{
 		Open:          "<|im_start|>",
@@ -241,7 +242,7 @@ func chatMLChatTemplate() engine.ChatTemplate {
 		UserRole:      "user",
 		AssistantRole: "assistant",
 		SystemRole:    "system",
-		Thinking:      &engine.ChatThinking{OffSuffix: "<think>\n\n</think>\n\n"},
+		Thinking:      &engine.ChatThinking{OnSuffix: "<think>\n", OffSuffix: "<think>\n\n</think>\n\n"},
 		Stops:         []string{"<|im_end|>"},
 	}
 }
