@@ -12,6 +12,7 @@ require (
 	dappco.re/go v0.11.0
 	dappco.re/go/api v0.19.0
 	dappco.re/go/config v0.18.0
+	dappco.re/go/container v0.11.0
 	dappco.re/go/io v0.15.1
 	dappco.re/go/orm v0.1.1
 	dappco.re/go/store v0.14.1

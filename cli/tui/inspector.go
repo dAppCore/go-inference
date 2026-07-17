@@ -23,9 +23,10 @@ const (
 var inspectorThemes = []string{"midnight", "aurora", "daylight"}
 
 type inspectorState struct {
-	cursor int
-	dirty  bool
-	theme  string
+	cursor  int
+	dirty   bool
+	theme   string
+	runtime runtimeInspection
 }
 
 func newInspector() inspectorState {
@@ -53,6 +54,12 @@ func (inspector *inspectorState) Move(delta int) {
 		return
 	}
 	inspector.cursor = ((inspector.cursor+delta)%int(inspectorControlCount) + int(inspectorControlCount)) % int(inspectorControlCount)
+}
+
+func (inspector *inspectorState) ApplyRuntime(result core.Result) {
+	if inspector != nil {
+		inspector.runtime = runtimeInspectionFrom(result)
+	}
 }
 
 func (inspector *inspectorState) Adjust(target *app, delta int) core.Result {
@@ -173,14 +180,7 @@ func (inspector inspectorState) renderWork(builder *strings.Builder, target app)
 		builder.WriteString(target.styles.status.Render("○ no work item selected") + "\n\n")
 	}
 
-	builder.WriteString(target.styles.accent.Render("RUNTIME") + "\n")
-	runtime := "○ detection pending"
-	if target.work != nil {
-		if selected, ok := target.work.Selected(); ok && selected.Runtime != "" {
-			runtime = "● " + selected.Runtime
-		}
-	}
-	builder.WriteString(target.styles.status.Render(runtime) + "\n\n")
+	inspector.renderRuntime(builder, target)
 
 	capabilities := []agentCapability{}
 	if target.work != nil {
@@ -235,6 +235,67 @@ func (inspector inspectorState) renderWork(builder *strings.Builder, target app)
 		}
 		builder.WriteString("\n")
 	}
+}
+
+func (inspector inspectorState) renderRuntime(builder *strings.Builder, target app) {
+	builder.WriteString(target.styles.accent.Render("RUNTIME") + "\n")
+	if target.work != nil {
+		if selected, ok := target.work.Selected(); ok && selected.Runtime != "" {
+			builder.WriteString(target.styles.title.Render("assigned  "+selected.Runtime) + "\n")
+		}
+	}
+	switch {
+	case !inspector.runtime.ready:
+		builder.WriteString(target.styles.status.Render("○ detection pending") + "\n\n")
+	case inspector.runtime.reason != "":
+		builder.WriteString(target.styles.attention.Render("○ unavailable") + "\n")
+		builder.WriteString(target.styles.thought.Render(inspector.runtime.reason) + "\n\n")
+	case len(inspector.runtime.capabilities) == 0:
+		builder.WriteString(target.styles.status.Render("○ none available") + "\n\n")
+	default:
+		for index, capability := range inspector.runtime.capabilities {
+			marker := "○"
+			if index == 0 {
+				marker = "●"
+			}
+			name := capability.Name
+			if capability.Version != "" {
+				name = core.Concat(name, "  ", capability.Version)
+			}
+			builder.WriteString(target.styles.success.Render(marker+" "+name) + "\n")
+			features := runtimeFeatureLabels(capability)
+			if len(features) > 0 {
+				builder.WriteString(target.styles.thought.Render("  "+core.Join(" · ", features...)) + "\n")
+			}
+			if capability.Path != "" {
+				builder.WriteString(target.styles.thought.Render("  "+capability.Path) + "\n")
+			}
+		}
+		builder.WriteString("\n")
+	}
+}
+
+func runtimeFeatureLabels(capability runtimeCapability) []string {
+	features := make([]string, 0, 6)
+	if capability.GPU {
+		features = append(features, "GPU")
+	}
+	if capability.NetworkIsolation {
+		features = append(features, "network isolation")
+	}
+	if capability.VolumeMounts {
+		features = append(features, "volumes")
+	}
+	if capability.Encryption {
+		features = append(features, "encryption")
+	}
+	if capability.HardwareIsolation {
+		features = append(features, "hardware isolation")
+	}
+	if capability.SubSecondStart {
+		features = append(features, "sub-second start")
+	}
+	return features
 }
 
 func (inspector inspectorState) renderChat(builder *strings.Builder, target app) {
