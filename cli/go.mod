@@ -12,9 +12,12 @@ require (
 	dappco.re/go v0.11.0
 	dappco.re/go/api v0.19.0
 	dappco.re/go/io v0.15.1
+	dappco.re/go/orm v0.1.1
+	dappco.re/go/store v0.14.1
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
+	github.com/google/uuid v1.6.0
 )
 
 require (
@@ -23,7 +26,6 @@ require (
 	dappco.re/go/log v0.13.1 // indirect
 	dappco.re/go/process v0.16.1 // indirect
 	dappco.re/go/ratelimit v0.12.1 // indirect
-	dappco.re/go/store v0.14.1 // indirect
 	forge.lthn.ai/Snider/Enchantrix v0.0.5 // indirect
 	github.com/99designs/gqlgen v0.17.88 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect
@@ -101,7 +103,6 @@ require (
 	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/google/flatbuffers v25.12.19+incompatible // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/context v1.1.2 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/gorilla/sessions v1.4.0 // indirect
