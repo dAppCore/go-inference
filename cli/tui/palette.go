@@ -1,0 +1,487 @@
+// SPDX-License-Identifier: EUPL-1.2
+
+package tui
+
+import (
+	"strings"
+
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+
+	core "dappco.re/go"
+)
+
+type commandID string
+
+const (
+	commandNewSession       commandID = "session.new"
+	commandSwitchSession    commandID = "session.switch"
+	commandSearchHistory    commandID = "history.search"
+	commandToggleInspector  commandID = "inspector.toggle"
+	commandShowHelp         commandID = "help.show"
+	commandPanelChat        commandID = "panel.chat"
+	commandPanelWork        commandID = "panel.work"
+	commandPanelModels      commandID = "panel.models"
+	commandPanelService     commandID = "panel.service"
+	commandSaveSettings     commandID = "settings.save"
+	commandExportMarkdown   commandID = "session.export.markdown"
+	commandExportJSON       commandID = "session.export.json"
+	commandRefreshWork      commandID = "work.refresh"
+	commandRefreshRuntimes  commandID = "runtimes.refresh"
+	commandRefreshKnowledge commandID = "knowledge.refresh"
+)
+
+type workspaceCommand struct {
+	ID          commandID
+	Title       string
+	Description string
+	Available   bool
+	Reason      string
+	run         func(*app) core.Result
+}
+
+type commandListItem struct{ command workspaceCommand }
+
+func (item commandListItem) Title() string { return item.command.Title }
+func (item commandListItem) Description() string {
+	if item.command.Available || item.command.Reason == "" {
+		return item.command.Description
+	}
+	return core.Concat(item.command.Description, " — unavailable: ", item.command.Reason)
+}
+func (item commandListItem) FilterValue() string {
+	return core.Concat(string(item.command.ID), " ", item.command.Title, " ", item.command.Description)
+}
+
+type commandPalette struct {
+	commands []workspaceCommand
+	byID     map[commandID]workspaceCommand
+	list     list.Model
+}
+
+func newCommandPalette(styles uiStyles) *commandPalette {
+	commands := defaultWorkspaceCommands()
+	items := make([]list.Item, 0, len(commands))
+	byID := make(map[commandID]workspaceCommand, len(commands))
+	for _, command := range commands {
+		items = append(items, commandListItem{command: command})
+		byID[command.ID] = command
+	}
+	model := list.New(items, list.NewDefaultDelegate(), 68, 16)
+	model.Title = "Commands"
+	model.SetShowStatusBar(false)
+	model.SetFilteringEnabled(true)
+	model.Styles.Title = styles.title
+	model.SetFilterState(list.Filtering)
+	return &commandPalette{commands: commands, byID: byID, list: model}
+}
+
+func (palette *commandPalette) Filter(query string) []workspaceCommand {
+	if palette == nil {
+		return nil
+	}
+	query = core.Trim(query)
+	if query == "" {
+		return append([]workspaceCommand(nil), palette.commands...)
+	}
+	targets := make([]string, len(palette.commands))
+	for i, command := range palette.commands {
+		targets[i] = commandListItem{command: command}.FilterValue()
+	}
+	ranks := list.DefaultFilter(query, targets)
+	matched := make([]workspaceCommand, 0, len(ranks))
+	for _, rank := range ranks {
+		matched = append(matched, palette.commands[rank.Index])
+	}
+	return matched
+}
+
+func (palette *commandPalette) Invoke(id commandID, target *app) core.Result {
+	if palette == nil {
+		return core.Fail(core.E("tui.commandPalette.Invoke", "command palette is unavailable", nil))
+	}
+	command, exists := palette.byID[id]
+	if !exists {
+		return core.Fail(core.E("tui.commandPalette.Invoke", core.Concat("unknown command: ", string(id)), nil))
+	}
+	if !command.Available {
+		return core.Fail(core.E("tui.commandPalette.Invoke", core.Concat(command.Title, " is unavailable: ", command.Reason), nil))
+	}
+	if target == nil || command.run == nil {
+		return core.Fail(core.E("tui.commandPalette.Invoke", "command target is unavailable", nil))
+	}
+	return command.run(target)
+}
+
+func (palette *commandPalette) SelectedID() commandID {
+	if palette == nil {
+		return ""
+	}
+	item, ok := palette.list.SelectedItem().(commandListItem)
+	if !ok {
+		return ""
+	}
+	return item.command.ID
+}
+
+func (palette *commandPalette) Open() {
+	if palette == nil {
+		return
+	}
+	palette.list.SetFilterText("")
+	palette.list.SetFilterState(list.Filtering)
+}
+
+func (palette *commandPalette) Update(message tea.Msg) tea.Cmd {
+	if palette == nil {
+		return nil
+	}
+	var command tea.Cmd
+	palette.list, command = palette.list.Update(message)
+	return command
+}
+
+func (palette *commandPalette) View(width, height int) string {
+	if palette == nil {
+		return ""
+	}
+	palette.list.SetSize(max(1, width), max(6, height))
+	return palette.list.View()
+}
+
+func defaultWorkspaceCommands() []workspaceCommand {
+	panelCommand := func(id commandID, title string, panel panelID) workspaceCommand {
+		return workspaceCommand{ID: id, Title: title, Description: "Go to the " + panelNames[panel] + " panel", Available: true, run: func(target *app) core.Result {
+			target.activePanel = panel
+			return core.Ok(nil)
+		}}
+	}
+	unavailable := func(id commandID, title, description, reason string) workspaceCommand {
+		return workspaceCommand{ID: id, Title: title, Description: description, Reason: reason}
+	}
+	return []workspaceCommand{
+		{ID: commandNewSession, Title: "New session", Description: "Create and open a blank chat session", Available: true, run: func(target *app) core.Result { return target.createSession() }},
+		{ID: commandSwitchSession, Title: "Switch session", Description: "Open the recent-session switcher", Available: true, run: func(target *app) core.Result { return target.openSessionSwitcher() }},
+		{ID: commandSearchHistory, Title: "Search history", Description: "Search durable chat titles and turns", Available: true, run: func(target *app) core.Result { return target.openHistorySearch() }},
+		{ID: commandToggleInspector, Title: "Toggle inspector", Description: "Show or hide contextual session details", Available: true, run: func(target *app) core.Result {
+			target.inspectorOpen = !target.inspectorOpen
+			return core.Ok(nil)
+		}},
+		{ID: commandShowHelp, Title: "Show help", Description: "Open the complete keyboard reference", Available: true, run: func(target *app) core.Result {
+			target.activeOverlay = overlayHelp
+			return core.Ok(nil)
+		}},
+		panelCommand(commandPanelChat, "Chat panel", panelChat),
+		panelCommand(commandPanelWork, "Work panel", panelWork),
+		panelCommand(commandPanelModels, "Models panel", panelModels),
+		panelCommand(commandPanelService, "Service panel", panelService),
+		unavailable(commandSaveSettings, "Save settings", "Commit generation and appearance preferences", "preference editor not open"),
+		unavailable(commandExportMarkdown, "Export Markdown", "Export the active session as Markdown", "export adapter not connected"),
+		unavailable(commandExportJSON, "Export JSONL", "Export the active session as JSON Lines", "export adapter not connected"),
+		{ID: commandRefreshWork, Title: "Refresh work", Description: "Refresh local work snapshots", Available: true, run: noOpCommand},
+		{ID: commandRefreshRuntimes, Title: "Refresh runtimes", Description: "Refresh local runtime capabilities", Available: true, run: noOpCommand},
+		{ID: commandRefreshKnowledge, Title: "Refresh knowledge", Description: "Refresh local knowledge packs", Available: true, run: noOpCommand},
+	}
+}
+
+func noOpCommand(*app) core.Result { return core.Ok(nil) }
+
+type sessionSwitcherItem struct {
+	SessionID   string
+	Title       string
+	Description string
+}
+
+type sessionListItem struct{ value sessionSwitcherItem }
+
+func (item sessionListItem) Title() string       { return item.value.Title }
+func (item sessionListItem) Description() string { return item.value.Description }
+func (item sessionListItem) FilterValue() string {
+	return core.Concat(item.value.Title, " ", item.value.Description)
+}
+
+type sessionSwitcher struct {
+	manager *sessionManager
+	items   []sessionSwitcherItem
+	list    list.Model
+}
+
+func newSessionSwitcher(manager *sessionManager, styles uiStyles, width, height int) core.Result {
+	if manager == nil {
+		return core.Fail(core.E("tui.newSessionSwitcher", "session manager is unavailable", nil))
+	}
+	model := list.New(nil, list.NewDefaultDelegate(), width, height)
+	model.Title = "Recent sessions"
+	model.SetShowStatusBar(false)
+	model.SetFilteringEnabled(true)
+	model.Styles.Title = styles.title
+	switcher := &sessionSwitcher{manager: manager, list: model}
+	switcher.Refresh()
+	return core.Ok(switcher)
+}
+
+func (switcher *sessionSwitcher) Refresh() {
+	if switcher == nil || switcher.manager == nil {
+		return
+	}
+	sessions := switcher.manager.Recent()
+	switcher.items = make([]sessionSwitcherItem, 0, len(sessions))
+	items := make([]list.Item, 0, len(sessions))
+	for _, session := range sessions {
+		marker := sessionMarker(session)
+		model := session.Record.PreferredModel
+		if model == "" {
+			model = "no preferred model"
+		}
+		item := sessionSwitcherItem{
+			SessionID:   session.Record.ID,
+			Title:       core.Concat(marker, " ", session.Record.Title),
+			Description: core.Concat(session.Record.Status, " · ", model),
+		}
+		switcher.items = append(switcher.items, item)
+		items = append(items, sessionListItem{value: item})
+	}
+	switcher.list.SetItems(items)
+}
+
+func sessionMarker(session *chatSession) string {
+	if session == nil {
+		return "○"
+	}
+	if session.Attention {
+		return "!"
+	}
+	switch session.Record.Status {
+	case "generating":
+		return "◉"
+	case "queued":
+		return "◌"
+	case "failed":
+		return "×"
+	default:
+		return "○"
+	}
+}
+
+func (switcher *sessionSwitcher) Items() []sessionSwitcherItem {
+	if switcher == nil {
+		return nil
+	}
+	return append([]sessionSwitcherItem(nil), switcher.items...)
+}
+
+func (switcher *sessionSwitcher) Update(message tea.Msg) tea.Cmd {
+	if switcher == nil {
+		return nil
+	}
+	var command tea.Cmd
+	switcher.list, command = switcher.list.Update(message)
+	return command
+}
+
+func (switcher *sessionSwitcher) ActivateSelected() core.Result {
+	if switcher == nil || switcher.manager == nil {
+		return core.Fail(core.E("tui.sessionSwitcher.ActivateSelected", "session switcher is unavailable", nil))
+	}
+	item, ok := switcher.list.SelectedItem().(sessionListItem)
+	if !ok {
+		return core.Fail(core.E("tui.sessionSwitcher.ActivateSelected", "no session is selected", nil))
+	}
+	return switcher.manager.Switch(item.value.SessionID)
+}
+
+func (switcher *sessionSwitcher) View(width, height int) string {
+	if switcher == nil {
+		return ""
+	}
+	switcher.list.SetSize(max(1, width), max(6, height))
+	return switcher.list.View()
+}
+
+type historySearchItem struct {
+	hit sessionSearchHit
+}
+
+func (item historySearchItem) Title() string       { return item.hit.Session.Title }
+func (item historySearchItem) Description() string { return item.hit.Snippet }
+func (item historySearchItem) FilterValue() string {
+	return core.Concat(item.hit.Session.Title, " ", item.hit.Snippet)
+}
+
+type historySearch struct {
+	repository workspaceRepository
+	manager    *sessionManager
+	input      textinput.Model
+	list       list.Model
+	hits       []sessionSearchHit
+	query      string
+	matchTurn  string
+}
+
+func newHistorySearch(repository workspaceRepository, manager *sessionManager, styles uiStyles, width, height int) core.Result {
+	if repository == nil || manager == nil {
+		return core.Fail(core.E("tui.newHistorySearch", "repository and session manager are required", nil))
+	}
+	input := textinput.New()
+	input.Placeholder = "Search titles and turns…"
+	input.Prompt = "› "
+	input.Focus()
+	model := list.New(nil, list.NewDefaultDelegate(), width, max(4, height-2))
+	model.Title = "History"
+	model.SetShowStatusBar(false)
+	model.SetFilteringEnabled(false)
+	model.Styles.Title = styles.title
+	return core.Ok(&historySearch{repository: repository, manager: manager, input: input, list: model})
+}
+
+func (search *historySearch) Search(query string) core.Result {
+	if search == nil || search.repository == nil {
+		return core.Fail(core.E("tui.historySearch.Search", "history search is unavailable", nil))
+	}
+	query = core.Trim(query)
+	search.query = query
+	search.input.SetValue(query)
+	result := search.repository.SearchSessions(query, 50)
+	if !result.OK {
+		return result
+	}
+	hits, ok := result.Value.([]sessionSearchHit)
+	if !ok {
+		return core.Fail(core.E("tui.historySearch.Search", "invalid search result", nil))
+	}
+	search.hits = append([]sessionSearchHit(nil), hits...)
+	items := make([]list.Item, 0, len(hits))
+	for _, hit := range hits {
+		items = append(items, historySearchItem{hit: hit})
+	}
+	search.list.SetItems(items)
+	return core.Ok(search.Hits())
+}
+
+func (search *historySearch) Hits() []sessionSearchHit {
+	if search == nil {
+		return nil
+	}
+	return append([]sessionSearchHit(nil), search.hits...)
+}
+
+func (search *historySearch) MatchTurnID() string {
+	if search == nil {
+		return ""
+	}
+	return search.matchTurn
+}
+
+func (search *historySearch) ActivateSelected() core.Result {
+	if search == nil || search.manager == nil {
+		return core.Fail(core.E("tui.historySearch.ActivateSelected", "history search is unavailable", nil))
+	}
+	item, ok := search.list.SelectedItem().(historySearchItem)
+	if !ok {
+		return core.Fail(core.E("tui.historySearch.ActivateSelected", "no history result is selected", nil))
+	}
+	if result := search.manager.Switch(item.hit.Session.ID); !result.OK {
+		return result
+	}
+	session := search.manager.Active()
+	position := 0
+	search.matchTurn = ""
+	needle := core.Lower(search.query)
+	for index, turn := range session.Turns {
+		if core.Contains(core.Lower(turn.Visible), needle) {
+			position = index
+			search.matchTurn = turn.ID
+			break
+		}
+	}
+	if result := search.manager.SetViewport(session.Record.ID, position, false); !result.OK {
+		return result
+	}
+	return core.Ok(item.hit)
+}
+
+func (search *historySearch) Update(message tea.Msg) tea.Cmd {
+	if search == nil {
+		return nil
+	}
+	if keyMessage, ok := message.(tea.KeyMsg); ok {
+		switch keyMessage.String() {
+		case "up", "down", "pgup", "pgdown", "ctrl+u", "ctrl+d":
+			var command tea.Cmd
+			search.list, command = search.list.Update(message)
+			return command
+		}
+	}
+	before := search.input.Value()
+	var command tea.Cmd
+	search.input, command = search.input.Update(message)
+	if search.input.Value() != before {
+		_ = search.Search(search.input.Value())
+	}
+	return command
+}
+
+func (search *historySearch) View(width, height int) string {
+	if search == nil {
+		return ""
+	}
+	search.input.Width = max(12, width-4)
+	search.list.SetSize(max(1, width), max(4, height-2))
+	return lipgloss.JoinVertical(lipgloss.Left, search.input.View(), search.list.View())
+}
+
+type overlayKind uint8
+
+const (
+	overlayNone overlayKind = iota
+	overlayCommands
+	overlaySessions
+	overlaySearch
+	overlayHelp
+)
+
+type helpOverlay struct {
+	model help.Model
+	keys  keyMap
+}
+
+func newHelpOverlay(keys keyMap, styles uiStyles) *helpOverlay {
+	model := help.New()
+	model.ShowAll = true
+	model.Styles.FullKey = styles.accent
+	model.Styles.FullDesc = styles.status
+	model.Styles.FullSeparator = styles.separator
+	return &helpOverlay{model: model, keys: keys}
+}
+
+func (overlay *helpOverlay) View(width int) string {
+	if overlay == nil {
+		return ""
+	}
+	overlay.model.Width = max(20, width)
+	return lipgloss.JoinVertical(lipgloss.Left, "Keyboard help", "", overlay.model.View(overlay.keys), "", "esc closes help")
+}
+
+func renderOverlay(body string, width, height int, styles uiStyles) string {
+	if width <= 0 || height <= 0 {
+		return ""
+	}
+	overlayWidth := min(72, max(1, width-2))
+	overlayHeight := min(18, max(3, height-2))
+	box := styles.outerFrame.Copy().
+		BorderForeground(styles.theme.focus).
+		Width(max(1, overlayWidth-2)).
+		Height(max(1, overlayHeight-2)).
+		MaxWidth(overlayWidth).
+		MaxHeight(overlayHeight).
+		Render(body)
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Top, box)
+}
+
+// strings is retained here only for the overlay's compact empty state builder.
+func overlayEmpty(title, reason string) string {
+	return strings.Join([]string{title, "", "○ " + reason, "", "esc closes"}, "\n")
+}

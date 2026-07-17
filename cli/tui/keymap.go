@@ -29,3 +29,14 @@ func newKeyMap() keyMap {
 		Help:            key.NewBinding(key.WithKeys("f1"), key.WithHelp("f1", "help")),
 	}
 }
+
+func (keys keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{keys.CommandPalette, keys.SwitchSession, keys.ToggleInspector, keys.Help}
+}
+
+func (keys keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{keys.NewSession, keys.SwitchSession, keys.PreviousSession, keys.NextSession},
+		{keys.CommandPalette, keys.ToggleInspector, keys.Search, keys.Save, keys.Help},
+	}
+}

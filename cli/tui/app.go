@@ -35,6 +35,13 @@ type app struct {
 	styles        uiStyles
 	keys          keyMap
 	markdown      *markdownRenderer
+	activeOverlay overlayKind
+	palette       *commandPalette
+	switcher      *sessionSwitcher
+	search        *historySearch
+	help          *helpOverlay
+	sessions      *sessionManager
+	repository    workspaceRepository
 
 	picker  list.Model
 	spin    spinner.Model
@@ -95,6 +102,7 @@ func loadModel(path string, ctxLen int) tea.Cmd {
 func newApp(modelPath string, ctxLen, maxTokens int) app {
 	ctx, cancel := context.WithCancel(context.Background())
 	styles := newUIStyles(midnightTheme())
+	keys := newKeyMap()
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 
@@ -119,8 +127,10 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 	a := app{
 		activePanel: panelModels,
 		styles:      styles,
-		keys:        newKeyMap(),
+		keys:        keys,
 		markdown:    newMarkdownRenderer(styles.theme.name),
+		palette:     newCommandPalette(styles),
+		help:        newHelpOverlay(keys, styles),
 		picker:      newPicker(styles),
 		spin:        sp,
 		input:       in,
@@ -294,6 +304,62 @@ func (a *app) runToolLoop() tea.Cmd {
 }
 
 func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.activeOverlay != overlayNone && msg.String() != "ctrl+c" {
+		return a.onOverlayKey(msg)
+	}
+	if key.Matches(msg, a.keys.CommandPalette) {
+		a.palette.Open()
+		a.activeOverlay = overlayCommands
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.SwitchSession) {
+		if result := a.openSessionSwitcher(); !result.OK {
+			a.errText = result.Error()
+		}
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.Search) {
+		if result := a.openHistorySearch(); !result.OK {
+			a.errText = result.Error()
+		}
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.Help) {
+		a.activeOverlay = overlayHelp
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.NewSession) {
+		if result := a.createSession(); !result.OK {
+			a.errText = result.Error()
+		}
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.PreviousSession) {
+		if a.sessions == nil {
+			a.errText = "session workspace is not connected"
+		} else if result := a.sessions.Previous(); !result.OK {
+			a.errText = result.Error()
+		} else {
+			a.activateManagedSession(a.sessions.Active())
+		}
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.NextSession) {
+		if a.sessions == nil {
+			a.errText = "session workspace is not connected"
+		} else if result := a.sessions.Next(); !result.OK {
+			a.errText = result.Error()
+		} else {
+			a.activateManagedSession(a.sessions.Active())
+		}
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.Save) {
+		if result := a.palette.Invoke(commandSaveSettings, &a); !result.OK {
+			a.errText = result.Error()
+		}
+		return a, nil
+	}
 	if key.Matches(msg, a.keys.ToggleInspector) {
 		a.inspectorOpen = !a.inspectorOpen
 		if a.ready {
@@ -410,7 +476,134 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a.route(msg)
 }
 
-// route hands the message to the focused component for the active tab.
+func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if message.String() == "esc" {
+		a.activeOverlay = overlayNone
+		return a, nil
+	}
+	if message.String() == "enter" {
+		switch a.activeOverlay {
+		case overlayCommands:
+			id := a.palette.SelectedID()
+			a.activeOverlay = overlayNone
+			if result := a.palette.Invoke(id, &a); !result.OK {
+				a.errText = result.Error()
+			}
+		case overlaySessions:
+			if a.switcher == nil {
+				a.errText = "session switcher is unavailable"
+			} else if result := a.switcher.ActivateSelected(); !result.OK {
+				a.errText = result.Error()
+			} else {
+				a.activateManagedSession(a.sessions.Active())
+				a.activeOverlay = overlayNone
+			}
+		case overlaySearch:
+			if a.search == nil {
+				a.errText = "history search is unavailable"
+			} else if result := a.search.ActivateSelected(); !result.OK {
+				a.errText = result.Error()
+			} else {
+				a.activateManagedSession(a.sessions.Active())
+				a.activeOverlay = overlayNone
+			}
+		}
+		return a, nil
+	}
+
+	var command tea.Cmd
+	switch a.activeOverlay {
+	case overlayCommands:
+		command = a.palette.Update(message)
+	case overlaySessions:
+		if a.switcher != nil {
+			command = a.switcher.Update(message)
+		}
+	case overlaySearch:
+		if a.search != nil {
+			command = a.search.Update(message)
+		}
+	case overlayHelp:
+		// Help is read-only; every key except Escape is intentionally consumed.
+	}
+	return a, command
+}
+
+func (a *app) createSession() core.Result {
+	if a.sessions != nil {
+		result := a.sessions.Create()
+		if !result.OK {
+			return result
+		}
+		a.activateManagedSession(result.Value.(*chatSession))
+		return core.Ok(result.Value)
+	}
+	if a.generating {
+		return core.Fail(core.E("tui.app.createSession", "connect the persistent workspace before creating a session during generation", nil))
+	}
+	a.sessionID = newRecordID()
+	a.turns = nil
+	a.input.Reset()
+	a.follow = true
+	a.newOutput = false
+	a.activePanel = panelChat
+	a.refreshTranscript()
+	return core.Ok(a.sessionID)
+}
+
+func (a *app) openSessionSwitcher() core.Result {
+	if a.sessions == nil {
+		return core.Fail(core.E("tui.app.openSessionSwitcher", "session workspace is not connected", nil))
+	}
+	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+	result := newSessionSwitcher(a.sessions, a.styles, metrics.mainWidth, metrics.mainHeight)
+	if !result.OK {
+		return result
+	}
+	a.switcher = result.Value.(*sessionSwitcher)
+	a.activeOverlay = overlaySessions
+	return core.Ok(a.switcher)
+}
+
+func (a *app) openHistorySearch() core.Result {
+	if a.sessions == nil || a.repository == nil {
+		return core.Fail(core.E("tui.app.openHistorySearch", "history workspace is not connected", nil))
+	}
+	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+	result := newHistorySearch(a.repository, a.sessions, a.styles, metrics.mainWidth, metrics.mainHeight)
+	if !result.OK {
+		return result
+	}
+	a.search = result.Value.(*historySearch)
+	a.activeOverlay = overlaySearch
+	return core.Ok(a.search)
+}
+
+func (a *app) activateManagedSession(session *chatSession) {
+	if a == nil || session == nil {
+		return
+	}
+	a.sessionID = session.Record.ID
+	a.turns = make([]turn, 0, len(session.Turns))
+	for _, record := range session.Turns {
+		a.turns = append(a.turns, turn{
+			id:      record.ID,
+			role:    record.Role,
+			thought: record.Thought,
+			text:    record.Visible,
+		})
+	}
+	a.input.SetValue(session.Draft)
+	a.follow = session.Follow
+	a.newOutput = session.Attention
+	a.activePanel = panelChat
+	a.refreshTranscript()
+	if !a.follow {
+		a.view.SetYOffset(session.ViewportOffset)
+	}
+}
+
+// route hands the message to the focused component for the active panel.
 func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch a.activePanel {
@@ -658,6 +851,9 @@ func (a app) View() string {
 }
 
 func (a app) panelView() string {
+	if a.activeOverlay != overlayNone {
+		return a.overlayView()
+	}
 	switch a.activePanel {
 	case panelModels:
 		return a.picker.View()
@@ -682,6 +878,34 @@ func (a app) panelView() string {
 			a.styles.inputBorder.Render(a.input.View()),
 		)
 	}
+}
+
+func (a app) overlayView() string {
+	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+	width := max(1, metrics.mainWidth)
+	height := max(1, metrics.mainHeight)
+	bodyWidth := max(1, min(68, width-8))
+	bodyHeight := max(5, min(14, height-4))
+	var body string
+	switch a.activeOverlay {
+	case overlayCommands:
+		body = a.palette.View(bodyWidth, bodyHeight)
+	case overlaySessions:
+		if a.switcher == nil {
+			body = overlayEmpty("Recent sessions", "session workspace is not connected")
+		} else {
+			body = a.switcher.View(bodyWidth, bodyHeight)
+		}
+	case overlaySearch:
+		if a.search == nil {
+			body = overlayEmpty("History search", "history workspace is not connected")
+		} else {
+			body = a.search.View(bodyWidth, bodyHeight)
+		}
+	case overlayHelp:
+		body = a.help.View(bodyWidth)
+	}
+	return renderOverlay(body, width, height, a.styles)
 }
 
 func (a app) sessionStrip() string {
