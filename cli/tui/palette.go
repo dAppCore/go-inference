@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
+	coreio "dappco.re/go/io"
 )
 
 type commandID string
@@ -58,9 +59,12 @@ func (item commandListItem) FilterValue() string {
 }
 
 type commandPalette struct {
-	commands []workspaceCommand
-	byID     map[commandID]workspaceCommand
-	list     list.Model
+	commands        []workspaceCommand
+	byID            map[commandID]workspaceCommand
+	list            list.Model
+	exporter        sessionExporter
+	exportMedium    coreio.Medium
+	exportDirectory string
 }
 
 func newCommandPalette(styles uiStyles) *commandPalette {
@@ -173,6 +177,78 @@ func (palette *commandPalette) SetAgentCapabilities(capabilities []agentCapabili
 	palette.commands = commands
 	palette.byID = byID
 	palette.list.SetItems(items)
+}
+
+func (palette *commandPalette) SetExporter(exporter sessionExporter, medium coreio.Medium, directory string) {
+	if palette == nil {
+		return
+	}
+	palette.exporter = exporter
+	palette.exportMedium = medium
+	palette.exportDirectory = directory
+	available := exporter != nil && medium != nil
+	for index := range palette.commands {
+		format := exportFormat("")
+		switch palette.commands[index].ID {
+		case commandExportMarkdown:
+			format = exportMarkdown
+		case commandExportJSON:
+			format = exportJSON
+		default:
+			continue
+		}
+		palette.commands[index].Available = available
+		palette.commands[index].Reason = ""
+		if !available {
+			palette.commands[index].Reason = "export adapter not connected"
+		}
+		palette.commands[index].run = func(target *app) core.Result {
+			return palette.runExport(target, format)
+		}
+	}
+	items := make([]list.Item, 0, len(palette.commands))
+	palette.byID = make(map[commandID]workspaceCommand, len(palette.commands))
+	for _, command := range palette.commands {
+		items = append(items, commandListItem{command: command})
+		palette.byID[command.ID] = command
+	}
+	palette.list.SetItems(items)
+}
+
+func (palette *commandPalette) runExport(target *app, format exportFormat) core.Result {
+	if palette == nil || palette.exporter == nil || palette.exportMedium == nil {
+		return core.Fail(core.E("tui.command.export", "export adapter is unavailable", nil))
+	}
+	if target == nil || target.repository == nil {
+		return core.Fail(core.E("tui.command.export", "workspace repository is unavailable", nil))
+	}
+	result := palette.exporter.Export(
+		palette.exportMedium,
+		palette.exportDirectory,
+		target.sessionID,
+		format,
+	)
+	if !result.OK {
+		return result
+	}
+	receipt, ok := result.Value.(exportReceipt)
+	if !ok {
+		return core.Fail(core.E("tui.command.export", "invalid export receipt", nil))
+	}
+	artifact := artifactRecord{
+		ID:           newRecordID(),
+		SessionID:    receipt.SessionID,
+		Kind:         core.Concat("export.", string(receipt.Format)),
+		Path:         receipt.Path,
+		Title:        core.Concat("Session export · ", receipt.Title),
+		MetadataJSON: core.JSONMarshalString(receipt),
+		CreatedAt:    receipt.ExportedAt,
+		ArchivedAt:   unsetRecordTime(),
+	}
+	if saved := target.repository.SaveArtifact(artifact); !saved.OK {
+		return core.Fail(core.E("tui.command.export", core.Concat("export written but artifact persistence failed: ", receipt.Path), resultError(saved)))
+	}
+	return core.Ok(receipt)
 }
 
 func defaultWorkspaceCommands() []workspaceCommand {
