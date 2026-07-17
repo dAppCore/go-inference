@@ -16,12 +16,13 @@ import (
 	state "dappco.re/go/inference/model/state"
 )
 
-// composed_state_test.go proves composedEngineSession's multi-turn -state (#379): a composed hybrid holds
-// no persistent KV cache (it decodes stateless-replay, re-prefilling the token prefix each generate), so
-// its save/restore is a TOKEN-PREFIX snapshot — CaptureKVWithOptions emits Tokens with no Layers, and a
-// session restored from those tokens produces a continuation byte-identical to an unbroken one because the
-// deterministic host-f32 forward recomputes byte-identical recurrent state from the identical prefix. The
-// tiny model here is pure host f32 (no Metal device), so these run under the plain `go test ./...` gate.
+// composed_state_test.go proves composedEngineSession's multi-turn -state (#379): the recurrent
+// conv/delta state has no kv.Snapshot Layers representation, so save/restore is a TOKEN-PREFIX
+// snapshot — CaptureKVWithOptions emits Tokens with no Layers, and a session restored from those
+// tokens produces a continuation byte-identical to an unbroken one because the deterministic
+// composed forward recomputes byte-identical recurrent state from the identical prefix (the
+// stateful session re-prefills once on the first call that needs live state — #25). The tiny
+// model here is pure host f32 (no Metal device), so these run under the plain `go test ./...` gate.
 
 // synComposedF32 is the deterministic weight filler model/composed's own unit tests use, so the tiny model
 // below decodes deterministically (a fixed greedy continuation to compare across save/restore).
@@ -71,7 +72,7 @@ func newTinyComposedModel(nLayers int) model.SessionModel {
 }
 
 func newTinyComposedSession(nLayers int) *composedEngineSession {
-	return &composedEngineSession{sm: newTinyComposedModel(nLayers), arch: "qwen3_next", numLayers: nLayers}
+	return &composedEngineSession{sm: newTinyComposedModel(nLayers), arch: "qwen3_next", numLayers: nLayers, pending: -1}
 }
 
 // TestComposedEngineSession_CaptureKVWithOptions_Good captures a prefilled+appended session and checks the

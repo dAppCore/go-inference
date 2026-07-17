@@ -116,15 +116,15 @@ type composedTextModel struct {
 // absence IS the composed-in-laneSet verdict, not a gap. With no opener,
 // engine.TextModel.BatchStepAvailable reports false and the scheduler keeps
 // composed requests on their per-session paths instead of the continuous-
-// batching laneSet. That is terminal by design: a composed decode step is a
-// host-f32 recurrence — each layer's mixer Forward consumes host []float32 and
-// threads host-side state (conv + delta for the gated-delta layers), so every
-// token crosses device→host→device at every layer no matter how far the tail
-// fuse family (composed_backend.go) folds the device work. laneSet's entire win
-// is advancing K lanes through ONE shared recorded submission per round
-// (lane_set.go); a per-layer host mix can never sit inside that submission.
-// Only a device-resident recurrence port — mixer state and the delta rule
-// recorded on device, a full arch campaign — would change this verdict.
+// batching laneSet. The original rationale (a host-f32 recurrence at every
+// layer) is gone — the #18 campaign made the decode device-resident (device
+// gated-delta state, device-KV attention, whole-token chaining) — but the
+// verdict still holds for a narrower reason: laneSet advances K lanes through
+// ONE shared RECORDED submission per round (lane_set.go), and the composed
+// chain is re-ENCODED per token per session with its device state bound to
+// that session's buffers. Until the composed lane records a replayable
+// command stream (the CB-recording follow-up on the #18 board), there is no
+// shared submission for laneSet to drive. Revisit when that lands.
 var (
 	_ engine.TokenModel           = (*composedTextModel)(nil)
 	_ engine.ChatTemplateDeclarer = (*composedTextModel)(nil)
@@ -190,14 +190,22 @@ func (m *composedTextModel) TokenEmbeddingsWithFeatures(ids []int32, imageFeatur
 	return v.TokenEmbeddingsWithFeatures(ids, imageFeatures, audioFeatures, videoFeatures)
 }
 
-// OpenEngineSession opens a fresh composed decode session bridged to engine.Session. The bridge threads
-// the composed model's own tested token loop (model.Generate*), so no decode logic is re-rolled here.
+// OpenEngineSession opens a fresh composed decode session bridged to engine.Session. The bridge holds
+// one open recurrent stepper and resumes it across prefill/append/generate (see composedEngineSession);
+// the decode loop itself is the composed model's own tested resume loop (model.GenerateSampledResumeEach),
+// so no decode logic is re-rolled here.
 func (m *composedTextModel) OpenEngineSession() (engine.Session, error) {
 	if m == nil || m.sm == nil {
 		return nil, core.NewError("native.composedTextModel: model is not initialised")
 	}
-	return &composedEngineSession{sm: m.sm, arch: m.modelType, numLayers: m.numLayers}, nil
+	return &composedEngineSession{sm: m.sm, arch: m.modelType, numLayers: m.numLayers, pending: -1}, nil
 }
+
+// SessionsReusePrompts declares that composed engine sessions implement
+// engine.PromptReuseSession (PrefillTokensCached), so the resident-session prompt cache
+// (#377) engages for composed chat — each turn forwards only its new tokens instead of
+// re-prefilling the whole history.
+func (m *composedTextModel) SessionsReusePrompts() bool { return true }
 
 // Close releases the composed model's resident weights. The composed loader widens the checkpoint to f32
 // and unmaps the shard mmap during the build, so nothing is held past load — Close is a no-op.
@@ -238,60 +246,198 @@ func chatMLChatTemplate() engine.ChatTemplate {
 }
 
 // composedEngineSession bridges a composed model.SessionModel to engine.Session for the serve path
-// (engine.TextModel.Generate / Chat): PrefillTokens stores the prompt, and the two generate methods
-// delegate to the composed model's own tested token loop (model.GenerateSampledWithStopTokensTransformEach),
-// which opens the recurrent session and threads every layer's state.
+// (engine.TextModel.Generate / Chat) as a STATEFUL session (#25): it holds ONE open recurrent stepper
+// (composed.composedStepper) across calls. PrefillTokens batch-prefills the prompt through it at call
+// time (so serve's prefill timing measures the real forward), AppendTokens forwards only the new tail,
+// and the generate methods resume decoding from the last forwarded token's hidden — no per-request
+// replay of the conversation prefix. PrefillTokensCached (engine.PromptReuseSession) extends a resident
+// prefix in place, which is what removes the whole-history re-prefill from every chat turn.
 //
-// A composed hybrid decodes STATELESS-REPLAY: each generate opens a fresh recurrent composed.ComposedSession
-// and re-prefills the whole token prefix, so the session never holds persistent KV/recurrent tensors — its
-// COMPLETE resumable state is the token prefix. The recurrent conv/delta state (gated-delta layers) is not a
-// transformer KV cache and has no kv.Snapshot Layers representation, so -state capture/restore is a
-// TOKEN-PREFIX snapshot (Tokens, no Layers): on restore the deterministic host-f32 forward recomputes
-// byte-identical recurrent state from the identical prefix, so a resumed conversation continues exactly as an
-// unbroken one — the -state acceptance semantics, expressed through the state the arch actually has.
+// The recurrent conv/delta state (gated-delta layers) is not a transformer KV cache and has no
+// kv.Snapshot Layers representation, so -state capture/restore stays a TOKEN-PREFIX snapshot (Tokens,
+// no Layers): restore reinstates the prefix and the next generate recomputes byte-identical recurrent
+// state from it (composed decode is deterministic), so a resumed conversation continues exactly as an
+// unbroken one. The prefix now includes generated tokens — a post-reply capture resumes WITH the reply,
+// matching the arch session's semantics. Recurrent state cannot REWIND (it is cumulative, not
+// per-token), so any prompt that does not extend the resident prefix re-prefills cold.
 type composedEngineSession struct {
 	sm        model.SessionModel
-	prompt    []int32
 	arch      string // config.json model_type — stamped on the snapshot (informational; restore is token-based)
 	numLayers int    // composed block count — stamped on the snapshot for parity with the native path
+
+	st      model.DecodeStepper // the open recurrent stepper; nil until the first prefill (or after restore)
+	hidden  []byte              // last forwarded token's output hidden — where the next decode resumes
+	pending int32               // picked-but-unstepped final token of the last decode; -1 = none
+	prompt  []int32             // the full token transcript in (or entering) the stepper, generated included
+
 	// embRows holds a multimodal turn's spliced embedding rows (one per prompt
 	// token, projected image features over the placeholder span) between
 	// PrefillTokenEmbeddings and the generate that consumes them. Rows are NOT
 	// token-replayable — while held, continuity appends and -state capture
 	// refuse (the gemma4 metal lane's v1 bounds: an image turn is a stateless
-	// turn).
+	// turn, decoded through the one-shot embeddings loop, not the stepper).
 	embRows [][]byte
 }
 
 var (
-	_ engine.Session       = (*composedEngineSession)(nil)
-	_ engine.VisionSession = (*composedEngineSession)(nil)
+	_ engine.Session            = (*composedEngineSession)(nil)
+	_ engine.VisionSession      = (*composedEngineSession)(nil)
+	_ engine.PromptReuseSession = (*composedEngineSession)(nil)
 )
 
-// PrefillTokens stores the prompt tokens; the composed loop re-runs prefill inside the generate delegate
-// (one prefill per stateless request), so the stored prompt is the whole retained state.
-func (s *composedEngineSession) PrefillTokens(ids []int32) error {
-	memWatermarkReset() // the operation's memory high-water starts here (#1843)
-	s.prompt = append(s.prompt[:0], ids...)
+// resetState drops the open stepper and its resume point (the retained prompt is the caller's
+// business). The stepper's per-layer state is GC-managed (model.DecodeStepper contract), so
+// dropping the reference is the release.
+func (s *composedEngineSession) resetState() {
+	s.st, s.hidden, s.pending = nil, nil, -1
+	s.embRows = nil
+}
+
+// forwardBatch embeds ids and forwards them through the open stepper in one batch (the
+// composed stepper's PrefillBatch; a per-token Step walk when a stepper lacks it), leaving
+// s.hidden at the last token's output. A pending token from the previous decode enters the
+// batch first — it is already part of s.prompt, just not yet in the stepper.
+func (s *composedEngineSession) forwardBatch(ids []int32) error {
+	batch := ids
+	if s.pending >= 0 {
+		batch = append([]int32{s.pending}, ids...)
+		s.pending = -1
+	}
+	if len(batch) == 0 {
+		return nil
+	}
+	embs := make([][]byte, len(batch))
+	for i, id := range batch {
+		emb, err := s.sm.Embed(id)
+		if err != nil {
+			return err
+		}
+		embs[i] = emb
+	}
+	if bp, ok := s.st.(model.BatchPrefillStepper); ok {
+		hidden, err := bp.PrefillBatch(embs)
+		if err != nil {
+			return err
+		}
+		s.hidden = hidden
+		return nil
+	}
+	for _, emb := range embs {
+		hidden, err := s.st.Step(emb)
+		if err != nil {
+			return err
+		}
+		s.hidden = hidden
+	}
 	return nil
 }
 
-// AppendTokens extends the stored prompt (the recurrent state carries no separate replay-free append).
-// A session holding multimodal rows refuses: appended tokens have no spliced rows, so the row/token
-// equality the embeddings replay depends on would silently break — an image turn is a stateless turn.
+// prefillFresh replaces the session state with ids: fresh stepper, one batched prefill.
+// An empty ids retains no state (matching the pre-stateful behaviour of erroring at the
+// first generate rather than here).
+func (s *composedEngineSession) prefillFresh(ids []int32) error {
+	s.resetState()
+	s.prompt = append(s.prompt[:0], ids...)
+	if len(ids) == 0 {
+		return nil
+	}
+	st, err := s.sm.OpenSession()
+	if err != nil {
+		return err
+	}
+	s.st = st
+	if err := s.forwardBatch(ids); err != nil {
+		s.resetState()
+		return err
+	}
+	return nil
+}
+
+// ensureResident makes the retained prompt resident in an open stepper — the lazy
+// re-prefill behind RestoreFromKV (and a cold AppendTokens): a token-prefix snapshot
+// reinstates s.prompt only, and the first call that needs live state pays the one
+// deterministic replay that recomputes it.
+func (s *composedEngineSession) ensureResident() error {
+	if s.st != nil {
+		return nil
+	}
+	prompt := s.prompt
+	s.prompt = nil
+	return s.prefillFresh(prompt)
+}
+
+// PrefillTokens batch-prefills the prompt through a fresh recurrent stepper at call time —
+// the timed prefill serve measures — and retains the stepper for the decode + any appends.
+func (s *composedEngineSession) PrefillTokens(ids []int32) error {
+	memWatermarkReset() // the operation's memory high-water starts here (#1843)
+	return s.prefillFresh(ids)
+}
+
+// AppendTokens forwards ONLY the appended tail through the open stepper (the replay-free
+// continuation). A session holding multimodal rows refuses: appended tokens have no spliced
+// rows, so the row/token equality the embeddings replay depends on would silently break —
+// an image turn is a stateless turn. With no live stepper (a restored session), the retained
+// prefix becomes resident first, then the tail extends it.
 func (s *composedEngineSession) AppendTokens(ids []int32) error {
 	if len(s.embRows) > 0 {
 		return core.NewError("native.composedEngineSession.AppendTokens: session holds multimodal prefill rows; an image turn does not continue")
 	}
 	memWatermarkReset() // a continuity turn's high-water starts here (#1843)
+	if err := s.ensureResident(); err != nil {
+		return err
+	}
+	if s.st == nil { // nothing retained and nothing appended stays stateless
+		return s.prefillFresh(ids)
+	}
+	if err := s.forwardBatch(ids); err != nil {
+		s.resetState() // the stepper advanced partially — unknown state must not serve
+		return err
+	}
 	s.prompt = append(s.prompt, ids...)
 	return nil
 }
 
+// PrefillTokensCached is the engine.PromptReuseSession entry the resident-session prompt
+// cache drives (#377): ids that EXTEND the resident prefix keep the live recurrent state and
+// forward only the divergent suffix, reporting the reused length; anything else re-prefills
+// cold exactly as PrefillTokens (recurrent state cannot rewind — it is cumulative, so a
+// shorter or divergent prompt has no partial reuse).
+func (s *composedEngineSession) PrefillTokensCached(ids []int32) (int, error) {
+	memWatermarkReset() // the operation's memory high-water starts here (#1843)
+	reused := len(s.prompt)
+	if s.st == nil || reused == 0 || len(s.embRows) > 0 || reused > len(ids) || !int32Prefix(ids, s.prompt) {
+		return 0, s.prefillFresh(ids)
+	}
+	if s.pending >= 0 { // the pending token is in the prompt but not yet in the stepper
+		reused--
+	}
+	tail := ids[len(s.prompt):]
+	if err := s.forwardBatch(tail); err != nil {
+		s.resetState()
+		return 0, err
+	}
+	s.prompt = append(s.prompt, tail...)
+	return reused, nil
+}
+
+// int32Prefix reports whether ids begins with prefix.
+func int32Prefix(ids, prefix []int32) bool {
+	if len(ids) < len(prefix) {
+		return false
+	}
+	for i, v := range prefix {
+		if ids[i] != v {
+			return false
+		}
+	}
+	return true
+}
+
 // PrefillTokenEmbeddings stores a multimodal turn's prompt: the token ids (position/budget accounting —
 // Pos, stop handling) plus the spliced embedding rows the generate replays through the composed model's
-// batch prefill (engine.VisionSession; rows come from TokenEmbeddingsWithFeatures). The composed session
-// stays stateless-replay — the rows ARE the retained state for this turn, consumed by the next generate.
+// batch prefill (engine.VisionSession; rows come from TokenEmbeddingsWithFeatures). The rows ARE the
+// retained state for this turn, consumed by the next generate through the one-shot embeddings loop —
+// any live text-lane stepper is dropped (an image turn is a stateless turn).
 func (s *composedEngineSession) PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) error {
 	if len(ids) != len(embeddings) {
 		return core.NewError("native.composedEngineSession.PrefillTokenEmbeddings: token and embedding counts differ")
@@ -300,43 +446,57 @@ func (s *composedEngineSession) PrefillTokenEmbeddings(ids []int32, embeddings [
 		return core.NewError("native.composedEngineSession.PrefillTokenEmbeddings: empty prompt")
 	}
 	memWatermarkReset() // the multimodal operation's memory high-water starts here (#1843)
+	s.resetState()
 	s.prompt = append(s.prompt[:0], ids...)
 	s.embRows = embeddings
 	return nil
 }
 
-// Pos is the retained prompt length — the budget engine.TextModel sizes generation against.
+// Pos is the retained transcript length (prompt + generated) — the budget engine.TextModel
+// sizes generation against.
 func (s *composedEngineSession) Pos() int { return len(s.prompt) }
 
-// GenerateFromCacheEach greedily decodes up to maxNew tokens from the stored prompt, yielding each. eosID
+// GenerateFromCacheEach greedily decodes up to maxNew tokens from the resident state, yielding each. eosID
 // < 0 lets the caller own the stop decision (via yield returning false), matching engine.TextModel's emit.
-// A zero-temperature sampler decodes greedily per token, reusing the composed model's tested stepwise loop.
+// A zero-temperature sampler decodes greedily per token through the same resume loop as the sampled path.
 func (s *composedEngineSession) GenerateFromCacheEach(maxNew, eosID int, yield func(int32) bool) ([]int32, error) {
 	var stops []int32
 	if eosID >= 0 {
 		stops = []int32{int32(eosID)}
 	}
-	if len(s.embRows) > 0 {
-		return model.GenerateSampledFromEmbeddingsEach(s.sm, model.NewSampler(0), model.SampleParams{}, s.prompt, s.embRows, maxNew, stops, nil, yield)
-	}
-	return model.GenerateSampledWithStopTokensTransformEach(s.sm, model.NewSampler(0), model.SampleParams{}, s.prompt, maxNew, stops, nil, yield)
+	return s.GenerateSampledFromCacheEach(maxNew, stops, model.NewSampler(0), model.SampleParams{}, nil, yield)
 }
 
-// GenerateSampledFromCacheEach decodes up to maxNew tokens with the sampler + params, honouring stopTokens
-// and the optional per-token transform — delegated wholesale to the composed model's tested sampled loop.
-// A multimodal turn (PrefillTokenEmbeddings) replays its spliced rows through the batch-prefill entry
-// instead of re-embedding token ids, so the projected image features reach the recurrent stack.
+// GenerateSampledFromCacheEach resumes decoding from the resident recurrent state — no prefix
+// replay; the decode starts at the last forwarded token's hidden. Generated tokens join the
+// retained transcript (Pos grows; a later capture or append continues after the reply). A
+// multimodal turn (PrefillTokenEmbeddings) decodes through the one-shot embeddings loop
+// instead — its rows cannot resume, so that turn stays stateless.
 func (s *composedEngineSession) GenerateSampledFromCacheEach(maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error) {
 	if len(s.embRows) > 0 {
 		return model.GenerateSampledFromEmbeddingsEach(s.sm, sampler, params, s.prompt, s.embRows, maxNew, stopTokens, transform, yield)
 	}
-	return model.GenerateSampledWithStopTokensTransformEach(s.sm, sampler, params, s.prompt, maxNew, stopTokens, transform, yield)
+	if len(s.prompt) == 0 {
+		return nil, core.NewError("model.Generate: empty prompt")
+	}
+	if err := s.ensureResident(); err != nil {
+		return nil, err
+	}
+	gen, resume, err := model.GenerateSampledResumeEach(s.sm, s.st, model.SessionResume{Hidden: s.hidden, PendingID: s.pending}, sampler, params, maxNew, stopTokens, transform, yield)
+	if err != nil {
+		s.resetState() // the stepper may have advanced mid-decode — unknown state must not serve
+		return nil, err
+	}
+	s.hidden, s.pending = resume.Hidden, resume.PendingID
+	s.prompt = append(s.prompt, gen...)
+	return gen, nil
 }
 
 // CaptureKVWithOptions captures the session's resumable state as a TOKEN-PREFIX kv.Snapshot: the retained
-// token prefix, no Layers (the composed hybrid holds no persistent KV/recurrent tensors — see the type doc).
-// RestoreFromKV reinstates the prefix and the next generate recomputes byte-identical recurrent state, so
-// the snapshot resumes the conversation exactly. opts are ignored: there is no KV cache to window or de-float.
+// token prefix (generated tokens included), no Layers — the recurrent conv/delta state has no kv.Snapshot
+// representation, and the prefix alone reproduces it (see the type doc). RestoreFromKV reinstates the
+// prefix and the next generate recomputes byte-identical recurrent state, so the snapshot resumes the
+// conversation exactly. opts are ignored: there is no KV cache to window or de-float.
 func (s *composedEngineSession) CaptureKVWithOptions(kv.CaptureOptions) (*kv.Snapshot, error) {
 	if s == nil {
 		return nil, core.NewError("native.composedEngineSession.CaptureKV: nil session")
@@ -429,9 +589,10 @@ func (s *composedEngineSession) RangeKVBlocks(blockSize int, opts kv.CaptureOpti
 	return nil
 }
 
-// RestoreFromKV reinstates a token-prefix snapshot captured by CaptureKVWithOptions: it takes the snapshot's
-// token prefix as the session prefix; the next generate re-prefills it and recomputes byte-identical
-// recurrent state (composed decode is deterministic host f32). Layers, if any, are ignored — a composed
+// RestoreFromKV reinstates a token-prefix snapshot captured by CaptureKVWithOptions: it takes the
+// snapshot's token prefix as the session prefix and drops any live stepper; the first call that
+// needs live state (generate/append) re-prefills the prefix once and recomputes byte-identical
+// recurrent state (composed decode is deterministic). Layers, if any, are ignored — a composed
 // snapshot never carries KV slabs.
 func (s *composedEngineSession) RestoreFromKV(_ context.Context, snapshot *kv.Snapshot) error {
 	if s == nil {
@@ -443,9 +604,15 @@ func (s *composedEngineSession) RestoreFromKV(_ context.Context, snapshot *kv.Sn
 	if len(snapshot.Tokens) == 0 {
 		return core.NewError("native.composedEngineSession.RestoreFromKV: snapshot carries no token prefix")
 	}
+	s.resetState()
 	s.prompt = append(s.prompt[:0], snapshot.Tokens...)
 	return nil
 }
 
-// Close releases the session state (none held beyond the stored prompt).
-func (s *composedEngineSession) Close() error { return nil }
+// Close releases the session state: the stepper reference is dropped (its per-layer state is
+// GC-managed) and the retained transcript cleared.
+func (s *composedEngineSession) Close() error {
+	s.resetState()
+	s.prompt = nil
+	return nil
+}
