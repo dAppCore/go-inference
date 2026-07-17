@@ -449,7 +449,24 @@ func topMappedSuppressed(logits []byte, ids []int32, vocab int, suppress []int32
 	return int32(best), nil
 }
 
+// applyRepeatPenaltyBF16 divides (positive) or multiplies (non-positive) the
+// logit of each already-generated token by penalty, discouraging repetition. It
+// returns a fresh buffer, leaving logits untouched — the one-shot convenience
+// wrapper; the decode loop's per-token path uses applyRepeatPenaltyBF16Into with
+// a reused scratch to avoid a vocab-sized allocation every token.
 func applyRepeatPenaltyBF16(logits []byte, vocab int, history []int32, penalty float32) ([]byte, error) {
+	var scratch []byte
+	return applyRepeatPenaltyBF16Into(&scratch, logits, vocab, history, penalty)
+}
+
+// applyRepeatPenaltyBF16Into writes the repeat-penalised logits into *scratch,
+// grown to the vocab ONCE and reused on every later call, so a decode loop under
+// repeat_penalty pays the vocab-sized buffer once rather than allocating ≈512 KB
+// per token on a 256k-vocab model (the AX-11 win). The input logits are left
+// untouched, and a no-op penalty returns logits directly with no copy. Only the
+// deduped history positions are rewritten over a fresh full copy, so the result
+// is byte-identical to allocating a new buffer each call.
+func applyRepeatPenaltyBF16Into(scratch *[]byte, logits []byte, vocab int, history []int32, penalty float32) ([]byte, error) {
 	if len(logits) != vocab*bf16Size {
 		return nil, core.NewError("model.applyRepeatPenalty: logits must be vocab bf16 bytes")
 	}
@@ -466,7 +483,10 @@ func applyRepeatPenaltyBF16(logits []byte, vocab int, history []int32, penalty f
 		return logits, nil
 	}
 	slices.Sort(ids)
-	out := make([]byte, len(logits))
+	if cap(*scratch) < len(logits) {
+		*scratch = make([]byte, len(logits))
+	}
+	out := (*scratch)[:len(logits)]
 	copy(out, logits)
 	var prev int32
 	for i, id := range ids {

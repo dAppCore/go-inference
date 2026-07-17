@@ -651,3 +651,76 @@ func TestSampleTopKFirst_ParityWithFullExp(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyRepeatPenaltyBF16Into_ReusedScratch proves the reused scratch never leaks state
+// across calls: penalising different logit vectors — including a shrinking vocab that reuses
+// the already-grown buffer — through ONE scratch yields bytes byte-identical to the fresh
+// full-copy wrapper each time, and never mutates the input.
+func TestApplyRepeatPenaltyBF16Into_ReusedScratch(t *testing.T) {
+	cases := []struct {
+		vals    []float32
+		history []int32
+	}{
+		{[]float32{1, 2, -3, 4, 5, -6}, []int32{0, 2, 2, 5}}, // grows the scratch
+		{[]float32{-1, 8, 3}, []int32{1}},                    // smaller vocab reuses it
+		{[]float32{0.5, 0.5, 0.5, 0.5}, []int32{0, 1, 3}},
+		{[]float32{10, -10, 10, -10, 10}, nil}, // no history → passthrough, input returned
+	}
+	var scratch []byte
+	for i, c := range cases {
+		vocab := len(c.vals)
+		logits := bf16Bytes(c.vals)
+		want, werr := applyRepeatPenaltyBF16(logits, vocab, c.history, 2) // fresh-alloc reference
+		got, gerr := applyRepeatPenaltyBF16Into(&scratch, logits, vocab, c.history, 2)
+		if (werr == nil) != (gerr == nil) {
+			t.Fatalf("case %d: err mismatch got=%v want=%v", i, gerr, werr)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("case %d: reused-scratch bytes differ from fresh-alloc", i)
+		}
+		if string(logits) != string(bf16Bytes(c.vals)) {
+			t.Fatalf("case %d: input logits were mutated", i)
+		}
+	}
+}
+
+func benchRepeatHistory(n, vocab int) []int32 {
+	h := make([]int32, n)
+	for i := range h {
+		h[i] = int32(i * 977 % vocab)
+	}
+	return h
+}
+
+// BenchmarkRepeatPenalty_ReuseScratch — the per-token cost with the reused scratch: no
+// vocab-sized allocation after the first token (the AX-11 win).
+func BenchmarkRepeatPenalty_ReuseScratch(b *testing.B) {
+	logits := benchLogits(benchVocab)
+	history := benchRepeatHistory(256, benchVocab)
+	var scratch []byte
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out, err := applyRepeatPenaltyBF16Into(&scratch, logits, benchVocab, history, 1.1)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sampleBenchSink = int32(len(out))
+	}
+}
+
+// BenchmarkRepeatPenalty_FreshAlloc — the old per-token path (a fresh vocab-sized copy every
+// call): the ≈512 KB/token allocation the reused scratch removes.
+func BenchmarkRepeatPenalty_FreshAlloc(b *testing.B) {
+	logits := benchLogits(benchVocab)
+	history := benchRepeatHistory(256, benchVocab)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out, err := applyRepeatPenaltyBF16(logits, benchVocab, history, 1.1)
+		if err != nil {
+			b.Fatal(err)
+		}
+		sampleBenchSink = int32(len(out))
+	}
+}
