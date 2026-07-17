@@ -22,11 +22,14 @@ import (
 // checkpoint's scales/biases/norms) is byte-correct: embed rows, RMSNorm, QKV+bias, NEOX half-split RoPE,
 // GQA attention, SwiGLU MLP and the tied LM head all land within mlx's own f16-vs-this-host's-f32
 // rounding noise, and the full 36-layer forward argmaxes the SAME token mlx-lm does (" Paris", id 12095).
-// The garble is therefore NOT this package's arch mapping — it is downstream, in engine/metal's GPU
-// decode kernels (worse on the default ICB-replay hot path than on LTHN_NATIVE_TRACE's dense re-encode
-// path, which still degrades but stays closer to coherent prose): out of scope for this package, and
-// left as a finding for the engine/metal lane. Skips cleanly (enginegate.HFModelPath) when the checkpoint
-// is not in the local Hugging Face cache, so CI stays green off this machine.
+// The garble is therefore NOT this package's arch mapping. The engine/metal follow-up
+// (real_checkpoint_gpu_test.go's TestRealCheckpointGPU_ArgmaxParis_Good) then EXONERATED the GPU
+// decode too: the production session on these same ids argmaxes " Paris" like mlx-lm. The garble
+// users saw was input-side — lem's chat surfaces frame every prompt through the ChatML template,
+// and this snapshot is the BASE Coder model, which degenerates on chat-framed input on ANY engine
+// (mlx-lm loops "The capital放法 of France is France…" on the identical snapshot + its own
+// template). Chat serving wants the -Instruct variant. Skips cleanly (enginegate.HFModelPath)
+// when the checkpoint is not in the local Hugging Face cache, so CI stays green off this machine.
 
 // qwen2CoderPromptIDs are the tokenizer ids mlx-lm's Qwen2Tokenizer gives "The capital of France is"
 // (--ignore-chat-template) — fixed input so the host mirror and mlx-lm process byte-identical positions.

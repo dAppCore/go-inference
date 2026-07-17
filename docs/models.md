@@ -77,7 +77,7 @@ Numbers: M3 Ultra, `lem bench` tg-512 greedy, 2026-07-16.
 | Qwen3.6 27B | `mlx-community/Qwen3.6-27B-4bit` | 256K | 16.1 GB | 7.3 chat-lane / **15.05 raw session** | ✓ sane; perf campaign #18 in flight (4.63 → 15.05; target ≥40 — mlx-lm 41.3). The chat-vs-session ×2 gap is board #25 |
 | Qwen3.5 2B / 4B / 9B (official bf16) | `Qwen/Qwen3.5-{2B,4B,9B}` | 256K | 4.6 / 9.3 / 19.3 GB | 20.1 / 10.6 / 8.2 | ✓ sane ("Paris" answered, mlx-lm argmax parity). bf16 source form — heavier per token than the 4-bit conversions by sheer byte mass; serve the conversions, eval against these |
 | Bonsai 27B 1-bit | `prism-ml/Bonsai-27B-mlx-1bit` | 256K | 5 GB | — | ✗ 1-bit affine width is outside the shipped kernel set (2/3/4/5/6/8) — warm-up hangs on the host fallback. 5 GB for a 27B is exactly the low-end story; needs the 1-bit qmv kernel first (#24) |
-| Qwen2.5-Coder 3B | `mlx-community/Qwen2.5-Coder-3B-4bit` | — | 2 GB | — | ✗ garbles (qwen2 arch mapping — #24); no number until the output is sane |
+| Qwen2.5-Coder 3B (base) | `mlx-community/Qwen2.5-Coder-3B-4bit` | 32K | 2 GB | 161–166 | ✓ engine exonerated (#24: GPU argmaxes " Paris" like mlx-lm — `TestRealCheckpointGPU_ArgmaxParis_Good`). The "garble" was chat-framing the BASE model — degenerate on any engine, mlx-lm included. Completion use only; serve chat wants the `-Instruct` variant. Gap: our ChatML render omits Qwen's default-system block |
 | Qwen3.6-35B-A3B | (not yet local) | — | — | — | the MoE hybrid target — pulls with the #17/#18 follow-on |
 
 Low-end/home serving guidance from the rows above: today's honest recommendations are the
