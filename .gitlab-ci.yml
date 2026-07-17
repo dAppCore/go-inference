@@ -1,9 +1,30 @@
-# graphify code-graph job — shared from dappcore/devops/build.
-# Keeps go-inference's slice of the fleet knowledge graph fresh on
-# https://graphify.lthn.sh. external/ (vendored mlx/ROCm) is excluded via
-# .graphifyignore. The job + the flock-serialised global merge live in the
-# shared template, so the fix is in one place for the whole fleet.
+# CI for go-inference on the git.lthn.sh homelab runner (shell executor, AMD box).
+#
+#   compile:linux — the gate: `make build` compiles bin/lem for linux/amd64.
+#     go.work stays active (the default) so the CLI builds against the local
+#     ./go module — the working tree — not the published dappco.re/go/inference
+#     tag that cli/go.mod pins under GOWORK=off.
+#   graphify — auxiliary code-graph refresh (shared template, allow_failure).
+#     external/ (vendored mlx/ROCm) stays out of the graph via .graphifyignore.
 include:
   - project: 'dappcore/devops/build'
     file: '/gitlab/graphify.yml'
     ref: dev
+
+compile:linux:
+  stage: build
+  tags: [homelab]
+  interruptible: true
+  variables:
+    # box go is 1.22; the go 1.26.2 directive auto-fetches the toolchain.
+    GOTOOLCHAIN: "auto"
+    # a plain Go compile needs no vendored C submodules (mlx / ROCm C++ are
+    # only for the metallib / static-archive release builds).
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - go version
+    - make build
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
