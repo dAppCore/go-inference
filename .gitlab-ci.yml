@@ -80,7 +80,10 @@ lem-amd:
     # them explicitly (GIT_SUBMODULE_PATHS left external/rocm-hip uninitialised
     # on the persistent shell-runner checkout → hip-static-archive bailed).
     - git submodule sync -- external/rocr-runtime external/rocm-clr external/rocm-hip
-    - git submodule update --init --force --depth 1 external/rocr-runtime external/rocm-clr external/rocm-hip
+    # NO --depth: a shallow submodule fetch can't reach a pinned gitlink commit
+    # that isn't a branch tip (rocm-hip failed that way, silently).
+    - git submodule update --init --force external/rocr-runtime external/rocm-clr external/rocm-hip
+    - test -f external/rocm-hip/CMakeLists.txt && test -f external/rocm-clr/CMakeLists.txt || { echo "ROCm submodule init failed"; git submodule status external/rocm-hip external/rocm-clr external/rocr-runtime; exit 1; }
     - make lem-amd
 
 lem-cuda:
@@ -93,5 +96,8 @@ lem-cuda:
     # them explicitly (GIT_SUBMODULE_PATHS left external/rocm-hip uninitialised
     # on the persistent shell-runner checkout → hip-static-archive bailed).
     - git submodule sync -- external/rocr-runtime external/rocm-clr external/rocm-hip
-    - git submodule update --init --force --depth 1 external/rocr-runtime external/rocm-clr external/rocm-hip
+    # NO --depth: a shallow submodule fetch can't reach a pinned gitlink commit
+    # that isn't a branch tip (rocm-hip failed that way, silently).
+    - git submodule update --init --force external/rocr-runtime external/rocm-clr external/rocm-hip
+    - test -f external/rocm-hip/CMakeLists.txt && test -f external/rocm-clr/CMakeLists.txt || { echo "ROCm submodule init failed"; git submodule status external/rocm-hip external/rocm-clr external/rocr-runtime; exit 1; }
     - make lem-cuda
