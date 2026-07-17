@@ -1,5 +1,5 @@
 # CI for go-inference on the git.lthn.sh homelab runner (shell executor, AMD box,
-# concurrent = 1 → one job at a time).
+# concurrent = 1 → one job at a time; the release builds serialize behind it).
 #
 #   build stage
 #     compile:linux — per-commit gate: `make build` compiles bin/lem for
@@ -8,10 +8,10 @@
 #
 #   release stage — the downloadable per-backend CLI binaries (build/bin/ is
 #     uploaded as a gitlab artifact per job):
-#     lem-cpu-x86 / lem-cpu-aarch64 — CGO-free CPU builds (hip-cpu kernel), auto.
+#     lem-cpu-x86 / lem-cpu-aarch64 — CGO-free CPU builds (hip-cpu kernel).
 #     lem-amd / lem-cuda — static builds that compile ROCr + HIP into static
-#       archives from the pinned external/rocm-* submodules (heavy; manual so
-#       they never hog the serialized runner on an ordinary push).
+#       archives from the pinned external/rocm-* submodules (heavy, but the box
+#       carries every toolchain: cmake, rocm-llvm, libdrm/elf-dev, hipcc, nvcc).
 include:
   - project: 'dappcore/devops/build'
     file: '/gitlab/graphify.yml'
@@ -47,6 +47,10 @@ compile:linux:
     paths:
       - build/bin/
     expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
 
 lem-cpu-x86:
   extends: .release-cli
@@ -55,10 +59,6 @@ lem-cpu-x86:
     GIT_SUBMODULE_STRATEGY: none
   script:
     - make lem-cpu-x86
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "dev"'
-    - if: '$CI_COMMIT_BRANCH == "main"'
-    - if: '$CI_COMMIT_TAG'
 
 lem-cpu-aarch64:
   extends: .release-cli
@@ -67,10 +67,6 @@ lem-cpu-aarch64:
     GIT_SUBMODULE_STRATEGY: none
   script:
     - make lem-cpu-aarch64
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "dev"'
-    - if: '$CI_COMMIT_BRANCH == "main"'
-    - if: '$CI_COMMIT_TAG'
 
 lem-amd:
   extends: .release-cli
@@ -82,16 +78,6 @@ lem-amd:
     GIT_SUBMODULE_DEPTH: 1
   script:
     - make lem-amd
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "dev"'
-      when: manual
-      allow_failure: true
-    - if: '$CI_COMMIT_BRANCH == "main"'
-      when: manual
-      allow_failure: true
-    - if: '$CI_COMMIT_TAG'
-      when: manual
-      allow_failure: true
 
 lem-cuda:
   extends: .release-cli
@@ -102,13 +88,3 @@ lem-cuda:
     GIT_SUBMODULE_DEPTH: 1
   script:
     - make lem-cuda
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "dev"'
-      when: manual
-      allow_failure: true
-    - if: '$CI_COMMIT_BRANCH == "main"'
-      when: manual
-      allow_failure: true
-    - if: '$CI_COMMIT_TAG'
-      when: manual
-      allow_failure: true
