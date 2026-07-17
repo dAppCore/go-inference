@@ -52,7 +52,12 @@ func (m *NativeTokenModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	// ChatML for a <|im_start|> vocab (Qwen/Yi/Mistral), else the gemma dialect in the tokenizer's
 	// marker flavour — a gemma checkpoint declares exactly what it did before, while a Qwen2 pack
 	// stops being mis-framed as gemma (whose <start_of_turn> markers it echoes instead of answering).
-	return engine.DetectChatTemplate(tok, engine.DetectTurnTokens(tok), m.NeedsThoughtChannelSuppressor()), true
+	tmpl := engine.DetectChatTemplate(tok, engine.DetectTurnTokens(tok), m.NeedsThoughtChannelSuppressor())
+	// The checkpoint's own default system prompt (Qwen2.5 injects one; gemma and
+	// Qwen3.5/3.6 leave this ""), so a no-system chat frames the vendor default
+	// exactly rather than omitting it. Empty is a no-op in the render loop.
+	tmpl.DefaultSystem = m.defaultSystem
+	return tmpl, true
 }
 
 // SupportedCacheModes reports the one KV cache mode this no-cgo engine runs: its

@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"regexp"
 	"strings"
 
 	"dappco.re/go/inference"
@@ -67,6 +68,18 @@ type ChatTemplate struct {
 	// history entries. ChatML and the gemma3-era dialect render every message
 	// as its own turn (their templates carry no such fold).
 	MergeAdjacentAssistant bool
+
+	// DefaultSystem is the checkpoint's own default system prompt, injected as a
+	// leading system turn whenever the conversation supplies none — the Qwen2.5
+	// rule, whose chat_template.jinja emits
+	// "<|im_start|>system\n<default><|im_end|>" unless the caller sent a system
+	// message. It is the checkpoint's LITERAL string, SOURCED per checkpoint
+	// rather than declared as a dialect constant, because the text varies within
+	// one family (Qwen2.5-Instruct "You are Qwen, created by Alibaba Cloud. You
+	// are a helpful assistant."; Qwen2.5-Coder "You are a helpful assistant.").
+	// Empty means the template injects no default — gemma, and Qwen3.5/3.6, whose
+	// jinja emits a system turn only when the caller provides one.
+	DefaultSystem string
 
 	// Thinking is the reasoning-channel framing, kept as the one dialect-
 	// divergent hook. Prelude is written into the leading system turn when
@@ -282,6 +295,14 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 			offSuffix = t.Thinking.OffSuffix
 		}
 	}
+	// A checkpoint carrying a DefaultSystem (Qwen2.5) frames it as a leading
+	// system turn whenever the conversation supplies none, matching the
+	// checkpoint's jinja. The synthetic turn flows through the normal render path
+	// below — ChatML spells it in place, a folding dialect folds it — so no other
+	// branch special-cases it.
+	if t.DefaultSystem != "" && (len(messages) == 0 || !chatSystemRole(messages[0].Role)) {
+		messages = append([]inference.Message{{Role: "system", Content: t.DefaultSystem}}, messages...)
+	}
 	sysFirst := t.SystemAsLeadingTurn && len(messages) > 0 && chatSystemRole(messages[0].Role)
 	rest := messages
 	// The leading system turn renders when the template folds a leading system
@@ -324,6 +345,10 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 func renderChatTurns(t ChatTemplate, messages []inference.Message) string {
 	t.SystemAsLeadingTurn = false
 	t.Thinking = nil
+	// A continuation frames only the new tail — the leading system turn (declared
+	// or DefaultSystem-injected) was emitted on the fresh prompt, so a woken
+	// session never re-injects it.
+	t.DefaultSystem = ""
 	return renderChatTemplate(t, messages, nil)
 }
 
@@ -332,4 +357,38 @@ func renderChatTurns(t ChatTemplate, messages []inference.Message) string {
 // there is one turn-rendering implementation rather than a private duplicate.
 func RenderChatTurns(t ChatTemplate, messages []inference.Message) string {
 	return renderChatTurns(t, messages)
+}
+
+// chatTemplateDefaultSystemRE matches a ChatML system turn whose content is a
+// pure string LITERAL — the "<|im_start|>system\n<default><|im_end|>" a
+// Qwen2.5-style jinja emits as its no-system fallback. The content class
+// excludes the quote/brace characters a jinja interpolation carries, so the
+// passthrough branch ("<|im_start|>system\n' + messages[0].content + '…", which
+// begins with a quote) never matches — only a hardcoded default does. The
+// newline alternation covers both a JSON-decoded template (a real "\n") and a
+// raw .jinja file (the two-character "\\n" escape).
+var chatTemplateDefaultSystemRE = regexp.MustCompile(`<\|im_start\|>system(?:\\n|\n)([^'"{}]+?)<\|im_end\|>`)
+
+// ExtractDefaultSystem returns a checkpoint chat_template's OWN default system
+// prompt — the literal a Qwen2.5-style template injects when the conversation
+// carries none — so a served checkpoint's [ChatTemplate.DefaultSystem] is its
+// exact text rather than a hardcoded family constant (Qwen2.5-Coder "You are a
+// helpful assistant." vs Qwen2.5-Instruct "You are Qwen, created by Alibaba
+// Cloud. You are a helpful assistant."). It returns "" when the template frames
+// a system turn only from a caller-supplied message — gemma (no ChatML system
+// literal at all) and Qwen3.5/3.6 (whose jinja emits the passthrough, never a
+// hardcoded default) — so those checkpoints inject no default.
+//
+//	sys := ExtractDefaultSystem(chatTemplateText) // "" unless the template hardcodes one
+func ExtractDefaultSystem(chatTemplate string) string {
+	m := chatTemplateDefaultSystemRE.FindStringSubmatch(chatTemplate)
+	if m == nil {
+		return ""
+	}
+	// A pathological cross-branch match (a system open far from any close) is not
+	// a real default; a genuine vendor prompt is a single short line.
+	if s := m[1]; len(s) <= 512 {
+		return s
+	}
+	return ""
 }

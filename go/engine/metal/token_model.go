@@ -41,6 +41,12 @@ type NativeTokenModel struct {
 	// (engine.SamplingDefaultsDeclarer) — the zero value when the checkpoint
 	// declares none.
 	declaredSampling engine.SamplingDefaults
+	// defaultSystem is the checkpoint chat_template's own default system prompt
+	// (engine.ExtractDefaultSystem) — a Qwen2.5-style template's no-system
+	// fallback text, "" for a template that injects none (gemma, Qwen3.5/3.6).
+	// DeclaredChatTemplate hands it to the ChatML dialect so a served checkpoint
+	// frames its exact default rather than a hardcoded family constant.
+	defaultSystem string
 	// openSession builds a fresh persistent-cache decode session (ArchSession /
 	// ArchQuantSession) — the incremental O(1)/token path model.Generate prefers
 	// over the whole-sequence NativeBackend.DecodeForward. It takes the model's shardBuffers so the

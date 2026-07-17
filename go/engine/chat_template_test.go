@@ -294,3 +294,107 @@ func TestChatTemplate_MergeAdjacentAssistant_Ugly(t *testing.T) {
 		t.Fatal("gemma3-era dialect must not declare MergeAdjacentAssistant")
 	}
 }
+
+// chatMLWithDefaultSystem is the ChatML dialect carrying a DefaultSystem — the
+// Qwen2.5-Coder shape (its jinja frames "You are a helpful assistant." as a
+// leading system turn when the caller sends none).
+func chatMLWithDefaultSystem() ChatTemplate {
+	return ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+		DefaultSystem: "You are a helpful assistant.",
+	}
+}
+
+// TestRenderChatTemplate_DefaultSystem_Good: a no-system chat frames the
+// checkpoint's DefaultSystem as a leading system turn — byte-identical to
+// Qwen2.5-Coder's apply_chat_template output for the same messages.
+func TestRenderChatTemplate_DefaultSystem_Good(t *testing.T) {
+	got := renderChatTemplate(chatMLWithDefaultSystem(),
+		[]inference.Message{{Role: "user", Content: "The capital of France is"}}, nil)
+	want := "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n" +
+		"<|im_start|>user\nThe capital of France is<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("no-system render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTemplate_DefaultSystem_Bad: a caller-supplied system message
+// wins — the default is NOT injected, the provided system renders in place.
+func TestRenderChatTemplate_DefaultSystem_Bad(t *testing.T) {
+	got := renderChatTemplate(chatMLWithDefaultSystem(), []inference.Message{
+		{Role: "system", Content: "Custom system."},
+		{Role: "user", Content: "hi"},
+	}, nil)
+	want := "<|im_start|>system\nCustom system.<|im_end|>\n" +
+		"<|im_start|>user\nhi<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("supplied-system render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTemplate_DefaultSystem_Ugly: an empty DefaultSystem injects
+// nothing — the Qwen3.5/3.6 rule (their jinja emits a system turn ONLY when the
+// caller provides one), so a plain ChatML render is unchanged.
+func TestRenderChatTemplate_DefaultSystem_Ugly(t *testing.T) {
+	tmpl := chatMLWithDefaultSystem()
+	tmpl.DefaultSystem = ""
+	got := renderChatTemplate(tmpl, []inference.Message{{Role: "user", Content: "hi"}}, nil)
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("empty-default render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTurns_DefaultSystem: a continuation (woken-session tail) never
+// re-injects the default system — it was emitted on the fresh prompt.
+func TestRenderChatTurns_DefaultSystem(t *testing.T) {
+	got := renderChatTurns(chatMLWithDefaultSystem(),
+		[]inference.Message{{Role: "user", Content: "hi"}})
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("continuation re-injected the default system\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestExtractDefaultSystem_Good: a Qwen2.5-style template's hardcoded no-system
+// default is pulled verbatim — the checkpoint's exact wording, which differs
+// Coder-vs-Instruct. The "\n" is the two-character escape a JSON-decoded
+// tokenizer_config.json (and a raw chat_template.jinja) both carry.
+func TestExtractDefaultSystem_Good(t *testing.T) {
+	coder := `{%- else %}{{- '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}{%- endif %}`
+	if got := ExtractDefaultSystem(coder); got != "You are a helpful assistant." {
+		t.Fatalf("Coder default = %q, want %q", got, "You are a helpful assistant.")
+	}
+	instruct := `{{- '<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n' }}`
+	want := "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+	if got := ExtractDefaultSystem(instruct); got != want {
+		t.Fatalf("Instruct default = %q, want %q", got, want)
+	}
+}
+
+// TestExtractDefaultSystem_Bad: a passthrough template — one that frames a
+// system turn only from the caller's own message (Qwen3.5/3.6) — has no
+// hardcoded default, so extraction yields "" (the interpolation's leading quote
+// is rejected, never mistaken for a literal default).
+func TestExtractDefaultSystem_Bad(t *testing.T) {
+	qwen35 := `{%- if messages[0].role == 'system' %}{{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' }}{%- endif %}`
+	if got := ExtractDefaultSystem(qwen35); got != "" {
+		t.Fatalf("passthrough template default = %q, want \"\"", got)
+	}
+}
+
+// TestExtractDefaultSystem_Ugly: a non-ChatML template (gemma turn markers, no
+// <|im_start|>system literal at all) yields "" — gemma checkpoints inject no
+// default and their rendering stays byte-unchanged.
+func TestExtractDefaultSystem_Ugly(t *testing.T) {
+	gemma := `{{ '<|turn>user\n' + message.content + '<turn|>\n' }}`
+	if got := ExtractDefaultSystem(gemma); got != "" {
+		t.Fatalf("gemma template default = %q, want \"\"", got)
+	}
+}
