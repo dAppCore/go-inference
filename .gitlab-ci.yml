@@ -1,26 +1,33 @@
-# CI for go-inference on the git.lthn.sh homelab runner (shell executor, AMD box).
+# CI for go-inference on the git.lthn.sh homelab runner (shell executor, AMD box,
+# concurrent = 1 → one job at a time).
 #
-#   compile:linux — the gate: `make build` compiles bin/lem for linux/amd64.
-#     go.work stays active (the default) so the CLI builds against the local
-#     ./go module — the working tree — not the published dappco.re/go/inference
-#     tag that cli/go.mod pins under GOWORK=off.
-#   graphify — auxiliary code-graph refresh (shared template, allow_failure).
-#     external/ (vendored mlx/ROCm) stays out of the graph via .graphifyignore.
+#   build stage
+#     compile:linux — per-commit gate: `make build` compiles bin/lem for
+#       linux/amd64 (engine/hip cgo included; the Mac metal lane can't).
+#     graphify — auxiliary code-graph refresh (shared template, allow_failure).
+#
+#   release stage — the downloadable per-backend CLI binaries (build/bin/ is
+#     uploaded as a gitlab artifact per job):
+#     lem-cpu-x86 / lem-cpu-aarch64 — CGO-free CPU builds (hip-cpu kernel), auto.
+#     lem-amd / lem-cuda — static builds that compile ROCr + HIP into static
+#       archives from the pinned external/rocm-* submodules (heavy; manual so
+#       they never hog the serialized runner on an ordinary push).
 include:
   - project: 'dappcore/devops/build'
     file: '/gitlab/graphify.yml'
     ref: dev
+
+stages:
+  - build
+  - release
 
 compile:linux:
   stage: build
   tags: [homelab]
   interruptible: true
   variables:
-    # box go is 1.22; the go 1.26.2 directive auto-fetches the toolchain.
-    GOTOOLCHAIN: "auto"
-    # a plain Go compile needs no vendored C submodules (mlx / ROCm C++ are
-    # only for the metallib / static-archive release builds).
-    GIT_SUBMODULE_STRATEGY: none
+    GOTOOLCHAIN: "auto"          # box go is 1.22; go 1.26.2 directive auto-fetches
+    GIT_SUBMODULE_STRATEGY: none # a plain Go compile needs no vendored C sources
   script:
     - go version
     - make build
@@ -28,3 +35,80 @@ compile:linux:
     - if: '$CI_COMMIT_BRANCH == "dev"'
     - if: '$CI_COMMIT_BRANCH == "main"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# --- per-backend CLI release binaries --------------------------------------
+.release-cli:
+  stage: release
+  tags: [homelab]
+  variables:
+    GOTOOLCHAIN: "auto"
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - build/bin/
+    expire_in: 1 week
+
+lem-cpu-x86:
+  extends: .release-cli
+  variables:
+    GOTOOLCHAIN: "auto"
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - make lem-cpu-x86
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+
+lem-cpu-aarch64:
+  extends: .release-cli
+  variables:
+    GOTOOLCHAIN: "auto"
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - make lem-cpu-aarch64
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+
+lem-amd:
+  extends: .release-cli
+  variables:
+    GOTOOLCHAIN: "auto"
+    # ROCr + HIP static archives build from the pinned ROCm source submodules.
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_PATHS: 'external/rocr-runtime external/rocm-clr external/rocm-hip'
+    GIT_SUBMODULE_DEPTH: 1
+  script:
+    - make lem-amd
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+      allow_failure: true
+
+lem-cuda:
+  extends: .release-cli
+  variables:
+    GOTOOLCHAIN: "auto"
+    GIT_SUBMODULE_STRATEGY: recursive
+    GIT_SUBMODULE_PATHS: 'external/rocr-runtime external/rocm-clr external/rocm-hip'
+    GIT_SUBMODULE_DEPTH: 1
+  script:
+    - make lem-cuda
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: true
+    - if: '$CI_COMMIT_TAG'
+      when: manual
+      allow_failure: true
