@@ -1095,6 +1095,11 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 	case panelChat:
+		if msg.Type == tea.KeyEnter && msg.Alt && !a.generating {
+			// Textarea treats Enter as a newline; the app reserves plain Enter
+			// for send, so explicitly forward the modified form to the editor.
+			return a.route(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 		if msg.String() == "enter" && !a.generating && a.model != nil {
 			prompt := core.Trim(a.input.Value())
 			if prompt == "" {
@@ -1423,6 +1428,7 @@ func (a *app) syncManagedSession(session *chatSession, activatePanel bool) {
 			role:    record.Role,
 			thought: record.Thought,
 			text:    record.Visible,
+			calls:   persistedTurnCalls(record),
 		})
 	}
 	a.input.SetValue(session.Draft)
@@ -1439,6 +1445,24 @@ func (a *app) syncManagedSession(session *chatSession, activatePanel bool) {
 	if activatePanel {
 		a.activePanel = panelChat
 	}
+}
+
+func persistedTurnCalls(record turnRecord) []string {
+	if record.Role == "tool" && record.ToolName != "" {
+		return []string{record.ToolName}
+	}
+	if record.Role != "assistant" || record.ToolCallJSON == "" || record.ToolCallJSON == "{}" {
+		return nil
+	}
+	var calls []inference.ToolCall
+	if result := core.JSONUnmarshalString(record.ToolCallJSON, &calls); !result.OK {
+		return nil
+	}
+	receipts := make([]string, 0, len(calls))
+	for _, call := range calls {
+		receipts = append(receipts, core.Concat(call.Name, " → requested"))
+	}
+	return receipts
 }
 
 // route hands the message to the focused component for the active panel.
@@ -1674,7 +1698,14 @@ func (a app) renderTranscript() string {
 		case "user":
 			b.WriteString(a.styles.user.Render("you ") + a.styles.answer.Render(t.text))
 		case "tool":
-			b.WriteString(a.styles.thought.Render("tool result fed back"))
+			label := "tool result"
+			if len(t.calls) > 0 {
+				label = core.Concat("tool · ", t.calls[0])
+			}
+			b.WriteString(a.styles.thought.Render(label))
+			if result := visibleToolResult(t.text); result != "" {
+				b.WriteString("\n" + a.styles.answer.Render(result))
+			}
 		default:
 			if t.thought != "" {
 				b.WriteString(a.styles.thought.Render("· thinking · "+core.Trim(t.thought)) + "\n")
@@ -1706,6 +1737,12 @@ func (a app) renderTranscript() string {
 		}
 	}
 	return lipgloss.NewStyle().Width(a.view.Width).Render(b.String())
+}
+
+func visibleToolResult(value string) string {
+	value = core.TrimPrefix(value, parser.ToolResponseOpenMarker)
+	value = core.TrimSuffix(value, parser.ToolResponseCloseMarker)
+	return core.Trim(value)
 }
 
 func (a app) statusLine() string {

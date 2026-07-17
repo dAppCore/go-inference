@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/parser"
@@ -194,6 +195,12 @@ func TestAppSessionToolLoop_Good(t *testing.T) {
 	jobs := resources.Repository.Jobs(sessionID).Value.([]generationJobRecord)
 	if len(jobs) != 2 || jobs[0].Status != "completed" || jobs[1].Status != "completed" {
 		t.Fatalf("tool jobs = %#v", jobs)
+	}
+	transcript := ansi.Strip(a.renderTranscript())
+	for _, want := range []string{"word_count", "2 words", "The count is two."} {
+		if !strings.Contains(transcript, want) {
+			t.Fatalf("durable tool transcript missing %q:\n%s", want, transcript)
+		}
 	}
 	_ = a.shutdown()
 }
@@ -525,6 +532,18 @@ func TestAppUpdateTransitions(t *testing.T) {
 	}
 	if v := a.View(); !strings.Contains(v, a.svc.addr()) {
 		t.Fatalf("service tab does not render the listen address %q", a.svc.addr())
+	}
+}
+
+func TestAppComposerNewline_Good(t *testing.T) {
+	a := newApp("", 0, 64)
+	a.input.SetValue("first line")
+
+	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	a = model.(app)
+
+	if a.input.Value() != "first line\n" {
+		t.Fatalf("Alt+Enter composer value = %q", a.input.Value())
 	}
 }
 
