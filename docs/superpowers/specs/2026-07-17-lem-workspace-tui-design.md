@@ -1,8 +1,32 @@
 # LEM Workspace TUI Design
 
 **Date:** 2026-07-17
-**Status:** Approved for TUI-first implementation
+**Status:** Implemented TUI-first foundation; reconciled with commit `02127921`
 **Scope:** Interactive workspace shell and local persistence
+
+## Implementation reconciliation
+
+The shipped foundation matches the core architecture: a four-panel responsive
+frame, durable DuckDB sessions and jobs, scoped go-store UI state, config-backed
+inspector settings, local pack/runtime discovery, atomic export, and one serial
+model lane shared by background sessions and the HTTP service. Startup is an
+asynchronous Bubble Tea command; `--check` performs the same storage bootstrap
+synchronously and closes it after rendering a 100x30 frame.
+
+This slice intentionally exposes only the interactions needed to validate that
+foundation. The UI provides session create/switch/search/export, while
+rename/archive/reopen remain tested `sessionManager` operations awaiting an
+editor/context surface. Work CRUD and knowledge attach/detach likewise exist as
+tested domain boundaries, but the current Work/inspector views are read-only.
+Only `~/.lem/packs/` is composed into discovery; configured additional local
+mounts are reserved for the next capability slice. Manual knowledge/runtime
+refresh commands are displayed as unavailable and tell the user to restart,
+rather than reporting a no-op as success.
+
+The implementation does not persist the active primary panel or collapsed
+inspector sections, install go-store watchers, or import an agent runtime. Chat
+is deliberately the startup panel. These are follow-on behaviours, not hidden
+or simulated features.
 
 ## Product intent
 
@@ -102,12 +126,14 @@ count rather than squeezed labels.
 - `Ctrl+N` creates a session.
 - `Ctrl+P` opens a fuzzy-search session switcher.
 - `Alt+Left` and `Alt+Right` move between recent sessions.
-- Rename, archive, reopen, and export are available from the command palette
-  and session context menu.
+- Create, switch, search, and export are available from the command palette.
+  Rename, archive, and reopen are durable domain operations whose interactive
+  editor/context surface is deferred.
 
-Export has explicit Markdown and JSONL actions. The default destination is
-`~/.lem/exports/`; a user-selected destination overrides it for that export.
-Export never changes or closes the source session.
+Export has explicit Markdown and structured JSON actions. The command palette
+uses `~/.lem/exports/`; the exporter boundary accepts another injected medium
+for a later destination picker. Export never changes or closes the source
+session.
 
 Creating a session does not require a loaded model. Its title starts as
 `New session` and is replaced by a compact title derived from the first user
@@ -118,13 +144,13 @@ delete turns, events, work items, or artifacts.
 
 The chat panel is a scrollable Bubbles viewport above a Bubbles textarea.
 Completed assistant messages are rendered with a custom Glamour style. User
-messages, thoughts, tool calls, tool results, errors, and runner events have
-distinct but related visual treatments.
+messages, thoughts, tool calls, and tool results have distinct but related
+visual treatments; errors use persistent status and provider events use Work.
 
-Thoughts and structured events render as compact cards. Long bodies are
-collapsed by default and can be expanded without changing the transcript's
-logical ordering. Status is never communicated by colour alone: cards carry a
-label and glyph as well as a semantic colour.
+Thoughts and tool results render as compact labelled transcript lines, while
+errors and job/service state remain in the persistent status/footer surfaces.
+Expandable event cards are deferred. Status is never communicated by colour
+alone: state also carries a label or glyph.
 
 The viewport follows new output only when it was already at the bottom. Manual
 scrolling suspends follow mode and displays a `new output` marker. End returns
@@ -143,53 +169,50 @@ list; the right side shows the selected item's timeline, repository, branch,
 runtime, workspace path, question, pull-request URL, and related artifacts.
 On smaller terminals the list and detail become sequential views.
 
-The user can create, rename, complete, reopen, and archive a LEM work item.
-Work items can be linked to a chat session. Agent activity, questions, logs,
-artifacts, and lifecycle actions have stable presentation states, but the
-default agent capability reports `not installed` and every execution action is
-disabled with that reason. This slice never pretends an unavailable backend
-succeeded.
+The Work domain can create, rename, complete, reopen, archive, and link a LEM
+work item to a session. This slice presents persisted/provider work but defers
+the interactive CRUD editor. Agent activity, questions, artifacts, and
+lifecycle actions have stable presentation states; the default agent capability
+reports `not installed` and every execution action is disabled with that
+reason. This slice never pretends an unavailable backend succeeded.
 
 ### Models panel
 
-The existing asynchronous model discovery remains, presented as a list/detail
-split. The list supports fuzzy filtering and carries loading/current/recent
-markers. Details show the discovered path and metadata available from the
-inference model. Selection is separate from loading, so browsing never unloads
-the current model.
+The existing asynchronous model discovery remains. The list supports fuzzy
+filtering; the contextual inspector shows selected path/type and the currently
+loaded model. Enter explicitly loads the selected row, so ordinary list
+navigation never unloads the current model.
 
-Each session remembers a preferred model plus its mode, generation values, and
-enabled tools. Activating a session never loads or unloads a model implicitly.
-When the preferred and currently loaded models differ, the inspector explains
-the mismatch and offers an explicit load action. Every assistant turn records
-the model that actually produced it.
+The session schema reserves preferred-model, mode, generation, and tool fields.
+The current inspector edits application preferences; activating a session never
+loads or unloads a model implicitly. Every assistant turn records the model
+that actually produced it.
 
-A model change is blocked while any chat generation or HTTP request is in
-flight. The UI explains why and offers the relevant cancel or wait action; it
-never tears down active work implicitly.
+A model change is blocked while any chat generation is active. If the HTTP
+listener is running, it is stopped and drained before the idle old lane closes
+and the replacement loads; chat work is never cancelled implicitly.
 
 ### Service panel
 
 The Service panel retains the existing one-lane scheduler shared with TUI chat.
-It presents start/stop, listen address, current model, request count, and base
-URLs first. Endpoint and curl examples are collapsed help rather than the main
-surface. Listener errors remain associated with this panel and appear in the
-global footer until acknowledged.
+It presents start/stop, listen address, current model, request count, base URLs,
+and a compact curl example. Listener errors remain associated with this panel
+and appear in the global footer until acknowledged.
 
 ### Inspector and overlays
 
-On terminals at least 120 columns wide, a 34-to-40-column inspector appears to
-the right of the active panel. It contains contextual sections for Model,
-Generation, Mode, Tools, Knowledge, Runtime, and Session. Sections may collapse
-but retain a one-line summary.
+On terminals at least 120 columns wide, a 32-column inspector appears to the
+right of the active panel. It contains contextual Model, Generation, Mode,
+Tools, Knowledge, Runtime, and Session detail selected according to the active
+panel.
 
 Between 80 and 119 columns, the inspector is an overlay toggled with `Ctrl+O`.
 Below 80 columns, the workspace becomes a single-column compact layout and the
 same inspector opens as a full content view. The outer frame, active panel, and
 footer remain recognisable at every supported width.
 
-`Ctrl+K` opens a command palette containing every global or contextual action.
-`Ctrl+F` opens search for the active panel. `F1` opens complete key help.
+`Ctrl+K` opens a command palette containing global and capability actions.
+`Ctrl+F` opens durable session-history search. `F1` opens complete key help.
 Overlays own keyboard input until dismissed; background panels do not receive
 the same key event.
 
@@ -213,27 +236,27 @@ valuable.
 
 ## Component architecture
 
-The existing `app` remains the Bubble Tea root but becomes a coordinator rather
-than owning every interaction and render decision. It composes focused models:
+The existing `app` remains the Bubble Tea root and coordinates focused state:
 
 - `sessionManager` — recent sessions, active session, drafts, and generation
   state;
-- `chatPanel` — transcript viewport, composer, follow mode, and chat actions;
+- Bubbles viewport/textarea state — transcript, composer, follow mode, and chat actions;
 - `workPanel` — work-item list/detail and imported agent events;
-- `modelPanel` — discovery, selection, loading, and details;
-- `servicePanel` — lifecycle and request state over the existing service code;
+- Bubbles model list — discovery, selection, loading, and details;
+- `serviceState` — lifecycle and request state over the existing service code;
 - `inspector` — contextual settings and capabilities;
 - `commandPalette` and `sessionSwitcher` — modal searchable overlays;
-- `workspaceLayout` — width/height allocation and responsive composition; and
+- layout helpers — width/height allocation and responsive composition; and
 - `theme` plus `markdownRenderer` — style tokens and cached rich rendering.
 
-The root model owns an explicit focus value: navigation, body, inspector,
-composer, or overlay. Global key handling runs first, modal handling second,
-and only the focused component receives the remaining message.
+The root model routes global keys first, modal keys second, inspector keys
+third, and only then sends a remaining message to the active panel component.
 
-All filesystem, database, configuration, model, service, and agent operations
-run through `tea.Cmd`. Background goroutines send typed messages back to the
-update loop and never mutate a Bubble Tea model directly.
+Resource-heavy startup, model loading, streaming, service lifecycle, runtime
+detection, and knowledge discovery run through `tea.Cmd`. Small transactional
+persistence calls execute synchronously through injected interfaces. Background
+goroutines send typed messages back to the update loop and never mutate a
+Bubble Tea model directly.
 
 The package stays split into focused sibling files under `cli/tui`. Persistence
 and external integrations are represented by small interfaces in the TUI
@@ -253,12 +276,10 @@ shape.
 ### dAppCore go-store
 
 `dappco.re/go/store` opens `~/.lem/state.db` as the reactive key/value store.
-A scoped `lem` namespace contains per-session drafts and small UI values such
-as the active session, recent-session ordering, active panel, and collapsed
-section state. Chat and work records never live in the key/value database.
-
-Store watchers are bridged into Bubble Tea commands where a live update is
-useful. All watchers are unregistered and stores closed during shutdown.
+A scoped `lem` namespace contains the active session plus per-session drafts
+and viewport/follow state. Chat and work records never live in the key/value
+database. No watchers are installed in this slice; the store is closed during
+shutdown.
 
 ### dAppCore config
 
@@ -305,9 +326,10 @@ the capability with a reason and never prevents local chat.
 
 ### Knowledge packs
 
-Knowledge packs are Markdown content rather than a required Go runtime. LEM
-discovers Markdown below `~/.lem/packs/` and additional paths configured by the
-user. The inspector provides search, preview, attach, and detach actions.
+Knowledge packs are Markdown content rather than a required Go runtime. This
+slice discovers Markdown below `~/.lem/packs/` and displays document/attachment
+state in the inspector. Search, preview, attach/detach controls, and additional
+configured mounts use the existing boundaries in a later UI slice.
 
 An attachment stores its source path, title, content hash, and selected content
 snapshot in DuckDB. The snapshot makes an existing conversation reproducible
@@ -329,6 +351,21 @@ pinned to an exact reachable pseudo-version. The CLI module receives no local
 `replace` directive and the repository `go.work` receives no path outside this
 repository. This keeps builds reproducible without the sibling checkouts.
 
+The implemented direct pins in `cli/go.mod` are:
+
+| Module | Version |
+| --- | --- |
+| `dappco.re/go/io` | `v0.15.1` |
+| `dappco.re/go/store` | `v0.14.1` |
+| `dappco.re/go/config` | `v0.18.0` |
+| `dappco.re/go/orm` | `v0.1.1` |
+| `dappco.re/go/container` | `v0.11.0` |
+| `github.com/charmbracelet/bubbletea` | `v1.3.10` |
+| `github.com/charmbracelet/bubbles` | `v1.0.0` |
+| `github.com/charmbracelet/glamour` | `v1.0.0` |
+| `github.com/charmbracelet/lipgloss` | `v1.1.1-0.20250404203927-76690c660834` |
+| `github.com/google/uuid` | `v1.6.0` |
+
 ## Application data and schema
 
 The default application root is fixed at `~/.lem/`. Production code resolves
@@ -346,21 +383,21 @@ setting in this slice.
 └── exports/
 ```
 
-The root and newly created private subdirectories use owner-only directory
-permissions. Existing user permissions are not silently rewritten.
+The root is mediated by the sandboxed medium. Existing user permissions are not
+silently rewritten.
 
 DuckDB contains these logical tables:
 
 | Table | Purpose |
 | --- | --- |
 | `lem_schema_versions` | Applied migration number and timestamp. |
-| `sessions` | Identity, title, lifecycle, preferred model, per-session settings, and timestamps. |
-| `turns` | Ordered user, assistant, and system content plus completion state and token counts. |
-| `events` | Thoughts, tool calls/results, errors, service events, and runner activity. |
-| `generation_jobs` | Durable queued, generating, completed, cancelled, failed, or interrupted generation state. |
-| `work_items` | Session-linked tasks and imported workspace status. |
-| `artifacts` | Files, URLs, exports, and pull requests related to work. |
-| `attachments` | Snapshotted knowledge-pack context and source hashes. |
+| `lem_sessions` | Identity, title, lifecycle, reserved per-session settings, and timestamps. |
+| `lem_turns` | Ordered user, assistant, and tool content, thoughts, receipts, and producing model. |
+| `lem_events` | Tool/error and future runner activity. |
+| `lem_generation_jobs` | Durable queued, generating, completed, cancelled, failed, or interrupted generation state. |
+| `lem_work_items` | Session-linked tasks and imported workspace status. |
+| `lem_artifacts` | Files, URLs, exports, and pull requests related to work. |
+| `lem_attachments` | Snapshotted knowledge-pack context and source hashes. |
 
 Primary identifiers are UUID strings. Turns have a session-scoped ordinal with
 a uniqueness constraint. Session and work-item status values are validated at
@@ -378,7 +415,7 @@ records from default lists while preserving queryability and export.
 2. Load configuration and report malformed input without overwriting it.
 3. Open DuckDB, apply migrations transactionally, and mount ORM schemas.
 4. Open and scope go-store.
-5. Restore sessions, active panel, active session, and its draft.
+5. Restore sessions, the active session, and its draft/viewport; start on Chat.
 6. Start model discovery, knowledge discovery, and runtime detection
    concurrently; resolve the agent capability immediately.
 7. Render immediately with loading placeholders; each result arrives as a
@@ -391,10 +428,10 @@ records from default lists while preserving queryability and export.
 3. Persist a per-session generation job and enqueue it on the shared model lane.
 4. Stream parser events into the owning session regardless of which session is
    currently visible.
-5. Record completed thought/tool/error events and render the evolving assistant
-   message at a bounded cadence.
-6. Persist the completed assistant turn and token counts, or persist an
-   interrupted partial turn plus an error event.
+5. Persist thought content with the assistant turn, record tool/error events,
+   and render the evolving assistant message at a bounded cadence.
+6. Persist the completed assistant turn and metrics, or retain partial content
+   with failed/cancelled durable job state.
 7. Mark the session as needing attention if it completed while hidden.
 
 Each session may have one in-flight generation. The shared scheduler serialises
@@ -406,10 +443,9 @@ jobs to interrupted. It never restarts work automatically.
 
 ### Tool loop
 
-Structured tool calls become events before execution. Enabled built-in tools
-run through the existing tool registry, and their structured results become a
-linked event and tool turn before generation continues. Disabled, malformed,
-or failed tool calls produce an explicit result the model can recover from.
+Enabled structured tool calls run through the existing registry; their call and
+result become a linked event/tool turn before generation continues. Malformed
+or failed enabled calls produce an explicit result the model can recover from.
 
 ### Agent capability states
 
@@ -425,9 +461,9 @@ not depend on their internal types.
 - Failure to create or open the application root or DuckDB produces a blocking
   storage screen with the exact path, error, Retry, and Quit. There is no silent
   in-memory history mode.
-- A malformed configuration file is preserved. The user may continue for the
-  current run with defaults or quit and repair it; continuing does not commit
-  over the malformed file.
+- A malformed configuration file is preserved. The run continues with defaults
+  and a warning, while commits stay disabled until the file is repaired and
+  configuration reload succeeds.
 - Migrations run in a transaction. Failure rolls back, closes the database, and
   presents the storage screen.
 - go-store failure disables draft/UI-state persistence with a persistent
@@ -436,15 +472,15 @@ not depend on their internal types.
   capability and show a reason in the inspector.
 - Model and tool failures are recorded on the owning session, even when hidden.
 - A listener failure stops only the HTTP service; local chat remains available.
-- Shutdown cancels generation, closes capability providers, tears down the HTTP service,
-  closes the model, unregisters watchers, flushes pending state, and closes both
-  stores in that order.
+- Shutdown cancels generation, closes capability providers, tears down the HTTP
+  service, closes the model, then closes go-store and DuckDB in that order.
 
 ## Privacy and authority
 
 All conversation, work, knowledge snapshots, and state remain local below
-`~/.lem/` unless the user explicitly exports them. Export writes only to the
-chosen destination and preserves the source archive.
+`~/.lem/` unless the user explicitly exports them. The current palette exports
+below `~/.lem/exports/`; the exporter can target another injected medium and
+always preserves the source session.
 
 This slice detects runtimes but has no authority to spawn agents, create
 containers, mutate repositories, or contact a remote forge. Knowledge
@@ -480,11 +516,11 @@ stripped render tests check structural invariants such as frame width, panel
 presence, truncation, and absence of overflow. Focused benchmarks cover a long
 transcript render, Markdown cache hits, and a large session switcher.
 
-Before handback, the implementation must pass focused CLI/TUI tests, the CLI
-module suite, `task qa`, `task cover` with the repository's 95% project and
-patch target, relevant benchmarks, `git diff --check`, and the documented
-core/go compliance audit. Metal-tagged live tests remain separate from the
-portable gate.
+Before handback, verification runs focused CLI/TUI tests, the CLI module suite,
+`task qa`, `task cover`, relevant benchmarks, `git diff --check`, and the
+documented core/go compliance audit. Any repository-wide baseline failure is
+reported with its exact command/output rather than attributed to or hidden by
+this slice. Metal-tagged live tests remain separate from the portable gate.
 
 ## Acceptance criteria
 
@@ -492,24 +528,27 @@ The workspace-foundation slice is complete when:
 
 1. `lem tui` opens into a polished full-frame layout at wide, medium, and narrow
    terminal sizes.
-2. A user can create, rename, switch, search, archive, reopen, and export
-   sessions, then restart the program and recover them from `~/.lem/lem.duckdb`.
+2. A user can create, switch, search, and export sessions, then restart the
+   program and recover them from `~/.lem/lem.duckdb`; rename/archive/reopen are
+   verified domain operations awaiting their editor.
 3. Generation can continue in one session while the user views or queues work
    in another, with visible per-session state and a globally serial model lane.
-4. Markdown, thoughts, tools, errors, and agent events render as distinct,
-   scrollable transcript elements without stealing manual scroll position.
+4. Markdown, thoughts, and tools render distinctly in the scrollable transcript
+   without stealing manual scroll position; errors stay visible in status and
+   provider events render in the Work timeline.
 5. Work items persist, the future agent activity surface is complete, and all
    unavailable execution actions are visibly disabled rather than simulated.
-6. Settings persist through dAppCore config, drafts through go-store, relational
-   records through ORM/DuckDB, runtime capabilities through go-container, and
-   local knowledge documents through the pack browser.
+6. Settings persist through dAppCore config, drafts/viewport through go-store,
+   relational records through ORM/DuckDB, runtime capabilities through
+   go-container, and local knowledge documents through read-only discovery.
 7. The current model picker and HTTP service remain functional inside the new
    shell.
 8. Every unavailable optional capability degrades locally with an actionable
    explanation, while storage failures never masquerade as successful
    persistence.
-9. The implementation meets the repository's portable QA, coverage,
-   compliance, and benchmark gates.
+9. The implementation has fresh portable QA, coverage, race, standalone-module,
+   compliance-audit, headless-frame, and benchmark evidence; any pre-existing
+   repository-wide failure is called out explicitly.
 
 ## Follow-on slices
 

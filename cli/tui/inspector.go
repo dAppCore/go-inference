@@ -2,11 +2,7 @@
 
 package tui
 
-import (
-	"strings"
-
-	core "dappco.re/go"
-)
+import core "dappco.re/go"
 
 type inspectorControl uint8
 
@@ -132,7 +128,7 @@ func (inspector inspectorState) View(target app, width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
-	var builder strings.Builder
+	var builder core.Builder
 	builder.WriteString(target.styles.title.Render("INSPECTOR") + "\n\n")
 	switch target.activePanel {
 	case panelWork:
@@ -169,7 +165,7 @@ func (inspector inspectorState) View(target app, width, height int) string {
 	return fitPane(builder.String(), width, height, target.styles.inspector)
 }
 
-func (inspector inspectorState) renderWork(builder *strings.Builder, target app) {
+func (inspector inspectorState) renderWork(builder *core.Builder, target app) {
 	builder.WriteString(target.styles.accent.Render("WORK DETAIL") + "\n")
 	if target.work == nil {
 		builder.WriteString(target.styles.status.Render("○ no work item selected") + "\n\n")
@@ -244,7 +240,7 @@ func (inspector inspectorState) renderWork(builder *strings.Builder, target app)
 	}
 }
 
-func (inspector inspectorState) renderRuntime(builder *strings.Builder, target app) {
+func (inspector inspectorState) renderRuntime(builder *core.Builder, target app) {
 	builder.WriteString(target.styles.accent.Render("RUNTIME") + "\n")
 	if target.work != nil {
 		if selected, ok := target.work.Selected(); ok && selected.Runtime != "" {
@@ -305,7 +301,7 @@ func runtimeFeatureLabels(capability runtimeCapability) []string {
 	return features
 }
 
-func (inspector inspectorState) renderChat(builder *strings.Builder, target app) {
+func (inspector inspectorState) renderChat(builder *core.Builder, target app) {
 	model := "○ none"
 	if target.modelName != "" {
 		model = "● " + target.modelName
@@ -358,7 +354,7 @@ func (inspector inspectorState) renderChat(builder *strings.Builder, target app)
 	}
 }
 
-func (inspector inspectorState) renderControl(builder *strings.Builder, target app, control inspectorControl, label, value string) {
+func (inspector inspectorState) renderControl(builder *core.Builder, target app, control inspectorControl, label, value string) {
 	cursor := "  "
 	style := target.styles.status
 	if inspector.cursor == int(control) {

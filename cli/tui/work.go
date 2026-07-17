@@ -342,7 +342,7 @@ func (panel *workPanel) renderList(width, height int, styles uiStyles) string {
 		builder.WriteString("\n")
 		builder.WriteString(styles.status.Render("○ No work yet"))
 		builder.WriteString("\n")
-		builder.WriteString(styles.thought.Render("Create local work from the command palette."))
+		builder.WriteString(styles.thought.Render("A connected provider or workspace action will create work here."))
 		return builder.String()
 	}
 	for index, raw := range visible {

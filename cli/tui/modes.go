@@ -3,8 +3,7 @@
 package tui
 
 import (
-	"strings"
-
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -43,7 +42,7 @@ func (m modeState) move(delta int) modeState {
 }
 
 func (m modeState) view(width int, styles uiStyles) string {
-	var b strings.Builder
+	var b core.Builder
 	b.WriteString(styles.title.Render("modes") + "\n\n")
 	for i, md := range modes {
 		cursor, name := "  ", styles.answer.Render(md.name)

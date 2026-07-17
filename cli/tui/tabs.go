@@ -3,9 +3,9 @@
 package tui
 
 import (
-	"strings"
-
 	"github.com/charmbracelet/lipgloss"
+
+	core "dappco.re/go"
 )
 
 type panelID uint8
@@ -65,5 +65,5 @@ func (panel panelID) String() string {
 	if panel >= panelCount {
 		return "Unknown"
 	}
-	return strings.ToLower(panelNames[panel])
+	return core.Lower(panelNames[panel])
 }

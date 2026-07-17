@@ -88,7 +88,7 @@ func TestWorkPanel_Ugly(t *testing.T) {
 	}
 	panel := opened.Value.(*workPanel)
 	empty := panel.View(72, 18, newUIStyles(midnightTheme()))
-	if !strings.Contains(empty, "No work yet") {
+	if !strings.Contains(empty, "No work yet") || !strings.Contains(empty, "workspace action") || strings.Contains(empty, "command palette") {
 		t.Fatalf("empty work view:\n%s", empty)
 	}
 	fixtures := []workItemRecord{

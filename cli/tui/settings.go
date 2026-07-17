@@ -2,11 +2,7 @@
 
 package tui
 
-import (
-	"strings"
-
-	core "dappco.re/go"
-)
+import core "dappco.re/go"
 
 // The Settings tab: a cursor list of knobs adjusted with ←/→ (or h/l). Values
 // apply to the NEXT load (context) or the next turn (the rest) — the honest
@@ -108,7 +104,7 @@ func (s settings) move(delta int) settings {
 }
 
 func (s settings) view(width int, styles uiStyles) string {
-	var b strings.Builder
+	var b core.Builder
 	b.WriteString(styles.title.Render("settings") + "\n\n")
 	for i, row := range s.rows() {
 		cursor := "  "

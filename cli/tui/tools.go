@@ -3,7 +3,6 @@
 package tui
 
 import (
-	"strings"
 	"time"
 
 	core "dappco.re/go"
@@ -51,7 +50,7 @@ func newTools() toolState {
 			},
 			run: func(args map[string]any) string {
 				text, _ := args["text"].(string)
-				return core.Sprintf("%d words", len(strings.Fields(text)))
+				return core.Sprintf("%d words", len(core.Fields(text)))
 			},
 		},
 	}}
@@ -87,8 +86,10 @@ func (t *toolState) execute(call inference.ToolCall) string {
 	for _, bt := range t.tools {
 		if bt.decl.Name == call.Name {
 			args := map[string]any{}
-			if strings.TrimSpace(call.ArgumentsJSON) != "" {
-				_ = core.JSONUnmarshal([]byte(call.ArgumentsJSON), &args)
+			if core.Trim(call.ArgumentsJSON) != "" {
+				if decoded := core.JSONUnmarshal([]byte(call.ArgumentsJSON), &args); !decoded.OK {
+					args = map[string]any{}
+				}
 			}
 			out := bt.run(args)
 			t.lastRun = append(t.lastRun, call.Name+" → "+out)
@@ -100,7 +101,7 @@ func (t *toolState) execute(call inference.ToolCall) string {
 }
 
 func (t toolState) view(width int, styles uiStyles) string {
-	var b strings.Builder
+	var b core.Builder
 	b.WriteString(styles.title.Render("tools") + "\n\n")
 	state := "disabled — replies are plain chat"
 	if t.enabled {

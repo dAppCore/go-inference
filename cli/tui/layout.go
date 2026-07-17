@@ -3,9 +3,9 @@
 package tui
 
 import (
-	"strings"
-
 	"github.com/charmbracelet/lipgloss"
+
+	core "dappco.re/go"
 )
 
 type layoutKind uint8
@@ -109,13 +109,13 @@ func renderWorkspaceRegion(spec frameSpec, metrics frameMetrics, styles uiStyles
 	switch metrics.kind {
 	case layoutWide:
 		main := fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
-		separator := fitPane(strings.Repeat("│\n", max(0, metrics.regionHeight-1))+"│", 1, metrics.regionHeight, styles.separator)
+		separator := fitPane(core.Repeat("│\n", max(0, metrics.regionHeight-1))+"│", 1, metrics.regionHeight, styles.separator)
 		inspector := fitPane(spec.Inspector, metrics.inspectorWidth, metrics.inspectorHeight, styles.inspector)
 		return lipgloss.JoinHorizontal(lipgloss.Top, main, separator, inspector)
 	case layoutOverlay:
 		if spec.InspectorOpen {
 			inspector := fitPane(spec.Inspector, metrics.inspectorWidth, metrics.inspectorHeight, styles.inspector)
-			separator := fitLine(strings.Repeat("─", metrics.innerWidth), metrics.innerWidth, styles.separator)
+			separator := fitLine(core.Repeat("─", metrics.innerWidth), metrics.innerWidth, styles.separator)
 			main := fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
 			return lipgloss.JoinVertical(lipgloss.Left, inspector, separator, main)
 		}
@@ -145,10 +145,10 @@ func minimalFrame(width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
-	line := strings.Repeat("─", width)
+	line := core.Repeat("─", width)
 	lines := make([]string, height)
 	for i := range lines {
 		lines[i] = line
 	}
-	return strings.Join(lines, "\n")
+	return core.Join("\n", lines...)
 }

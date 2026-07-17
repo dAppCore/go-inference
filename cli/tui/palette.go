@@ -4,7 +4,6 @@ package tui
 
 import (
 	"context"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/list"
@@ -281,20 +280,18 @@ func defaultWorkspaceCommands() []workspaceCommand {
 			return target.inspector.Save(target)
 		}},
 		unavailable(commandExportMarkdown, "Export Markdown", "Export the active session as Markdown", "export adapter not connected"),
-		unavailable(commandExportJSON, "Export JSONL", "Export the active session as JSON Lines", "export adapter not connected"),
+		unavailable(commandExportJSON, "Export JSON", "Export the active session as structured JSON", "export adapter not connected"),
 		{ID: commandRefreshWork, Title: "Refresh work", Description: "Refresh local work and provider snapshots", Available: true, run: func(target *app) core.Result {
 			if target == nil || target.work == nil {
 				return core.Fail(core.E("tui.command.refreshWork", "work panel is unavailable", nil))
 			}
 			return target.work.Refresh(context.Background())
 		}},
-		{ID: commandRefreshRuntimes, Title: "Refresh runtimes", Description: "Refresh local runtime capabilities", Available: true, run: noOpCommand},
-		{ID: commandRefreshKnowledge, Title: "Refresh knowledge", Description: "Refresh local knowledge packs", Available: true, run: noOpCommand},
+		unavailable(commandRefreshRuntimes, "Refresh runtimes", "Refresh local runtime capabilities", "manual refresh is not connected; restart LEM to rescan"),
+		unavailable(commandRefreshKnowledge, "Refresh knowledge", "Refresh local knowledge packs", "manual refresh is not connected; restart LEM to rescan"),
 	}
 	return append(commands, agentWorkspaceCommands(agentFeatureCatalog(defaultAgentUnavailableReason))...)
 }
-
-func noOpCommand(*app) core.Result { return core.Ok(nil) }
 
 func agentCommandID(feature agentFeature) commandID {
 	return commandID(core.Concat("agent.", string(feature)))
@@ -618,7 +615,7 @@ func renderOverlay(body string, width, height int, styles uiStyles) string {
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Top, box)
 }
 
-// strings is retained here only for the overlay's compact empty state builder.
+// overlayEmpty keeps unavailable overlays legible without adding a component.
 func overlayEmpty(title, reason string) string {
-	return strings.Join([]string{title, "", "○ " + reason, "", "esc closes"}, "\n")
+	return core.Join("\n", title, "", "○ "+reason, "", "esc closes")
 }

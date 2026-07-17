@@ -41,6 +41,23 @@ func TestCommandPalette_Bad(t *testing.T) {
 	}
 }
 
+func TestCommandPaletteLocalRefresh_Bad(t *testing.T) {
+	palette := newCommandPalette(newUIStyles(midnightTheme()))
+	a := newApp("", 0, 64)
+	for _, id := range []commandID{commandRefreshRuntimes, commandRefreshKnowledge} {
+		command := palette.byID[id]
+		if command.Available || !strings.Contains(command.Reason, "restart") {
+			t.Fatalf("refresh command %q = %#v", id, command)
+		}
+		if result := palette.Invoke(id, &a); result.OK {
+			t.Fatalf("unwired refresh command %q reported success", id)
+		}
+	}
+	if command := palette.byID[commandExportJSON]; command.Title != "Export JSON" || strings.Contains(command.Description, "JSON Lines") {
+		t.Fatalf("JSON export command = %#v", command)
+	}
+}
+
 func TestSessionSwitcher_Good(t *testing.T) {
 	manager := openTestSessionManager(t, sequenceIDs("session-one", "session-two"))
 	first := manager.Create().Value.(*chatSession)
