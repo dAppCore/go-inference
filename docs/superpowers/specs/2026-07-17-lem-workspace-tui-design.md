@@ -1,17 +1,16 @@
 # LEM Workspace TUI Design
 
 **Date:** 2026-07-17
-**Status:** Approved for implementation planning
-**Scope:** Workspace foundation slice
+**Status:** Approved for TUI-first implementation
+**Scope:** Interactive workspace shell and local persistence
 
 ## Product intent
 
 `lem tui` becomes the canonical interactive workspace for local inference and
 agent-assisted work. It is a new product surface inside `go-inference`; it does
-not embed, wrap, or reproduce CoreAgent's CLI. Useful CoreAgent and dAppCore
-packages are consumed through narrow adapters so their working features are
-available immediately and can migrate into `go-inference` later without
-rewriting the user interface.
+not embed, wrap, or reproduce CoreAgent's CLI. CoreAgent remains the behavioural
+reference for the later `go/agent/*` port, while this slice builds stable UI
+interfaces and honest unavailable states without importing CoreAgent.
 
 The central experience is a familiar agent chat contained inside a stable,
 full-terminal frame. Multiple conversations remain open as sessions, continue
@@ -20,11 +19,12 @@ model management, service hosting, knowledge context, settings, and runtime
 status are coordinated as parts of one workspace rather than presented as six
 unrelated screens.
 
-This specification deliberately covers the first vertical slice. It delivers
-the complete visual shell, durable multi-session behaviour, work tracking, and
-useful read-side integrations. Starting and controlling container-backed
-agents is a separate execution slice because it introduces process authority,
-approval, cancellation, and recovery semantics that deserve their own design.
+This specification deliberately covers the TUI-first vertical slice. It
+delivers the complete visual shell, durable multi-session behaviour, local work
+tracking, and useful read-side integrations. Agent dispatch, monitoring, Brain,
+fleet, forge, and closeout features are represented by capability boundaries
+and disabled actions until their inference-native implementations land under
+`go/agent/*`.
 
 ## Goals
 
@@ -38,10 +38,13 @@ approval, cancellation, and recovery semantics that deserve their own design.
 - Persist relational data in DuckDB and reactive key/value state in
   `dAppCore/go-store`, all below `~/.lem/`.
 - Use `dAppCore/config` for explicit, durable settings changes.
+- Route file-like state through an injected `dAppCore/go-io` medium. The
+  default is a sandboxed local medium rooted at `~/.lem/`; tests use a memory
+  medium and later agent backends may supply a remote medium.
 - Use `dAppCore/orm` for typed session, turn, event, work-item, attachment, and
   artifact access over DuckDB.
-- Import CoreAgent's useful runner-status and coordination-event packages
-  behind a LEM-owned adapter. Do not use CoreAgent's CLI.
+- Define a LEM-owned agent capability interface without importing CoreAgent.
+  The future `go/agent/*` implementation must plug into this boundary.
 - Discover local runtime capabilities through `dAppCore/go-container` without
   spawning a container in this slice.
 - Discover and attach local Markdown knowledge-pack documents as session
@@ -56,6 +59,7 @@ approval, cancellation, and recovery semantics that deserve their own design.
   processes.
 - Automatically creating Apple, VZ, Docker, or Podman containers.
 - Reusing any CoreAgent CLI code, command parsing, or presentation code.
+- Importing CoreAgent Go packages into the TUI-first slice.
 - Remote fleet control, forge automation, auto-PR, auto-merge, or auto-QA.
 - Automatic network download or update of knowledge packs.
 - Semantic/vector retrieval or shared OpenBrain writes.
@@ -80,7 +84,7 @@ frame contains, from top to bottom:
 The primary panels are:
 
 - **Chat** — transcript, composer, generation state, and per-session context;
-- **Work** — work items and imported CoreAgent workspace activity;
+- **Work** — local work items and the future agent activity surface;
 - **Models** — discovery, filtering, details, loading, and recent choices; and
 - **Service** — HTTP service state, address, request count, and concise actions.
 
@@ -140,10 +144,11 @@ runtime, workspace path, question, pull-request URL, and related artifacts.
 On smaller terminals the list and detail become sequential views.
 
 The user can create, rename, complete, reopen, and archive a LEM work item.
-Work items can be linked to a chat session and to an imported CoreAgent
-workspace. The CoreAgent adapter discovers existing workspace status and
-normalises runner coordination messages into LEM events. This slice observes and
-tracks existing work; it does not dispatch a new agent.
+Work items can be linked to a chat session. Agent activity, questions, logs,
+artifacts, and lifecycle actions have stable presentation states, but the
+default agent capability reports `not installed` and every execution action is
+disabled with that reason. This slice never pretends an unavailable backend
+succeeded.
 
 ### Models panel
 
@@ -257,30 +262,39 @@ useful. All watchers are unregistered and stores closed during shutdown.
 
 ### dAppCore config
 
-`dappco.re/go/config` reads and commits `~/.lem/config.yaml`. Defaults cover
-generation values, appearance, knowledge paths, recent-session limit, preferred
-runtime, and whether future execution features require confirmation.
+`dappco.re/go/config` reads and commits `config.yaml` through
+`config.WithMedium`. Defaults cover generation values, appearance, knowledge
+paths, recent-session limit, preferred runtime, and whether future execution
+features require confirmation.
 Environment-derived values may affect the resolved view but are not written
 back when the user commits an unrelated setting.
 
-### CoreAgent packages
+### dAppCore go-io
 
-The first adapter consumes public Go packages from CoreAgent for runner status
-and coordination-message shapes. It translates those values
-into LEM-owned `workItem` and `workspaceEvent` values at the boundary. No
-CoreAgent type crosses into the UI components or DuckDB models.
+The composition root resolves the user's home, joins `.lem`, creates
+`io.NewSandboxed(resolvedRoot)`, and injects the resulting `io.Medium` into
+configuration, knowledge, export, and agent-capability boundaries. Medium paths
+are application-relative: `config.yaml`, `packs/`, `exports/`, and
+`workspaces/`. Components never join these paths to the host home themselves.
 
-The adapter does not call the broad CoreAgent registration path because that
-path enables automation such as QA, PR, and merge behaviour. Observation starts
-and stops explicitly with the TUI lifecycle. A later execution adapter may use
-specific dispatch APIs only after an execution design defines authority and
-confirmation.
+DuckDB and SQLite drivers require local database filenames, so the composition
+root separately retains the resolved local paths for `lem.duckdb` and
+`state.db`. Those path-only adapters remain behind repository interfaces. A
+future remote deployment can replace the file medium without changing panels,
+then choose a remote repository adapter independently.
 
-CoreAgent's `lemma` and `chathistory` packages currently select an older DuckDB
-driver. The workspace foundation uses the official driver shared by current
-go-store and ORM. Those two CoreAgent packages can be adopted or migrated after
-their driver boundary is aligned; they are not imported into this binary in the
-meantime.
+### Future agent capability
+
+The TUI owns a small agent capability interface for availability, work
+snapshots, events, and lifecycle commands. The TUI-first implementation is an
+unavailable provider with a stable reason. No CoreAgent type, package, status
+file, or CLI path crosses into the TUI.
+
+The later `go/agent/*` port will implement this interface using medium-backed
+workspaces and inference-native domain values. CoreAgent's runner, queue,
+monitor, setup, Brain, session/handoff, provider, fleet, forge, QA, review, PR,
+merge, and recovery behaviour are design inputs for that port rather than a
+dependency of this slice.
 
 ### dAppCore go-container
 
@@ -365,8 +379,8 @@ records from default lists while preserving queryability and export.
 3. Open DuckDB, apply migrations transactionally, and mount ORM schemas.
 4. Open and scope go-store.
 5. Restore sessions, active panel, active session, and its draft.
-6. Start model discovery, knowledge discovery, runtime detection, and the
-   read-side CoreAgent observer concurrently.
+6. Start model discovery, knowledge discovery, and runtime detection
+   concurrently; resolve the agent capability immediately.
 7. Render immediately with loading placeholders; each result arrives as a
    typed Bubble Tea message.
 
@@ -397,13 +411,14 @@ run through the existing tool registry, and their structured results become a
 linked event and tool turn before generation continues. Disabled, malformed,
 or failed tool calls produce an explicit result the model can recover from.
 
-### CoreAgent observation
+### Agent capability states
 
-The adapter discovers existing workspace state and converts changes into
-idempotent work-item upserts and timeline events. A stable external workspace
-identity prevents duplicate rows after restart. Questions and failures mark the
-associated session as needing attention. The observer performs no dispatch,
-git mutation, or process control.
+The Work panel asks the capability provider for availability before offering
+agent actions. An unavailable provider returns a reason displayed in the panel,
+inspector, and command palette; dispatch, cancel, answer, retry, and resume stay
+disabled. Local work-item CRUD remains fully functional. Later providers emit
+LEM-owned work snapshots and timeline events, so the UI and DuckDB schema do
+not depend on their internal types.
 
 ## Failure and recovery behaviour
 
@@ -417,11 +432,11 @@ git mutation, or process control.
   presents the storage screen.
 - go-store failure disables draft/UI-state persistence with a persistent
   warning but does not endanger DuckDB chat history.
-- Knowledge, runtime, and CoreAgent integration failures disable only their
-  related capability and show a reason in the inspector.
+- Knowledge, runtime, and agent-capability failures disable only their related
+  capability and show a reason in the inspector.
 - Model and tool failures are recorded on the owning session, even when hidden.
 - A listener failure stops only the HTTP service; local chat remains available.
-- Shutdown cancels generation, stops observers, tears down the HTTP service,
+- Shutdown cancels generation, closes capability providers, tears down the HTTP service,
   closes the model, unregisters watchers, flushes pending state, and closes both
   stores in that order.
 
@@ -431,17 +446,16 @@ All conversation, work, knowledge snapshots, and state remain local below
 `~/.lem/` unless the user explicitly exports them. Export writes only to the
 chosen destination and preserves the source archive.
 
-This slice observes external agent work and detects runtimes but has no
-authority to spawn agents, create containers, mutate repositories, or contact a
-remote forge. Knowledge discovery reads configured local paths only. Future
-execution and network features require explicit designs and user-visible
-confirmation boundaries.
+This slice detects runtimes but has no authority to spawn agents, create
+containers, mutate repositories, or contact a remote forge. Knowledge
+discovery reads configured medium paths only. Future execution and network
+features require explicit designs and user-visible confirmation boundaries.
 
 ## Testing and quality
 
 Production dependencies are hidden behind interfaces so tests use temporary
-DuckDB/go-store paths, fake inference models, deterministic knowledge fixtures,
-and fake agent/runtime adapters.
+DuckDB/go-store paths, an in-memory file medium, fake inference models,
+deterministic knowledge fixtures, and fake agent/runtime adapters.
 
 Required test coverage includes:
 
@@ -452,7 +466,7 @@ Required test coverage includes:
 - queued background generation and hidden-session attention state;
 - interrupted and failed generation persistence;
 - tool event ordering and replay into model history;
-- CoreAgent workspace import idempotency and status transitions;
+- unavailable agent actions, injected agent snapshots, and event transitions;
 - knowledge discovery, attachment snapshots, and stale detection;
 - config load, malformed-file handling, and explicit commit behaviour;
 - focus routing and overlay key ownership;
@@ -484,8 +498,8 @@ The workspace-foundation slice is complete when:
    in another, with visible per-session state and a globally serial model lane.
 4. Markdown, thoughts, tools, errors, and agent events render as distinct,
    scrollable transcript elements without stealing manual scroll position.
-5. Work items persist and existing CoreAgent workspace activity can be attached
-   and followed without invoking CoreAgent's CLI or dispatching a worker.
+5. Work items persist, the future agent activity surface is complete, and all
+   unavailable execution actions are visibly disabled rather than simulated.
 6. Settings persist through dAppCore config, drafts through go-store, relational
    records through ORM/DuckDB, runtime capabilities through go-container, and
    local knowledge documents through the pack browser.
@@ -509,6 +523,6 @@ rewrite:
 3. **Fleet and collaboration:** multiple runners, remote nodes, hand-off,
    concurrency/rate views, and forge workflows.
 
-As CoreAgent packages become redundant, their adapter implementations can move
-into `go-inference` one capability at a time. UI components and persisted LEM
-records remain stable throughout that migration.
+CoreAgent's proven behaviours are ported into focused `go/agent/*` packages one
+capability at a time. UI components and persisted LEM records remain stable
+throughout that migration.
