@@ -74,19 +74,24 @@ lem-amd:
   extends: .release-cli
   variables:
     GOTOOLCHAIN: "auto"
-    # ROCr + HIP static archives build from the pinned ROCm source submodules.
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_PATHS: 'external/rocr-runtime external/rocm-clr external/rocm-hip'
-    GIT_SUBMODULE_DEPTH: 1
+    GIT_SUBMODULE_STRATEGY: none
   script:
+    # ROCr + HIP static archives compile from these three ROCm sources; init
+    # them explicitly (GIT_SUBMODULE_PATHS left external/rocm-hip uninitialised
+    # on the persistent shell-runner checkout → hip-static-archive bailed).
+    - git submodule sync -- external/rocr-runtime external/rocm-clr external/rocm-hip
+    - git submodule update --init --force --depth 1 external/rocr-runtime external/rocm-clr external/rocm-hip
     - make lem-amd
 
 lem-cuda:
   extends: .release-cli
   variables:
     GOTOOLCHAIN: "auto"
-    GIT_SUBMODULE_STRATEGY: recursive
-    GIT_SUBMODULE_PATHS: 'external/rocr-runtime external/rocm-clr external/rocm-hip'
-    GIT_SUBMODULE_DEPTH: 1
+    GIT_SUBMODULE_STRATEGY: none
   script:
+    # ROCr + HIP static archives compile from these three ROCm sources; init
+    # them explicitly (GIT_SUBMODULE_PATHS left external/rocm-hip uninitialised
+    # on the persistent shell-runner checkout → hip-static-archive bailed).
+    - git submodule sync -- external/rocr-runtime external/rocm-clr external/rocm-hip
+    - git submodule update --init --force --depth 1 external/rocr-runtime external/rocm-clr external/rocm-hip
     - make lem-cuda
