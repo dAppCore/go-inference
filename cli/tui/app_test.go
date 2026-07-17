@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"os"
@@ -10,8 +11,459 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference/decode/parser"
 )
+
+func TestAppBootstrap_Good(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	resources.Warnings = append(resources.Warnings, "reactive state: degraded fixture")
+	a := newWorkspaceApp("", 0, 64, func() core.Result { return core.Ok(resources) })
+	if a.activePanel != panelChat || a.boot.phase != bootLoading {
+		t.Fatalf("initial workspace app = panel %d boot %#v", a.activePanel, a.boot)
+	}
+	message := workspaceBootstrap(a.workspaceLoader)()
+	m, command := a.Update(message)
+	a = m.(app)
+	if a.boot.phase != bootReady || a.resources != resources || a.sessions == nil || a.sessions.Active() == nil {
+		t.Fatalf("ready app = boot %#v resources=%p sessions=%#v", a.boot, a.resources, a.sessions)
+	}
+	if a.repository == nil || a.preferences == nil || a.work == nil || a.knowledge == nil {
+		t.Fatalf("composition incomplete: repository=%v preferences=%v work=%v knowledge=%v", a.repository != nil, a.preferences != nil, a.work != nil, a.knowledge != nil)
+	}
+	if command == nil || !strings.Contains(a.statusLine(), "degraded fixture") {
+		t.Fatalf("ready command/warning = %v / %q", command != nil, a.statusLine())
+	}
+	if result := a.shutdown(); !result.OK {
+		t.Fatalf("shutdown: %v", result.Value)
+	}
+}
+
+func TestAppBootstrap_Bad(t *testing.T) {
+	attempts := 0
+	var resources *workspaceResources
+	loader := func() core.Result {
+		attempts++
+		if attempts == 1 {
+			return core.Fail(core.E("test.bootstrap", "/tmp/lem.duckdb is unavailable", nil))
+		}
+		resources = openAppTestWorkspace(t)
+		return core.Ok(resources)
+	}
+	a := newWorkspaceApp("", 0, 64, loader)
+	m, _ := a.Update(workspaceBootstrap(loader)())
+	a = m.(app)
+	if a.boot.phase != bootFailed || !strings.Contains(a.View(), "/tmp/lem.duckdb") || !strings.Contains(a.View(), "Retry") {
+		t.Fatalf("blocking storage view:\n%s", a.View())
+	}
+	m, command := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	a = m.(app)
+	if a.boot.phase != bootLoading || command == nil {
+		t.Fatalf("retry state = %#v command=%v", a.boot, command != nil)
+	}
+	m, _ = a.Update(command())
+	a = m.(app)
+	if a.boot.phase != bootReady || attempts != 2 || a.resources != resources {
+		t.Fatalf("retry result = boot %#v attempts=%d", a.boot, attempts)
+	}
+	_ = a.shutdown()
+}
+
+func TestAppBootstrap_Ugly(t *testing.T) {
+	a := newWorkspaceApp("", 0, 64, func() core.Result {
+		return core.Fail(core.E("test.bootstrap", "storage offline", nil))
+	})
+	m, _ := a.Update(workspaceBootstrap(a.workspaceLoader)())
+	a = m.(app)
+	m, command := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	a = m.(app)
+	if command == nil {
+		t.Fatal("quit from blocking storage screen returned no command")
+	}
+	if _, ok := command().(tea.QuitMsg); !ok {
+		t.Fatalf("quit command produced %T", command())
+	}
+}
+
+func TestAppSessionGeneration_Good(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	a := newApp("", 0, 64)
+	if result := a.connectWorkspace(resources); !result.OK {
+		t.Fatalf("connect workspace: %v", result.Value)
+	}
+	base := newFakeTextModel(map[string][]string{"alpha": {"answer-a"}, "beta": {"answer-b"}})
+	alphaGate := base.block("alpha")
+	m, _ := a.Update(loadedMsg{model: base, name: "fixture"})
+	a = m.(app)
+	sessionA := a.sessions.Active().Record.ID
+	a.input.SetValue("alpha")
+	m, commandA := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if commandA == nil || a.sessionJobs[sessionA] == nil {
+		t.Fatal("session A did not enqueue generation")
+	}
+	if started := waitFakeStarted(t, base.started); started != "alpha" {
+		t.Fatalf("first prompt = %q", started)
+	}
+
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	a = m.(app)
+	sessionB := a.sessions.Active().Record.ID
+	if sessionB == sessionA {
+		t.Fatal("Ctrl+N did not create session B")
+	}
+	a.input.SetValue("beta")
+	m, commandB := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if commandB == nil || a.sessionJobs[sessionB] == nil || a.sessionJobs[sessionA] == nil {
+		t.Fatalf("independent jobs = A:%v B:%v", a.sessionJobs[sessionA] != nil, a.sessionJobs[sessionB] != nil)
+	}
+	assertNoFakeStarted(t, base.started)
+	close(alphaGate)
+	driveAppGeneration(t, &a, sessionA, commandA)
+	if started := waitFakeStarted(t, base.started); started != "beta" {
+		t.Fatalf("second prompt = %q", started)
+	}
+	if !a.sessions.sessions[sessionA].Attention || a.sessions.Active().Record.ID != sessionB {
+		t.Fatalf("hidden completion = active %q attention %v", a.sessions.Active().Record.ID, a.sessions.sessions[sessionA].Attention)
+	}
+	driveAppGeneration(t, &a, sessionB, commandB)
+
+	for sessionID, want := range map[string]string{sessionA: "answer-a", sessionB: "answer-b"} {
+		turnResult := resources.Repository.Turns(sessionID)
+		if !turnResult.OK {
+			t.Fatalf("turns %s: %v", sessionID, turnResult.Value)
+		}
+		turns := turnResult.Value.([]turnRecord)
+		if len(turns) != 2 || turns[0].Role != "user" || turns[1].Role != "assistant" || turns[1].Visible != want {
+			t.Fatalf("session %s turns = %#v", sessionID, turns)
+		}
+		jobs := resources.Repository.Jobs(sessionID).Value.([]generationJobRecord)
+		if len(jobs) != 1 || jobs[0].Status != "completed" {
+			t.Fatalf("session %s jobs = %#v", sessionID, jobs)
+		}
+	}
+	if base.maxActive.Load() != 1 {
+		t.Fatalf("shared lane max concurrency = %d", base.maxActive.Load())
+	}
+	_ = a.shutdown()
+}
+
+func TestAppSessionToolLoop_Good(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	a := newApp("", 0, 64)
+	if result := a.connectWorkspace(resources); !result.OK {
+		t.Fatalf("connect workspace: %v", result.Value)
+	}
+	a.tools.setEnabled(true)
+	toolCall := parser.RenderGemmaToolCall("word_count", `{"text":"one two"}`)
+	toolResponse := parser.RenderGemmaToolResponse("2 words")
+	base := newFakeTextModel(map[string][]string{
+		"please count": {toolCall},
+		toolResponse:   {"The count is two."},
+	})
+	m, _ := a.Update(loadedMsg{model: base, name: "tool-fixture"})
+	a = m.(app)
+	sessionID := a.sessions.Active().Record.ID
+	a.input.SetValue("please count")
+	m, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	driveAppGeneration(t, &a, sessionID, command)
+
+	turnResult := resources.Repository.Turns(sessionID)
+	if !turnResult.OK {
+		t.Fatalf("load tool turns: %v", turnResult.Value)
+	}
+	turns := turnResult.Value.([]turnRecord)
+	if len(turns) != 4 {
+		t.Fatalf("tool loop turns = %#v", turns)
+	}
+	if turns[0].Role != "user" || turns[1].Role != "assistant" || turns[2].Role != "tool" || turns[3].Role != "assistant" {
+		t.Fatalf("tool loop roles = %#v", turns)
+	}
+	if turns[2].ToolName != "word_count" || turns[3].Visible != "The count is two." {
+		t.Fatalf("tool loop result = %#v", turns)
+	}
+	events := resources.Repository.Events(sessionID).Value.([]eventRecord)
+	if len(events) != 1 || events[0].Kind != "tool.call" || events[0].Status != "completed" {
+		t.Fatalf("tool events = %#v", events)
+	}
+	jobs := resources.Repository.Jobs(sessionID).Value.([]generationJobRecord)
+	if len(jobs) != 2 || jobs[0].Status != "completed" || jobs[1].Status != "completed" {
+		t.Fatalf("tool jobs = %#v", jobs)
+	}
+	_ = a.shutdown()
+}
+
+func TestAppSharedServiceLane_Good(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	a := newApp("", 0, 64)
+	if result := a.connectWorkspace(resources); !result.OK {
+		t.Fatalf("connect workspace: %v", result.Value)
+	}
+	base := newFakeTextModel(map[string][]string{
+		"chat": {"chat-answer"}, "api": {"api-answer"}, "later": {"later-answer"},
+	})
+	chatGate := base.block("chat")
+	m, _ := a.Update(loadedMsg{model: base, name: "shared"})
+	a = m.(app)
+	a.svc.custom = "127.0.0.1:0"
+	if command := a.svc.start(a.model); command == nil || !a.svc.running {
+		t.Fatal("service did not start on the shared lane")
+	}
+	a.input.SetValue("chat")
+	m, chatCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if started := waitFakeStarted(t, base.started); started != "chat" {
+		t.Fatalf("first shared request = %q", started)
+	}
+	apiDone := make(chan string, 1)
+	go consumeFakeChat(a.model, "api", apiDone)
+	assertNoFakeStarted(t, base.started)
+	close(chatGate)
+	driveAppGeneration(t, &a, a.sessionID, chatCommand)
+	if started := waitFakeStarted(t, base.started); started != "api" {
+		t.Fatalf("queued API request = %q", started)
+	}
+	if answer := waitFakeDone(t, apiDone); answer != "api-answer" {
+		t.Fatalf("API answer = %q", answer)
+	}
+	a.svc.teardown("test stop")
+	select {
+	case event := <-a.svc.events:
+		a.svc.finish(event.err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("service listener did not stop")
+	}
+	if base.closes.Load() != 0 {
+		t.Fatalf("service stop closed base model %d times", base.closes.Load())
+	}
+	a.input.SetValue("later")
+	m, laterCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if laterCommand == nil {
+		t.Fatal("later chat did not start after service stop")
+	}
+	if started := waitFakeStarted(t, base.started); started != "later" {
+		t.Fatalf("later request = %q", started)
+	}
+	driveAppGeneration(t, &a, a.sessionID, laterCommand)
+	if base.maxActive.Load() != 1 {
+		t.Fatalf("shared service lane concurrency = %d", base.maxActive.Load())
+	}
+	_ = a.shutdown()
+}
+
+func TestAppModelSwap_Bad(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	a := newApp("", 0, 64)
+	if result := a.connectWorkspace(resources); !result.OK {
+		t.Fatalf("connect workspace: %v", result.Value)
+	}
+	base := newFakeTextModel(map[string][]string{"busy": {"done"}})
+	gate := base.block("busy")
+	m, _ := a.Update(loadedMsg{model: base, name: "old"})
+	a = m.(app)
+	a.input.SetValue("busy")
+	m, generationCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	waitFakeStarted(t, base.started)
+	loads := 0
+	a.modelLoader = func(string, int) tea.Cmd {
+		loads++
+		return func() tea.Msg { return loadErrMsg{err: errFor("must not load")} }
+	}
+	a.activePanel = panelModels
+	a.picker.SetItems([]list.Item{modelItem{path: "/models/new", name: "new", modelType: "fake"}})
+	m, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if command != nil || loads != 0 || base.closes.Load() != 0 || !strings.Contains(a.errText, "jobs are active") {
+		t.Fatalf("blocked swap = command=%v loads=%d closes=%d err=%q", command != nil, loads, base.closes.Load(), a.errText)
+	}
+	close(gate)
+	driveAppGeneration(t, &a, a.sessionID, generationCommand)
+	_ = a.shutdown()
+}
+
+func TestAppModelSwap_Good(t *testing.T) {
+	oldBase := newFakeTextModel(nil)
+	newBase := newFakeTextModel(nil)
+	a := newApp("", 0, 64)
+	m, _ := a.Update(loadedMsg{model: oldBase, name: "old"})
+	a = m.(app)
+	a.svc.custom = "127.0.0.1:0"
+	if command := a.svc.start(a.model); command == nil {
+		t.Fatal("service did not start before swap")
+	}
+	loads := 0
+	a.modelLoader = func(path string, _ int) tea.Cmd {
+		loads++
+		return func() tea.Msg {
+			if strings.Contains(path, "broken") {
+				return loadErrMsg{err: errFor("broken checkpoint")}
+			}
+			return loadedMsg{model: newBase, name: "new"}
+		}
+	}
+	a.activePanel = panelModels
+	a.picker.SetItems([]list.Item{modelItem{path: "/models/new", name: "new", modelType: "fake"}})
+	m, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if command != nil || !a.svc.stopping || a.pendingModel != "/models/new" || oldBase.closes.Load() != 0 {
+		t.Fatalf("draining swap = command=%v stopping=%v pending=%q closes=%d", command != nil, a.svc.stopping, a.pendingModel, oldBase.closes.Load())
+	}
+	var serviceEvent serviceEvent
+	select {
+	case serviceEvent = <-a.svc.events:
+	case <-time.After(2 * time.Second):
+		t.Fatal("service did not drain for model swap")
+	}
+	m, command = a.Update(serviceMsg{ev: serviceEvent})
+	a = m.(app)
+	if command == nil || oldBase.closes.Load() != 1 || a.model != nil {
+		t.Fatalf("post-drain unload = command=%v closes=%d model=%v", command != nil, oldBase.closes.Load(), a.model != nil)
+	}
+	m, _ = a.Update(command())
+	a = m.(app)
+	if a.model == nil || a.modelName != "new" || loads != 1 || newBase.closes.Load() != 0 {
+		t.Fatalf("new model = name=%q loads=%d closes=%d", a.modelName, loads, newBase.closes.Load())
+	}
+
+	a.activePanel = panelModels
+	a.picker.SetItems([]list.Item{modelItem{path: "/models/broken", name: "broken", modelType: "fake"}})
+	m, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if command == nil || newBase.closes.Load() != 1 {
+		t.Fatalf("failed-swap unload = command=%v closes=%d", command != nil, newBase.closes.Load())
+	}
+	m, _ = a.Update(command())
+	a = m.(app)
+	if a.model != nil || a.lane != nil || a.loading != "" || !strings.Contains(a.errText, "broken checkpoint") {
+		t.Fatalf("failed load state = model=%v lane=%v loading=%q err=%q", a.model != nil, a.lane != nil, a.loading, a.errText)
+	}
+	_ = a.shutdown()
+}
+
+func TestAppQuit_Ugly(t *testing.T) {
+	order := make([]string, 0, 4)
+	files := testWorkspaceFiles(t)
+	opened := openWorkspaceWith(files, workspaceOpeners{
+		Repository: func(path string) core.Result {
+			result := openDuckRepository(path)
+			if !result.OK {
+				return result
+			}
+			return core.Ok(workspaceRepository(&trackingWorkspaceRepository{
+				workspaceRepository: result.Value.(workspaceRepository), closeOrder: &order,
+			}))
+		},
+		State: func(paths appPaths) core.Result {
+			result := openReactiveState(paths)
+			if !result.OK {
+				return result
+			}
+			return core.Ok(reactiveState(&trackingReactiveState{
+				reactiveState: result.Value.(reactiveState), closeOrder: &order,
+			}))
+		},
+	})
+	if !opened.OK {
+		t.Fatalf("open tracked workspace: %v", opened.Value)
+	}
+	resources := opened.Value.(*workspaceResources)
+	a := newApp("", 0, 64)
+	a.agent = &orderedAgentProvider{order: &order}
+	if result := a.connectWorkspace(resources); !result.OK {
+		t.Fatalf("connect workspace: %v", result.Value)
+	}
+	base := &orderedFakeTextModel{
+		fakeTextModel: newFakeTextModel(map[string][]string{"running": {"one"}, "queued": {"two"}}),
+		order:         &order,
+	}
+	base.block("running")
+	m, _ := a.Update(loadedMsg{model: base, name: "ordered"})
+	a = m.(app)
+	a.svc.custom = "127.0.0.1:0"
+	if command := a.svc.start(a.model); command == nil {
+		t.Fatal("service did not start")
+	}
+	a.input.SetValue("running")
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	waitFakeStarted(t, base.started)
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	a = m.(app)
+	a.input.SetValue("queued")
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if a.jobs.ActiveCount() != 2 {
+		t.Fatalf("queued job count = %d", a.jobs.ActiveCount())
+	}
+
+	type quitResult struct {
+		app     app
+		command tea.Cmd
+	}
+	finished := make(chan quitResult, 1)
+	go func() {
+		model, command := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		finished <- quitResult{app: model.(app), command: command}
+	}()
+	select {
+	case result := <-finished:
+		a = result.app
+		if result.command == nil {
+			t.Fatal("quit returned no Bubble Tea command")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("quit blocked with queued jobs")
+	}
+	if got := strings.Join(order, ","); got != "agent,model,state,repository" {
+		t.Fatalf("shutdown close order = %q", got)
+	}
+	if base.closes.Load() != 1 || a.svc.running || a.jobs.ActiveCount() != 0 {
+		t.Fatalf("shutdown state = closes=%d service=%v jobs=%d", base.closes.Load(), a.svc.running, a.jobs.ActiveCount())
+	}
+	select {
+	case <-a.svc.events:
+	case <-time.After(2 * time.Second):
+		t.Fatal("service goroutine did not finish after quit")
+	}
+}
+
+type orderedAgentProvider struct {
+	order *[]string
+}
+
+func (*orderedAgentProvider) Capabilities() []agentCapability {
+	return agentFeatureCatalog(defaultAgentUnavailableReason)
+}
+
+func (*orderedAgentProvider) Snapshot(context.Context) core.Result {
+	return core.Ok(agentSnapshot{Work: []agentWorkSnapshot{}, Events: []agentEventSnapshot{}})
+}
+
+func (*orderedAgentProvider) Run(context.Context, agentRequest) core.Result {
+	return core.Ok(nil)
+}
+
+func (provider *orderedAgentProvider) Close() core.Result {
+	*provider.order = append(*provider.order, "agent")
+	return core.Ok(nil)
+}
+
+type orderedFakeTextModel struct {
+	*fakeTextModel
+	order *[]string
+}
+
+func (model *orderedFakeTextModel) Close() core.Result {
+	*model.order = append(*model.order, "model")
+	return model.fakeTextModel.Close()
+}
 
 // TestAppUpdateTransitions drives the pure state machine without a terminal:
 // sizing readies the viewport, discovery fills the picker, enter on a picked
@@ -24,8 +476,8 @@ func TestAppUpdateTransitions(t *testing.T) {
 	if !a.ready {
 		t.Fatal("window size did not ready the app")
 	}
-	if a.activePanel != panelModels {
-		t.Fatalf("activePanel = %d, want Models on a pickerless start", a.activePanel)
+	if a.activePanel != panelChat {
+		t.Fatalf("activePanel = %d, want Chat on a pickerless start", a.activePanel)
 	}
 	// a load failure lands back on Models with the error surfaced
 	m, _ = a.Update(loadErrMsg{err: errFor("no backends")})
@@ -86,6 +538,10 @@ func TestAppLiveChatDrive(t *testing.T) {
 		t.Skip("needs LTHN_PROBE_MODEL + MLX_METALLIB_PATH")
 	}
 	a := newApp(dir, 0, 128)
+	if result := a.connectWorkspace(openAppTestWorkspace(t)); !result.OK {
+		t.Fatalf("connect live workspace: %v", result.Value)
+	}
+	defer func() { _ = a.shutdown() }()
 	m, _ := a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	a = m.(app)
 
@@ -99,8 +555,6 @@ func TestAppLiveChatDrive(t *testing.T) {
 	if a.activePanel != panelChat || a.model == nil {
 		t.Fatalf("panel = %d model=%v, want chat + loaded", a.activePanel, a.model != nil)
 	}
-	defer a.lane.Close()
-
 	a.cfg.thinkIdx = 2 // thinking off — deterministic short answers for the drive
 	a.input.SetValue("Say hello in exactly two words.")
 	m, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -138,6 +592,10 @@ func TestAppLiveServiceAPI(t *testing.T) {
 		t.Skip("needs LTHN_PROBE_MODEL + MLX_METALLIB_PATH")
 	}
 	a := newApp(dir, 0, 128)
+	if result := a.connectWorkspace(openAppTestWorkspace(t)); !result.OK {
+		t.Fatalf("connect live workspace: %v", result.Value)
+	}
+	defer func() { _ = a.shutdown() }()
 	m, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	a = m.(app)
 
@@ -148,8 +606,6 @@ func TestAppLiveServiceAPI(t *testing.T) {
 	}
 	m, _ = a.Update(loaded)
 	a = m.(app)
-	defer a.lane.Close()
-
 	const addr = "127.0.0.1:36917"
 	a.svc.custom = addr
 	a.activePanel = panelService
@@ -329,3 +785,25 @@ func errFor(text string) error { return &driveErr{text} }
 type driveErr struct{ s string }
 
 func (e *driveErr) Error() string { return e.s }
+
+func openAppTestWorkspace(t *testing.T) *workspaceResources {
+	t.Helper()
+	result := openWorkspaceWith(testWorkspaceFiles(t), workspaceOpeners{})
+	if !result.OK {
+		t.Fatalf("open app test workspace: %v", result.Value)
+	}
+	return result.Value.(*workspaceResources)
+}
+
+func driveAppGeneration(t *testing.T, target *app, sessionID string, command tea.Cmd) {
+	t.Helper()
+	for step := 0; step < 128 && command != nil; step++ {
+		model, next := target.Update(command())
+		*target = model.(app)
+		command = next
+		if target.sessionJobs[sessionID] == nil {
+			return
+		}
+	}
+	t.Fatalf("session %s generation did not complete", sessionID)
+}

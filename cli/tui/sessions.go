@@ -246,6 +246,40 @@ func (manager *sessionManager) Complete(sessionID string) core.Result {
 	return core.Ok(session)
 }
 
+func (manager *sessionManager) BeginGeneration(sessionID, jobID string) core.Result {
+	return manager.setGenerationStatus("BeginGeneration", sessionID, jobID, "queued", false)
+}
+
+func (manager *sessionManager) MarkGenerating(sessionID, jobID string) core.Result {
+	return manager.setGenerationStatus("MarkGenerating", sessionID, jobID, "generating", false)
+}
+
+func (manager *sessionManager) FailGeneration(sessionID, jobID string) core.Result {
+	return manager.setGenerationStatus("FailGeneration", sessionID, jobID, "failed", true)
+}
+
+func (manager *sessionManager) setGenerationStatus(operation, sessionID, jobID, status string, finished bool) core.Result {
+	session, result := manager.knownSession(operation, sessionID)
+	if !result.OK {
+		return result
+	}
+	updated := session.Record
+	updated.Status = status
+	updated.UpdatedAt = manager.now().UTC()
+	if result := manager.repository.SaveSession(updated); !result.OK {
+		return result
+	}
+	session.Record = updated
+	if finished {
+		session.ActiveJobID = ""
+		session.ToolHops = 0
+		session.Attention = sessionID != manager.activeID
+	} else {
+		session.ActiveJobID = jobID
+	}
+	return core.Ok(session)
+}
+
 func (manager *sessionManager) AddTurn(record turnRecord) core.Result {
 	session, result := manager.knownSession("AddTurn", record.SessionID)
 	if !result.OK {

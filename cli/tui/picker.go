@@ -3,14 +3,12 @@
 package tui
 
 import (
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -33,10 +31,12 @@ type discoveredMsg struct{ items []list.Item }
 // documents. Runs as a tea.Cmd so a slow disk never blocks the first frame.
 func discoverModels() tea.Msg {
 	dirs := []string{}
-	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".cache", "huggingface", "hub"))
+	if homeResult := core.UserHomeDir(); homeResult.OK {
+		if home, ok := homeResult.Value.(string); ok && core.Trim(home) != "" {
+			dirs = append(dirs, core.Path(home, ".cache", "huggingface", "hub"))
+		}
 	}
-	if extra := os.Getenv("LEM_MODELS_DIR"); extra != "" {
+	if extra := core.Trim(core.Getenv("LEM_MODELS_DIR")); extra != "" {
 		dirs = append(dirs, extra)
 	}
 	var items []list.Item
@@ -63,15 +63,15 @@ func discoverModels() tea.Msg {
 // displayName compresses a hub snapshot path to its repo name — the hub layout
 // is models--ORG--NAME/snapshots/HASH, anything else keeps its base name.
 func displayName(path string) string {
-	for _, part := range strings.Split(path, string(filepath.Separator)) {
-		if rest, ok := strings.CutPrefix(part, "models--"); ok {
-			if _, name, found := strings.Cut(rest, "--"); found {
+	for _, part := range core.Split(path, string(core.PathSeparator)) {
+		if rest, ok := core.CutPrefix(part, "models--"); ok {
+			if _, name, found := core.Cut(rest, "--"); found {
 				return name
 			}
 			return rest
 		}
 	}
-	return filepath.Base(path)
+	return core.PathBase(path)
 }
 
 // newPicker builds the model list with the house dark styling.

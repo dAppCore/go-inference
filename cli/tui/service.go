@@ -4,7 +4,6 @@ package tui
 
 import (
 	"context"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -63,10 +62,10 @@ func (s serviceState) addr() string {
 // address, which only the operator knows.
 func (s serviceState) baseURL() string {
 	addr := s.addr()
-	if strings.HasPrefix(addr, ":") {
+	if core.HasPrefix(addr, ":") {
 		return "http://localhost" + addr
 	}
-	if after, ok := strings.CutPrefix(addr, "0.0.0.0"); ok {
+	if after, ok := core.CutPrefix(addr, "0.0.0.0"); ok {
 		return "http://<this-machine>" + after
 	}
 	return "http://" + addr
@@ -154,7 +153,7 @@ func serviceTick() tea.Cmd {
 }
 
 func (s serviceState) view(modelName string, width int, styles uiStyles) string {
-	var b strings.Builder
+	var b core.Builder
 	b.WriteString(styles.title.Render("service") + "  " +
 		styles.thought.Render("OpenAI · Anthropic · Ollama HTTP API for the loaded model") + "\n\n")
 

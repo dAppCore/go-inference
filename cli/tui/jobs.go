@@ -165,6 +165,24 @@ func (jobs *jobManager) CancelAll() core.Result {
 	return core.Ok(len(generations))
 }
 
+func (jobs *jobManager) Active(sessionID string) *generation {
+	if jobs == nil {
+		return nil
+	}
+	jobs.mu.Lock()
+	defer jobs.mu.Unlock()
+	return jobs.bySession[sessionID]
+}
+
+func (jobs *jobManager) ActiveCount() int {
+	if jobs == nil {
+		return 0
+	}
+	jobs.mu.Lock()
+	defer jobs.mu.Unlock()
+	return len(jobs.bySession)
+}
+
 func (jobs *jobManager) finish(sessionID, jobID string) {
 	jobs.mu.Lock()
 	defer jobs.mu.Unlock()
