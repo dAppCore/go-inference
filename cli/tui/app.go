@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -27,7 +28,10 @@ type turn struct {
 }
 
 type app struct {
-	activeTab tabID
+	activePanel   panelID
+	inspectorOpen bool
+	styles        uiStyles
+	keys          keyMap
 
 	picker  list.Model
 	spin    spinner.Model
@@ -84,6 +88,7 @@ func loadModel(path string, ctxLen int) tea.Cmd {
 
 func newApp(modelPath string, ctxLen, maxTokens int) app {
 	ctx, cancel := context.WithCancel(context.Background())
+	styles := newUIStyles(midnightTheme())
 	sp := spinner.New()
 	sp.Spinner = spinner.MiniDot
 
@@ -106,20 +111,22 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 	}
 
 	a := app{
-		activeTab: tabModels,
-		picker:    newPicker(),
-		spin:      sp,
-		input:     in,
-		cfg:       cfg,
-		modes:     modeState{},
-		tools:     newTools(),
-		svc:       newService(),
-		jobs:      newJobManager(ctx),
-		cancel:    cancel,
-		sessionID: newRecordID(),
+		activePanel: panelModels,
+		styles:      styles,
+		keys:        newKeyMap(),
+		picker:      newPicker(styles),
+		spin:        sp,
+		input:       in,
+		cfg:         cfg,
+		modes:       modeState{},
+		tools:       newTools(),
+		svc:         newService(),
+		jobs:        newJobManager(ctx),
+		cancel:      cancel,
+		sessionID:   newRecordID(),
 	}
 	if modelPath != "" {
-		a.activeTab = tabChat
+		a.activePanel = panelChat
 		a.loading = modelPath
 	}
 	return a
@@ -137,9 +144,10 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width, a.height = msg.Width, msg.Height
-		a.picker.SetSize(msg.Width-2, a.contentHeight())
-		a.input.SetWidth(msg.Width - 6)
-		a.view = viewport.New(msg.Width-2, a.transcriptHeight())
+		metrics := measureFrame(msg.Width, msg.Height, a.inspectorOpen)
+		a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
+		a.input.SetWidth(max(1, metrics.mainWidth-4))
+		a.view = viewport.New(max(1, metrics.mainWidth), a.transcriptHeight())
 		a.view.SetContent(a.renderTranscript())
 		a.view.GotoBottom()
 		a.ready = true
@@ -156,7 +164,7 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			a.errText = laneResult.Error()
 			a.loading = ""
-			a.activeTab = tabModels
+			a.activePanel = panelModels
 			return a, nil
 		}
 		_ = a.jobs.CancelAll()
@@ -167,14 +175,14 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.model, a.modelName = a.lane.Model(), msg.name
 		a.loading = ""
 		a.errText = ""
-		a.activeTab = tabChat
+		a.activePanel = panelChat
 		a.refreshTranscript()
 		return a, nil
 
 	case loadErrMsg:
 		a.errText = msg.err.Error()
 		a.loading = ""
-		a.activeTab = tabModels
+		a.activePanel = panelModels
 		return a, nil
 
 	case spinner.TickMsg:
@@ -262,6 +270,17 @@ func (a *app) runToolLoop() tea.Cmd {
 }
 
 func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, a.keys.ToggleInspector) {
+		a.inspectorOpen = !a.inspectorOpen
+		if a.ready {
+			metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+			a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
+			a.input.SetWidth(max(1, metrics.mainWidth-4))
+			a.view.Width = max(1, metrics.mainWidth)
+			a.view.Height = a.transcriptHeight()
+		}
+		return a, nil
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		_ = a.jobs.CancelAll()
@@ -273,11 +292,11 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "tab", "shift+tab":
 		if msg.String() == "tab" {
-			a.activeTab = a.activeTab.next()
+			a.activePanel = a.activePanel.next()
 		} else {
-			a.activeTab = a.activeTab.prev()
+			a.activePanel = a.activePanel.prev()
 		}
-		if a.activeTab == tabModels && len(a.picker.Items()) == 0 {
+		if a.activePanel == panelModels && len(a.picker.Items()) == 0 {
 			return a, discoverModels
 		}
 		return a, nil
@@ -296,8 +315,8 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	switch a.activeTab {
-	case tabModels:
+	switch a.activePanel {
+	case panelModels:
 		if msg.String() == "enter" && a.loading == "" {
 			if item, ok := a.picker.SelectedItem().(modelItem); ok {
 				// the service serves THIS model's weights — stop it before they change
@@ -307,7 +326,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
-	case tabService:
+	case panelService:
 		switch msg.String() {
 		case "enter":
 			if a.svc.running {
@@ -330,36 +349,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
-	case tabSettings:
-		switch msg.String() {
-		case "up", "k":
-			a.cfg = a.cfg.move(-1)
-			return a, nil
-		case "down", "j":
-			a.cfg = a.cfg.move(1)
-			return a, nil
-		case "left", "h":
-			a.cfg = a.cfg.adjust(-1)
-			return a, nil
-		case "right", "l", "enter":
-			a.cfg = a.cfg.adjust(1)
-			return a, nil
-		}
-	case tabModes:
-		switch msg.String() {
-		case "up", "k":
-			a.modes = a.modes.move(-1)
-			return a, nil
-		case "down", "j":
-			a.modes = a.modes.move(1)
-			return a, nil
-		}
-	case tabTools:
-		if msg.String() == "enter" {
-			a.tools.enabled = !a.tools.enabled
-			return a, nil
-		}
-	case tabChat:
+	case panelChat:
 		if msg.String() == "enter" && !a.generating && a.model != nil {
 			prompt := strings.TrimSpace(a.input.Value())
 			if prompt == "" {
@@ -380,10 +370,10 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // route hands the message to the focused component for the active tab.
 func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	switch a.activeTab {
-	case tabModels:
+	switch a.activePanel {
+	case panelModels:
 		a.picker, cmd = a.picker.Update(msg)
-	case tabChat:
+	case panelChat:
 		if a.generating {
 			a.view, cmd = a.view.Update(msg)
 		} else {
@@ -452,15 +442,11 @@ func (a *app) refreshTranscript() {
 }
 
 func (a app) contentHeight() int {
-	h := a.height - 4 // tab bar + status
-	if h < 3 {
-		h = 3
-	}
-	return h
+	return max(1, measureFrame(a.width, a.height, a.inspectorOpen).mainHeight)
 }
 
 func (a app) transcriptHeight() int {
-	h := a.height - a.input.Height() - 8 // tab bar + input border + status
+	h := a.contentHeight() - a.input.Height() - 2 // composer border
 	if h < 3 {
 		h = 3
 	}
@@ -475,19 +461,19 @@ func (a app) renderTranscript() string {
 		}
 		switch t.role {
 		case "user":
-			b.WriteString(styleUser.Render("you ") + styleAnswer.Render(t.text))
+			b.WriteString(a.styles.user.Render("you ") + a.styles.answer.Render(t.text))
 		case "tool":
-			b.WriteString(styleThought.Render("tool result fed back"))
+			b.WriteString(a.styles.thought.Render("tool result fed back"))
 		default:
 			if t.thought != "" {
-				b.WriteString(styleThought.Render("· thinking · "+strings.TrimSpace(t.thought)) + "\n")
+				b.WriteString(a.styles.thought.Render("· thinking · "+strings.TrimSpace(t.thought)) + "\n")
 			}
-			b.WriteString(styleAccent.Render(a.modelName+" ") + styleAnswer.Render(t.text))
+			b.WriteString(a.styles.assistant.Render(a.modelName+" ") + a.styles.answer.Render(t.text))
 			for _, c := range t.calls {
-				b.WriteString("\n" + styleThought.Render("→ "+c))
+				b.WriteString("\n" + a.styles.thought.Render("→ "+c))
 			}
 			if t.text == "" && t.thought == "" && a.generating && i == len(a.turns)-1 {
-				b.WriteString(styleThought.Render(a.spin.View() + " …"))
+				b.WriteString(a.styles.thought.Render(a.spin.View() + " …"))
 			}
 		}
 	}
@@ -518,36 +504,102 @@ func (a app) statusLine() string {
 		parts = append(parts, a.spin.View()+" generating (esc cancels)")
 	}
 	if a.errText != "" {
-		parts = append(parts, styleErr.Render(a.errText))
+		parts = append(parts, a.styles.err.Render("error: "+a.errText))
 	}
-	return styleStatus.Render(strings.Join(parts, "  ·  "))
+	return a.styles.status.Render(strings.Join(parts, "  ·  "))
 }
 
 func (a app) View() string {
-	bar := renderTabBar(a.activeTab, a.width)
-	var content string
-	switch a.activeTab {
-	case tabModels:
-		content = a.picker.View()
-	case tabService:
-		content = a.svc.view(a.modelName, a.width)
-	case tabSettings:
-		content = a.cfg.view(a.width)
-	case tabTools:
-		content = a.tools.view(a.width)
-	case tabModes:
-		content = a.modes.view(a.width)
+	content := a.panelView()
+	return renderFrame(frameSpec{
+		Width:         a.width,
+		Height:        a.height,
+		Active:        a.activePanel,
+		SessionStrip:  a.sessionStrip(),
+		Main:          content,
+		Inspector:     a.inspectorView(),
+		Footer:        a.footerLine(),
+		InspectorOpen: a.inspectorOpen,
+	}, a.styles)
+}
+
+func (a app) panelView() string {
+	switch a.activePanel {
+	case panelModels:
+		return a.picker.View()
+	case panelService:
+		return a.svc.view(a.modelName, a.width, a.styles)
+	case panelWork:
+		return lipgloss.JoinVertical(lipgloss.Left,
+			a.styles.title.Render("Work"),
+			"",
+			a.styles.status.Render("○ no active work"),
+			a.styles.thought.Render("Local work tracking and agent capabilities arrive in the next workspace slice."),
+		)
 	default: // chat
 		if a.model == nil && a.loading == "" {
-			content = "\n  " + styleStatus.Render("no model loaded — press tab to reach Models and pick one")
-		} else if a.model == nil {
-			content = "\n  " + a.spin.View() + styleStatus.Render(" loading "+displayName(a.loading)+" …")
-		} else {
-			content = lipgloss.JoinVertical(lipgloss.Left,
-				a.view.View(),
-				styleInputBorder.Render(a.input.View()),
-			)
+			return "\n  " + a.styles.status.Render("○ no model loaded — open Models and choose one")
+		}
+		if a.model == nil {
+			return "\n  " + a.spin.View() + a.styles.status.Render(" loading "+displayName(a.loading)+" …")
+		}
+		return lipgloss.JoinVertical(lipgloss.Left,
+			a.view.View(),
+			a.styles.inputBorder.Render(a.input.View()),
+		)
+	}
+}
+
+func (a app) sessionStrip() string {
+	title := "New session"
+	for _, turn := range a.turns {
+		if turn.role == "user" && core.Trim(turn.text) != "" {
+			title = core.Trim(turn.text)
+			break
 		}
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, bar, content, a.statusLine())
+	marker := "●"
+	state := "idle"
+	if a.generating {
+		marker, state = "◉", "generating"
+	}
+	return marker + " " + title + "  ·  " + state
+}
+
+func (a app) inspectorView() string {
+	model := "○ none loaded"
+	if a.modelName != "" {
+		model = "● " + a.modelName
+	}
+	generation := "○ idle"
+	if a.generating {
+		generation = "◉ generating"
+	}
+	tools := "○ off"
+	if a.tools.enabled {
+		tools = "● on"
+	}
+	return strings.Join([]string{
+		a.styles.title.Render("INSPECTOR"),
+		"",
+		a.styles.accent.Render("SESSION") + "  ● active",
+		a.styles.accent.Render("MODEL") + "  " + model,
+		a.styles.accent.Render("GENERATION") + "  " + generation,
+		a.styles.accent.Render("MODE") + "  " + a.modes.current().name,
+		a.styles.accent.Render("TOOLS") + "  " + tools,
+		"",
+		a.styles.thought.Render("ctrl+o toggles this inspector"),
+	}, "\n")
+}
+
+func (a app) footerLine() string {
+	keys := "tab panels  ·  ctrl+k commands  ·  ctrl+o inspector  ·  f1 help"
+	if chooseLayout(a.width) == layoutNarrow {
+		keys = "tab panels  ·  ^K commands  ·  ^O info  ·  F1 help"
+	}
+	status := a.statusLine()
+	if status == "" {
+		return keys
+	}
+	return status + "  │  " + keys
 }

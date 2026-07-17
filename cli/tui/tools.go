@@ -87,27 +87,27 @@ func (t *toolState) execute(call inference.ToolCall) string {
 	return "error: unknown tool " + call.Name
 }
 
-func (t toolState) view(width int) string {
+func (t toolState) view(width int, styles uiStyles) string {
 	var b strings.Builder
-	b.WriteString(styleTitle.Render("tools") + "\n\n")
+	b.WriteString(styles.title.Render("tools") + "\n\n")
 	state := "disabled — replies are plain chat"
 	if t.enabled {
 		state = "enabled — declarations ride the system turn; calls run locally and feed back"
 	}
-	b.WriteString("  " + styleAccent.Render("function calling: ") + styleAnswer.Render(state) + "\n\n")
+	b.WriteString("  " + styles.accent.Render("function calling: ") + styles.answer.Render(state) + "\n\n")
 	for _, bt := range t.tools {
-		b.WriteString("  " + styleAnswer.Render(bt.decl.Name) + "  " + styleThought.Render(bt.decl.Description) + "\n")
+		b.WriteString("  " + styles.answer.Render(bt.decl.Name) + "  " + styles.thought.Render(bt.decl.Description) + "\n")
 	}
 	if len(t.lastRun) > 0 {
-		b.WriteString("\n" + styleTitle.Render("recent calls") + "\n")
+		b.WriteString("\n" + styles.title.Render("recent calls") + "\n")
 		start := len(t.lastRun) - 5
 		if start < 0 {
 			start = 0
 		}
 		for _, r := range t.lastRun[start:] {
-			b.WriteString("  " + styleThought.Render(r) + "\n")
+			b.WriteString("  " + styles.thought.Render(r) + "\n")
 		}
 	}
-	b.WriteString("\n" + styleStatus.Render("enter toggles · calls appear dim in the chat transcript"))
+	b.WriteString("\n" + styles.status.Render("enter toggles · calls appear dim in the chat transcript"))
 	return b.String()
 }

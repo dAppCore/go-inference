@@ -83,19 +83,19 @@ func (s settings) move(delta int) settings {
 	return s
 }
 
-func (s settings) view(width int) string {
+func (s settings) view(width int, styles uiStyles) string {
 	var b strings.Builder
-	b.WriteString(styleTitle.Render("settings") + "\n\n")
+	b.WriteString(styles.title.Render("settings") + "\n\n")
 	for i, row := range s.rows() {
 		cursor := "  "
-		name := styleAnswer.Render(row.name)
+		name := styles.answer.Render(row.name)
 		if i == s.cursor {
-			cursor = styleAccent.Render("› ")
-			name = styleAccent.Render(row.name)
+			cursor = styles.accent.Render("› ")
+			name = styles.accent.Render(row.name)
 		}
-		b.WriteString(cursor + name + "  " + styleTitle.Render("‹ "+row.value+" ›") + "\n")
-		b.WriteString("    " + styleThought.Render(row.hint) + "\n\n")
+		b.WriteString(cursor + name + "  " + styles.title.Render("‹ "+row.value+" ›") + "\n")
+		b.WriteString("    " + styles.thought.Render(row.hint) + "\n\n")
 	}
-	b.WriteString(styleStatus.Render("↑/↓ select · ←/→ change · values apply as hinted"))
+	b.WriteString(styles.status.Render("↑/↓ select · ←/→ change · values apply as hinted"))
 	return b.String()
 }

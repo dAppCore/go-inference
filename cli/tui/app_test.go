@@ -24,22 +24,22 @@ func TestAppUpdateTransitions(t *testing.T) {
 	if !a.ready {
 		t.Fatal("window size did not ready the app")
 	}
-	if a.activeTab != tabModels {
-		t.Fatalf("activeTab = %d, want Models on a pickerless start", a.activeTab)
+	if a.activePanel != panelModels {
+		t.Fatalf("activePanel = %d, want Models on a pickerless start", a.activePanel)
 	}
 	// a load failure lands back on Models with the error surfaced
 	m, _ = a.Update(loadErrMsg{err: errFor("no backends")})
 	a = m.(app)
-	if a.activeTab != tabModels || a.errText == "" {
-		t.Fatalf("loadErr: tab=%d err=%q, want Models + message", a.activeTab, a.errText)
+	if a.activePanel != panelModels || a.errText == "" {
+		t.Fatalf("loadErr: panel=%d err=%q, want Models + message", a.activePanel, a.errText)
 	}
 	// tab cycles through every pane and wraps
-	for i := 0; i < int(tabCount); i++ {
+	for i := 0; i < int(panelCount); i++ {
 		m, _ = a.Update(tea.KeyMsg{Type: tea.KeyTab})
 		a = m.(app)
 	}
-	if a.activeTab != tabModels {
-		t.Fatalf("tab cycle did not wrap: %d", a.activeTab)
+	if a.activePanel != panelModels {
+		t.Fatalf("panel cycle did not wrap: %d", a.activePanel)
 	}
 	// ctrl+t flips the thinking override to an explicit state
 	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
@@ -50,32 +50,22 @@ func TestAppUpdateTransitions(t *testing.T) {
 	if v := a.View(); !strings.Contains(v, "thinking") {
 		t.Fatalf("status line missing thinking state: %q", v)
 	}
-	// settings adjust: move to max tokens and bump it
-	a.activeTab = tabSettings
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	// inspector is a global surface, independent of the active primary panel.
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
 	a = m.(app)
-	before := a.cfg.maxTokens()
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
-	a = m.(app)
-	if a.cfg.maxTokens() == before {
-		t.Fatal("settings right-adjust did not change max tokens")
-	}
-	// tools toggle arms declarations
-	a.activeTab = tabTools
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	a = m.(app)
-	if !a.tools.enabled || a.tools.declarations() == "" {
-		t.Fatal("tools enter did not arm declarations")
+	if !a.inspectorOpen || !strings.Contains(a.View(), "INSPECTOR") {
+		t.Fatal("ctrl+o did not open the inspector")
 	}
 	// service: enter with no model declines with a note, never starts
-	a.activeTab = tabService
+	a.inspectorOpen = false
+	a.activePanel = panelService
 	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	a = m.(app)
 	if a.svc.running || a.svc.note == "" {
 		t.Fatalf("service start without a model: running=%v note=%q", a.svc.running, a.svc.note)
 	}
 	// address presets cycle while stopped and render in the tab
-	before = a.svc.addrIdx
+	before := a.svc.addrIdx
 	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
 	a = m.(app)
 	if a.svc.addrIdx == before {
@@ -106,8 +96,8 @@ func TestAppLiveChatDrive(t *testing.T) {
 	}
 	m, _ = a.Update(loaded)
 	a = m.(app)
-	if a.activeTab != tabChat || a.model == nil {
-		t.Fatalf("tab = %d model=%v, want chat + loaded", a.activeTab, a.model != nil)
+	if a.activePanel != panelChat || a.model == nil {
+		t.Fatalf("panel = %d model=%v, want chat + loaded", a.activePanel, a.model != nil)
 	}
 	defer a.lane.Close()
 
@@ -162,7 +152,7 @@ func TestAppLiveServiceAPI(t *testing.T) {
 
 	const addr = "127.0.0.1:36917"
 	a.svc.custom = addr
-	a.activeTab = tabService
+	a.activePanel = panelService
 	m, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	a = m.(app)
 	if !a.svc.running || cmd == nil {

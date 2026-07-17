@@ -153,53 +153,53 @@ func serviceTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return serviceTickMsg{} })
 }
 
-func (s serviceState) view(modelName string, width int) string {
+func (s serviceState) view(modelName string, width int, styles uiStyles) string {
 	var b strings.Builder
-	b.WriteString(styleTitle.Render("service") + "  " +
-		styleThought.Render("OpenAI · Anthropic · Ollama HTTP API for the loaded model") + "\n\n")
+	b.WriteString(styles.title.Render("service") + "  " +
+		styles.thought.Render("OpenAI · Anthropic · Ollama HTTP API for the loaded model") + "\n\n")
 
-	state := styleStatus.Render("○ stopped")
+	state := styles.status.Render("○ stopped")
 	if s.running {
 		label := "● serving on " + s.addr()
 		if modelName != "" {
 			label = "● serving " + modelName + " on " + s.addr()
 		}
-		state = styleAccent.Render(label)
+		state = styles.success.Render(label)
 	}
 	b.WriteString("  " + state + "\n\n")
 
-	addrLabel := styleAnswer.Render("address")
+	addrLabel := styles.answer.Render("address")
 	value := "‹ " + s.addr() + " ›"
 	hint := serviceAddrs[s.addrIdx].hint
 	if s.running {
 		value = s.addr()
 		hint = "locked while serving — stop first to change it"
 	}
-	b.WriteString("  " + addrLabel + "  " + styleTitle.Render(value) + "\n")
-	b.WriteString("    " + styleThought.Render(hint) + "\n\n")
+	b.WriteString("  " + addrLabel + "  " + styles.title.Render(value) + "\n")
+	b.WriteString("    " + styles.thought.Render(hint) + "\n\n")
 
 	if s.running || s.requests.Load() > 0 {
-		b.WriteString("  " + styleAnswer.Render("requests") + "  " +
-			styleTitle.Render(core.Sprintf("%d", s.requests.Load())) + "\n\n")
+		b.WriteString("  " + styles.answer.Render("requests") + "  " +
+			styles.title.Render(core.Sprintf("%d", s.requests.Load())) + "\n\n")
 	}
 
 	base := s.baseURL()
-	b.WriteString(styleTitle.Render("point a client here") + "  " +
-		styleThought.Render("the request's model name is cosmetic — the loaded model answers") + "\n")
-	b.WriteString("  " + styleAnswer.Render("opencode / codex / OpenAI SDKs") + "   " + styleAccent.Render(base+"/v1") + "\n")
-	b.WriteString("  " + styleAnswer.Render("Claude Code / Anthropic SDKs  ") + "   " + styleAccent.Render(base) + "\n")
-	b.WriteString("  " + styleAnswer.Render("Ollama clients                ") + "   " + styleAccent.Render(base) + "\n\n")
+	b.WriteString(styles.title.Render("point a client here") + "  " +
+		styles.thought.Render("the request's model name is cosmetic — the loaded model answers") + "\n")
+	b.WriteString("  " + styles.answer.Render("opencode / codex / OpenAI SDKs") + "   " + styles.accent.Render(base+"/v1") + "\n")
+	b.WriteString("  " + styles.answer.Render("Claude Code / Anthropic SDKs  ") + "   " + styles.accent.Render(base) + "\n")
+	b.WriteString("  " + styles.answer.Render("Ollama clients                ") + "   " + styles.accent.Render(base) + "\n\n")
 
-	b.WriteString(styleTitle.Render("smoke") + "\n")
-	b.WriteString("  " + styleThought.Render("curl -s "+base+"/v1/chat/completions \\") + "\n")
-	b.WriteString("  " + styleThought.Render(`    -d '{"model":"lem","messages":[{"role":"user","content":"hello"}]}'`) + "\n\n")
+	b.WriteString(styles.title.Render("smoke") + "\n")
+	b.WriteString("  " + styles.thought.Render("curl -s "+base+"/v1/chat/completions \\") + "\n")
+	b.WriteString("  " + styles.thought.Render(`    -d '{"model":"lem","messages":[{"role":"user","content":"hello"}]}'`) + "\n\n")
 
-	b.WriteString("  " + styleThought.Render("TUI chat and API requests share the model through one serial lane —") + "\n")
-	b.WriteString("  " + styleThought.Render("turns queue behind each other, nothing races the engine.") + "\n\n")
+	b.WriteString("  " + styles.thought.Render("TUI chat and API requests share the model through one serial lane —") + "\n")
+	b.WriteString("  " + styles.thought.Render("turns queue behind each other, nothing races the engine.") + "\n\n")
 
 	if s.note != "" {
-		b.WriteString("  " + styleErr.Render(s.note) + "\n\n")
+		b.WriteString("  " + styles.err.Render(s.note) + "\n\n")
 	}
-	b.WriteString(styleStatus.Render("enter start/stop · ←/→ address (while stopped)"))
+	b.WriteString(styles.status.Render("enter start/stop · ←/→ address (while stopped)"))
 	return b.String()
 }

@@ -75,12 +75,12 @@ func displayName(path string) string {
 }
 
 // newPicker builds the model list with the house dark styling.
-func newPicker() list.Model {
+func newPicker(styles uiStyles) list.Model {
 	delegate := list.NewDefaultDelegate()
 	l := list.New(nil, delegate, 0, 0)
-	l.Title = "lem — pick a model"
+	l.Title = "Models"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
-	l.Styles.Title = styleTitle
+	l.Styles.Title = styles.title
 	return l
 }
