@@ -31,6 +31,8 @@ type streamMsg streamEvent
 // family-aware reasoning parser (thinking → thought deltas, the rest →
 // visible deltas). The caller owns the context and registration lifecycle.
 func streamGeneration(ctx context.Context, g *generation, model inference.TextModel, history []inference.Message, genOpts []inference.GenerateOption, finish func()) {
+	var requestErr error
+	errorSinkCalled := false
 	tag := func(event streamEvent) streamEvent {
 		event.SessionID = g.SessionID
 		event.JobID = g.JobID
@@ -61,7 +63,14 @@ func streamGeneration(ctx context.Context, g *generation, model inference.TextMo
 		}
 		close(g.events)
 	}()
-	for tok := range model.Chat(ctx, history, opts...) {
+	stream := model.Chat(ctx, history, opts...)
+	if scoped, ok := model.(scopedErrorChatModel); ok {
+		stream = scoped.chatWithErrorSink(ctx, history, func(err error) {
+			requestErr = err
+			errorSinkCalled = true
+		}, opts...)
+	}
+	for tok := range stream {
 		if visible := proc.Process(tok.Text); visible != "" {
 			emit(streamEvent{visible: visible})
 		}
@@ -70,7 +79,9 @@ func streamGeneration(ctx context.Context, g *generation, model inference.TextMo
 		emit(streamEvent{visible: tail})
 	}
 	ev := streamEvent{done: true}
-	if r := model.Err(); !r.OK {
+	if errorSinkCalled {
+		ev.err = requestErr
+	} else if r := model.Err(); !r.OK {
 		if err, ok := r.Value.(error); ok {
 			ev.err = err
 		}

@@ -19,21 +19,63 @@ import (
 // script and may have a gate; a gated call blocks until the gate closes or its
 // context is cancelled. The counters are safe to inspect while calls run.
 type fakeTextModel struct {
-	mu      sync.RWMutex
-	scripts map[string][]string
-	gates   map[string]chan struct{}
-	started chan string
+	mu              sync.RWMutex
+	scripts         map[string][]string
+	gates           map[string]chan struct{}
+	afterFirstGates map[string]chan struct{}
+	started         chan string
+	firstYielded    chan string
 
 	active    atomic.Int64
 	maxActive atomic.Int64
 	closes    atomic.Int64
 }
 
+type requestErrorTextModel struct {
+	*fakeTextModel
+	errMu   sync.Mutex
+	lastErr core.Result
+}
+
+func newRequestErrorTextModel() *requestErrorTextModel {
+	return &requestErrorTextModel{
+		fakeTextModel: newFakeTextModel(nil),
+		lastErr:       core.Ok(nil),
+	}
+}
+
+func (model *requestErrorTextModel) Chat(_ context.Context, messages []inference.Message, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	prompt := ""
+	if len(messages) > 0 {
+		prompt = messages[len(messages)-1].Content
+	}
+	return func(yield func(inference.Token) bool) {
+		model.errMu.Lock()
+		if prompt == "fails" {
+			model.lastErr = core.Fail(core.E("test.request", "first request failed", nil))
+		} else {
+			model.lastErr = core.Ok(nil)
+		}
+		model.errMu.Unlock()
+		if prompt != "fails" {
+			yield(inference.Token{Text: "second succeeds"})
+		}
+	}
+}
+
+func (model *requestErrorTextModel) Err() core.Result {
+	model.errMu.Lock()
+	defer model.errMu.Unlock()
+	return model.lastErr
+}
+
 func newFakeTextModel(scripts map[string][]string) *fakeTextModel {
 	return &fakeTextModel{
-		scripts: scripts,
-		gates:   make(map[string]chan struct{}),
-		started: make(chan string, 16),
+		scripts:         scripts,
+		gates:           make(map[string]chan struct{}),
+		afterFirstGates: make(map[string]chan struct{}),
+		started:         make(chan string, 16),
+		firstYielded:    make(chan string, 16),
 	}
 }
 
@@ -42,6 +84,14 @@ func (m *fakeTextModel) block(prompt string) chan struct{} {
 	defer m.mu.Unlock()
 	gate := make(chan struct{})
 	m.gates[prompt] = gate
+	return gate
+}
+
+func (m *fakeTextModel) blockAfterFirst(prompt string) chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	gate := make(chan struct{})
+	m.afterFirstGates[prompt] = gate
 	return gate
 }
 
@@ -71,6 +121,7 @@ func (m *fakeTextModel) sequence(ctx context.Context, prompt string) iter.Seq[in
 
 		m.mu.RLock()
 		gate := m.gates[prompt]
+		afterFirstGate := m.afterFirstGates[prompt]
 		tokens := append([]string(nil), m.scripts[prompt]...)
 		m.mu.RUnlock()
 		if gate != nil {
@@ -80,7 +131,7 @@ func (m *fakeTextModel) sequence(ctx context.Context, prompt string) iter.Seq[in
 			case <-gate:
 			}
 		}
-		for _, text := range tokens {
+		for index, text := range tokens {
 			select {
 			case <-ctx.Done():
 				return
@@ -88,6 +139,16 @@ func (m *fakeTextModel) sequence(ctx context.Context, prompt string) iter.Seq[in
 			}
 			if !yield(inference.Token{Text: text}) {
 				return
+			}
+			if index == 0 {
+				m.firstYielded <- prompt
+				if afterFirstGate != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case <-afterFirstGate:
+					}
+				}
 			}
 		}
 	}
@@ -269,6 +330,48 @@ func TestJobManager_Ugly(t *testing.T) {
 
 	assertTaggedGeneration(t, cancelled.Value.(*generation), "session-cancel", "job-cancel", "")
 	assertTaggedGeneration(t, continued.Value.(*generation), "session-continue", "job-continue", "yes")
+}
+
+func TestJobManagerRequestErrorsAreIsolated_Ugly(t *testing.T) {
+	base := newRequestErrorTextModel()
+	laneResult := newModelLane(base, "request-errors")
+	if !laneResult.OK {
+		t.Fatalf("newModelLane: %s", laneResult.Error())
+	}
+	lane := laneResult.Value.(*modelLane)
+	defer lane.Close()
+	jobs := newJobManager(context.Background())
+
+	first := jobs.Start("session-first", "job-first", lane.Model(), []inference.Message{{Role: "user", Content: "fails"}}, nil)
+	if !first.OK {
+		t.Fatalf("start first: %s", first.Error())
+	}
+	firstText, firstErr := collectGeneration(t, first.Value.(*generation))
+	if firstText != "" || firstErr == nil || !strings.Contains(firstErr.Error(), "first request failed") {
+		t.Fatalf("first result = %q / %v", firstText, firstErr)
+	}
+
+	second := jobs.Start("session-second", "job-second", lane.Model(), []inference.Message{{Role: "user", Content: "succeeds"}}, nil)
+	if !second.OK {
+		t.Fatalf("start second: %s", second.Error())
+	}
+	secondText, secondErr := collectGeneration(t, second.Value.(*generation))
+	if secondText != "second succeeds" || secondErr != nil {
+		t.Fatalf("second result = %q / %v", secondText, secondErr)
+	}
+}
+
+func collectGeneration(t *testing.T, generation *generation) (string, error) {
+	t.Helper()
+	var text strings.Builder
+	var terminalErr error
+	for event := range generation.events {
+		text.WriteString(event.visible)
+		if event.err != nil {
+			terminalErr = event.err
+		}
+	}
+	return text.String(), terminalErr
 }
 
 func consumeFakeChat(model inference.TextModel, prompt string, done chan<- string) {

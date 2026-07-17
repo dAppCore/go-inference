@@ -24,21 +24,23 @@ import (
 type turn struct {
 	id      string
 	role    string // "user" | "assistant" | "tool"
+	model   string
 	thought string
 	text    string
 	calls   []string // rendered tool-call receipts on an assistant turn
 }
 
 type app struct {
-	boot            bootState
-	workspaceLoader func() core.Result
-	resources       *workspaceResources
-	lifecycle       *appLifecycle
-	warnings        []string
-	runtimeDetector runtimeDetector
-	knowledgeScan   knowledgeScanner
-	knowledgeMounts []knowledgeMount
-	knowledgeLimit  int64
+	boot               bootState
+	workspaceLoader    func() core.Result
+	resources          *workspaceResources
+	lifecycle          *appLifecycle
+	warnings           []string
+	runtimeDetector    runtimeDetector
+	knowledgeScan      knowledgeScanner
+	knowledgeMounts    []knowledgeMount
+	knowledgeLimit     int64
+	recentSessionLimit int
 
 	activePanel   panelID
 	inspectorOpen bool
@@ -74,7 +76,6 @@ type app struct {
 	modelName string
 	lane      *modelLane
 	jobs      *jobManager
-	cancel    context.CancelFunc
 	sessionID string
 
 	cfg   settings
@@ -124,11 +125,175 @@ type sessionGeneration struct {
 	job        generationJobRecord
 	started    bool
 	cancelled  bool
+	persistErr string
+	dirty      bool
+	flushAt    time.Time
 }
 
 type appLifecycle struct {
-	once   sync.Once
-	result core.Result
+	once    sync.Once
+	result  core.Result
+	mu      sync.Mutex
+	stopped bool
+	cancel  context.CancelFunc
+	workers sync.WaitGroup
+	stopCh  chan struct{}
+	nextID  uint64
+	pending map[uint64]tea.Msg
+}
+
+type lifecycleStoppedMsg struct{}
+type lifecycleResultMsg struct{ id uint64 }
+
+func newAppLifecycle(cancel context.CancelFunc) *appLifecycle {
+	return &appLifecycle{
+		result:  core.Ok(nil),
+		cancel:  cancel,
+		stopCh:  make(chan struct{}),
+		pending: make(map[uint64]tea.Msg),
+	}
+}
+
+// command joins a resource-producing Bubble Tea command to the app lifetime.
+// A result arriving after quit is closed here instead of being sent to a dead
+// update loop.
+func (lifecycle *appLifecycle) command(command tea.Cmd) tea.Cmd {
+	if command == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		if !lifecycle.beginWorker() {
+			return lifecycleStoppedMsg{}
+		}
+		defer lifecycle.workers.Done()
+		message := command()
+		return lifecycle.adopt(message)
+	}
+}
+
+func (lifecycle *appLifecycle) adopt(message tea.Msg) tea.Msg {
+	if lifecycle == nil {
+		closeLifecycleMessage(message)
+		return lifecycleStoppedMsg{}
+	}
+	lifecycle.mu.Lock()
+	if lifecycle.stopped {
+		lifecycle.mu.Unlock()
+		closeLifecycleMessage(message)
+		return lifecycleStoppedMsg{}
+	}
+	if !lifecycleOwnsMessage(message) {
+		lifecycle.mu.Unlock()
+		return message
+	}
+	lifecycle.nextID++
+	id := lifecycle.nextID
+	lifecycle.pending[id] = message
+	lifecycle.mu.Unlock()
+	return lifecycleResultMsg{id: id}
+}
+
+func (lifecycle *appLifecycle) claim(id uint64) (tea.Msg, bool) {
+	if lifecycle == nil || id == 0 {
+		return nil, false
+	}
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	message, ok := lifecycle.pending[id]
+	if ok {
+		delete(lifecycle.pending, id)
+	}
+	return message, ok
+}
+
+func (lifecycle *appLifecycle) closePending() {
+	if lifecycle == nil {
+		return
+	}
+	lifecycle.mu.Lock()
+	messages := make([]tea.Msg, 0, len(lifecycle.pending))
+	for id, message := range lifecycle.pending {
+		messages = append(messages, message)
+		delete(lifecycle.pending, id)
+	}
+	lifecycle.mu.Unlock()
+	for _, message := range messages {
+		closeLifecycleMessage(message)
+	}
+}
+
+func lifecycleOwnsMessage(message tea.Msg) bool {
+	switch message.(type) {
+	case loadedMsg, workspaceReadyMsg:
+		return true
+	default:
+		return false
+	}
+}
+
+func (lifecycle *appLifecycle) beginWorker() bool {
+	if lifecycle == nil {
+		return false
+	}
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if lifecycle.stopped {
+		return false
+	}
+	lifecycle.workers.Add(1)
+	return true
+}
+
+func (lifecycle *appLifecycle) isStopped() bool {
+	if lifecycle == nil {
+		return true
+	}
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	return lifecycle.stopped
+}
+
+func (lifecycle *appLifecycle) stop() {
+	if lifecycle == nil {
+		return
+	}
+	lifecycle.mu.Lock()
+	if lifecycle.stopped {
+		lifecycle.mu.Unlock()
+		return
+	}
+	lifecycle.stopped = true
+	cancel := lifecycle.cancel
+	if lifecycle.stopCh != nil {
+		close(lifecycle.stopCh)
+	}
+	lifecycle.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (lifecycle *appLifecycle) wait() {
+	if lifecycle != nil {
+		lifecycle.workers.Wait()
+	}
+}
+
+func closeLifecycleMessage(message tea.Msg) {
+	switch value := message.(type) {
+	case loadedMsg:
+		if value.model != nil {
+			if result := value.model.Close(); !result.OK {
+				core.Warn("tui.lifecycle.close_late_model", "error", result.Value)
+			}
+		}
+	case workspaceReadyMsg:
+		if value.resources != nil {
+			if result := value.resources.Close(); !result.OK {
+				core.Warn("tui.lifecycle.close_late_workspace", "error", result.Value)
+			}
+		}
+	}
 }
 
 // loadModel loads the checkpoint through the registered engine as a tea.Cmd.
@@ -151,6 +316,7 @@ func loadModel(path string, ctxLen int) tea.Cmd {
 
 func newApp(modelPath string, ctxLen, maxTokens int) app {
 	ctx, cancel := context.WithCancel(context.Background())
+	lifecycle := newAppLifecycle(cancel)
 	styles := newUIStyles(midnightTheme())
 	keys := newKeyMap()
 	agent := newUnavailableAgentProvider(defaultAgentUnavailableReason)
@@ -176,32 +342,32 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 	}
 
 	a := app{
-		boot:            bootState{phase: bootReady},
-		lifecycle:       &appLifecycle{result: core.Ok(nil)},
-		runtimeDetector: newContainerRuntimeDetector(),
-		knowledgeScan:   newKnowledgeScanner(),
-		knowledgeLimit:  knowledgeSystemMessageMaxBytes,
-		modelLoader:     loadModel,
-		activePanel:     panelChat,
-		styles:          styles,
-		keys:            keys,
-		markdown:        newMarkdownRenderer(styles.theme.name),
-		palette:         newCommandPalette(styles),
-		help:            newHelpOverlay(keys, styles),
-		inspector:       newInspector(),
-		agent:           agent,
-		picker:          newPicker(styles),
-		spin:            sp,
-		input:           in,
-		cfg:             cfg,
-		modes:           modeState{},
-		tools:           newTools(),
-		svc:             newService(),
-		jobs:            newJobManager(ctx),
-		sessionJobs:     make(map[string]*sessionGeneration),
-		cancel:          cancel,
-		sessionID:       newRecordID(),
-		follow:          true,
+		boot:               bootState{phase: bootReady},
+		lifecycle:          lifecycle,
+		runtimeDetector:    newContainerRuntimeDetector(),
+		knowledgeScan:      newKnowledgeScanner(),
+		knowledgeLimit:     knowledgeSystemMessageMaxBytes,
+		recentSessionLimit: defaultPreferenceValues().RecentSessionLimit,
+		modelLoader:        loadModel,
+		activePanel:        panelChat,
+		styles:             styles,
+		keys:               keys,
+		markdown:           newMarkdownRenderer(styles.theme.name),
+		palette:            newCommandPalette(styles),
+		help:               newHelpOverlay(keys, styles),
+		inspector:          newInspector(),
+		agent:              agent,
+		picker:             newPicker(styles),
+		spin:               sp,
+		input:              in,
+		cfg:                cfg,
+		modes:              modeState{},
+		tools:              newTools(),
+		svc:                newService(),
+		jobs:               newJobManager(ctx),
+		sessionJobs:        make(map[string]*sessionGeneration),
+		sessionID:          newRecordID(),
+		follow:             true,
 	}
 	if modelPath != "" {
 		a.activePanel = panelChat
@@ -367,12 +533,12 @@ func (a *app) rebuildTheme(selected theme) {
 func (a app) Init() tea.Cmd {
 	cmds := []tea.Cmd{a.spin.Tick}
 	if a.boot.phase == bootLoading {
-		cmds = append(cmds, workspaceBootstrap(a.workspaceLoader))
+		cmds = append(cmds, a.lifecycle.command(workspaceBootstrap(a.workspaceLoader)))
 		return tea.Batch(cmds...)
 	}
 	cmds = append(cmds, discoverModels)
 	if a.loading != "" {
-		cmds = append(cmds, a.modelLoader(a.loading, a.cfg.contextLen()))
+		cmds = append(cmds, a.lifecycle.command(a.modelLoader(a.loading, a.cfg.contextLen())))
 	}
 	return tea.Batch(cmds...)
 }
@@ -380,6 +546,10 @@ func (a app) Init() tea.Cmd {
 func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case workspaceReadyMsg:
+		if a.lifecycle.isStopped() {
+			closeLifecycleMessage(msg)
+			return a, nil
+		}
 		if result := a.connectWorkspace(msg.resources); !result.OK {
 			if msg.resources != nil {
 				_ = msg.resources.Close()
@@ -427,6 +597,10 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.picker.SetItems(msg.items)
 
 	case loadedMsg:
+		if a.lifecycle.isStopped() {
+			closeLifecycleMessage(msg)
+			return a, nil
+		}
 		laneResult := newModelLane(msg.model, msg.name)
 		if !laneResult.OK {
 			if msg.model != nil {
@@ -454,6 +628,16 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.activePanel = panelModels
 		return a, nil
 
+	case lifecycleStoppedMsg:
+		return a, nil
+
+	case lifecycleResultMsg:
+		message, ok := a.lifecycle.claim(msg.id)
+		if !ok {
+			return a, nil
+		}
+		return a.Update(message)
+
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		a.spin, cmd = a.spin.Update(msg)
@@ -463,6 +647,10 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.onStream(msg)
 
 	case streamRefreshMsg:
+		if managed := a.sessionJobs[msg.SessionID]; managed != nil && managed.generation != nil && managed.generation.JobID == msg.JobID {
+			a.flushManagedGeneration(managed)
+			return a, waitEvent(managed.generation)
+		}
 		if a.gen == nil || msg.SessionID != a.gen.SessionID || msg.JobID != a.gen.JobID {
 			return a, nil
 		}
@@ -516,6 +704,7 @@ func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
 	}
 	values := resources.Preferences.Values()
 	a.knowledgeLimit = values.KnowledgeMaxBytes
+	a.recentSessionLimit = values.RecentSessionLimit
 	if result := a.attachKnowledge(resources.Repository, values.KnowledgeMaxBytes); !result.OK {
 		return result
 	}
@@ -544,7 +733,7 @@ func (a app) workspaceReadyCommands() tea.Cmd {
 		})
 	}
 	if a.loading != "" {
-		commands = append(commands, a.modelLoader(a.loading, a.cfg.contextLen()))
+		commands = append(commands, a.lifecycle.command(a.modelLoader(a.loading, a.cfg.contextLen())))
 	}
 	return tea.Batch(commands...)
 }
@@ -602,16 +791,18 @@ func (a app) onManagedStream(ev streamMsg, managed *sessionGeneration) (tea.Mode
 		managed.started = true
 		managed.job.Status = "generating"
 		managed.job.StartedAt = now
-		if result := a.repository.SaveJob(managed.job); !result.OK {
-			a.errText = result.Error()
-		}
-		if result := a.sessions.MarkGenerating(ev.SessionID, ev.JobID); !result.OK {
-			a.errText = result.Error()
-		}
+		a.recordManagedPersistence(managed, a.repository.SaveJob(managed.job))
+		a.recordManagedPersistence(managed, a.sessions.MarkGenerating(ev.SessionID, ev.JobID))
 	}
 	managed.answer.Visible += ev.visible
 	managed.answer.Thought += ev.thought
 	managed.answer.UpdatedAt = now
+	if ev.visible != "" || ev.thought != "" {
+		managed.dirty = true
+		if managed.flushAt.IsZero() {
+			managed.flushAt = now.Add(streamRefreshInterval)
+		}
+	}
 	if ev.metrics != nil {
 		managed.job.MetricsJSON = core.JSONMarshalString(ev.metrics)
 		if a.sessionID == ev.SessionID {
@@ -621,21 +812,20 @@ func (a app) onManagedStream(ev streamMsg, managed *sessionGeneration) (tea.Mode
 	if ev.err != nil {
 		managed.job.Error = ev.err.Error()
 	}
-	if ev.visible != "" || ev.thought != "" || ev.done || ev.err != nil {
-		if result := a.sessions.AddTurn(managed.answer); !result.OK {
-			a.errText = result.Error()
-		}
-	}
-	active := a.sessions.Active()
-	if active != nil && active.Record.ID == ev.SessionID {
-		a.syncManagedSession(active, false)
-		a.refreshTranscriptOutput()
+	if ev.done || ev.err != nil || (!managed.flushAt.IsZero() && !now.Before(managed.flushAt)) {
+		a.flushManagedGeneration(managed)
 	}
 	if !ev.done {
+		if managed.dirty {
+			return a, waitEventOrRefresh(managed.generation, managed.flushAt)
+		}
 		return a, waitEvent(managed.generation)
 	}
 	managed.job.FinishedAt = now
 	switch {
+	case managed.persistErr != "":
+		managed.job.Status = "failed"
+		managed.job.Error = managed.persistErr
 	case managed.cancelled:
 		managed.job.Status = "cancelled"
 	case ev.err != nil:
@@ -644,7 +834,9 @@ func (a app) onManagedStream(ev streamMsg, managed *sessionGeneration) (tea.Mode
 		managed.job.Status = "completed"
 	}
 	if result := a.repository.SaveJob(managed.job); !result.OK {
-		a.errText = result.Error()
+		a.recordManagedPersistence(managed, result)
+		managed.job.Status = "failed"
+		managed.job.Error = managed.persistErr
 	}
 	a.jobs.finish(ev.SessionID, ev.JobID)
 	delete(a.sessionJobs, ev.SessionID)
@@ -668,10 +860,15 @@ func (a app) onManagedStream(ev streamMsg, managed *sessionGeneration) (tea.Mode
 				a.errText = result.Error()
 			}
 		}
-	} else if result := a.sessions.Complete(ev.SessionID); !result.OK {
-		a.errText = result.Error()
+	} else {
+		if result := a.sessions.cancelGeneration(ev.SessionID, ev.JobID); !result.OK {
+			a.errText = result.Error()
+		}
+		if result := a.persistGenerationEvent(ev.SessionID, ev.JobID, "generation.cancelled", "cancelled", managed.job.Error); !result.OK {
+			a.errText = result.Error()
+		}
 	}
-	active = a.sessions.Active()
+	active := a.sessions.Active()
 	if active != nil && active.Record.ID == ev.SessionID {
 		a.syncManagedSession(active, false)
 		if continuation == nil {
@@ -682,6 +879,33 @@ func (a app) onManagedStream(ev streamMsg, managed *sessionGeneration) (tea.Mode
 		a.refreshTranscriptOutput()
 	}
 	return a, continuation
+}
+
+func (a *app) flushManagedGeneration(managed *sessionGeneration) {
+	if a == nil || managed == nil || a.sessions == nil {
+		return
+	}
+	if managed.dirty {
+		a.recordManagedPersistence(managed, a.sessions.AddTurn(managed.answer))
+		managed.dirty = false
+	}
+	managed.flushAt = time.Time{}
+	active := a.sessions.Active()
+	if active != nil && active.Record.ID == managed.answer.SessionID {
+		a.syncManagedSession(active, false)
+		a.refreshTranscriptOutput()
+	}
+}
+
+func (a *app) recordManagedPersistence(managed *sessionGeneration, result core.Result) {
+	if result.OK || managed == nil {
+		return
+	}
+	if managed.persistErr == "" {
+		managed.persistErr = result.Error()
+	}
+	managed.job.Error = managed.persistErr
+	a.errText = result.Error()
 }
 
 func (a *app) persistGenerationEvent(sessionID, jobID, kind, status, detail string) core.Result {
@@ -824,7 +1048,7 @@ func (a *app) runToolLoop() tea.Cmd {
 			return nil
 		}
 	}
-	a.turns = append(a.turns, turn{id: newRecordID(), role: "assistant"})
+	a.turns = append(a.turns, turn{id: newRecordID(), role: "assistant", model: a.modelName})
 	a.toolHops++
 	return a.beginGeneration()
 }
@@ -962,15 +1186,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if key.Matches(msg, a.keys.ToggleInspector) {
-		a.inspectorOpen = !a.inspectorOpen
-		if a.ready {
-			metrics := measureFrame(a.width, a.height, a.inspectorOpen)
-			a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
-			a.input.SetWidth(max(1, metrics.mainWidth-4))
-			a.view.Width = max(1, metrics.mainWidth)
-			a.view.Height = a.transcriptHeight()
-			a.refreshTranscript()
-		}
+		a.toggleInspector()
 		return a, nil
 	}
 	if a.inspectorOpen {
@@ -1117,6 +1333,22 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a.route(msg)
 }
 
+func (a *app) toggleInspector() {
+	if a == nil {
+		return
+	}
+	a.inspectorOpen = !a.inspectorOpen
+	if !a.ready {
+		return
+	}
+	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+	a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
+	a.input.SetWidth(max(1, metrics.mainWidth-4))
+	a.view.Width = max(1, metrics.mainWidth)
+	a.view.Height = a.transcriptHeight()
+	a.refreshTranscript()
+}
+
 func (a *app) requestModelLoad(path string) tea.Cmd {
 	if a == nil {
 		return nil
@@ -1158,7 +1390,7 @@ func (a *app) beginModelLoad(path string) tea.Cmd {
 	if loader == nil {
 		loader = loadModel
 	}
-	return loader(path, a.cfg.contextLen())
+	return a.lifecycle.command(loader(path, a.cfg.contextLen()))
 }
 
 func (a *app) sendPrompt(prompt string) core.Result {
@@ -1173,7 +1405,7 @@ func (a *app) sendPrompt(prompt string) core.Result {
 		a.input.Reset()
 		a.turns = append(a.turns,
 			turn{id: newRecordID(), role: "user", text: prompt},
-			turn{id: newRecordID(), role: "assistant"},
+			turn{id: newRecordID(), role: "assistant", model: a.modelName},
 		)
 		a.follow = true
 		a.newOutput = false
@@ -1254,7 +1486,7 @@ func (a app) onBootKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		if a.boot.phase == bootFailed {
 			a.boot = bootState{phase: bootLoading}
-			return a, workspaceBootstrap(a.workspaceLoader)
+			return a, a.lifecycle.command(workspaceBootstrap(a.workspaceLoader))
 		}
 	}
 	return a, nil
@@ -1265,7 +1497,7 @@ func (a *app) shutdown() core.Result {
 		return core.Ok(nil)
 	}
 	if a.lifecycle == nil {
-		a.lifecycle = &appLifecycle{result: core.Ok(nil)}
+		a.lifecycle = newAppLifecycle(nil)
 	}
 	a.lifecycle.once.Do(func() {
 		result := core.Ok(nil)
@@ -1274,12 +1506,11 @@ func (a *app) shutdown() core.Result {
 				result = candidate
 			}
 		}
+		a.lifecycle.stop()
 		if a.jobs != nil {
 			record(a.jobs.CancelAll())
 		}
-		if a.cancel != nil {
-			a.cancel()
-		}
+		record(a.drainManagedGenerations())
 		if a.agent != nil {
 			record(a.agent.Close())
 		}
@@ -1289,12 +1520,56 @@ func (a *app) shutdown() core.Result {
 			a.lane = nil
 			a.model = nil
 		}
+		a.lifecycle.wait()
+		a.lifecycle.closePending()
 		if a.resources != nil {
 			record(a.resources.Close())
 		}
 		a.lifecycle.result = result
 	})
 	return a.lifecycle.result
+}
+
+// drainManagedGenerations folds every buffered delta and a terminal
+// cancellation into durable state before the workspace database closes.
+func (a *app) drainManagedGenerations() core.Result {
+	if a == nil || len(a.sessionJobs) == 0 {
+		return core.Ok(nil)
+	}
+	managedJobs := make([]*sessionGeneration, 0, len(a.sessionJobs))
+	firstFailure := ""
+	for _, managed := range a.sessionJobs {
+		if managed != nil && managed.generation != nil {
+			managed.cancelled = true
+			managedJobs = append(managedJobs, managed)
+		}
+	}
+	for _, managed := range managedJobs {
+		generation := managed.generation
+		terminal := false
+		for event := range generation.events {
+			model, _ := a.onManagedStream(streamMsg(event), managed)
+			*a = model.(app)
+			if event.done {
+				terminal = true
+			}
+		}
+		if !terminal {
+			model, _ := a.onManagedStream(streamMsg{
+				SessionID: generation.SessionID,
+				JobID:     generation.JobID,
+				done:      true,
+			}, managed)
+			*a = model.(app)
+		}
+		if managed.persistErr != "" && firstFailure == "" {
+			firstFailure = managed.persistErr
+		}
+	}
+	if firstFailure != "" {
+		return core.Fail(core.E("tui.app.drainManagedGenerations", "persist terminal generation state", core.NewError(firstFailure)))
+	}
+	return core.Ok(nil)
 }
 
 func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1326,6 +1601,12 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.errText = result.Error()
 			} else {
 				a.activateManagedSession(a.sessions.Active())
+				offset := a.transcriptTurnOffset(a.search.MatchTurnID())
+				a.view.SetYOffset(offset)
+				a.follow = false
+				if result := a.sessions.SetViewport(a.sessionID, a.view.YOffset, false); !result.OK {
+					a.errText = result.Error()
+				}
 				a.activeOverlay = overlayNone
 			}
 		}
@@ -1426,6 +1707,7 @@ func (a *app) syncManagedSession(session *chatSession, activatePanel bool) {
 		a.turns = append(a.turns, turn{
 			id:      record.ID,
 			role:    record.Role,
+			model:   record.Model,
 			thought: record.Thought,
 			text:    record.Visible,
 			calls:   persistedTurnCalls(record),
@@ -1690,8 +1972,12 @@ func (a app) transcriptHeight() int {
 
 func (a app) renderTranscript() string {
 	var b core.Builder
+	notice := a.sessionTranscriptNotice()
+	if notice != "" {
+		b.WriteString(a.styles.attention.Render(notice))
+	}
 	for i, t := range a.turns {
-		if i > 0 {
+		if i > 0 || notice != "" {
 			b.WriteString("\n\n")
 		}
 		switch t.role {
@@ -1710,7 +1996,10 @@ func (a app) renderTranscript() string {
 			if t.thought != "" {
 				b.WriteString(a.styles.thought.Render("· thinking · "+core.Trim(t.thought)) + "\n")
 			}
-			label := a.modelName
+			label := t.model
+			if label == "" {
+				label = a.modelName
+			}
 			if label == "" {
 				label = "assistant"
 			}
@@ -1737,6 +2026,45 @@ func (a app) renderTranscript() string {
 		}
 	}
 	return lipgloss.NewStyle().Width(a.view.Width).Render(b.String())
+}
+
+func (a app) transcriptTurnOffset(turnID string) int {
+	turnID = core.Trim(turnID)
+	if turnID == "" {
+		return 0
+	}
+	index := -1
+	for candidate, item := range a.turns {
+		if item.id == turnID {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return 0
+	}
+	if index == 0 && a.sessionTranscriptNotice() == "" {
+		return 0
+	}
+	prefix := a
+	prefix.turns = a.turns[:index]
+	return core.Count(prefix.renderTranscript(), "\n") + 2
+}
+
+func (a app) sessionTranscriptNotice() string {
+	if a.sessions == nil || a.sessions.Active() == nil {
+		return ""
+	}
+	switch a.sessions.Active().Record.Status {
+	case "interrupted":
+		return "! Generation interrupted · partial output preserved"
+	case "cancelled":
+		return "! Generation cancelled · partial output preserved"
+	case "failed":
+		return "! Generation failed · inspect the error before retrying"
+	default:
+		return ""
+	}
 }
 
 func visibleToolResult(value string) string {
@@ -1885,19 +2213,90 @@ func (a app) overlayView() string {
 }
 
 func (a app) sessionStrip() string {
-	title := "New session"
-	for _, turn := range a.turns {
-		if turn.role == "user" && core.Trim(turn.text) != "" {
-			title = core.Trim(turn.text)
+	if a.sessions == nil || len(a.sessions.Recent()) == 0 {
+		title := newSessionTitle
+		for _, item := range a.turns {
+			if item.role == "user" && core.Trim(item.text) != "" {
+				title = compactStripTitle(item.text, 24)
+				break
+			}
+		}
+		marker := "●"
+		if a.generating {
+			marker = "◉"
+		}
+		return core.Concat(marker, " ", title)
+	}
+
+	recent := a.sessions.Recent()
+	limit := a.recentSessionLimit
+	if limit < 1 {
+		limit = defaultPreferenceValues().RecentSessionLimit
+	}
+	shown := min(len(recent), limit)
+	parts := make([]string, 0, shown+1)
+	for _, session := range recent[:shown] {
+		title := core.Trim(session.Record.Title)
+		if title == "" {
+			title = newSessionTitle
+		}
+		parts = append(parts, core.Concat(sessionStripMarker(session, a.sessions.activeID), " ", compactStripTitle(title, 24)))
+	}
+	hidden := len(recent) - shown
+	maxWidth := a.width - 14
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
+	for len(parts) > 1 {
+		candidate := append([]string(nil), parts...)
+		if hidden > 0 {
+			candidate = append(candidate, core.Sprintf("+%d", hidden))
+		}
+		if lipgloss.Width(core.Join("  ·  ", candidate...)) <= maxWidth {
 			break
 		}
+		parts = parts[:len(parts)-1]
+		hidden++
 	}
-	marker := "●"
-	state := "idle"
-	if a.generating {
-		marker, state = "◉", "generating"
+	if hidden > 0 {
+		parts = append(parts, core.Sprintf("+%d", hidden))
 	}
-	return marker + " " + title + "  ·  " + state
+	return core.Join("  ·  ", parts...)
+}
+
+func sessionStripMarker(session *chatSession, activeID string) string {
+	if session == nil {
+		return "○"
+	}
+	if session.Record.Status == "queued" || session.Record.Status == "generating" || session.ActiveJobID != "" {
+		return "◉"
+	}
+	terminal := session.Record.Status == "failed" || session.Record.Status == "interrupted" || session.Record.Status == "cancelled"
+	if session.Record.ID == activeID && terminal {
+		return "!"
+	}
+	if session.Record.ID == activeID {
+		return "●"
+	}
+	if session.Attention {
+		return "◆"
+	}
+	if terminal {
+		return "!"
+	}
+	return "○"
+}
+
+func compactStripTitle(value string, maxCells int) string {
+	value = core.Trim(value)
+	if maxCells < 2 || lipgloss.Width(value) <= maxCells {
+		return value
+	}
+	runes := []rune(value)
+	for len(runes) > 1 && lipgloss.Width(string(runes)+"…") > maxCells {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes) + "…"
 }
 
 func (a app) inspectorView() string {

@@ -85,8 +85,10 @@ model.
 
 The user turn, assistant placeholder, job state, streamed deltas, final metrics,
 tool calls/results, and attention transition are persisted. On restart, queued
-or generating jobs become `interrupted`; partial assistant content remains and
-nothing restarts automatically.
+or generating jobs and their sessions become `interrupted`, a timeline event
+is recorded, partial assistant content remains, and nothing restarts
+automatically. Graceful quit drains buffered deltas into the cancelled session
+before DuckDB closes.
 
 When built-in tools are enabled, declarations join the system message. A valid
 call is recorded, executed locally, persisted as a tool turn/event, and fed

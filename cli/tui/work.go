@@ -297,15 +297,18 @@ func (panel *workPanel) View(width, height int, styles uiStyles) string {
 	}
 	panel.list.Styles.Title = styles.title
 	listWidth := width
+	listHeight := height
+	detailWidth := width
+	detailHeight := height
 	if width >= 100 {
 		listWidth = min(48, max(32, width/3))
-	}
-	listView := panel.renderList(listWidth, height, styles)
-	detailWidth := width
-	if width >= 100 {
 		detailWidth = max(1, width-listWidth-1)
+	} else {
+		listHeight = max(4, height/2)
+		detailHeight = max(1, height-listHeight-1)
 	}
-	detailView := panel.renderDetail(detailWidth, height, styles)
+	listView := panel.renderList(listWidth, listHeight, styles)
+	detailView := panel.renderDetail(detailWidth, detailHeight, styles)
 	var view string
 	if width >= 100 {
 		separator := fitPane("│", 1, height, styles.separator)
@@ -315,7 +318,11 @@ func (panel *workPanel) View(width, height int, styles uiStyles) string {
 			fitPane(detailView, detailWidth, height, styles.panel),
 		)
 	} else {
-		view = lipgloss.JoinVertical(lipgloss.Left, listView, "", detailView)
+		view = lipgloss.JoinVertical(lipgloss.Left,
+			fitPane(listView, listWidth, listHeight, styles.panel),
+			"",
+			fitPane(detailView, detailWidth, detailHeight, styles.panel),
+		)
 	}
 	return fitPane(view, width, height, styles.panel)
 }

@@ -258,6 +258,10 @@ func (manager *sessionManager) FailGeneration(sessionID, jobID string) core.Resu
 	return manager.setGenerationStatus("FailGeneration", sessionID, jobID, "failed", true)
 }
 
+func (manager *sessionManager) cancelGeneration(sessionID, jobID string) core.Result {
+	return manager.setGenerationStatus("CancelGeneration", sessionID, jobID, "cancelled", true)
+}
+
 func (manager *sessionManager) setGenerationStatus(operation, sessionID, jobID, status string, finished bool) core.Result {
 	session, result := manager.knownSession(operation, sessionID)
 	if !result.OK {

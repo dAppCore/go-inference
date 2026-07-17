@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"iter"
 	"sync"
 
 	core "dappco.re/go"
@@ -17,10 +18,28 @@ import (
 type modelLane struct {
 	base      inference.TextModel
 	scheduled *scheduler.Model
+	model     *laneTextModel
 	name      string
 
 	closeOnce   sync.Once
 	closeResult core.Result
+}
+
+// laneTextModel keeps the scheduler's shared serial lane while capturing the
+// base model's terminal Result before the next queued request may run. The
+// private request-error seam lets the TUI attribute errors to one session
+// without requiring a newer public inference option in the nested CLI module.
+type laneTextModel struct {
+	base      inference.TextModel
+	scheduled *scheduler.Model
+	gate      chan struct{}
+	close     func() core.Result
+	errMu     sync.Mutex
+	lastErr   core.Result
+}
+
+type scopedErrorChatModel interface {
+	chatWithErrorSink(context.Context, []inference.Message, func(error), ...inference.GenerateOption) iter.Seq[inference.Token]
 }
 
 // newModelLane creates the application's single serial generation lane.
@@ -38,7 +57,15 @@ func newModelLane(model inference.TextModel, name string) core.Result {
 	if err != nil {
 		return core.Fail(core.E("tui.newModelLane", "create serial scheduler", err))
 	}
-	return core.Ok(&modelLane{base: model, scheduled: scheduled, name: name})
+	lane := &modelLane{base: model, scheduled: scheduled, name: name}
+	lane.model = &laneTextModel{
+		base:      model,
+		scheduled: scheduled,
+		gate:      make(chan struct{}, 1),
+		lastErr:   core.Ok(nil),
+	}
+	lane.model.close = lane.Close
+	return core.Ok(lane)
 }
 
 // Model returns the scheduled view shared by all generation consumers.
@@ -46,7 +73,147 @@ func (lane *modelLane) Model() inference.TextModel {
 	if lane == nil {
 		return nil
 	}
-	return lane.scheduled
+	return lane.model
+}
+
+func (model *laneTextModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return model.stream(ctx, func() iter.Seq[inference.Token] {
+		return model.scheduled.Generate(ctx, prompt, opts...)
+	}, nil)
+}
+
+func (model *laneTextModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return model.chatWithErrorSink(ctx, messages, nil, opts...)
+}
+
+func (model *laneTextModel) chatWithErrorSink(ctx context.Context, messages []inference.Message, sink func(error), opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return model.stream(ctx, func() iter.Seq[inference.Token] {
+		return model.scheduled.Chat(ctx, messages, opts...)
+	}, sink)
+}
+
+func (model *laneTextModel) stream(ctx context.Context, source func() iter.Seq[inference.Token], sink func(error)) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		if model == nil || model.base == nil || model.scheduled == nil {
+			result := core.Fail(core.E("tui.laneTextModel.stream", "model lane is unavailable", nil))
+			model.setResult(result, sink)
+			return
+		}
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		select {
+		case model.gate <- struct{}{}:
+			defer func() { <-model.gate }()
+		case <-ctx.Done():
+			model.setResult(core.Fail(ctx.Err()), sink)
+			return
+		}
+		for token := range source() {
+			if !yield(token) {
+				break
+			}
+		}
+		result := model.base.Err()
+		if result.OK && ctx.Err() != nil {
+			result = core.Fail(ctx.Err())
+		}
+		model.setResult(result, sink)
+	}
+}
+
+func (model *laneTextModel) setResult(result core.Result, sink func(error)) {
+	if model != nil {
+		model.errMu.Lock()
+		model.lastErr = result
+		model.errMu.Unlock()
+	}
+	if sink == nil {
+		return
+	}
+	if result.OK {
+		sink(nil)
+		return
+	}
+	err := resultError(result)
+	if err == nil {
+		err = core.E("tui.laneTextModel.setResult", result.Error(), nil)
+	}
+	sink(err)
+}
+
+func (model *laneTextModel) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
+	if result := model.acquire(ctx); !result.OK {
+		return result
+	}
+	defer model.release()
+	return model.scheduled.Classify(ctx, prompts, opts...)
+}
+
+func (model *laneTextModel) BatchGenerate(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
+	if result := model.acquire(ctx); !result.OK {
+		return result
+	}
+	defer model.release()
+	return model.scheduled.BatchGenerate(ctx, prompts, opts...)
+}
+
+func (model *laneTextModel) acquire(ctx context.Context) core.Result {
+	if model == nil || model.scheduled == nil {
+		return core.Fail(core.E("tui.laneTextModel.acquire", "model lane is unavailable", nil))
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case model.gate <- struct{}{}:
+		return core.Ok(nil)
+	case <-ctx.Done():
+		return core.Fail(ctx.Err())
+	}
+}
+
+func (model *laneTextModel) release() {
+	if model != nil {
+		<-model.gate
+	}
+}
+
+func (model *laneTextModel) ModelType() string {
+	if model == nil || model.base == nil {
+		return ""
+	}
+	return model.base.ModelType()
+}
+
+func (model *laneTextModel) Info() inference.ModelInfo {
+	if model == nil || model.base == nil {
+		return inference.ModelInfo{}
+	}
+	return model.base.Info()
+}
+
+func (model *laneTextModel) Metrics() inference.GenerateMetrics {
+	if model == nil || model.scheduled == nil {
+		return inference.GenerateMetrics{}
+	}
+	return model.scheduled.Metrics()
+}
+
+func (model *laneTextModel) Err() core.Result {
+	if model == nil {
+		return core.Fail(core.E("tui.laneTextModel.Err", "model lane is unavailable", nil))
+	}
+	model.errMu.Lock()
+	defer model.errMu.Unlock()
+	return model.lastErr
+}
+
+func (model *laneTextModel) Close() core.Result {
+	if model == nil || model.close == nil {
+		return core.Ok(nil)
+	}
+	return model.close()
 }
 
 // Close drains the scheduler and releases the base model exactly once.

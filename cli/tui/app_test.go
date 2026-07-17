@@ -89,6 +89,83 @@ func TestAppBootstrap_Ugly(t *testing.T) {
 	}
 }
 
+func TestAppLifecycleLoaders_Ugly(t *testing.T) {
+	t.Run("workspace", func(t *testing.T) {
+		resources := openAppTestWorkspace(t)
+		started := make(chan struct{})
+		release := make(chan struct{})
+		a := newWorkspaceApp("", 0, 64, func() core.Result {
+			close(started)
+			<-release
+			return core.Ok(resources)
+		})
+		command := a.lifecycle.command(workspaceBootstrap(a.workspaceLoader))
+		message := make(chan tea.Msg, 1)
+		go func() { message <- command() }()
+		<-started
+		shutdown := make(chan core.Result, 1)
+		go func() { shutdown <- a.shutdown() }()
+		<-a.lifecycle.stopCh
+		close(release)
+		if result := <-shutdown; !result.OK {
+			t.Fatalf("shutdown workspace loader: %s", result.Error())
+		}
+		if _, ok := (<-message).(lifecycleStoppedMsg); !ok {
+			t.Fatal("late workspace load was delivered after shutdown")
+		}
+		if resources.Repository != nil || resources.State != nil {
+			t.Fatal("late workspace resources were not closed")
+		}
+	})
+
+	t.Run("model", func(t *testing.T) {
+		base := newFakeTextModel(nil)
+		started := make(chan struct{})
+		release := make(chan struct{})
+		a := newApp("", 0, 64)
+		command := a.lifecycle.command(func() tea.Msg {
+			close(started)
+			<-release
+			return loadedMsg{model: base, name: "late"}
+		})
+		message := make(chan tea.Msg, 1)
+		go func() { message <- command() }()
+		<-started
+		shutdown := make(chan core.Result, 1)
+		go func() { shutdown <- a.shutdown() }()
+		<-a.lifecycle.stopCh
+		close(release)
+		if result := <-shutdown; !result.OK {
+			t.Fatalf("shutdown model loader: %s", result.Error())
+		}
+		if _, ok := (<-message).(lifecycleStoppedMsg); !ok {
+			t.Fatal("late model load was delivered after shutdown")
+		}
+		if base.closes.Load() != 1 {
+			t.Fatalf("late model close count = %d", base.closes.Load())
+		}
+	})
+
+	t.Run("completed but undelivered model", func(t *testing.T) {
+		base := newFakeTextModel(nil)
+		a := newApp("", 0, 64)
+		message := a.lifecycle.command(func() tea.Msg {
+			return loadedMsg{model: base, name: "pending"}
+		})()
+		if result := a.shutdown(); !result.OK {
+			t.Fatalf("shutdown pending model: %s", result.Error())
+		}
+		if base.closes.Load() != 1 {
+			t.Fatalf("pending model close count = %d", base.closes.Load())
+		}
+		model, _ := a.Update(message)
+		a = model.(app)
+		if base.closes.Load() != 1 {
+			t.Fatalf("pending model closed twice: %d", base.closes.Load())
+		}
+	})
+}
+
 func TestAppSessionGeneration_Good(t *testing.T) {
 	resources := openAppTestWorkspace(t)
 	a := newApp("", 0, 64)
@@ -149,6 +226,80 @@ func TestAppSessionGeneration_Good(t *testing.T) {
 	}
 	if base.maxActive.Load() != 1 {
 		t.Fatalf("shared lane max concurrency = %d", base.maxActive.Load())
+	}
+	_ = a.shutdown()
+}
+
+func TestAppSessionPersistenceFailure_Bad(t *testing.T) {
+	tests := []struct {
+		name        string
+		failTurn    bool
+		failJobCall int
+	}{
+		{name: "final turn", failTurn: true},
+		{name: "final job", failJobCall: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resources := openAppTestWorkspace(t)
+			faults := &failingWorkspaceRepository{workspaceRepository: resources.Repository, failJobCall: test.failJobCall}
+			resources.Repository = faults
+			a := newApp("", 0, 64)
+			if result := a.connectWorkspace(resources); !result.OK {
+				t.Fatalf("connect workspace: %v", result.Value)
+			}
+			base := newFakeTextModel(map[string][]string{"persist": {"answer"}})
+			model, _ := a.Update(loadedMsg{model: base, name: "fixture"})
+			a = model.(app)
+			sessionID := a.sessions.Active().Record.ID
+			a.input.SetValue("persist")
+			model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			a = model.(app)
+			faults.failTurn = test.failTurn
+			driveAppGeneration(t, &a, sessionID, command)
+
+			if status := a.sessions.sessions[sessionID].Record.Status; status != "failed" {
+				t.Fatalf("session status = %q, want failed", status)
+			}
+			if !strings.Contains(a.errText, "injected persistence failure") {
+				t.Fatalf("error text = %q", a.errText)
+			}
+			if events := faults.workspaceRepository.Events(sessionID); !events.OK || len(events.Value.([]eventRecord)) != 1 || events.Value.([]eventRecord)[0].Kind != "generation.failed" {
+				t.Fatalf("failure events = %#v (%s)", events.Value, events.Error())
+			}
+			_ = a.shutdown()
+		})
+	}
+}
+
+func TestAppManagedStreamBatchesPersistence_Good(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	tracked := &failingWorkspaceRepository{workspaceRepository: resources.Repository}
+	resources.Repository = tracked
+	a := newApp("", 0, 256)
+	if result := a.connectWorkspace(resources); !result.OK {
+		t.Fatalf("connect workspace: %v", result.Value)
+	}
+	tokens := make([]string, 128)
+	for index := range tokens {
+		tokens[index] = "x"
+	}
+	base := newFakeTextModel(map[string][]string{"burst": tokens})
+	model, _ := a.Update(loadedMsg{model: base, name: "fixture"})
+	a = model.(app)
+	sessionID := a.sessions.Active().Record.ID
+	a.input.SetValue("burst")
+	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	driveAppGeneration(t, &a, sessionID, command)
+
+	if tracked.turnCalls > 8 {
+		t.Fatalf("128-token stream wrote turns %d times, want bounded batches", tracked.turnCalls)
+	}
+	turnResult := tracked.workspaceRepository.Turns(sessionID)
+	turns := turnResult.Value.([]turnRecord)
+	if !turnResult.OK || len(turns) != 2 || len(turns[1].Visible) != 128 {
+		t.Fatalf("batched transcript = %#v (%s)", turnResult.Value, turnResult.Error())
 	}
 	_ = a.shutdown()
 }
@@ -441,8 +592,133 @@ func TestAppQuit_Ugly(t *testing.T) {
 	}
 }
 
+func TestAppQuitPersistsPartialGeneration_Ugly(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	opened := openWorkspaceWith(files, workspaceOpeners{})
+	if !opened.OK {
+		t.Fatalf("open workspace: %v", opened.Value)
+	}
+	a := newApp("", 0, 64)
+	if result := a.connectWorkspace(opened.Value.(*workspaceResources)); !result.OK {
+		t.Fatalf("connect workspace: %v", result.Value)
+	}
+	base := newFakeTextModel(map[string][]string{"quit during reply": {"durable partial", "discarded"}})
+	base.blockAfterFirst("quit during reply")
+	model, _ := a.Update(loadedMsg{model: base, name: "fixture"})
+	a = model.(app)
+	sessionID := a.sessions.Active().Record.ID
+	a.input.SetValue("quit during reply")
+	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	select {
+	case <-base.firstYielded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("model did not yield partial output")
+	}
+
+	model, command := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	a = model.(app)
+	if command == nil {
+		t.Fatal("quit returned no Bubble Tea command")
+	}
+
+	reopened := openWorkspaceWith(files, workspaceOpeners{})
+	if !reopened.OK {
+		t.Fatalf("reopen workspace: %v", reopened.Value)
+	}
+	defer reopened.Value.(*workspaceResources).Close()
+	repository := reopened.Value.(*workspaceResources).Repository
+	turnResult := repository.Turns(sessionID)
+	turns, ok := turnResult.Value.([]turnRecord)
+	if !turnResult.OK || !ok || len(turns) != 2 || turns[1].Visible != "durable partial" {
+		t.Fatalf("reopened turns = %#v (%s)", turnResult.Value, turnResult.Error())
+	}
+	jobResult := repository.Jobs(sessionID)
+	jobs, ok := jobResult.Value.([]generationJobRecord)
+	if !jobResult.OK || !ok || len(jobs) != 1 || jobs[0].Status != "cancelled" {
+		t.Fatalf("reopened jobs = %#v (%s)", jobResult.Value, jobResult.Error())
+	}
+	sessionResult := repository.Session(sessionID)
+	if !sessionResult.OK || sessionResult.Value.(sessionRecord).Status != "cancelled" {
+		t.Fatalf("reopened session = %#v (%s)", sessionResult.Value, sessionResult.Error())
+	}
+	eventResult := repository.Events(sessionID)
+	events, ok := eventResult.Value.([]eventRecord)
+	if !eventResult.OK || !ok || len(events) != 1 || events[0].Kind != "generation.cancelled" {
+		t.Fatalf("reopened events = %#v (%s)", eventResult.Value, eventResult.Error())
+	}
+}
+
+func TestAppInterruptedSessionIsVisible_Ugly(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	opened := openWorkspaceWith(files, workspaceOpeners{})
+	if !opened.OK {
+		t.Fatalf("open workspace: %v", opened.Value)
+	}
+	resources := opened.Value.(*workspaceResources)
+	now := time.Date(2026, time.July, 17, 20, 0, 0, 0, time.UTC)
+	session := testSessionRecord("session-interrupted", "Interrupted durable work", now)
+	session.Status = "generating"
+	if result := resources.Repository.SaveSession(session); !result.OK {
+		t.Fatalf("save session: %s", result.Error())
+	}
+	answer := testTurnRecord("answer-interrupted", session.ID, 1, "assistant", "partial answer survives", now)
+	if result := resources.Repository.SaveTurn(answer); !result.OK {
+		t.Fatalf("save answer: %s", result.Error())
+	}
+	job := testJobRecord("job-interrupted", session.ID, "generating", now, unsetRecordTime())
+	job.AnswerTurnID = answer.ID
+	if result := resources.Repository.SaveJob(job); !result.OK {
+		t.Fatalf("save job: %s", result.Error())
+	}
+	if result := resources.Close(); !result.OK {
+		t.Fatalf("close crashed workspace: %s", result.Error())
+	}
+
+	reopened := openWorkspaceWith(files, workspaceOpeners{Now: func() time.Time { return now.Add(time.Minute) }})
+	if !reopened.OK {
+		t.Fatalf("reopen workspace: %v", reopened.Value)
+	}
+	a := newApp("", 0, 64)
+	if result := a.connectWorkspace(reopened.Value.(*workspaceResources)); !result.OK {
+		t.Fatalf("connect recovered workspace: %s", result.Error())
+	}
+	transcript := ansi.Strip(a.renderTranscript())
+	if !strings.Contains(transcript, "Generation interrupted") || !strings.Contains(transcript, "partial answer survives") {
+		t.Fatalf("recovered transcript:\n%s", transcript)
+	}
+	if strip := a.sessionStrip(); !strings.Contains(strip, "! Interrupted durable work") {
+		t.Fatalf("recovered strip = %q", strip)
+	}
+	_ = a.shutdown()
+}
+
 type orderedAgentProvider struct {
 	order *[]string
+}
+
+type failingWorkspaceRepository struct {
+	workspaceRepository
+	failTurn    bool
+	failJobCall int
+	jobCalls    int
+	turnCalls   int
+}
+
+func (repository *failingWorkspaceRepository) SaveTurn(record turnRecord) core.Result {
+	repository.turnCalls++
+	if repository.failTurn {
+		return core.Fail(core.E("test.repository.SaveTurn", "injected persistence failure", nil))
+	}
+	return repository.workspaceRepository.SaveTurn(record)
+}
+
+func (repository *failingWorkspaceRepository) SaveJob(record generationJobRecord) core.Result {
+	repository.jobCalls++
+	if repository.failJobCall > 0 && repository.jobCalls >= repository.failJobCall {
+		return core.Fail(core.E("test.repository.SaveJob", "injected persistence failure", nil))
+	}
+	return repository.workspaceRepository.SaveJob(record)
 }
 
 func (*orderedAgentProvider) Capabilities() []agentCapability {
@@ -544,6 +820,60 @@ func TestAppComposerNewline_Good(t *testing.T) {
 
 	if a.input.Value() != "first line\n" {
 		t.Fatalf("Alt+Enter composer value = %q", a.input.Value())
+	}
+}
+
+func TestAppSessionStrip_Good(t *testing.T) {
+	manager := openTestSessionManager(t, sequenceIDs("session-one", "session-two", "session-three"))
+	first := manager.Create().Value.(*chatSession)
+	second := manager.Create().Value.(*chatSession)
+	third := manager.Create().Value.(*chatSession)
+	if result := manager.Rename(first.Record.ID, "Renamed durable session"); !result.OK {
+		t.Fatalf("rename first: %s", result.Error())
+	}
+	if result := manager.Rename(second.Record.ID, "Background answer"); !result.OK {
+		t.Fatalf("rename second: %s", result.Error())
+	}
+	if result := manager.Rename(third.Record.ID, "Interrupted work"); !result.OK {
+		t.Fatalf("rename third: %s", result.Error())
+	}
+	if result := manager.Switch(first.Record.ID); !result.OK {
+		t.Fatalf("switch first: %s", result.Error())
+	}
+	second.Record.Status = "generating"
+	second.ActiveJobID = "job-two"
+	second.Attention = true
+	third.Record.Status = "interrupted"
+	third.Attention = true
+	manager.order = []string{first.Record.ID, second.Record.ID, third.Record.ID}
+
+	a := newApp("", 0, 64)
+	a.sessions = manager
+	a.sessionID = first.Record.ID
+	a.width = 120
+	a.recentSessionLimit = 3
+	strip := a.sessionStrip()
+	for _, want := range []string{"● Renamed durable", "◉ Background answer", "◆ Interrupted work"} {
+		if !strings.Contains(strip, want) {
+			t.Fatalf("session strip missing %q: %s", want, strip)
+		}
+	}
+
+	a.recentSessionLimit = 2
+	strip = a.sessionStrip()
+	if !strings.Contains(strip, "+1") || strings.Contains(strip, "Interrupted work") {
+		t.Fatalf("limited session strip = %q", strip)
+	}
+}
+
+func TestTranscriptPreservesTurnModel_Good(t *testing.T) {
+	a := newApp("", 0, 64)
+	a.modelName = "current-model"
+	a.turns = []turn{{id: "answer-old", role: "assistant", model: "original-model", text: "historical answer"}}
+	a.view.Width = 72
+	transcript := ansi.Strip(a.renderTranscript())
+	if !strings.Contains(transcript, "original-model") || strings.Contains(transcript, "current-model") {
+		t.Fatalf("historical model label:\n%s", transcript)
 	}
 }
 
@@ -816,7 +1146,7 @@ func openAppTestWorkspace(t *testing.T) *workspaceResources {
 
 func driveAppGeneration(t *testing.T, target *app, sessionID string, command tea.Cmd) {
 	t.Helper()
-	for step := 0; step < 128 && command != nil; step++ {
+	for step := 0; step < 1024 && command != nil; step++ {
 		model, next := target.Update(command())
 		*target = model.(app)
 		command = next

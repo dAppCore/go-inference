@@ -118,6 +118,11 @@ func TestWorkPanel_Ugly(t *testing.T) {
 				t.Fatalf("width %d line %d overflows at %d", width, line, got)
 			}
 		}
+		for _, want := range []string{"source", "TIMELINE"} {
+			if !strings.Contains(view, want) {
+				t.Fatalf("width %d cropped detail %q:\n%s", width, want, view)
+			}
+		}
 	}
 }
 

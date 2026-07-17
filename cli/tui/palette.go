@@ -265,7 +265,7 @@ func defaultWorkspaceCommands() []workspaceCommand {
 		{ID: commandSwitchSession, Title: "Switch session", Description: "Open the recent-session switcher", Available: true, run: func(target *app) core.Result { return target.openSessionSwitcher() }},
 		{ID: commandSearchHistory, Title: "Search history", Description: "Search durable chat titles and turns", Available: true, run: func(target *app) core.Result { return target.openHistorySearch() }},
 		{ID: commandToggleInspector, Title: "Toggle inspector", Description: "Show or hide contextual session details", Available: true, run: func(target *app) core.Result {
-			target.inspectorOpen = !target.inspectorOpen
+			target.toggleInspector()
 			return core.Ok(nil)
 		}},
 		{ID: commandShowHelp, Title: "Show help", Description: "Open the complete keyboard reference", Available: true, run: func(target *app) core.Result {

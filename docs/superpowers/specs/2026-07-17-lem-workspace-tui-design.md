@@ -438,8 +438,9 @@ Each session may have one in-flight generation. The shared scheduler serialises
 model access across sessions and HTTP requests. Switching sessions never
 cancels a generation. Additional sends in other sessions queue visibly.
 
-After an unclean process exit, startup changes persisted queued or generating
-jobs to interrupted. It never restarts work automatically.
+After an unclean process exit, startup atomically changes persisted queued or
+generating jobs and their sessions to interrupted, records a timeline event,
+and preserves any partial answer. It never restarts work automatically.
 
 ### Tool loop
 
@@ -472,8 +473,10 @@ not depend on their internal types.
   capability and show a reason in the inspector.
 - Model and tool failures are recorded on the owning session, even when hidden.
 - A listener failure stops only the HTTP service; local chat remains available.
-- Shutdown cancels generation, closes capability providers, tears down the HTTP
-  service, closes the model, then closes go-store and DuckDB in that order.
+- Shutdown cancels generation, drains and persists buffered terminal state,
+  closes capability providers, tears down the HTTP service, closes the model,
+  joins late workspace/model loaders, then closes go-store and DuckDB in that
+  order.
 
 ## Privacy and authority
 

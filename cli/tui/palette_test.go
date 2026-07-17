@@ -25,6 +25,15 @@ func TestCommandPalette_Good(t *testing.T) {
 	if a.activePanel != panelModels {
 		t.Fatalf("active panel = %d, want Models", a.activePanel)
 	}
+	model, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	a = model.(app)
+	beforeHeight := a.view.Height
+	if result := palette.Invoke(commandToggleInspector, &a); !result.OK {
+		t.Fatalf("Invoke inspector: %v", result.Value)
+	}
+	if !a.inspectorOpen || a.view.Height == beforeHeight || a.view.Height != a.transcriptHeight() {
+		t.Fatalf("palette inspector layout = open %v height %d (before %d)", a.inspectorOpen, a.view.Height, beforeHeight)
+	}
 }
 
 func TestCommandPalette_Bad(t *testing.T) {
@@ -143,6 +152,19 @@ func TestHistorySearch_Good(t *testing.T) {
 	}
 	if search.MatchTurnID() != second.ID {
 		t.Fatalf("match turn = %q, want %q", search.MatchTurnID(), second.ID)
+	}
+}
+
+func TestHistorySearchUsesRenderedTurnOffset_Ugly(t *testing.T) {
+	a := newApp("", 0, 64)
+	a.view.Width = 24
+	a.turns = []turn{
+		{id: "turn-wrapped", role: "assistant", text: "This is a deliberately long markdown paragraph that wraps across several terminal lines before the next match."},
+		{id: "turn-match", role: "assistant", text: "durable needle"},
+	}
+	offset := a.transcriptTurnOffset("turn-match")
+	if offset <= 1 {
+		t.Fatalf("rendered match offset = %d, want wrapped line offset", offset)
 	}
 }
 

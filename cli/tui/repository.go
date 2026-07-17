@@ -245,11 +245,88 @@ func (repository *duckRepository) InterruptActiveJobs(at time.Time) core.Result 
 	if result := repository.ready("InterruptActiveJobs"); !result.OK {
 		return result
 	}
-	return repository.database.store.Exec(`
+	type interruptedJob struct {
+		ID        string
+		SessionID string
+		Partial   string
+	}
+	rows, err := repository.database.store.Conn().Query(`
+		SELECT j.id, j.session_id, COALESCE(t.visible, '')
+		FROM lem_generation_jobs AS j
+		LEFT JOIN lem_turns AS t ON t.id = j.answer_turn_id
+		WHERE j.status IN (?, ?)
+		ORDER BY j.created_at
+	`, "queued", "generating")
+	if err != nil {
+		return core.Fail(core.E("tui.repository.InterruptActiveJobs", "read active jobs", err))
+	}
+	jobs := make([]interruptedJob, 0)
+	for rows.Next() {
+		var job interruptedJob
+		if err := rows.Scan(&job.ID, &job.SessionID, &job.Partial); err != nil {
+			if closeErr := rows.Close(); closeErr != nil {
+				core.Warn("tui.repository.recovery_rows_close", "error", closeErr)
+			}
+			return core.Fail(core.E("tui.repository.InterruptActiveJobs", "scan active job", err))
+		}
+		jobs = append(jobs, job)
+	}
+	if err := rows.Err(); err != nil {
+		if closeErr := rows.Close(); closeErr != nil {
+			core.Warn("tui.repository.recovery_rows_close", "error", closeErr)
+		}
+		return core.Fail(core.E("tui.repository.InterruptActiveJobs", "iterate active jobs", err))
+	}
+	if err := rows.Close(); err != nil {
+		return core.Fail(core.E("tui.repository.InterruptActiveJobs", "close active jobs", err))
+	}
+	if len(jobs) == 0 {
+		return core.Ok(nil)
+	}
+
+	transaction, err := repository.database.store.Conn().Begin()
+	if err != nil {
+		return core.Fail(core.E("tui.repository.InterruptActiveJobs", "begin recovery", err))
+	}
+	rollback := func(operation string, cause error) core.Result {
+		rollbackWorkspaceMigration(transaction)
+		return core.Fail(core.E("tui.repository.InterruptActiveJobs", operation, cause))
+	}
+	if _, err := transaction.Exec(`
 		UPDATE lem_generation_jobs
-		SET status = ?, finished_at = ?
+		SET status = ?, error = ?, finished_at = ?
 		WHERE status IN (?, ?)
-	`, "interrupted", at.UTC(), "queued", "generating")
+	`, "interrupted", "application exited before generation completed", at.UTC(), "queued", "generating"); err != nil {
+		return rollback("interrupt active jobs", err)
+	}
+
+	sessions := make(map[string]struct{}, len(jobs))
+	for _, job := range jobs {
+		if _, seen := sessions[job.SessionID]; !seen {
+			if _, err := transaction.Exec(`
+				UPDATE lem_sessions SET status = ?, updated_at = ? WHERE id = ?
+			`, "interrupted", at.UTC(), job.SessionID); err != nil {
+				return rollback("interrupt active session", err)
+			}
+			sessions[job.SessionID] = struct{}{}
+		}
+		detail := "Generation stopped before producing output."
+		if core.Trim(job.Partial) != "" {
+			detail = "Partial output was preserved in the transcript."
+		}
+		if _, err := transaction.Exec(`
+			INSERT INTO lem_events
+				(id, session_id, work_item_id, job_id, kind, status, title, detail, payload_json, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, newRecordID(), job.SessionID, "", job.ID, "generation.interrupted", "interrupted",
+			"Generation interrupted", detail, "{}", at.UTC()); err != nil {
+			return rollback("record interrupted generation", err)
+		}
+	}
+	if err := transaction.Commit(); err != nil {
+		return rollback("commit recovery", err)
+	}
+	return core.Ok(len(jobs))
 }
 
 func (repository *duckRepository) ListWorkItems(includeArchived bool) core.Result {

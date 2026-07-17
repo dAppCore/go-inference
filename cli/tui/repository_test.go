@@ -190,14 +190,20 @@ func TestDuckRepository_Ugly(t *testing.T) {
 
 	createdAt := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
 	session := testSessionRecord("session-recovery", "Recovery", createdAt)
+	session.Status = "generating"
 	if result := repository.SaveSession(session); !result.OK {
 		t.Fatalf("save session: %v", result.Value)
+	}
+	partial := testTurnRecord("turn-partial", session.ID, 1, "assistant", "partial answer", createdAt)
+	if result := repository.SaveTurn(partial); !result.OK {
+		t.Fatalf("save partial turn: %v", result.Value)
 	}
 	jobs := []generationJobRecord{
 		testJobRecord("job-queued", session.ID, "queued", createdAt, unsetRecordTime()),
 		testJobRecord("job-generating", session.ID, "generating", createdAt.Add(time.Second), unsetRecordTime()),
 		testJobRecord("job-completed", session.ID, "completed", createdAt.Add(2*time.Second), createdAt.Add(3*time.Second)),
 	}
+	jobs[1].AnswerTurnID = partial.ID
 	for _, job := range jobs {
 		if result := repository.SaveJob(job); !result.OK {
 			t.Fatalf("save %s: %v", job.ID, result.Value)
@@ -227,6 +233,25 @@ func TestDuckRepository_Ugly(t *testing.T) {
 	}
 	if completed := byID["job-completed"]; completed.Status != "completed" || !completed.FinishedAt.Equal(jobs[2].FinishedAt) {
 		t.Errorf("completed job changed to %#v", completed)
+	}
+	recoveredSession := repository.Session(session.ID)
+	if !recoveredSession.OK || recoveredSession.Value.(sessionRecord).Status != "interrupted" {
+		t.Fatalf("session after recovery = %#v (%s)", recoveredSession.Value, recoveredSession.Error())
+	}
+	eventResult := repository.Events(session.ID)
+	events, ok := eventResult.Value.([]eventRecord)
+	if !eventResult.OK || !ok || len(events) != 2 {
+		t.Fatalf("recovery events = %#v (%s)", eventResult.Value, eventResult.Error())
+	}
+	preserved := false
+	for _, event := range events {
+		if event.Kind != "generation.interrupted" || event.Status != "interrupted" {
+			t.Errorf("recovery event = %#v", event)
+		}
+		preserved = preserved || strings.Contains(event.Detail, "Partial output")
+	}
+	if !preserved {
+		t.Fatal("recovery events did not report the preserved partial output")
 	}
 }
 
