@@ -4,7 +4,7 @@ import (
 	"database/sql"
 
 	"dappco.re/go"
-	_ "github.com/marcboeker/go-duckdb/v2"
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 // DB wraps a DuckDB connection.

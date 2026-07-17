@@ -55,9 +55,13 @@ AMD_GOARCH ?= amd64
 CUDA_GOARCH ?= amd64
 CPU_X86_GOARCH ?= amd64
 CPU_AARCH64_GOARCH ?= arm64
+CPU_AARCH64_CC ?= aarch64-linux-gnu-gcc
+CPU_AARCH64_CXX ?= aarch64-linux-gnu-g++
 AMD_CGO_ENABLED ?= 1
 CUDA_CGO_ENABLED ?= 1
-CPU_CGO_ENABLED ?= 0
+# DuckDB (the go-store/chathistory driver) requires cgo — like engine/hip,
+# the linux lanes build with cgo on. Only the Apple metal engine is no-cgo.
+CPU_CGO_ENABLED ?= 1
 RELEASE_BINS := $(CLI_NAME)-amd $(CLI_NAME)-cuda $(CLI_NAME)-cpu-x86 $(CLI_NAME)-cpu-aarch64
 RELEASE_ARCHIVES := $(addsuffix -linux.tar.gz,$(RELEASE_BINS))
 RELEASE_SIDECARS = $(AMD_KERNEL_MODULE_NAME) $(CUDA_KERNEL_MODULE_NAME) $(CPU_X86_KERNEL_MODULE_NAME) $(CPU_AARCH64_KERNEL_MODULE_NAME)
@@ -299,7 +303,7 @@ lem-cpu-x86: hip-cpu-x86_64
 
 lem-cpu-aarch64: hip-cpu-aarch64
 	mkdir -p "$(BIN_DIR_ABS)"
-	CGO_ENABLED=$(CPU_CGO_ENABLED) GOOS=$(TARGET_GOOS) GOARCH=$(CPU_AARCH64_GOARCH) $(GO) -C "$(CLI_SUBTREE)" build -ldflags "$(CLI_GO_LDFLAGS)" -o "$(BIN_DIR_ABS)/$(CLI_NAME)-cpu-aarch64" "$(CLI_CMD)"
+	CGO_ENABLED=$(CPU_CGO_ENABLED) CC=$(CPU_AARCH64_CC) CXX=$(CPU_AARCH64_CXX) GOOS=$(TARGET_GOOS) GOARCH=$(CPU_AARCH64_GOARCH) $(GO) -C "$(CLI_SUBTREE)" build -ldflags "$(CLI_GO_LDFLAGS)" -o "$(BIN_DIR_ABS)/$(CLI_NAME)-cpu-aarch64" "$(CLI_CMD)"
 
 test:
 	$(GO) -C "$(GO_SUBTREE)" test ./... -count=1

@@ -50,10 +50,11 @@ import (
 	"github.com/google/uuid"
 
 	// duckdb driver registers itself with database/sql via init().
-	// Using v2 to align with dappco.re/go/orm's transitive pin —
-	// prevents CGo duplicate-symbol link errors from v1 + v2 both
-	// embedding DuckDB statics into the same binary.
-	_ "github.com/marcboeker/go-duckdb/v2"
+	// The official DuckDB-hosted binding (github.com/duckdb/duckdb-go), the
+	// successor to marcboeker/go-duckdb — one binding across the whole binary
+	// so two DuckDB statics never link in (CGo duplicate-symbol errors), and
+	// its mapping package compiles under CGO_ENABLED=0 (the CPU release lane).
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 //go:embed migrations/001_init.sql
