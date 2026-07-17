@@ -46,6 +46,8 @@ type app struct {
 	inspector     inspectorState
 	agent         agentProvider
 	work          *workPanel
+	knowledge     *knowledgeLibrary
+	attachments   []attachmentRecord
 
 	picker  list.Model
 	spin    spinner.Model
@@ -173,6 +175,79 @@ func (a *app) attachWork(repository workspaceRepository, provider agentProvider)
 	a.work = opened.Value.(*workPanel)
 	a.palette.SetAgentCapabilities(provider.Capabilities())
 	return core.Ok(a.work)
+}
+
+func (a *app) attachKnowledge(repository workspaceRepository, maxBytes int64) core.Result {
+	if a == nil {
+		return core.Fail(core.E("tui.app.attachKnowledge", "application is unavailable", nil))
+	}
+	opened := newKnowledgeLibrary(repository, maxBytes, nil, nil)
+	if !opened.OK {
+		return opened
+	}
+	a.knowledge = opened.Value.(*knowledgeLibrary)
+	return a.reloadKnowledgeAttachments()
+}
+
+func (a *app) applyKnowledgeDiscovery(result core.Result) core.Result {
+	if a == nil {
+		return core.Fail(core.E("tui.app.applyKnowledgeDiscovery", "application is unavailable", nil))
+	}
+	a.inspector.ApplyKnowledge(result)
+	if !result.OK || a.knowledge == nil || core.Trim(a.sessionID) == "" {
+		return result
+	}
+	discovery, ok := result.Value.(knowledgeDiscovery)
+	if !ok {
+		return core.Fail(core.E("tui.app.applyKnowledgeDiscovery", "invalid knowledge discovery result", nil))
+	}
+	if refreshed := a.knowledge.RefreshStaleness(a.sessionID, discovery.Documents); !refreshed.OK {
+		return refreshed
+	}
+	return a.reloadKnowledgeAttachments()
+}
+
+func (a *app) attachKnowledgeDocument(index int) core.Result {
+	if a == nil || a.knowledge == nil {
+		return core.Fail(core.E("tui.app.attachKnowledgeDocument", "knowledge library is unavailable", nil))
+	}
+	if index < 0 || index >= len(a.inspector.knowledge.documents) {
+		return core.Fail(core.E("tui.app.attachKnowledgeDocument", "knowledge document selection is out of range", nil))
+	}
+	result := a.knowledge.Attach(a.sessionID, a.inspector.knowledge.documents[index])
+	if !result.OK {
+		return result
+	}
+	return a.reloadKnowledgeAttachments()
+}
+
+func (a *app) detachKnowledgeAttachment(index int) core.Result {
+	if a == nil || a.knowledge == nil {
+		return core.Fail(core.E("tui.app.detachKnowledgeAttachment", "knowledge library is unavailable", nil))
+	}
+	if index < 0 || index >= len(a.attachments) {
+		return core.Fail(core.E("tui.app.detachKnowledgeAttachment", "knowledge attachment selection is out of range", nil))
+	}
+	if result := a.knowledge.Detach(a.sessionID, a.attachments[index].ID); !result.OK {
+		return result
+	}
+	return a.reloadKnowledgeAttachments()
+}
+
+func (a *app) reloadKnowledgeAttachments() core.Result {
+	if a == nil || a.knowledge == nil || core.Trim(a.sessionID) == "" {
+		return core.Ok(nil)
+	}
+	result := a.knowledge.Attachments(a.sessionID)
+	if !result.OK {
+		return result
+	}
+	attachments, ok := result.Value.([]attachmentRecord)
+	if !ok {
+		return core.Fail(core.E("tui.app.reloadKnowledgeAttachments", "invalid attachment result", nil))
+	}
+	a.attachments = append([]attachmentRecord(nil), attachments...)
+	return core.Ok(a.attachments)
 }
 
 func (a *app) attachPreferences(preferences preferenceStore) {
@@ -730,6 +805,7 @@ func (a *app) createSession() core.Result {
 	}
 	a.sessionID = newRecordID()
 	a.turns = nil
+	a.attachments = nil
 	a.input.Reset()
 	a.follow = true
 	a.newOutput = false
@@ -783,6 +859,10 @@ func (a *app) activateManagedSession(session *chatSession) {
 	a.input.SetValue(session.Draft)
 	a.follow = session.Follow
 	a.newOutput = session.Attention
+	a.attachments = nil
+	if result := a.reloadKnowledgeAttachments(); !result.OK {
+		a.errText = result.Error()
+	}
 	a.activePanel = panelChat
 	a.refreshTranscript()
 	if !a.follow {
@@ -901,8 +981,19 @@ func (a app) generateOpts() []inference.GenerateOption {
 // ride the system turn when the Tools tab armed them (the serve convention).
 func (a app) history() []inference.Message {
 	msgs := make([]inference.Message, 0, len(a.turns)+1)
+	systemParts := make([]string, 0, 2)
+	knowledgeLimit := knowledgeSystemMessageMaxBytes
+	if a.knowledge != nil {
+		knowledgeLimit = int(a.knowledge.maxBytes)
+	}
+	if knowledge := knowledgeSystemMessageBounded(a.attachments, knowledgeLimit); knowledge != "" {
+		systemParts = append(systemParts, knowledge)
+	}
 	if decl := a.tools.declarations(); decl != "" {
-		msgs = append(msgs, inference.Message{Role: "system", Content: decl})
+		systemParts = append(systemParts, decl)
+	}
+	if len(systemParts) > 0 {
+		msgs = append(msgs, inference.Message{Role: "system", Content: core.Join("\n\n", systemParts...)})
 	}
 	for _, t := range a.turns {
 		if t.role == "assistant" && t.text == "" && t.thought == "" {

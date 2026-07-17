@@ -23,10 +23,11 @@ const (
 var inspectorThemes = []string{"midnight", "aurora", "daylight"}
 
 type inspectorState struct {
-	cursor  int
-	dirty   bool
-	theme   string
-	runtime runtimeInspection
+	cursor    int
+	dirty     bool
+	theme     string
+	runtime   runtimeInspection
+	knowledge knowledgeInspection
 }
 
 func newInspector() inspectorState {
@@ -59,6 +60,12 @@ func (inspector *inspectorState) Move(delta int) {
 func (inspector *inspectorState) ApplyRuntime(result core.Result) {
 	if inspector != nil {
 		inspector.runtime = runtimeInspectionFrom(result)
+	}
+}
+
+func (inspector *inspectorState) ApplyKnowledge(result core.Result) {
+	if inspector != nil {
+		inspector.knowledge = knowledgeInspectionFrom(result)
 	}
 }
 
@@ -323,6 +330,29 @@ func (inspector inspectorState) renderChat(builder *strings.Builder, target app)
 		tools = "● enabled"
 	}
 	inspector.renderControl(builder, target, inspectorControlTools, "function calls", tools)
+	builder.WriteString("\n" + target.styles.accent.Render("KNOWLEDGE") + "\n")
+	switch {
+	case !inspector.knowledge.ready:
+		builder.WriteString(target.styles.status.Render("  ○ discovery pending") + "\n")
+	case len(inspector.knowledge.documents) == 0:
+		builder.WriteString(target.styles.status.Render("  ○ no local documents") + "\n")
+	default:
+		builder.WriteString(target.styles.success.Render(core.Sprintf("  ● %d local documents", len(inspector.knowledge.documents))) + "\n")
+		for _, document := range inspector.knowledge.documents {
+			builder.WriteString(target.styles.status.Render("    "+document.Title+"  "+document.Path) + "\n")
+		}
+	}
+	if len(target.attachments) > 0 {
+		builder.WriteString(target.styles.title.Render(core.Sprintf("  %d attached snapshots", len(target.attachments))) + "\n")
+	}
+	for _, warning := range inspector.knowledge.warnings {
+		label := warning.Path
+		if label == "" {
+			label = warning.Mount
+		}
+		builder.WriteString(target.styles.attention.Render("  ! "+label) + "\n")
+		builder.WriteString(target.styles.thought.Render("    "+warning.Reason) + "\n")
+	}
 	if inspector.dirty {
 		builder.WriteString("\n" + target.styles.attention.Render("● unsaved · ctrl+s"))
 	}
