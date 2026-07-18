@@ -558,13 +558,13 @@ func (orchestrator *Orchestrator) Resume(context.Context, work.ResumeRequest) co
 func (orchestrator *Orchestrator) Retry(context.Context, work.Item, parentRunID string) core.Result
 ```
 
-- [ ] Write direct `TestRun_Orchestrator_{Answer,Resume,Retry}_{Good,Bad,Ugly}` AX-7 tests: Answer only waiting runs with an unanswered question; Resume requires a stored answer; Retry accepts failed/cancelled/interrupted only; empty text/IDs fail; duplicate actions do not rewrite the parent.
-- [ ] Assert each action creates a new queued run with `ParentRunID`, preserves the parent's `Number` and exact internal `Branch`, increments `Attempt`, preserves the parent status/timestamps, and builds continuation text from `Store.Continuation(parentRunID)` containing the earlier task/output/question/answer. A fresh root dispatch obtains its branch number from `Store.NextRunNumber(workID)`.
-- [ ] Assert Resume/Retry reuses a retained parent worktree after confirming its branch and internal root, reconstructs from Soft Serve only when the checkout is absent, and returns a durable recovery reason when a retained checkout is corrupt or on the wrong branch. Never attach the same internal branch to a second worktree.
-- [ ] Assert no question/answer/status file appears in either repository.
-- [ ] Run the focused tests and see the missing methods fail.
-- [ ] Commit the answer separately from launch but atomically as one Store commit. Resume/Retry build fresh provider commands and enter the same Dispatch queue path without mutating terminal attempts.
-- [ ] Run package/race, format, and commit:
+- [x] Write direct `TestRun_Orchestrator_{Answer,Resume,Retry}_{Good,Bad,Ugly}` AX-7 tests: Answer only waiting runs with an unanswered question; Resume requires a stored answer; Retry accepts failed/cancelled/interrupted only; empty text/IDs fail; duplicate actions do not rewrite the parent.
+- [x] Assert each action creates a new queued run with `ParentRunID`, preserves the parent's `Number` and exact internal `Branch`, increments `Attempt`, preserves the parent status/timestamps, and builds continuation text from `Store.Continuation(parentRunID)` containing the earlier task/output/question/answer. A fresh root dispatch obtains its branch number from `Store.NextRunNumber(workID)`.
+- [x] Assert Resume/Retry reuses a retained parent worktree after confirming its branch and internal root, reconstructs from Soft Serve only when the checkout is absent, and returns a durable recovery reason when a retained checkout is corrupt or on the wrong branch. Never attach the same internal branch to a second worktree.
+- [x] Assert no question/answer/status file appears in either repository.
+- [x] Run the focused tests and see the missing methods fail.
+- [x] Commit the answer separately from launch but atomically as one Store commit. Resume/Retry build fresh provider commands and enter the same Dispatch queue path without mutating terminal attempts.
+- [x] Run package/race, format, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/go
@@ -702,7 +702,7 @@ go get dappco.re/go/inference@v0.14.0
 
 ```sql
 CREATE TABLE agent_projects (id TEXT PRIMARY KEY, source_path TEXT NOT NULL UNIQUE, repository_root TEXT NOT NULL, source_branch TEXT NOT NULL, source_revision TEXT NOT NULL, repository_name TEXT NOT NULL UNIQUE, clone_path TEXT NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
-CREATE TABLE agent_runs (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, project_id TEXT NOT NULL, parent_run_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, source_revision TEXT NOT NULL, execution_revision TEXT NOT NULL, accepted_revision TEXT NOT NULL, branch TEXT NOT NULL, worktree TEXT NOT NULL, command_receipt TEXT NOT NULL, run_number INTEGER NOT NULL, attempt INTEGER NOT NULL, process_id BIGINT NOT NULL, status TEXT NOT NULL, exit_code INTEGER NOT NULL, failure_reason TEXT NOT NULL, queued_at TIMESTAMP NOT NULL, started_at TIMESTAMP NOT NULL, finished_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
+CREATE TABLE agent_runs (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, project_id TEXT NOT NULL, parent_run_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, source_revision TEXT NOT NULL, durable_revision TEXT NOT NULL DEFAULT '', execution_revision TEXT NOT NULL, accepted_revision TEXT NOT NULL, branch TEXT NOT NULL, worktree TEXT NOT NULL, command_receipt TEXT NOT NULL, run_number INTEGER NOT NULL, attempt INTEGER NOT NULL, process_id BIGINT NOT NULL, status TEXT NOT NULL, exit_code INTEGER NOT NULL, failure_reason TEXT NOT NULL, queued_at TIMESTAMP NOT NULL, started_at TIMESTAMP NOT NULL, finished_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
 CREATE TABLE agent_events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, work_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, detail_json TEXT NOT NULL, created_at TIMESTAMP NOT NULL);
 CREATE TABLE agent_log_chunks (run_id TEXT NOT NULL, sequence BIGINT NOT NULL, stream TEXT NOT NULL, text TEXT NOT NULL, created_at TIMESTAMP NOT NULL, PRIMARY KEY (run_id, sequence));
 CREATE TABLE agent_questions (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL, created_at TIMESTAMP NOT NULL);
@@ -717,7 +717,7 @@ CREATE INDEX agent_events_run_idx ON agent_events(run_id, created_at, id);
 CREATE INDEX agent_acceptances_work_idx ON agent_acceptances(work_id, updated_at);
 ```
 - [ ] Write migration Good/Bad/Ugly tests for idempotence, transaction rollback, upgrade from version 1, and reopen.
-- [ ] Write Store contract tests for every method, transactionally checked transitions, monotonic log sequences, ordered snapshots, interrupted startup recovery, queue/provider reopen, and concurrent writer serialization.
+- [ ] Write Store contract tests for every method, transactionally checked transitions, monotonic log sequences, ordered snapshots, interrupted startup recovery, queue/provider reopen, and concurrent writer serialization. Round-trip `durable_revision` through every Run insert/load/Snapshot/Continuation path; existing rows default to empty and must never infer push acknowledgement from cached Git tracking state.
 - [ ] Assert SQL tables contain no secret values and repository directory scans contain no LEM state files.
 - [ ] Prove focused tests fail before implementation.
 - [ ] Implement `Store.Commit` as one SQL transaction for every non-nil member, with compare-and-swap status enforcement through `ExpectedStatus`. Derive concurrency from run rows instead of mutable counters.
