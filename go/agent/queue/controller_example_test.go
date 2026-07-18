@@ -67,3 +67,10 @@ func ExampleController_RecordBackoff() {
 	core.Println(state.Provider, state.BackoffReason)
 	// Output: codex quota
 }
+
+func ExampleController_Restore() {
+	controller := exampleQueueController(work.QueueAccepting)
+	result := controller.Restore(work.QueueState{ID: "default", Status: work.QueueFrozen}, nil)
+	core.Println(result.OK)
+	// Output: true
+}

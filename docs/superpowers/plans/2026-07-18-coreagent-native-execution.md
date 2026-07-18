@@ -520,16 +520,16 @@ func (orchestrator *Orchestrator) StopQueue(context.Context) core.Result
 func (orchestrator *Orchestrator) Close() core.Result
 ```
 
-- [ ] Write orchestration tests for existing-project lookup by canonical source, non-mutating project review, separately confirmed ad-hoc Git enablement, unavailable providers, dirty/moved source after review, durable queued record before admission, persistence failure before launch, concurrency order, backoff, Queue Stop drain, Queue Start, live output batches, malformed output, zero/non-zero exits, cancellation grace/escalation, capture failure retention, and idempotent Close.
-- [ ] Use channel-controlled fakes to prove no child starts until the `running` transition is durable and no goroutine/process remains after Close.
-- [ ] Prove startup `Recover` marks queued/preparing/running/cancelling interrupted and starts the queue frozen without automatic launch.
-- [ ] Prove focused tests fail before implementation.
-- [ ] Implement `ReviewProject` and `RegisterProject` as the sole bridge to workspace registration. `ReviewDispatch` remains non-mutating source/provider/command/queue inspection and requires a registered project; launch review carries the exact source revision and redacted command.
-- [ ] Implement Dispatch by revalidating the review, atomically committing the queued run/event, signalling the queue loop, preparing the worktree only after admission, atomically committing preparing/running transitions and provider start state, then launching.
-- [ ] Route each raw launcher line through the selected provider adapter. Batch log chunks at the first of configured byte/time thresholds with monotonic sequence numbers. Persist provider events and parsed backoff immediately; on DuckDB failure cancel the process and fail the run.
-- [ ] On exit, flush logs, classify final envelope plus exit code, capture/push Git, save waiting question only from a valid waiting envelope, and release only durably recoverable worktrees. A zero exit without a valid envelope completes with an `unclassified provider finish` event; a non-zero exit fails even when the envelope is missing.
-- [ ] Implement Close in the approved order and combine errors without abandoning later cleanup.
-- [ ] Add examples and snapshot benchmark; run package/race/benchmark, format, and commit:
+- [x] Write orchestration tests for existing-project lookup by canonical source, non-mutating project review, separately confirmed ad-hoc Git enablement, unavailable providers, dirty/moved source after review, durable queued record before admission, persistence failure before launch, concurrency order, backoff, Queue Stop drain, Queue Start, live output batches, malformed output, zero/non-zero exits, cancellation grace/escalation, capture failure retention, and idempotent Close.
+- [x] Use channel-controlled fakes to prove no child starts until the `running` transition is durable and no goroutine/process remains after Close.
+- [x] Prove startup `Recover` marks queued/preparing/running/cancelling interrupted and starts the queue frozen without automatic launch.
+- [x] Prove focused tests fail before implementation.
+- [x] Implement `ReviewProject` and `RegisterProject` as the sole bridge to workspace registration. `ReviewDispatch` remains non-mutating source/provider/command/queue inspection and requires a registered project; launch review carries the exact source revision and redacted command.
+- [x] Implement Dispatch by revalidating the review, atomically committing the queued run/event, signalling the queue loop, preparing the worktree only after admission, atomically committing preparing/running transitions and provider start state, then launching.
+- [x] Route each raw launcher line through the selected provider adapter. Batch log chunks at the first of configured byte/time thresholds with monotonic sequence numbers. Persist provider events and parsed backoff immediately; on DuckDB failure cancel the process and fail the run.
+- [x] On exit, flush logs, classify final envelope plus exit code, capture/push Git, save waiting question only from a valid waiting envelope, and release only durably recoverable worktrees. A zero exit without a valid envelope completes with an `unclassified provider finish` event; a non-zero exit fails even when the envelope is missing.
+- [x] Implement Close in the approved order and combine errors without abandoning later cleanup.
+- [x] Add examples and snapshot benchmark; run package/race/benchmark, format, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/go

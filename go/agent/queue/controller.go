@@ -282,6 +282,26 @@ func (controller *Controller) RecordBackoff(provider, reason string, until, at t
 	return core.Ok(state)
 }
 
+// Restore replaces mutable controller state with one validated durable snapshot.
+func (controller *Controller) Restore(state work.QueueState, providers []work.ProviderState) core.Result {
+	if controller == nil {
+		return core.Fail(core.NewError("agent queue controller is required"))
+	}
+	controller.mu.Lock()
+	policy := clonePolicy(controller.policy)
+	controller.mu.Unlock()
+	restoredResult := NewController(policy, state, providers)
+	if !restoredResult.OK {
+		return restoredResult
+	}
+	restored := restoredResult.Value.(*Controller)
+	controller.mu.Lock()
+	controller.state = restored.state
+	controller.providers = restored.providers
+	controller.mu.Unlock()
+	return core.Ok(nil)
+}
+
 func validQueueStatus(status work.QueueStatus) bool {
 	return status == work.QueueFrozen || status == work.QueueAccepting || status == work.QueueDraining
 }

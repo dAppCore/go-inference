@@ -276,6 +276,15 @@ func TestNativeBoundaryGuards(t *testing.T) {
 	closed := broken.Close()
 	core.AssertFalse(t, closed.OK)
 	core.AssertContains(t, closed.Error(), "process is required")
+
+	closedLauncher := nativeTestLauncher(t, "PATH")
+	core.AssertTrue(t, closedLauncher.Close().OK)
+	script := nativeTestScript(t, "exit 0\n")
+	start := closedLauncher.Start(context.Background(), provider.Command{
+		Provider: "fake", Executable: script, Dir: core.PathDir(script),
+	}, func(string, string) {})
+	core.AssertFalse(t, start.OK)
+	core.AssertContains(t, start.Error(), "launcher is closed")
 }
 
 func TestNativeActionRoutingAndFailedStart(t *testing.T) {
@@ -340,6 +349,13 @@ func TestNativeCredentialReceiptAndOrdering(t *testing.T) {
 	overlapCommand := launcher.(*nativeLauncher).commandEnvironment(provider.Command{CredentialKeys: []string{"PATH"}})
 	core.AssertTrue(t, overlapCommand.OK, overlapCommand.Error())
 	core.AssertEqual(t, 1, len(overlapCommand.Value.(nativeEnvironment).assignments))
+
+	missingName := "LEM_NATIVE_TEST_MISSING_019F7061"
+	_, missingExists := core.LookupEnv(missingName)
+	core.AssertFalse(t, missingExists)
+	missing := launcher.(*nativeLauncher).commandEnvironment(provider.Command{CredentialKeys: []string{missingName}})
+	core.AssertTrue(t, missing.OK, missing.Error())
+	core.AssertEqual(t, 1, len(missing.Value.(nativeEnvironment).assignments))
 }
 
 func TestNativeCloseDuringStartAndReleaseFailure(t *testing.T) {

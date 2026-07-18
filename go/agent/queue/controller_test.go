@@ -395,3 +395,35 @@ func TestController_Controller_RecordBackoff_Ugly(t *testing.T) {
 	var nilController *Controller
 	core.AssertFalse(t, nilController.RecordBackoff("codex", "quota", at.Add(time.Hour), at).OK)
 }
+
+func TestController_Controller_Restore_Good(t *testing.T) {
+	at := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	controller := mustQueueController(t, controllerTestPolicy(), work.QueueState{ID: "default", Status: work.QueueFrozen}, nil)
+	result := controller.Restore(work.QueueState{
+		ID: "default", Status: work.QueueAccepting, UpdatedAt: at,
+	}, []work.ProviderState{{
+		Provider: "codex", BackoffReason: "quota", BackoffUntil: at.Add(time.Hour), UpdatedAt: at,
+	}})
+	core.AssertTrue(t, result.OK, result.Error())
+	decision := controller.Decide(Candidate{
+		RunID: "run-restore", Provider: "codex", QueuedAt: at,
+	}, Runtime{Now: at})
+	core.AssertTrue(t, decision.OK, decision.Error())
+	core.AssertFalse(t, decision.Value.(Decision).Allowed)
+	core.AssertEqual(t, at.Add(time.Hour), decision.Value.(Decision).NotBefore)
+}
+
+func TestController_Controller_Restore_Bad(t *testing.T) {
+	var controller *Controller
+	core.AssertFalse(t, controller.Restore(work.QueueState{}, nil).OK)
+	controller = mustQueueController(t, controllerTestPolicy(), work.QueueState{ID: "default", Status: work.QueueFrozen}, nil)
+	core.AssertFalse(t, controller.Restore(work.QueueState{ID: "other", Status: work.QueueFrozen}, nil).OK)
+}
+
+func TestController_Controller_Restore_Ugly(t *testing.T) {
+	controller := mustQueueController(t, controllerTestPolicy(), work.QueueState{ID: "default", Status: work.QueueFrozen}, nil)
+	providers := []work.ProviderState{{Provider: "codex"}, {Provider: "codex"}}
+	result := controller.Restore(work.QueueState{ID: "default", Status: work.QueueFrozen}, providers)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "duplicated")
+}
