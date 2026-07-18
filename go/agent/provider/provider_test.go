@@ -312,6 +312,7 @@ func TestProvider_NativeAdapter_Build_Good(t *testing.T) {
 	core.AssertTrue(t, slices.Contains(command.Args, "--search"))
 	core.AssertTrue(t, slices.Contains(command.Args, "network"))
 	core.AssertContains(t, command.Receipt, "codex")
+	core.AssertEqual(t, launch.Worktree, command.Dir)
 
 	launch = providerTestLaunch()
 	launch.UnsafeFlags = []string{"--api-key", "super-secret", "--password=hunter2", "--token", "value"}

@@ -27,6 +27,7 @@ type Launch struct {
 type Command struct {
 	Provider       string
 	Executable     string
+	Dir            string
 	Args           []string
 	Environment    []string
 	CredentialKeys []string
@@ -264,6 +265,7 @@ func (adapter *NativeAdapter) Build(launch Launch) core.Result {
 	command := Command{
 		Provider:       adapter.Name(),
 		Executable:     adapter.config.Executable,
+		Dir:            launch.Worktree,
 		Args:           append([]string(nil), args...),
 		CredentialKeys: append([]string(nil), adapter.config.CredentialEnv...),
 	}
