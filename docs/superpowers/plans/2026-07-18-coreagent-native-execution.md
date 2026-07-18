@@ -850,14 +850,14 @@ git commit -m "feat(tui): review native agent launches"
 - Modify: `cli/tui/palette.go`
 - Modify: `cli/tui/palette_test.go`
 
-- [ ] Write tests for queued/preparing/running/completed/waiting/cancelling/cancelled/failed/interrupted/accepted/rejected rendering; batched stdout/stderr order; refresh while another panel is active; switching Work; attention markers; Answer/Resume; Retry; Queue Start/Stop/draining; cancellation; change diff; conflict; validation pass/fail; no-validation acknowledgement; final confirmation; accept/reject.
-- [ ] Assert provider events are rendered from `agent_events` snapshots and are not copied into `lem_events`; local Work events remain intact.
-- [ ] Assert `--check` does not start Soft Serve, run providers, mutate Git, or admit queued work.
-- [ ] Prove focused tests fail before implementation.
-- [ ] Merge local Work events and live agent snapshots in memory by stable IDs. Render log chunks through the existing viewport/Markdown styles with stdout/stderr distinction and bounded history.
-- [ ] Add answer textarea, changes viewport, validation receipt, and final acceptance overlay states. Every long action returns through `agentActionMsg`, refreshes snapshots, and preserves actionable errors.
-- [ ] Add a one-second refresh command only while non-terminal agent work exists; lifecycle cancellation stops it on shutdown.
-- [ ] Run focused/full TUI tests and race, render checks at narrow/wide sizes, format, and commit:
+- [x] Write tests for queued/preparing/running/completed/waiting/cancelling/cancelled/failed/interrupted/accepted/rejected rendering; batched stdout/stderr order; refresh while another panel is active; switching Work; attention markers; Answer/Resume; Retry; Queue Start/Stop/draining; cancellation; change diff; conflict; validation pass/fail; no-validation acknowledgement; final confirmation; accept/reject.
+- [x] Assert provider events are rendered from `agent_events` snapshots and are not copied into `lem_events`; local Work events remain intact.
+- [x] Assert `--check` does not start Soft Serve, run providers, mutate Git, or admit queued work.
+- [x] Prove focused tests fail before implementation.
+- [x] Merge local Work events and live agent snapshots in memory by stable IDs. Render log chunks through the existing viewport/Markdown styles with stdout/stderr distinction and bounded history.
+- [x] Add answer textarea, changes viewport, validation receipt, and final acceptance overlay states. Every long action returns through `agentActionMsg`, refreshes snapshots, and preserves actionable errors.
+- [x] Add a one-second refresh command only while non-terminal agent work exists; lifecycle cancellation stops it on shutdown.
+- [x] Run focused/full TUI tests and race, render checks at narrow/wide sizes, format, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
