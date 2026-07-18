@@ -188,46 +188,81 @@ already show the identical shape, just diluted by size).
    ordering (`TestSpikeFineGrainedReplayMatchesCoarse`). Dead end, already
    banked as a negative result.
 
-## Fix proposal — NOT implemented this session (scope is architectural)
+## SHIPPED (slice 1) — value-norm barrier prune, +2.3–2.6% on E2B/E4B
 
-The lever the evidence points to is **reducing per-layer dispatch count in
-the ICB replay** (fewer, bigger barriered kernels), e.g.:
+Acting on the barrier-drain root cause, the first bounded slice removes **one
+full-drain `SetBarrier` per gemma4 layer** from the attention half of the ICB
+recorder (`decode_forward_arch_icb.go`, the owner + shared-KV branches).
 
-- Fuse Q/K/V projections (three matvecs reading the same input row) into
-  one wider dispatch.
-- A steady-state (single-row) fusion of FFN gate-proj + GELU + up-proj·mul
-  for the per-token ICB decode step. Note: a *batched* K-row analogue of
-  this already exists for the prefill/MTP-verify epilogue
-  (`engine/metal/ple_gate_gelu.go`'s `lthn_ple_gate_gelu_rows`) — a
-  different kernel/context from the per-token ICB replay path measured
-  here, and the single-row PLE-specific case was already tried and
-  reverted (item 1 above).
-- Investigate coarsening the ICB's `SetBarrier` placement to TRUE
-  dependency edges only (e.g. one barrier per attn-half / FFN-half /
-  PLE-half instead of one per matvec) — distinct from the already-rejected
-  resource-scoped approach, and not obviously ruled out by the existing
-  negative result, but unverified.
+The recorder already relaxes the big-gemv siblings to no-barrier
+(`emitNB`): Q/K/V all read `normed`, so Q barriers and K+V "ride free". The
+gemma4 **value-norm** (`vCache = rms(vCache)` per head) was left as its own
+full-drain barrier because it followed the V-projection with nothing to flush
+it. The fix reorders the K/V prep so V is projected **before** the K-norm-rope:
+the K-norm-rope's barrier then flushes vCache, and the value-norm reads the
+already-flushed row and rides free (`emitNB`). Byte-identical — same ops, same
+data dependencies (SDPA still barriers on qr/kCache/vCache); only the recorded
+order and one barrier flag change. Gated on `valueNormOnes != nil && !qkvBias`
+so non-gemma arches (Qwen qkvBias / llama / mistral) keep the proven order
+untouched.
 
-Every one of these touches `decode_forward_arch_icb.go` /
-`decode_forward_arch_icb_quant.go` — the ICB recording core **shared by
-every gemma4 size** (12B/26B included, via `recordArchICBQuant`/
-`recordArchICBBF16`). A change here needs the full ICB parity suite
-(`TestPipelinedBatchMatchesSerial`, `TestDecodeForwardArchICBQuant*`,
-`TestRealE2BChainedGPUParityAndSpeed`) plus regression coverage on the
-large models, not just E2B/E4B. That is genuine multi-day engine-team
-work with real correctness risk (the two already-tried levers both either
-broke tokens or underperformed) — not a bounded, single-lever, one-session
-fix. Per the brief's own instruction, reporting it here rather than
-attempting it speculatively.
+**Before → after (M3 Ultra, temp 0, 256-token decode, GPU quiet, 3-run best):**
 
-## What was and wasn't done
+| model | quant | before tok/s | after tok/s | Δ |
+|---|---|---:|---:|---:|
+| E2B | qat-4bit | 140.7 | 144.3 | **+2.6%** |
+| E2B | plain 4bit | 168.2 | 172.2 | **+2.4%** |
+| E4B | qat-4bit | 91.7 | 93.8 | **+2.3%** |
 
-- **No code changes.** This doc is the only diff.
-- Correctness gates run and **PASSING** ("...is **Paris**.", greedy,
-  16 tokens) on E2B bf16, E2B qat-4bit and E4B qat-4bit at the exact
-  snapshots used for measurement.
-- All numbers reproducible via the bench recipe in the task brief, plus:
-  `LEM_REAL_E2B=1 MLX_METALLIB_PATH=<repo>/build/dist/lib/mlx.metallib go test -tags metal_runtime -run 'TestRealE2BChainedGPUParityAndSpeed|TestRealE2BWithinLayerOpCost' -v ./engine/metal/`
-  (from `go/`; resolves the plain e2b-it-4bit snapshot automatically, or
-  point `LEM_PROFILE_DIR` at any other dense-ICB gemma4 snapshot for the
-  op-cost breakdown).
+Corroborated by the piece-split instrument: `TestRealE2BChainedGPUParityAndSpeed`
+layer-stack dropped 5.605ms → 5.498ms/token (~0.107ms, ~1 barrier·15 owner
+layers). Commit carries the full receipt.
+
+**Correctness (all gates green):**
+- Full `-run 'ICB|Parity|Chain'` metal suite passes (3 pre-existing
+  allocation-budget failures in `icb.go`/`icb_layer.go` — `NormProjectICB`,
+  `AttentionBlockICB` — fail identically on the clean base; untouched code).
+- `TestRealE2BChainedGPUParityAndSpeed`: host / chained-GPU / pipelined tokens
+  **identical** on the real e2b-4bit weights.
+- Greedy "…is **Paris**." AND a 64-token greedy essay are **byte-identical**
+  before→after on E2B qat-4bit, E2B plain-4bit, and E4B qat-4bit (md5-checked).
+
+The fixed per-token dispatch/barrier tax is shared by every gemma size, so this
+compounds fleet-wide (12B dense owner layers get the same saving).
+
+## Next iterations (bounded, in priority order — for the follow-up campaign)
+
+1. **Second barrier via the full attention-half reorder (~2× this win).**
+   The three post-projection ops — qk-norm-rope(q), k-norm-rope(k),
+   value-norm(v) — are *mutually* independent once Q/K/V are all projected.
+   Emitting the three projections first (Q barriers, K+V `emitNB`), then letting
+   the **qk-norm-rope** be the single flushing barrier, lets BOTH k-norm-rope
+   and value-norm ride free — saving 2 barriers/layer instead of 1
+   (est. ~+4–6% at 4-bit). Slice 1 only moved V within the owner/shared
+   branches; this one must also hoist the K-projection ahead of qk-norm-rope in
+   the **common prefix** (lines ~1882–1897), which is why it was left for a
+   dedicated slice — bigger blast radius across the q8 / K==V-share paths.
+2. **FFN half is already at the emitNB floor** (gate barriers, up rides free;
+   gelu·up → down → residual are a true sequential chain). No slack without a
+   kernel fusion — and the two candidate fusions (input-rms→qmv, gelu-fold into
+   down) are both measured net-zero-or-worse and reverted (see above). Skip.
+3. **PLE tail (5 sequential barriered ops)** is a genuine dependency chain with
+   no sibling slack; the one available fusion (post-norm residual) diverges
+   ~2 ULP and is byte-parity-hostile (already reverted). Not worth pursuing.
+
+All of these touch the ICB recording core shared by every gemma4 size, so each
+needs the full ICB parity suite + `TestRealE2BChainedGPUParityAndSpeed` +
+large-model regression before landing — one bounded slice at a time, measured,
+as slice 1 was.
+
+## Reproduce
+
+- Bench: the recipe in the task brief (`bin/lem generate -temp 0
+  -max-tokens 256 …`), read the `decode N tok/s` line; run on a quiet GPU
+  (`pgrep -f "lem generate"` empty).
+- Parity: `MLX_METALLIB_PATH=<repo>/build/dist/lib/mlx.metallib go test -tags metal_runtime ./engine/metal/ -run 'ICB|Parity|Chain' -count=1`
+  (from `go/`).
+- Piece split / real-model parity: add `LEM_REAL_E2B=1` and
+  `-run 'TestRealE2BChainedGPUParityAndSpeed|TestRealE2BWithinLayerOpCost' -v`
+  (resolves the plain e2b-it-4bit snapshot automatically; `LEM_PROFILE_DIR`
+  aims the op-cost breakdown at any other dense-ICB gemma4 snapshot).

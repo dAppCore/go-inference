@@ -1927,6 +1927,18 @@ func recordArchICB(
 				emitKVQ8Store(fastICBSink{cvs}, kvQ8StoreICB, vStageQ8, vCaches[li], 0, kvQ8.vScales[li], 0, kvdOf(li))
 				vStoreIdx[li] = opIdx - 1
 			} else if owns {
+				// gemma4 value-norm barrier prune: with a value-norm following, project V FIRST
+				// (emitNB, sibling of q/k reading `normed`) so the K-norm-rope's full-drain barrier
+				// below flushes vCache — the value-norm then reads the already-flushed row and rides
+				// free (emitNB) instead of paying its own ~7.5µs full-drain barrier/layer. Byte-identical:
+				// same ops + data deps (SDPA still barriers on qr/kCache/vCache). Qwen (qkvBias) keeps the
+				// proven order — its V-bias sits between V-proj and value-norm, so V-proj stays after K-rope.
+				vFirst := valueNormOnes != nil && !lay.qkvBias
+				if vFirst {
+					cv := emitNB()
+					recInputProj(cv, li, inBuf, anwBufs[li], normed, vCaches[li], 0, vProjOf(li)) // -> vCache @ row pos (rebound/token)
+					vIdx[li] = opIdx - 1
+				}
 				if fuseK {
 					ck := emit()
 					setQKNormRope(ck, kProj, 0, kNormBufs[li], kCaches[li], 0, kvOf(li), li) // kNorm+rope -> kCache @ row pos (rebound/token)
@@ -1939,20 +1951,35 @@ func recordArchICB(
 					setRope(ck, kProj, kCaches[li], kvOf(li), li) // -> kCache @ row pos (rebound/token)
 					kRopeIdx[li] = opIdx - 1
 				}
-				cv := emitNB()                                                                // 2nd consumer of `normed` (q barriered it) — overlap
-				recInputProj(cv, li, inBuf, anwBufs[li], normed, vCaches[li], 0, vProjOf(li)) // -> vCache @ row pos (rebound/token); K==V layers project via wK
-				vIdx[li] = opIdx - 1
-				if lay.qkvBias { // Qwen2 additive V bias on the new cache V row — rebound to rowOff/token like vIdx (see prepareStepRebind)
-					cvb := emit()
-					setBinOffsets(cvb, addPSO, vCaches[li], 0, vBiasBufs[li], 0, vCaches[li], 0, kvOf(li)*hdOf(li))
-					vBiasIdx[li] = opIdx - 1
+				if !vFirst {
+					cv := emitNB()                                                                // 2nd consumer of `normed` (q barriered it) — overlap
+					recInputProj(cv, li, inBuf, anwBufs[li], normed, vCaches[li], 0, vProjOf(li)) // -> vCache @ row pos (rebound/token); K==V layers project via wK
+					vIdx[li] = opIdx - 1
+					if lay.qkvBias { // Qwen2 additive V bias on the new cache V row — rebound to rowOff/token like vIdx (see prepareStepRebind)
+						cvb := emit()
+						setBinOffsets(cvb, addPSO, vCaches[li], 0, vBiasBufs[li], 0, vCaches[li], 0, kvOf(li)*hdOf(li))
+						vBiasIdx[li] = opIdx - 1
+					}
 				}
 				if valueNormOnes != nil { // gemma4 value-norm on the new V row (per head; rebound/token)
-					cvn := emit()
+					var cvn metal.MTLIndirectComputeCommand
+					if vFirst { // vCache flushed by the K-norm-rope barrier above → the value-norm rides free
+						cvn = emitNB()
+					} else {
+						cvn = emit()
+					}
 					setRMSRows(cvn, vCaches[li], valueNormOnes, vCaches[li], kvOf(li), hdOf(li))
 					vNormIdx[li] = opIdx - 1
 				}
 			} else {
+				// Shared-KV layer: the same op layout as the owner branch (throwaway K/V keep the ICB
+				// stride uniform), so it takes the same value-norm reorder — V-proj first, value-norm
+				// rides free after the K-rope barrier. The outputs are discarded, so this is trivially
+				// byte-safe; matching the owner order keeps the recorded op sequence uniform per layer.
+				vFirst := valueNormOnes != nil && !lay.qkvBias
+				if vFirst {
+					recInputProj(emitNB(), li, inBuf, anwBufs[li], normed, vThrow, 0, vProjOf(li)) // discarded; sibling of `normed` — overlap
+				}
 				if fuseK {
 					setQKNormRope(emit(), kProj, 0, kNormBufs[li], kThrow, 0, kvOf(li), li) // kNorm+rope -> discard
 				} else {
@@ -1961,12 +1988,18 @@ func recordArchICB(
 					}
 					setRope(emit(), kProj, kThrow, kvOf(li), li) // discarded
 				}
-				recInputProj(emitNB(), li, inBuf, anwBufs[li], normed, vThrow, 0, vProjOf(li)) // discarded; 2nd consumer of `normed` — overlap
-				if lay.qkvBias {                                                               // Qwen2 additive V bias on the discarded V (keeps the op layout uniform)
-					setBin(emit(), addPSO, vThrow, vBiasBufs[li], vThrow, kvOf(li)*hdOf(li))
+				if !vFirst {
+					recInputProj(emitNB(), li, inBuf, anwBufs[li], normed, vThrow, 0, vProjOf(li)) // discarded; 2nd consumer of `normed` — overlap
+					if lay.qkvBias {                                                               // Qwen2 additive V bias on the discarded V (keeps the op layout uniform)
+						setBin(emit(), addPSO, vThrow, vBiasBufs[li], vThrow, kvOf(li)*hdOf(li))
+					}
 				}
 				if valueNormOnes != nil {
-					setRMSRows(emit(), vThrow, valueNormOnes, vThrow, kvOf(li), hdOf(li)) // discarded (keeps the op layout uniform)
+					if vFirst { // discarded; rides free after the K-rope barrier (mirrors the owner branch)
+						setRMSRows(emitNB(), vThrow, valueNormOnes, vThrow, kvOf(li), hdOf(li))
+					} else {
+						setRMSRows(emit(), vThrow, valueNormOnes, vThrow, kvOf(li), hdOf(li)) // discarded (keeps the op layout uniform)
+					}
 				}
 			}
 			// SDPA over the owner's cache; sliding layers read the windowed slice.
