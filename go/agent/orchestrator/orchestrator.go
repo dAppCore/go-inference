@@ -76,6 +76,7 @@ type Orchestrator struct {
 	closeResult   core.Result
 	lifecycle     sync.RWMutex
 	queueMu       sync.Mutex
+	decisionMu    sync.Mutex
 
 	mu         sync.Mutex
 	runs       map[string]Process

@@ -41,6 +41,7 @@ type ValidationResult struct {
 // AcceptRequest carries the reviewed receipt plus explicit final confirmation.
 type AcceptRequest struct {
 	Review    ChangeReview
+	Project   work.Project
 	Confirmed bool
 }
 
@@ -51,15 +52,19 @@ type reviewState struct {
 }
 
 type application struct {
-	manager *Manager
-	review  ChangeReview
-	state   reviewState
+	manager  *Manager
+	review   ChangeReview
+	state    reviewState
+	advanced bool
 }
 
 // Rollback restores the clean reviewed source if the durable decision cannot commit.
 func (applied application) Rollback(ctx context.Context) core.Result {
 	if applied.manager == nil || ctx == nil {
 		return core.Fail(core.NewError("agent workspace acceptance rollback requires manager and context"))
+	}
+	if !applied.advanced {
+		return core.Ok(nil)
 	}
 	applied.manager.mu.Lock()
 	defer applied.manager.mu.Unlock()
@@ -211,8 +216,7 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 				if len(review.Conflicts) == 0 {
 					return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to replay exact agent range", integrated.Err()))
 				}
-				manager.reviews[review.RunID] = reviewState{review: review, sourcePath: project.RepositoryRoot, clonePath: project.ClonePath}
-				return core.Ok(review)
+				return core.Ok(cloneChangeReview(review))
 			}
 		}
 	}
@@ -227,8 +231,7 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	}
 	review.Diff = diff.Value.(string)
 	review.Validation = runValidation(ctx, integrationPath, validation)
-	manager.reviews[review.RunID] = reviewState{review: review, sourcePath: project.RepositoryRoot, clonePath: project.ClonePath}
-	return core.Ok(review)
+	return core.Ok(cloneChangeReview(review))
 }
 
 // Apply advances the unchanged reviewed source to the already validated result.
@@ -247,12 +250,12 @@ func (manager *Manager) Apply(ctx context.Context, request AcceptRequest) core.R
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	review := request.Review
-	state, exists := manager.reviews[review.RunID]
-	if !exists || core.JSONMarshalString(state.review) != core.JSONMarshalString(review) {
-		return core.Fail(core.NewError("agent workspace acceptance review is unknown or changed"))
+	verified := manager.verifyChangeReview(ctx, request.Project, request.Review)
+	if !verified.OK {
+		return verified
 	}
-	review = state.review
+	state := verified.Value.(reviewState)
+	review := state.review
 	if !completeChangeReview(review) || len(review.Conflicts) != 0 {
 		return core.Fail(core.NewError("agent workspace acceptance review is incomplete or conflicted"))
 	}
@@ -283,7 +286,7 @@ func (manager *Manager) Apply(ctx context.Context, request AcceptRequest) core.R
 	if !applied.OK {
 		return core.Fail(core.E("workspace.Manager.Apply", "failed to fast-forward source to validated result", applied.Err()))
 	}
-	return core.Ok(application{manager: manager, review: review, state: state})
+	return core.Ok(application{manager: manager, review: review, state: state, advanced: true})
 }
 
 // Reject acknowledges a reviewed result while retaining all internal Git history.
@@ -319,6 +322,66 @@ func completeChangeReview(review ChangeReview) bool {
 		core.Trim(review.SourceRevision) != "" && core.Trim(review.AgentBase) != "" && core.Trim(review.AgentTip) != "" &&
 		core.Trim(review.IntegrationBranch) != "" && core.Trim(review.IntegrationPath) != "" &&
 		core.Trim(review.ResultRevision) != ""
+}
+
+func cloneChangeReview(review ChangeReview) ChangeReview {
+	cloned := review
+	cloned.Validation = make([]ValidationResult, len(review.Validation))
+	for index, validation := range review.Validation {
+		cloned.Validation[index] = validation
+		cloned.Validation[index].Command = Command{
+			Dir: validation.Command.Dir, Executable: validation.Command.Executable,
+			Args:        append([]string(nil), validation.Command.Args...),
+			Environment: append([]string(nil), validation.Command.Environment...),
+		}
+	}
+	cloned.Conflicts = append([]string(nil), review.Conflicts...)
+	return cloned
+}
+
+func (manager *Manager) verifyChangeReview(ctx context.Context, project work.Project, supplied ChangeReview) core.Result {
+	review := cloneChangeReview(supplied)
+	if !completeChangeReview(review) || len(review.Conflicts) != 0 {
+		return core.Fail(core.NewError("agent workspace acceptance review is incomplete or conflicted"))
+	}
+	if validated := manager.validateReviewProject(project); !validated.OK {
+		return validated
+	}
+	if project.SourceBranch != review.SourceBranch {
+		return core.Fail(core.NewError("agent workspace acceptance project branch differs from review"))
+	}
+	integrationPathResult := manager.internalAbsolute(review.IntegrationPath)
+	if !integrationPathResult.OK || integrationPathResult.Value.(string) != review.IntegrationPath {
+		return core.Fail(core.NewError("agent workspace acceptance integration path is outside the internal root"))
+	}
+	commonResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if !commonResult.OK {
+		return core.Fail(core.E("workspace.Manager.Apply", "failed to resolve integration repository", commonResult.Err()))
+	}
+	clonePath := core.Trim(commonResult.Value.(string))
+	cloneResult := manager.internalAbsolute(clonePath)
+	if !cloneResult.OK || cloneResult.Value.(string) != project.ClonePath || clonePath != project.ClonePath || core.PathBase(clonePath) != "repo.git" {
+		return core.Fail(core.NewError("agent workspace acceptance cached clone is outside the internal root"))
+	}
+	branchResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "symbolic-ref", "--short", "HEAD")
+	headResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "rev-parse", "HEAD")
+	statusResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "status", "--porcelain=v1", "--untracked-files=all")
+	if !branchResult.OK || !headResult.OK || !statusResult.OK || core.Trim(branchResult.Value.(string)) != review.IntegrationBranch ||
+		core.Trim(headResult.Value.(string)) != review.ResultRevision || core.Trim(statusResult.Value.(string)) != "" {
+		return core.Fail(core.NewError("agent workspace acceptance integration Git facts changed"))
+	}
+	agentAncestor := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "merge-base", "--is-ancestor", review.AgentBase, review.AgentTip)
+	resultAncestor := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "merge-base", "--is-ancestor", review.SourceRevision, review.ResultRevision)
+	if !agentAncestor.OK || !resultAncestor.OK {
+		return core.Fail(core.NewError("agent workspace acceptance revision ancestry changed"))
+	}
+	commitLog := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath,
+		"log", "--reverse", "--format=%H%x09%s", core.Concat(review.AgentBase, "..", review.AgentTip))
+	diff := manager.gitOutput(ctx, review.IntegrationPath, nil, "diff", "--binary", review.SourceRevision, review.ResultRevision)
+	if !commitLog.OK || !diff.OK || core.Trim(commitLog.Value.(string)) != review.CommitLog || diff.Value.(string) != review.Diff {
+		return core.Fail(core.NewError("agent workspace acceptance commit or diff receipt changed"))
+	}
+	return core.Ok(reviewState{review: cloneChangeReview(review), sourcePath: project.RepositoryRoot, clonePath: clonePath})
 }
 
 func runValidation(ctx context.Context, directory string, configured []queue.Command) []ValidationResult {

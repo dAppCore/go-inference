@@ -220,11 +220,15 @@ func TestAccept_Manager_Apply_Good(t *testing.T) {
 	reviewResult := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil)
 	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
 	review := reviewResult.Value.(ChangeReview)
-	result := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Confirmed: true})
+	result := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
 	core.AssertTrue(t, result.OK, result.Error())
 	core.AssertEqual(t, tip, workspaceRunGit(t, fixture.runner, fixture.source, "rev-parse", "HEAD"))
-	repeated := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Confirmed: true})
+	repeated := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
 	core.AssertTrue(t, repeated.OK, repeated.Error())
+	beforeRollback := acceptanceSourceSnapshot(t, fixture)
+	rolledBack := repeated.Value.(application).Rollback(context.Background())
+	core.AssertTrue(t, rolledBack.OK, rolledBack.Error())
+	core.AssertEqual(t, beforeRollback, acceptanceSourceSnapshot(t, fixture))
 }
 
 func TestAccept_Manager_Apply_Bad(t *testing.T) {
@@ -237,8 +241,26 @@ func TestAccept_Manager_Apply_Bad(t *testing.T) {
 	core.AssertEqual(t, before, acceptanceSourceSnapshot(t, fixture))
 	failed := review
 	failed.Validation = []ValidationResult{{Passed: false}}
-	core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Review: failed, Confirmed: true}).OK)
+	core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Review: failed, Project: fixture.project, Confirmed: true}).OK)
 	core.AssertEqual(t, before, acceptanceSourceSnapshot(t, fixture))
+}
+
+func TestAcceptPreparedReviewSurvivesManagerRestart(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	tip := fixture.agentCommit(t, "restart.txt", "restart\n", "agent restart")
+	fixture.capture(t)
+	reviewResult := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil)
+	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+	review := reviewResult.Value.(ChangeReview)
+	reopenedResult := NewManager(ManagerOptions{
+		Root: fixture.root, Files: fixture.files, Git: fixture.runner, Server: fixture.server,
+		IDs: func() string { return "reopened-review" }, Now: fixture.manager.now,
+	})
+	core.AssertTrue(t, reopenedResult.OK, reopenedResult.Error())
+	reopened := reopenedResult.Value.(*Manager)
+	applied := reopened.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
+	core.AssertTrue(t, applied.OK, applied.Error())
+	core.AssertEqual(t, tip, workspaceRunGit(t, fixture.runner, fixture.source, "rev-parse", "HEAD"))
 }
 
 func TestAccept_Manager_Apply_Ugly(t *testing.T) {
@@ -246,7 +268,7 @@ func TestAccept_Manager_Apply_Ugly(t *testing.T) {
 	fixture.agentCommit(t, "accepted.txt", "accepted\n", "agent accepted")
 	fixture.capture(t)
 	review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
-	core.AssertFalse(t, fixture.manager.Apply(nil, AcceptRequest{Review: review, Confirmed: true}).OK)
+	core.AssertFalse(t, fixture.manager.Apply(nil, AcceptRequest{Review: review, Project: fixture.project, Confirmed: true}).OK)
 	core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Confirmed: true}).OK)
 }
 
@@ -258,7 +280,7 @@ func TestAcceptApplyRejectsMovedOrDirtySourceWithoutPreparingAnything(t *testing
 		review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
 		fixture.sourceCommit(t, "moved.txt", "moved\n", "source moved")
 		before := acceptanceSourceSnapshot(t, fixture)
-		core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Confirmed: true}).OK)
+		core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true}).OK)
 		core.AssertEqual(t, before, acceptanceSourceSnapshot(t, fixture))
 	})
 	t.Run("dirty", func(t *testing.T) {
@@ -268,7 +290,7 @@ func TestAcceptApplyRejectsMovedOrDirtySourceWithoutPreparingAnything(t *testing
 		review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
 		workspaceWriteFile(t, core.PathJoin(fixture.source, "dirty.txt"), "dirty\n")
 		before := acceptanceSourceSnapshot(t, fixture)
-		core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Confirmed: true}).OK)
+		core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true}).OK)
 		core.AssertEqual(t, before, acceptanceSourceSnapshot(t, fixture))
 	})
 }
