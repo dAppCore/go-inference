@@ -1170,6 +1170,10 @@ type MoEQuantLayerWeights struct {
 	perExpertScaleView bufView
 
 	ExpGate, ExpUp, ExpGateUp, ExpDown QuantWeight // batched SwitchGLU experts (ExpertDFF)
+	// Shared expert (qwen3_5_moe): a single always-on dense SwiGLU (SharedGate/Up/Down) + a σ gate
+	// (SharedSigmoid, [1×dModel]) added to the routed output. A bound SharedGate MARKS a qwen MoE layer,
+	// which decodes on the host (encQwenMoEHalf) rather than the gemma device MoE (#18).
+	SharedGate, SharedUp, SharedDown, SharedSigmoid QuantWeight
 }
 
 type mlpTransformScratch struct {

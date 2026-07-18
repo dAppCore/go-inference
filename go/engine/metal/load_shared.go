@@ -96,6 +96,10 @@ func moeToQuant(e *model.LoadedMoE, experts, topK, expertFF, dModel int, fuseGat
 		ExpUp:             qw(e.ExpUp),
 		ExpGateUp:         qw(e.ExpGateUp),
 		ExpDown:           qw(e.ExpDown),
+		SharedGate:        qw(e.SharedGate),
+		SharedUp:          qw(e.SharedUp),
+		SharedDown:        qw(e.SharedDown),
+		SharedSigmoid:     qw(e.SharedSigmoid),
 	}
 	if e.ExpGate != nil {
 		q.ExpertGroupSize, q.ExpertBits = e.ExpGate.GroupSize, e.ExpGate.Bits

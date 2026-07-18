@@ -1604,7 +1604,22 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		if li < len(s.moeQuant) {
 			moeQ = s.moeQuant[li]
 		}
-		if moeW := s.moeWeights[li]; moeQ != nil || moeW != nil {
+		if moeQ != nil && len(moeQ.SharedGate.Packed) > 0 {
+			// qwen3_5_moe — host MoE forward (SiLU switch-MLP experts + the always-on shared expert),
+			// correctness-first, same flush/resume shape as the gated mixer. The gemma device MoE below
+			// assumes gemma's five sandwich norms / GELU / router.scale, none of which qwen has, so a qwen
+			// MoE layer (marked by a bound shared expert) intercepts here and writes the layer output to out.
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			if err := s.encQwenMoEHalf(li, moeQ, out); err != nil {
+				return nil, err
+			}
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
+		} else if moeW := s.moeWeights[li]; moeQ != nil || moeW != nil {
 			enc = s.profSeam(cb, enc, "moe.router")
 			// Fully-encoded lane first (session-owned scratches, device router + gathered
 			// experts): the WHOLE block encodes into the LIVE encoder — no command-buffer
