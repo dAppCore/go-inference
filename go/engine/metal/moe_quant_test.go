@@ -166,6 +166,78 @@ func TestMoEExpertsQuantSiLU(t *testing.T) {
 	t.Logf("4-bit batched SwiGLU experts: silu(gate)·up ≡ composed SiLU reference, distinct from the GELU sibling")
 }
 
+// TestEncQwenMoESharedExpertMatchesDevice gates the qwen3_5_moe shared-expert FUSION in encQwenMoEHalf
+// (arch_qwen_moe.go): the always-on shared expert now rides the SAME batched MoEExpertsQuantSiLU kernel as
+// the routed experts, as a degenerate numExperts=topK=1 call whose sole combine weight IS
+// σ(x·SharedSigmoid) — fusing the gate scale into the ONE dispatch instead of a separate host multiply
+// (was 3 quant-seam round trips: gate, up, down, then a host σ multiply).
+//
+// The oracle is swigluSiLUHost×σ — the pre-fusion reference this code path replaces. The two are NOT
+// expected to be byte-identical: swigluSiLUHost's SiLU runs as one continuous host float64 expression (a
+// single bf16 rounding, at the down-projection's quant seam), while the device kernel's encSiLUGateMulBF16
+// composes σ(gate)/gate·σ(gate)/·up as three SEPARATE bf16-rounded dispatches — a different (coarser-
+// grained) rounding schedule at the same bf16 boundary the model already serves at. A handful of bf16 ULP
+// of drift from that is expected, not a defect; anything beyond it would mean the fused call is wired to
+// the wrong weight/expert/activation, which greedy decode's argmax could hide.
+func TestEncQwenMoESharedExpertMatchesDevice(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const D, sharedFF, gs, bits = 64, 32, 32, 4
+	mk := func(n, salt int) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = float32((i*salt+11)%89-44) * 0.02
+		}
+		return s
+	}
+	sGate := QuantWeight{GroupSize: gs, Bits: bits}
+	sGate.Packed, sGate.Scales, sGate.Biases = quantizeProj(t, sharedFF, D, gs, bits, 17)
+	sUp := QuantWeight{GroupSize: gs, Bits: bits}
+	sUp.Packed, sUp.Scales, sUp.Biases = quantizeProj(t, sharedFF, D, gs, bits, 29)
+	sDown := QuantWeight{GroupSize: gs, Bits: bits}
+	sDown.Packed, sDown.Scales, sDown.Biases = quantizeProj(t, D, sharedFF, gs, bits, 41)
+
+	x := mk(D, 5)
+	const sigma = 0.63 // arbitrary, non-trivial (≠0, ≠1) σ — proves the gate scale is genuinely consumed
+
+	// host reference: the pre-fusion path this replaces — swigluSiLUHost, then a host σ multiply.
+	seF32, err := swigluSiLUHost(x, sGate, sUp, sDown, D, sharedFF)
+	if err != nil {
+		t.Fatalf("swigluSiLUHost: %v", err)
+	}
+	expected := make([]float32, D)
+	for d := range expected {
+		expected[d] = seF32[d] * sigma
+	}
+	expectedBF := f32ToBf16Slice(expected)
+
+	// device: the fused degenerate 1-of-1 MoEExpertsQuantSiLU call encQwenMoEHalf now makes, weighted by σ.
+	xBF := f32ToBf16Slice(x)
+	sr := f32ToBF16(sigma)
+	gotBF, err := MoEExpertsQuantSiLU(xBF, []int32{0}, []byte{byte(sr), byte(sr >> 8)}, sGate, sUp, sDown, 1, 1, D, sharedFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantSiLU (shared 1-of-1): %v", err)
+	}
+
+	worst, at := bf16UlpDist(gotBF, expectedBF)
+	t.Logf("shared-expert fused call vs host swigluSiLUHost×σ: worst %d bf16 ULP at elem %d", worst, at)
+	if worst > 4 {
+		t.Fatalf("shared-expert fused call diverges from the host reference by %d bf16 ULP at elem %d — beyond the expected bf16-rounding-schedule tolerance, likely a wiring bug (wrong weight/expert/activation), not rounding", worst, at)
+	}
+
+	// non-vacuous: a different σ must move the output — proves the combine weight is genuinely the gate,
+	// not a hardcoded 1.0 (the bug this fusion would silently produce if the weight argument were dropped).
+	sr2 := f32ToBF16(0.2)
+	other, err := MoEExpertsQuantSiLU(xBF, []int32{0}, []byte{byte(sr2), byte(sr2 >> 8)}, sGate, sUp, sDown, 1, 1, D, sharedFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantSiLU (shared 1-of-1, σ=0.2): %v", err)
+	}
+	if bytes.Equal(gotBF, other) {
+		t.Fatal("different σ produced the same output — the combine weight is not wired to the gate")
+	}
+}
+
 func TestMoEExpertsQuantBindsWholeBatchedExpertTensors(t *testing.T) {
 	requireNativeRuntime(t)
 	resetResidentBufsForTest()

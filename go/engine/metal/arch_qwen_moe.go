@@ -12,34 +12,21 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// arch_qwen_moe.go decodes a qwen3_5_moe MoE FFN layer on the HOST — the SiLU switch-MLP routed experts +
-// the always-on shared expert. The gemma DEVICE MoE (encMoEBlockQuantDevice) can't serve it: gemma's block
-// assumes five sandwich norms, GELU experts and a router.scale, none of which qwen has. Correctness-first,
-// ported from model/composed MoEMLP.forward: PreFFNorm(=post_attention_layernorm) → softmax top-k router →
-// Σ_k w_k·SwiGLU_silu(expert_k) + σ(x·SharedSigmoid)·SwiGLU_silu(shared) → residual. A qwen MoE layer is
-// marked by a bound shared expert, so gemma's device MoE is untouched. Device fusion is a later slice.
-
-// sliceExpertRows returns a VIEW of expert e's rows in a batched [totalRows, K] quant weight. The per-row
-// packed/scales/biases byte strides are derived dtype-agnostically as len(bytes)/totalRows, so it needs no
-// knowledge of the scale/bias element type — no copy, the views alias the batched weight's bytes.
-func sliceExpertRows(w QuantWeight, e, totalRows, rowsPerExpert int) QuantWeight {
-	rp := len(w.Packed) / totalRows
-	rs := len(w.Scales) / totalRows
-	off := e * rowsPerExpert
-	out := QuantWeight{
-		GroupSize: w.GroupSize, Bits: w.Bits,
-		Packed: w.Packed[off*rp : (off+rowsPerExpert)*rp],
-		Scales: w.Scales[off*rs : (off+rowsPerExpert)*rs],
-	}
-	if len(w.Biases) > 0 {
-		rb := len(w.Biases) / totalRows
-		out.Biases = w.Biases[off*rb : (off+rowsPerExpert)*rb]
-	}
-	return out
-}
+// arch_qwen_moe.go decodes a qwen3_5_moe MoE FFN layer for the factory session — the SiLU switch-MLP routed
+// experts + the always-on shared expert. The gemma DEVICE MoE (encMoEBlockQuantDevice) can't serve it:
+// gemma's block assumes five sandwich norms, GELU experts and a router.scale, none of which qwen has.
+// PreFFNorm(=post_attention_layernorm) → softmax top-k router (host-orchestrated, one device round trip via
+// projQuantAttn) → ONE MoEExpertsQuantSiLU dispatch over the routed top-K → ONE degenerate-1-of-1
+// MoEExpertsQuantSiLU dispatch for σ(x·SharedSigmoid)·SwiGLU_silu(shared) → residual. Was topK×3 + 3
+// per-projection quant-seam round trips (host loop over sliceExpertRows + swigluSiLUHost); now 2 batched
+// device dispatches — the batched ExpGate/ExpUp/ExpDown tensors are addressed by byte offset inside the
+// kernel, so no host-side row-slicing is needed. A qwen MoE layer is marked by a bound shared expert, so
+// gemma's device MoE is untouched.
 
 // swigluSiLUHost computes down @ (silu(gate@x) · (up@x)) for one [d] row — a single expert's SiLU SwiGLU
-// through the host quant matmul seam. gate/up are [ff,d], down is [d,ff].
+// through the host quant matmul seam. gate/up are [ff,d], down is [d,ff]. No longer on the decode path
+// (see encQwenMoEHalf) — kept as the correctness oracle for TestEncQwenMoESharedExpertMatchesDevice, which
+// pins the fused device shared-expert call against this reference.
 func swigluSiLUHost(x []float32, gate, up, down QuantWeight, d, ff int) ([]float32, error) {
 	g, err := projQuantAttn(gate, x, d, ff, nil)
 	if err != nil {
@@ -79,7 +66,8 @@ func sharedGateSigmoid(w QuantWeight, x []float32, d int) (float64, error) {
 }
 
 // encQwenMoEHalf computes one qwen3_5_moe MoE FFN for a single decode token: reads the post-mixer residual
-// from hBuf, writes the layer output (h + routed + shared) to out. Host path (correctness-first).
+// from hBuf, writes the layer output (h + routed + shared) to out. Router stays host-orchestrated (one
+// device round trip); the routed top-K and the shared expert are each ONE MoEExpertsQuantSiLU dispatch.
 func (s *archDecodeState) encQwenMoEHalf(li int, moe *MoEQuantLayerWeights, out metal.MTLBuffer) error {
 	if moe == nil {
 		return core.NewError("native.encQwenMoEHalf: nil MoE weights")
@@ -129,36 +117,40 @@ func (s *archDecodeState) encQwenMoEHalf(li int, moe *MoEQuantLayerWeights, out 
 		denom = 1
 	}
 
-	// Routed experts: Σ_k (probs[k]/denom) · SwiGLU_silu(expert_k). The batched switch_mlp is sliced per
-	// selected expert — gate/up are [nE·ff, D], down is [nE·D, ff].
-	acc := make([]float32, D)
-	for _, e := range sel {
-		w := probs[e] / denom
-		ge := sliceExpertRows(moe.ExpGate, e, nE*ff, ff)
-		ue := sliceExpertRows(moe.ExpUp, e, nE*ff, ff)
-		de := sliceExpertRows(moe.ExpDown, e, nE*D, D)
-		eo, err := swigluSiLUHost(normed, ge, ue, de, D, ff)
-		if err != nil {
-			return err
-		}
-		for d := 0; d < D; d++ {
-			acc[d] += float32(w * float64(eo[d]))
-		}
+	// Routed experts: ONE device dispatch computes Σ_k (probs[k]/denom) · SwiGLU_silu(expert_k) over the
+	// BATCHED [nE·ff,D]/[nE·D,ff] switch_mlp tensors — MoEExpertsQuantSiLU addresses each selected expert's
+	// rows by byte offset internally, so no host-side slicing (was topK×3 quant-seam round trips per layer).
+	normedBF := f32ToBf16Slice(normed)
+	selK := len(sel)
+	idx := make([]int32, selK)
+	wts := make([]byte, selK*bf16Size)
+	for i, e := range sel {
+		idx[i] = int32(e)
+		r := f32ToBF16(float32(probs[e] / denom))
+		wts[2*i], wts[2*i+1] = byte(r), byte(r>>8)
 	}
+	routedBytes, err := MoEExpertsQuantSiLU(normedBF, idx, wts, moe.ExpGate, moe.ExpUp, moe.ExpDown, nE, selK, D, ff, moe.ExpGate.GroupSize, moe.ExpGate.Bits)
+	if err != nil {
+		return err
+	}
+	acc := bf16ToF32Slice(routedBytes)
 
-	// Shared expert: σ(normed·SharedSigmoid) · SwiGLU_silu(shared). Shared FF == moe_intermediate (ff).
+	// Shared expert: the SAME kernel as a degenerate 1-of-1 call — numExperts=topK=1, the combine weight IS
+	// σ(normed·SharedSigmoid), so the gate scale fuses into the dispatch instead of a separate host multiply.
+	// Shared FF == moe_intermediate (ff).
 	if len(moe.SharedGate.Packed) > 0 {
-		se, err := swigluSiLUHost(normed, moe.SharedGate, moe.SharedUp, moe.SharedDown, D, ff)
-		if err != nil {
-			return err
-		}
 		g, err := sharedGateSigmoid(moe.SharedSigmoid, normed, D)
 		if err != nil {
 			return err
 		}
-		gf := float32(g)
+		sr := f32ToBF16(float32(g))
+		sharedBytes, err := MoEExpertsQuantSiLU(normedBF, []int32{0}, []byte{byte(sr), byte(sr >> 8)}, moe.SharedGate, moe.SharedUp, moe.SharedDown, 1, 1, D, ff, moe.SharedGate.GroupSize, moe.SharedGate.Bits)
+		if err != nil {
+			return err
+		}
+		se := bf16ToF32Slice(sharedBytes)
 		for d := 0; d < D; d++ {
-			acc[d] += gf * se[d]
+			acc[d] += se[d]
 		}
 	}
 
