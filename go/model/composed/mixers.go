@@ -235,6 +235,32 @@ func (m *gatedDeltaMixer) chainQuantLayer(ctx any, inputNorm, postNorm []float32
 	return gatedDeltaState{sc: sc}, nil
 }
 
+// chainableMoEQuant reports whether this gated-delta layer, whose FFN is a MoE, can ride the chained
+// device path over packed weights — chainableQuant's gated-delta conditions plus the MoE tail's
+// recordability (batched experts + lean gather present).
+func (m *gatedDeltaMixer) chainableMoEQuant(moe *MoEMLP) bool {
+	return GatedDeltaQuantChainMoELayerDevice != nil && MoEChainRecordable != nil && MoEChainRecordable(moe) &&
+		qwen3.GatedDeltaChainGeometryOK != nil && qwen3.GatedDeltaChainGeometryOK(m.cfg) &&
+		m.w.InProjQKVQ != nil && m.w.InProjAQ != nil && m.w.InProjBQ != nil && m.w.InProjZQ != nil && m.w.OutProjQ != nil
+}
+
+// chainQuantMoELayer encodes this gated-delta layer + its MoE FFN tail onto the chain over packed
+// weights — the MoE twin of chainQuantLayer.
+func (m *gatedDeltaMixer) chainQuantMoELayer(ctx any, inputNorm, postNorm []float32, moe *MoEMLP, eps float32, prior any) (next any, err error) {
+	var pc, pd []float32
+	var sc *qwen3.GatedDeltaScratch
+	if st, ok := prior.(gatedDeltaState); ok {
+		pc, pd, sc = st.conv, st.delta, st.sc
+	}
+	if sc == nil {
+		sc = &qwen3.GatedDeltaScratch{}
+	}
+	if cerr := GatedDeltaQuantChainMoELayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, moe, pc, pd, eps); cerr != nil {
+		return nil, cerr
+	}
+	return gatedDeltaState{sc: sc}, nil
+}
+
 // forwardQuantLayer runs one WHOLE packed gated-delta layer through the device layer seam
 // (qwen3.GatedDeltaQuantLayerDeviceTry): input norm, the five packed projections, the block and the
 // packed FFN tail in one command buffer, x in / y out, state device-resident. engaged=false leaves

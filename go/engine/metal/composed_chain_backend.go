@@ -11,6 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
@@ -40,6 +41,10 @@ type composedChainCtx struct {
 	// of the chain shares one set (encoder/barrier ordering serialises reuse), replacing the
 	// per-call pin churn. A recording owns its scratch for its lifetime.
 	attnSc map[attnChainKey]*attnChainLayerScratch
+	// moeSc pools the MoE FFN-tail body slabs per geometry — the router/gather/combine + shared
+	// staging, shared by every same-shaped MoE layer of the chain (the MoE tail is live-only, so a
+	// recording ctx never populates this).
+	moeSc map[moeChainKey]*moeChainScratch
 	// head fold (#18): the terminal RMSNorm + LM head encoded onto this chain's CB by
 	// ComposedChainHeadDevice. headSc holds the staging + the logits pin ComposedChainTakeLogits
 	// reads after End's wait; returned to its pool at take (or at End when never taken).
@@ -159,6 +164,52 @@ func (c *composedChainCtx) releaseScratch() {
 		putAttnChainLayerScratch(k, sc)
 	}
 	c.attnSc = nil
+	for k, sc := range c.moeSc {
+		putMoEChainLayerScratch(k, sc)
+	}
+	c.moeSc = nil
+}
+
+// moeChainKey identifies one MoE FFN-tail body geometry.
+type moeChainKey struct{ D, nE, topK, expertDFF, sharedFF int }
+
+var moeChainLayerPools sync.Map // moeChainKey -> *sync.Pool
+
+func getMoEChainLayerScratch(k moeChainKey) (*moeChainScratch, error) {
+	poolAny, ok := moeChainLayerPools.Load(k)
+	if !ok {
+		poolAny, _ = moeChainLayerPools.LoadOrStore(k, &sync.Pool{})
+	}
+	if v := poolAny.(*sync.Pool).Get(); v != nil {
+		return v.(*moeChainScratch), nil
+	}
+	return newMoEChainScratch(k.D, k.nE, k.topK, k.expertDFF, k.sharedFF)
+}
+
+func putMoEChainLayerScratch(k moeChainKey, sc *moeChainScratch) {
+	if sc == nil {
+		return
+	}
+	if v, ok := moeChainLayerPools.Load(k); ok {
+		v.(*sync.Pool).Put(sc)
+	}
+}
+
+// moeScratchFor resolves the shared MoE-tail staging for this geometry (one per ctx per geometry —
+// same-shaped layers share; encoder/barrier ordering serialises reuse).
+func (c *composedChainCtx) moeScratchFor(k moeChainKey) (*moeChainScratch, error) {
+	if c.moeSc == nil {
+		c.moeSc = make(map[moeChainKey]*moeChainScratch, 1)
+	}
+	if sc, ok := c.moeSc[k]; ok {
+		return sc, nil
+	}
+	sc, err := getMoEChainLayerScratch(k)
+	if err != nil {
+		return nil, err
+	}
+	c.moeSc[k] = sc
+	return sc, nil
 }
 
 func (c *composedChainCtx) cur() *pinnedNoCopyBytes {
@@ -1023,4 +1074,304 @@ func attnQuantChainLayerDevice(ctxAny, dev any, inputNorm []float32, qw, kw, vw,
 	}
 	ctx.curIsA = !ctx.curIsA
 	return h, nil
+}
+
+// composed_chain_moe wiring: bind the MoE-tail chain hooks (declared in the composed lib) to the
+// native whole-layer bodies + the recordability probe. Separate from composed_bf16_backend's init so
+// the MoE lane is self-contained (AX-8: composed declares, the backend binds).
+func init() {
+	composed.AttnQuantChainMoELayerDevice = attnQuantChainMoELayerDevice
+	composed.GatedDeltaQuantChainMoELayerDevice = gatedDeltaQuantChainMoELayerDevice
+	composed.MoEChainRecordable = moeChainRecordable
+}
+
+// attnQuantChainMoELayerDevice encodes one packed dense-attention layer whose FFN is a MoE onto the
+// chain — attnQuantChainLayerDevice's mixer body verbatim, then the MoE tail
+// (chainResidualNormMoEQuantTail) instead of the dense SwiGLU tail. LIVE-only: the MoE tail's custom
+// router/combine/scale kernels have no ICB-specialised pipeline, so a recording pass declines here
+// and the model keeps the re-encode chain (still one command buffer per token).
+func attnQuantChainMoELayerDevice(ctxAny, dev any, inputNorm []float32, qw, kw, vw, ow *model.QuantWeight, qNormW, kNormW, postNorm []float32, moe *composed.MoEMLP, priorK, priorV []float32, H, KVH, HD, RD, pos0, window, gated, qkNorm int, eps, theta float32) (any, error) {
+	ctx, ok := ctxAny.(*composedChainCtx)
+	if !ok {
+		return dev, core.NewError("native.attnQuantChainMoELayerDevice: not a chain context")
+	}
+	if ctx.rec != nil {
+		return dev, core.NewError("native.attnQuantChainMoELayerDevice: MoE layers do not record")
+	}
+	moeW, ok := resolveMoEChainWeights(moe)
+	if !ok {
+		return dev, core.NewError("native.attnQuantChainMoELayerDevice: MoE weights not chainable")
+	}
+	L, D := ctx.L, ctx.D
+	if !attnCoreUsable(H, KVH, HD, RD) {
+		return dev, core.NewError("native.attnQuantChainMoELayerDevice: core not servable")
+	}
+	qCols := H * HD
+	if gated != 0 {
+		qCols = 2 * H * HD
+	}
+	mixCols := H * HD
+	if !quantGeometryOK(qw, qCols, D) || !quantGeometryOK(kw, KVH*HD, D) || !quantGeometryOK(vw, KVH*HD, D) ||
+		!quantGeometryOK(ow, D, mixCols) {
+		return dev, core.NewError("native.attnQuantChainMoELayerDevice: size/geometry mismatch")
+	}
+	h, _ := dev.(*attnKVDeviceState)
+	if h == nil {
+		h = &attnKVDeviceState{KVH: KVH, HD: HD}
+		if err := h.ensureCap(pos0 + L); err != nil {
+			return dev, err
+		}
+		if pos0 > 0 {
+			if len(priorK) != pos0*KVH*HD || len(priorV) != pos0*KVH*HD {
+				return dev, core.NewError("native.attnQuantChainMoELayerDevice: prior state size mismatch")
+			}
+			copy(h.kBuf.bytes, float32Bytes(priorK))
+			copy(h.vBuf.bytes, float32Bytes(priorV))
+		}
+		h.n = pos0
+	} else if err := h.ensureCap(pos0 + L); err != nil {
+		return h, err
+	}
+	if h.n != pos0 {
+		return h, core.NewError("native.attnQuantChainMoELayerDevice: position desync with resident cache")
+	}
+	sc, err := ctx.attnScratchFor(attnChainKey{L: L, D: D, qCols: qCols, kvDim: KVH * HD, mixCols: mixCols, FF: D})
+	if err != nil {
+		return h, err
+	}
+	moeSc, err := ctx.moeScratchFor(moeChainKey{D: D, nE: moeW.numExperts, topK: moeW.topK, expertDFF: moeW.expertDFF, sharedFF: moeW.sharedFF})
+	if err != nil {
+		return h, err
+	}
+	*ctx.posPtr = int32(pos0) // every layer of this token shares the position (idempotent)
+	var encErr error
+	withAutoreleasePool(func() {
+		inNormBuf := residentFloat32(inputNorm)
+		postNormBuf := residentFloat32(postNorm)
+		normQ, normK := inNormBuf, inNormBuf
+		if qkNorm == 1 {
+			normQ = residentFloat32(qNormW)
+			normK = residentFloat32(kNormW)
+		}
+		rmsName := "rmsfloat32"
+		if D > rmsLoopedLimit {
+			rmsName = "rms_loopedfloat32"
+		}
+		t, done, terr := ctx.layerTarget()
+		if terr != nil {
+			encErr = terr
+			return
+		}
+		defer done()
+		fail := func(err error) { encErr = err }
+		psoRMS, perr := t.pso(rmsName)
+		if perr != nil {
+			fail(perr)
+			return
+		}
+		emitRMSNormRows(t.cmd(), psoRMS, ctx.cur().buf, inNormBuf, sc.normed.buf, 0, 0, 0, D, eps, L, rmsThreadgroup(D, psoRMS))
+		t.barrier()
+		if err := chainNarrowF32ToBF16(t, sc.normed.buf, sc.nBF.buf, L*D); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainProjQuantBF16In(t, qw, sc.nBF.buf, sc.qRawBF.buf, sc.qRaw.buf, L, qCols, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := chainProjQuantBF16In(t, kw, sc.nBF.buf, sc.kRawBF.buf, sc.kRaw.buf, L, KVH*HD, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := chainProjQuantBF16In(t, vw, sc.nBF.buf, sc.vRawBF.buf, sc.vRaw.buf, L, KVH*HD, D); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainAttnQPrep(t, sc.qRaw.buf, normQ, sc.qPrep.buf, sc.gateBuf.buf, ctx.posBuf, L, H, HD, RD, gated, qkNorm, eps, theta, pos0); err != nil {
+			fail(err)
+			return
+		}
+		if err := chainAttnKPrep(t, sc.kRaw.buf, normK, h.kBuf.buf, ctx.posBuf, L, KVH, HD, RD, qkNorm, eps, theta, pos0); err != nil {
+			fail(err)
+			return
+		}
+		if err := chainAttnVAppend(t, sc.vRaw.buf, h.vBuf.buf, ctx.posBuf, L, KVH*HD, pos0); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainAttnSDPA(t, sc.qPrep.buf, h.kBuf.buf, h.vBuf.buf, sc.attnOut.buf, ctx.posBuf, L, H, KVH, HD, pos0, window); err != nil {
+			fail(err)
+			return
+		}
+		if gated != 0 {
+			t.barrier()
+			if err := chainAttnGateSilu(t, sc.attnOut.buf, sc.gateBuf.buf, L*H*HD); err != nil {
+				fail(err)
+				return
+			}
+		}
+		t.barrier()
+		if err := chainNarrowF32ToBF16(t, sc.attnOut.buf, sc.attnBF.buf, L*mixCols); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainProjQuantBF16In(t, ow, sc.attnBF.buf, sc.mixBF.buf, sc.mix.buf, L, D, mixCols); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainResidualNormMoEQuantTail(t, moeTailBufs{
+			h: ctx.cur().buf, mix: sc.mix.buf, normed: sc.normed.buf, nBF: sc.nBF.buf, out: ctx.next().buf, sc: moeSc,
+		}, postNormBuf, moeW, L, D, eps); err != nil {
+			fail(err)
+			return
+		}
+		if t.err != nil {
+			fail(t.err)
+		}
+	})
+	if encErr != nil {
+		return h, encErr
+	}
+	h.n = pos0 + L
+	ctx.curIsA = !ctx.curIsA
+	return h, nil
+}
+
+// gatedDeltaQuantChainMoELayerDevice is attnQuantChainMoELayerDevice's gated-delta twin:
+// gatedDeltaQuantChainLayerDevice's mixer body verbatim, then the MoE tail. LIVE-only (declines
+// recording), same as the attn MoE layer.
+func gatedDeltaQuantChainMoELayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, moe *composed.MoEMLP, priorConv, priorDelta []float32, eps float32) error {
+	ctx, ok := ctxAny.(*composedChainCtx)
+	if !ok {
+		return core.NewError("native.gatedDeltaQuantChainMoELayerDevice: not a chain context")
+	}
+	if ctx.rec != nil {
+		return core.NewError("native.gatedDeltaQuantChainMoELayerDevice: MoE layers do not record")
+	}
+	moeW, ok := resolveMoEChainWeights(moe)
+	if !ok {
+		return core.NewError("native.gatedDeltaQuantChainMoELayerDevice: MoE weights not chainable")
+	}
+	h, _ := sc.Device.(*gatedDeltaDeviceState)
+	if h == nil {
+		if !gatedDeltaBlockUsable(cfg.HeadDim, cfg.HeadDim, cfg.KeyHeads, cfg.ValueHeads, cfg.ConvKernel) {
+			return core.NewError("native.gatedDeltaQuantChainMoELayerDevice: geometry not servable")
+		}
+		nh, err := newGatedDeltaDeviceState(cfg.KeyHeads, cfg.ValueHeads, cfg.HeadDim, cfg.HeadDim, cfg.ConvKernel, 1)
+		if err != nil {
+			return err
+		}
+		h = nh
+	}
+	L, D := ctx.L, ctx.D
+	convDim, vDim := h.convDim, h.Hv*h.Dv
+	if w.InProjQKVQ == nil || !quantGeometryOK(w.InProjQKVQ, convDim, D) ||
+		w.InProjZQ == nil || !quantGeometryOK(w.InProjZQ, vDim, D) ||
+		w.InProjAQ == nil || !quantGeometryOK(w.InProjAQ, h.Hv, D) ||
+		w.InProjBQ == nil || !quantGeometryOK(w.InProjBQ, h.Hv, D) ||
+		w.OutProjQ == nil || !quantGeometryOK(w.OutProjQ, D, vDim) {
+		return core.NewError("native.gatedDeltaQuantChainMoELayerDevice: unsupported quant geometry")
+	}
+	if !h.valid {
+		h.prime(priorConv, priorDelta)
+	}
+	key := gatedDeltaQuantLayerKey{L: L, D: D, FF: D, Hk: h.Hk, Hv: h.Hv, Dk: h.Dk, K: h.K}
+	if ctx.gdSc == nil {
+		gsc, err := getGatedDeltaQuantLayerScratch(key)
+		if err != nil {
+			return err
+		}
+		ctx.gdSc, ctx.gdKey = gsc, key
+	} else if ctx.gdKey != key {
+		return core.NewError("native.gatedDeltaQuantChainMoELayerDevice: mixed gd geometries in one chain")
+	}
+	gsc := ctx.gdSc
+	moeSc, err := ctx.moeScratchFor(moeChainKey{D: D, nE: moeW.numExperts, topK: moeW.topK, expertDFF: moeW.expertDFF, sharedFF: moeW.sharedFF})
+	if err != nil {
+		return err
+	}
+	rmsName := "rmsfloat32"
+	if D > rmsLoopedLimit {
+		rmsName = "rms_loopedfloat32"
+	}
+	var encErr error
+	withAutoreleasePool(func() {
+		wConv := residentFloat32(w.ConvWeight)
+		wBias := wConv
+		hasBias := 0
+		if w.ConvBias != nil {
+			wBias = residentFloat32(w.ConvBias)
+			hasBias = 1
+		}
+		t, done, terr := ctx.layerTarget()
+		if terr != nil {
+			encErr = terr
+			return
+		}
+		defer done()
+		fail := func(err error) { encErr = err }
+		psoRMS, perr := t.pso(rmsName)
+		if perr != nil {
+			fail(perr)
+			return
+		}
+		emitRMSNormRows(t.cmd(), psoRMS, ctx.cur().buf, residentFloat32(inputNorm), gsc.normed1.buf, 0, 0, 0, D, eps, L, rmsThreadgroup(D, psoRMS))
+		t.barrier()
+		if err := chainNarrowF32ToBF16(t, gsc.normed1.buf, gsc.n1BF.buf, L*D); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainProjQuantBF16In(t, w.InProjQKVQ, gsc.n1BF.buf, gsc.qkvBF.buf, gsc.qkv.buf, L, convDim, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := chainProjQuantBF16In(t, w.InProjZQ, gsc.n1BF.buf, gsc.zBF.buf, gsc.z.buf, L, vDim, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := chainProjQuantBF16In(t, w.InProjAQ, gsc.n1BF.buf, gsc.aBF.buf, gsc.a.buf, L, h.Hv, D); err != nil {
+			fail(err)
+			return
+		}
+		if err := chainProjQuantBF16In(t, w.InProjBQ, gsc.n1BF.buf, gsc.bBF.buf, gsc.b.buf, L, h.Hv, D); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainGatedDeltaBlockStages(t, h, gdBlockStageBufs{
+			qkv: gsc.qkv.buf, z: gsc.z.buf, a: gsc.a.buf, b: gsc.b.buf,
+			qN: gsc.qN.buf, kN: gsc.kN.buf, vN: gsc.vN.buf, g: gsc.g.buf, beta: gsc.beta.buf,
+			gated: gsc.gated.buf,
+		}, wConv, wBias, hasBias, residentFloat32(w.ALog), residentFloat32(w.DtBias), residentFloat32(w.Norm), L); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainProjQuantF32(t, w.OutProjQ, gsc.gated.buf, gsc.gatedBF.buf, gsc.mixBF.buf, gsc.mix.buf, L, D, vDim); err != nil {
+			fail(err)
+			return
+		}
+		t.barrier()
+		if err := chainResidualNormMoEQuantTail(t, moeTailBufs{
+			h: ctx.cur().buf, mix: gsc.mix.buf, normed: gsc.normed2.buf, nBF: gsc.n2BF.buf, out: ctx.next().buf, sc: moeSc,
+		}, residentFloat32(postNorm), moeW, L, D, eps); err != nil {
+			fail(err)
+			return
+		}
+		if t.err != nil {
+			fail(t.err)
+		}
+	})
+	if encErr != nil {
+		return encErr
+	}
+	sc.Device = h
+	ctx.curIsA = !ctx.curIsA
+	return nil
 }

@@ -407,6 +407,56 @@ func (m *attnMixer) chainQuantLayer(ctx any, inputNorm, postNorm []float32, mlp 
 	return attnState{n: st.n + L, sc: sc}, nil
 }
 
+// chainableMoEQuant reports whether this attention layer, whose FFN is a MoE, can ride the chained
+// device path over packed weights — chainableQuant's attention conditions (the MoE tail replaces the
+// dense gate/up/down check) plus the MoE tail's own recordability (batched experts + lean gather).
+func (m *attnMixer) chainableMoEQuant(moe *MoEMLP) bool {
+	cfg := m.cfg
+	return AttnQuantChainMoELayerDevice != nil && MoEChainRecordable != nil && MoEChainRecordable(moe) &&
+		AttnChainGeometryOK != nil && AttnChainGeometryOK(cfg) &&
+		!cfg.ALiBi && cfg.QKVClip == 0 &&
+		cfg.QKNormalization != model.QKLayerNorm && cfg.RotaryDim%2 == 0 &&
+		m.w.QProjQ != nil && m.w.KProjQ != nil && m.w.VProjQ != nil && m.w.OProjQ != nil
+}
+
+// chainQuantMoELayer encodes this attention layer + its MoE FFN tail onto the chain over packed
+// weights — the MoE twin of chainQuantLayer (the mixer weights are identical; the FFN is the MoE).
+func (m *attnMixer) chainQuantMoELayer(ctx any, inputNorm, postNorm []float32, moe *MoEMLP, L, D int, eps float32, prior any) (next any, err error) {
+	cfg := m.cfg
+	var st attnState
+	if p, ok := prior.(attnState); ok {
+		st = p
+	}
+	sc := st.sc
+	if sc == nil {
+		sc = &attnScratch{}
+	}
+	qkNorm := 0
+	switch {
+	case cfg.QKNormalization == model.QKL2Norm:
+		qkNorm = 2
+	case len(m.w.QNorm) > 0 && len(m.w.KNorm) > 0:
+		qkNorm = 1
+	}
+	gatedI := 0
+	if cfg.OutputGate {
+		gatedI = 1
+	}
+	theta := cfg.RopeTheta
+	if theta == 0 {
+		theta = 1e6
+	}
+	devOut, ferr := AttnQuantChainMoELayerDevice(ctx, sc.Device, inputNorm,
+		m.w.QProjQ, m.w.KProjQ, m.w.VProjQ, m.w.OProjQ, m.w.QNorm, m.w.KNorm, postNorm,
+		moe, st.k, st.v,
+		cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim, st.n, cfg.SlidingWindow, gatedI, qkNorm, eps, theta)
+	if ferr != nil {
+		return nil, ferr
+	}
+	sc.Device = devOut
+	return attnState{n: st.n + L, sc: sc}, nil
+}
+
 // forwardBF16Layer runs one WHOLE dense bf16 attention layer through the fold seams — [front CB]
 // → host rope/cache/SDPA → [tail CB] — engaging only when both seams are bound and every
 // projection carries its bf16 form. engaged=false leaves the per-stage path in charge. A front

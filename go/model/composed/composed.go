@@ -17,6 +17,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
@@ -605,6 +606,19 @@ var ComposedChainRecordEnd func(ctx any) (rec any, err error)
 var ComposedChainReplayDevice func(rec any, h []float32) (y []float32, logits []float32, ok bool, err error)
 var ComposedChainRecordingRelease func(rec any)
 
+// MoE FFN-tail chaining (#26 MoE): a qwen3_5_moe layer rides the whole-token chain — the router,
+// gather experts (lthn_gather_qmv reading a device idx buffer), SiLU SwiGLU, weighted combine and
+// shared expert encoded onto the chain's command buffer, mirroring the dense
+// AttnQuantChainLayerDevice / GatedDeltaQuantChainLayerDevice but with the MoE tail. chainWalk
+// dispatches these when a layer's MLP is *MoEMLP; MoEChainRecordable is chainable()'s pre-flight
+// probe (batched experts present, softmax/norm-topk routing, the lean gather kernel available). The
+// MoE tail is LIVE-only — it declines the ICB recording pass (see the backend), so an all-quant MoE
+// stack rides the re-encode chain (one command buffer per token) rather than the recorded replay.
+// AX-8: declared here, bound by the backend.
+var AttnQuantChainMoELayerDevice func(ctx, dev any, inputNorm []float32, qw, kw, vw, ow *model.QuantWeight, qNormW, kNormW, postNorm []float32, moe *MoEMLP, priorK, priorV []float32, H, KVH, HD, RD, pos0, window, gated, qkNorm int, eps, theta float32) (devOut any, err error)
+var GatedDeltaQuantChainMoELayerDevice func(ctx any, sc *qwen3.GatedDeltaScratch, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, moe *MoEMLP, priorConv, priorDelta []float32, eps float32) error
+var MoEChainRecordable func(moe *MoEMLP) bool
+
 // chainable reports whether EVERY layer of this model can ride the chained device path — the
 // all-or-nothing v1 gate (mixed models keep the per-layer folds). Form-agnostic (#26 QUANT): each
 // layer qualifies by carrying EITHER its bf16 form OR its packed form ready for the chain step —
@@ -615,20 +629,54 @@ func (s *ComposedSession) chainable() bool {
 	}
 	for li := range s.m.Layers {
 		layer := &s.m.Layers[li]
-		mlp, isDense := layer.MLP.(*MLP)
-		if !isDense {
-			return false
-		}
-		switch mx := layer.Mixer.(type) {
-		case *gatedDeltaMixer:
-			if !mx.chainableBF16(mlp) && !mx.chainableQuant(mlp) {
+		switch mlp := layer.MLP.(type) {
+		case *MLP:
+			switch mx := layer.Mixer.(type) {
+			case *gatedDeltaMixer:
+				if !mx.chainableBF16(mlp) && !mx.chainableQuant(mlp) {
+					return false
+				}
+			case *attnMixer:
+				if !mx.chainableBF16(mlp) && !mx.chainableQuant(mlp) {
+					return false
+				}
+			default:
 				return false
 			}
-		case *attnMixer:
-			if !mx.chainableBF16(mlp) && !mx.chainableQuant(mlp) {
+		case *MoEMLP:
+			// A MoE FFN rides the chain via the packed MoE tail (quant-only); the mixer must be
+			// chainable over its packed weights AND the batched experts + lean gather must be present.
+			switch mx := layer.Mixer.(type) {
+			case *gatedDeltaMixer:
+				if !mx.chainableMoEQuant(mlp) {
+					return false
+				}
+			case *attnMixer:
+				if !mx.chainableMoEQuant(mlp) {
+					return false
+				}
+			default:
 				return false
 			}
 		default:
+			return false
+		}
+	}
+	return true
+}
+
+// chainHandlesLen reports whether the chain can serve a forward of this length. The MoE FFN tail
+// (chainResidualNormMoEQuantTail) is a SINGLE-TOKEN body — its router → gather → combine slabs are
+// sized for one token's routing — so a prefill (L>1) through a stack with any MoE layer runs the
+// per-seam path instead (MoEMLP.forward's per-token loop, the proven prefill path); the L=1 decode
+// still rides the chain, which is where the per-token command-buffer win lives. An all-dense/bf16
+// chainable stack has no such limit and chains at any L exactly as before.
+func (s *ComposedSession) chainHandlesLen(L int) bool {
+	if L == 1 {
+		return true
+	}
+	for li := range s.m.Layers {
+		if _, isMoE := s.m.Layers[li].MLP.(*MoEMLP); isMoE {
 			return false
 		}
 	}
@@ -644,21 +692,30 @@ func (s *ComposedSession) chainWalk(ctx any, L int, commit bool) error {
 	D, eps := s.m.D, s.m.Eps
 	for li := range s.m.Layers {
 		layer := &s.m.Layers[li]
-		mlp := layer.MLP.(*MLP)
 		var next any
 		var cerr error
-		switch mx := layer.Mixer.(type) {
-		case *gatedDeltaMixer:
-			if mx.chainableBF16(mlp) {
-				next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
-			} else {
-				next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+		switch mlp := layer.MLP.(type) {
+		case *MLP:
+			switch mx := layer.Mixer.(type) {
+			case *gatedDeltaMixer:
+				if mx.chainableBF16(mlp) {
+					next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+				} else {
+					next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+				}
+			case *attnMixer:
+				if mx.chainableBF16(mlp) {
+					next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+				} else {
+					next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+				}
 			}
-		case *attnMixer:
-			if mx.chainableBF16(mlp) {
-				next, cerr = mx.chainBF16Layer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
-			} else {
-				next, cerr = mx.chainQuantLayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
+		case *MoEMLP:
+			switch mx := layer.Mixer.(type) {
+			case *gatedDeltaMixer:
+				next, cerr = mx.chainQuantMoELayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, eps, s.states[li])
+			case *attnMixer:
+				next, cerr = mx.chainQuantMoELayer(ctx, layer.InputNorm, layer.PostAttnNorm, mlp, L, D, eps, s.states[li])
 			}
 		}
 		if cerr != nil {
@@ -791,7 +848,7 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 	// folded into the PREVIOUS layer's proj-fused tail command buffer, the symmetric collapse to the
 	// o_proj fuse below. At most one is ever set (a layer has exactly one mixer kind); both nil ⇒ this
 	// layer computes its input norm + projections fresh (always true for layer 0 — no predecessor tail).
-	if (s.m.BF16Resident || s.m.Quantised) && s.chainable() {
+	if (s.m.BF16Resident || s.m.Quantised) && s.chainable() && s.chainHandlesLen(L) {
 		return s.forwardChain(h, L)
 	}
 
