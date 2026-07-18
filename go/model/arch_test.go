@@ -23,6 +23,28 @@ func TestArch_QKNormalization_Ugly(t *testing.T) {
 	}
 }
 
+func TestLayerSpec_Mixer_Good(t *testing.T) {
+	if got := (LayerSpec{Mixer: MixerGatedDelta}).Mixer; got != MixerGatedDelta {
+		t.Fatalf("declared Mixer = %d, want MixerGatedDelta (%d)", got, MixerGatedDelta)
+	}
+}
+
+// TestLayerSpec_Mixer_Bad pins the gemma-safety invariant of the named-mixer extension: the zero
+// value of LayerSpec.Mixer (a layer a config leaves unset) is MixerAttention, so every arch that
+// declares no recurrence stays byte-identical multi-head attention. Reordering the enum so a
+// recurrence became the zero value would silently reroute gemma4's decode.
+func TestLayerSpec_Mixer_Bad(t *testing.T) {
+	if MixerAttention != 0 {
+		t.Fatalf("MixerAttention = %d, want 0 (the zero value must be attention)", MixerAttention)
+	}
+	if got := (LayerSpec{}).Mixer; got != MixerAttention {
+		t.Fatalf("zero-value LayerSpec.Mixer = %d, want MixerAttention", got)
+	}
+	if MixerGatedDelta == MixerAttention {
+		t.Fatal("MixerGatedDelta must be distinct from MixerAttention")
+	}
+}
+
 func TestArch_NormPlacement_Good(t *testing.T) {
 	if NormPlacementPre != NormPlacement("pre") {
 		t.Fatalf("NormPlacementPre = %q", NormPlacementPre)

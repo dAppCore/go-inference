@@ -19,6 +19,21 @@ const (
 	SlidingAttention                      // sliding_attention — windowed
 )
 
+// MixerKind is a layer's SEQUENCE-MIXER family — the named algorithm that mixes across positions.
+// It is orthogonal to AttentionType (which is only a SPAN within the attention family). A layer
+// declares exactly one: standard multi-head attention (q/k/v/o projections over a KV cache), or a
+// linear-attention recurrence (gated-delta: a recurrent state, no KV cache). Adding a mixer family
+// is a new named kind here + its build branch in model.Assemble + its decode in the backend — the
+// registry/factory extension the reactive loader was built for, NOT a parallel load path. The zero
+// value is MixerAttention, so every arch that declares nothing (gemma4, llama, qwen2, …) is
+// byte-identical — this field only shifts a layer that a config explicitly maps to a recurrence.
+type MixerKind uint8
+
+const (
+	MixerAttention  MixerKind = iota // multi-head attention (q/k/v/o + KV cache) — the default
+	MixerGatedDelta                  // gated-delta linear-attention recurrence (recurrent state, no KV cache)
+)
+
 // QKNormalization declares the per-head operation applied to projected queries
 // and keys before rotary position encoding. It is an architecture property, not
 // inferred from the presence of weights: Cohere's LayerNorm may be enabled by a
@@ -35,7 +50,8 @@ const (
 // LayerSpec declares one decode layer's structure, backend-agnostic.
 type LayerSpec struct {
 	Attention     AttentionType
-	DisableRotary bool // skip the architecture's RoPE declaration for an explicit NoPE layer
+	Mixer         MixerKind // the sequence-mixer family (default MixerAttention); a config maps a recurrence layer to MixerGatedDelta
+	DisableRotary bool      // skip the architecture's RoPE declaration for an explicit NoPE layer
 	KVShareFrom   int  // index of the layer whose KV cache this layer reads (== own index if it owns its cache)
 	CacheIndex    int  // cache slot for an owner; -1 if this layer shares another's cache
 	MoE           bool // sparse-expert MLP instead of dense (derivation: a later slice)
