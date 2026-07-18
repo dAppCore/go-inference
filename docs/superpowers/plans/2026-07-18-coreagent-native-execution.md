@@ -28,7 +28,7 @@
 - Queue Stop disables admissions but does not cancel running work. LEM Close withdraws queued admissions, shuts down all process groups, captures recoverable Git work, marks unfinished runs interrupted, and joins every worker.
 - Acceptance prepares and validates in a disposable internal worktree. Final confirmation rechecks source cleanliness, branch, and commit, then fetches and fast-forwards the source; conflicts, validation failure, or source movement leave it untouched.
 - Production code uses `dappco.re/go` wrappers for formatting, errors, filesystem access, paths, JSON, strings, logging, bytes, and process execution. Public fallible functions return `core.Result`, and callers inspect `OK` before `Value`.
-- Add tests and runnable examples beside their source. Exported symbols receive direct AX-7 Good/Bad/Ugly coverage; hot paths receive sibling benchmarks. Do not add monolithic compliance files, versioned tests, or `ax7*` files.
+- Add tests and runnable examples beside their source. Exported symbols receive direct file-aware AX-7 Good/Bad/Ugly coverage named `Test<File>_<Symbol>_<Variant>`; hot paths receive sibling benchmarks. Do not add monolithic compliance files, versioned tests, or `ax7*` files.
 - Every task starts with a failing behavioural test, proves the expected failure, implements the smallest contract, proves focused success, and commits only that task's files.
 - Do not add a permanent `replace` directive. Before `cli/tui` imports the new root packages, publish or otherwise make the root module version available and update `cli/go.mod` normally; `GOWORK=off` standalone verification is mandatory at that checkpoint.
 
@@ -142,13 +142,13 @@ func Transition(from, to RunStatus) core.Result
 func ValidateDispatch(request DispatchRequest) core.Result
 ```
 
-- [ ] Write `TestTransition_Good`, `TestTransition_Bad`, and `TestTransition_Ugly`. Assert `queued -> preparing`, `running -> waiting`, `running -> interrupted`, and `completed -> accepted/rejected` succeed; terminal-to-running and empty statuses fail.
-- [ ] Write `TestValidateDispatch_Good`, `_Bad`, and `_Ugly`, directly checking a complete request, missing task/repository/provider, and blank/whitespace values.
+- [ ] Write `TestWork_Transition_Good`, `TestWork_Transition_Bad`, and `TestWork_Transition_Ugly`. Assert `queued -> preparing`, `running -> waiting`, `running -> interrupted`, and `completed -> accepted/rejected` succeed; terminal-to-running and empty statuses fail.
+- [ ] Write `TestWork_ValidateDispatch_Good`, `_Bad`, and `_Ugly`, directly checking a complete request, missing task/repository/provider, and blank/whitespace values.
 - [ ] Run the focused tests and confirm compilation fails because the package surface is absent:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/go
-go test ./agent/work -run '^(TestTransition|TestValidateDispatch)_' -count=1
+go test ./agent/work -run '^TestWork_(Transition|ValidateDispatch)_' -count=1
 ```
 
 - [ ] Implement an explicit transition map. Shutdown recovery may move any non-terminal status to interrupted; user cancellation may move queued to cancelled and running to cancelling; waiting/completed/failed/cancelled/interrupted never transition back to queued because retry/resume creates a child record.
@@ -210,7 +210,7 @@ func (controller *Controller) RecordBackoff(provider, reason string, until, at t
 
 - [ ] Copy the CoreAgent YAML fixture shape into test strings, including scalar `codex: 1`, nested `opencode: {total: 3, opencode-go/deepseek-v4-pro: 1}`, reset windows, delays, and the additive `dispatch.global_concurrency`/`dispatch.validation` fields.
 - [ ] Add an optional additive `providers:` fixture with explicit executable, default model, credential environment names, and custom flags; reject empty/invalid environment names and preserve unsafe flags only for launch-review display.
-- [ ] Write `TestLoadPolicy_Good`, `_Bad`, and `_Ugly`: valid scalar/nested policy succeeds, malformed YAML fails, and missing policy returns the documented conservative defaults without creating a file.
+- [ ] Write `TestConfig_LoadPolicy_Good`, `_Bad`, and `_Ugly`: valid scalar/nested policy succeeds, malformed YAML fails, and missing policy returns the documented conservative defaults without creating a file.
 - [ ] Write controller AX-7 tests for global/provider/model limits, FIFO eligibility, frozen/accepting/draining, minimum/sustained/burst delays, persisted backoff, daily quota reset, and clock boundaries.
 - [ ] Prove the tests fail before implementation:
 
@@ -558,7 +558,7 @@ func (orchestrator *Orchestrator) Resume(context.Context, work.ResumeRequest) co
 func (orchestrator *Orchestrator) Retry(context.Context, work.Item, parentRunID string) core.Result
 ```
 
-- [ ] Write direct AX-7 tests: Answer only waiting runs with an unanswered question; Resume requires a stored answer; Retry accepts failed/cancelled/interrupted only; empty text/IDs fail; duplicate actions do not rewrite the parent.
+- [ ] Write direct `TestRun_Orchestrator_{Answer,Resume,Retry}_{Good,Bad,Ugly}` AX-7 tests: Answer only waiting runs with an unanswered question; Resume requires a stored answer; Retry accepts failed/cancelled/interrupted only; empty text/IDs fail; duplicate actions do not rewrite the parent.
 - [ ] Assert each action creates a new queued run with `ParentRunID`, preserves the parent's `Number` and exact internal `Branch`, increments `Attempt`, preserves the parent status/timestamps, and builds continuation text from `Store.Continuation(parentRunID)` containing the earlier task/output/question/answer. A fresh root dispatch obtains its branch number from `Store.NextRunNumber(workID)`.
 - [ ] Assert Resume/Retry reuses a retained parent worktree after confirming its branch and internal root, reconstructs from Soft Serve only when the checkout is absent, and returns a durable recovery reason when a retained checkout is corrupt or on the wrong branch. Never attach the same internal branch to a second worktree.
 - [ ] Assert no question/answer/status file appears in either repository.
@@ -568,8 +568,8 @@ func (orchestrator *Orchestrator) Retry(context.Context, work.Item, parentRunID 
 
 ```sh
 cd /Users/snider/Code/core/go-inference/go
-go test ./agent/orchestrator -run '^(TestOrchestrator_(Answer|Resume|Retry))_' -count=1
-go test -race ./agent/orchestrator -run '^(TestOrchestrator_(Answer|Resume|Retry))_' -count=1
+go test ./agent/orchestrator -run '^TestRun_Orchestrator_(Answer|Resume|Retry)_' -count=1
+go test -race ./agent/orchestrator -run '^TestRun_Orchestrator_(Answer|Resume|Retry)_' -count=1
 cd ..
 gofmt -w go/agent/orchestrator
 git add go/agent/orchestrator/run.go go/agent/orchestrator/run_test.go go/agent/orchestrator/run_example_test.go
