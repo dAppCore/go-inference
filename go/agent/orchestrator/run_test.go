@@ -124,6 +124,12 @@ func orchestratorAssertImmutableChild(t *testing.T, fixture *orchestratorFixture
 	storedParent := fixture.store.Run(parent.ID)
 	core.AssertTrue(t, storedParent.OK, storedParent.Error())
 	core.AssertEqual(t, parent, storedParent.Value.(work.Run))
+	parentContinuation := fixture.store.Continuation(parent.ID)
+	core.AssertTrue(t, parentContinuation.OK, parentContinuation.Error())
+	childContinuation := fixture.store.Continuation(child.ID)
+	core.AssertTrue(t, childContinuation.OK, childContinuation.Error())
+	core.AssertTrue(t, parentContinuation.Value.(work.Continuation).Task != "")
+	core.AssertEqual(t, parentContinuation.Value.(work.Continuation).Task, childContinuation.Value.(work.Continuation).Task)
 }
 
 func orchestratorAssertContinuationOrder(t *testing.T, continuation string, pieces ...string) {
@@ -163,6 +169,9 @@ func orchestratorSeedContinuation(t *testing.T, status work.RunStatus, answered 
 	fixture.store.mu.Lock()
 	fixture.store.projects[project.ID] = project
 	fixture.store.runs[parent.ID] = parent
+	fixture.store.events = append(fixture.store.events, work.Event{
+		ID: "event-boundary", RunID: parent.ID, Kind: "queued", Detail: item.Task, CreatedAt: fixture.at,
+	})
 	fixture.store.questions = append(fixture.store.questions, question)
 	if answered {
 		fixture.store.answers = append(fixture.store.answers, work.Answer{
@@ -562,6 +571,16 @@ func TestRun_Orchestrator_Resume_Bad(t *testing.T) {
 	core.AssertTrue(t, answer.OK, answer.Error())
 	request.AnswerID = "different-answer"
 	core.AssertFalse(t, fixture.orchestrator.Resume(context.Background(), request).OK)
+	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
+	request.AnswerID = answer.Value.(work.Answer).ID
+	request.Work.Task = "Tampered task for the same work ID"
+	tampered := fixture.orchestrator.Resume(context.Background(), request)
+	core.AssertFalse(t, tampered.OK)
+	core.AssertContains(t, tampered.Error(), "task")
+	core.AssertEqual(t, parent, fixture.store.Run(parent.ID).Value.(work.Run))
+	fixture.store.mu.Lock()
+	core.AssertEqual(t, 1, len(fixture.store.runs))
+	fixture.store.mu.Unlock()
 }
 
 func TestRun_Orchestrator_Resume_Ugly(t *testing.T) {
@@ -645,6 +664,20 @@ func TestRun_Orchestrator_Retry_Bad(t *testing.T) {
 	fixture.store.runs[waiting.ID] = waiting
 	fixture.store.mu.Unlock()
 	core.AssertFalse(t, fixture.orchestrator.Retry(context.Background(), item, waiting.ID).OK)
+	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
+	waiting.Status = work.RunFailed
+	fixture.store.mu.Lock()
+	fixture.store.runs[waiting.ID] = waiting
+	fixture.store.mu.Unlock()
+	tamperedItem := item
+	tamperedItem.Task = "Tampered task for the same work ID"
+	tampered := fixture.orchestrator.Retry(context.Background(), tamperedItem, waiting.ID)
+	core.AssertFalse(t, tampered.OK)
+	core.AssertContains(t, tampered.Error(), "task")
+	core.AssertEqual(t, waiting, fixture.store.Run(waiting.ID).Value.(work.Run))
+	fixture.store.mu.Lock()
+	core.AssertEqual(t, 1, len(fixture.store.runs))
+	fixture.store.mu.Unlock()
 }
 
 func TestRun_Orchestrator_Retry_Ugly(t *testing.T) {
@@ -1987,18 +2020,89 @@ func TestRunTerminalMetadataFailureRetainsUntilCloseRecovery(t *testing.T) {
 func TestRunQueueStartPersistenceRollback(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	item, _, revision := fixture.registerRepository()
-	fixture.queueDispatch(item, revision)
+	run := fixture.queueDispatch(item, revision)
+	acceptingCommitReached := make(chan struct{}, 1)
+	releaseAcceptingCommit := make(chan struct{})
+	preparingCommitReached := make(chan struct{}, 1)
+	fixture.store.mu.Lock()
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Queue != nil && commit.Queue.Status == work.QueueAccepting {
+			acceptingCommitReached <- struct{}{}
+			<-releaseAcceptingCommit
+		}
+		if commit.Run != nil && commit.Run.Status == work.RunPreparing {
+			preparingCommitReached <- struct{}{}
+		}
+	}
+	fixture.store.mu.Unlock()
 	fixture.store.failNext(func(commit Commit) bool {
 		return commit.Queue != nil && commit.Queue.Status == work.QueueAccepting
 	})
-	core.AssertFalse(t, fixture.orchestrator.StartQueue(context.Background()).OK)
-	fixture.orchestrator.wakeQueue()
-	time.Sleep(100 * time.Millisecond)
+	started := make(chan core.Result, 1)
+	go func() { started <- fixture.orchestrator.StartQueue(context.Background()) }()
+	select {
+	case <-acceptingCommitReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queue start did not reach the blocked persistence boundary")
+	}
+	drained := make(chan time.Time, 1)
+	go func() { drained <- fixture.orchestrator.drainQueue() }()
+	prematureAdmission := false
+	select {
+	case <-preparingCommitReached:
+		prematureAdmission = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseAcceptingCommit)
+	core.AssertFalse(t, (<-started).OK)
+	select {
+	case <-drained:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queue drain did not return after persistence rollback")
+	}
+	fixture.store.mu.Lock()
+	fixture.store.beforeCommit = nil
+	fixture.store.mu.Unlock()
+	core.AssertFalse(t, prematureAdmission)
 	core.AssertEqual(t, 0, fixture.launcher.Count())
+	core.AssertEqual(t, work.RunQueued, fixture.store.Run(run.ID).Value.(work.Run).Status)
 	fixture.store.mu.Lock()
 	queueStatus := fixture.store.queue.Status
 	fixture.store.mu.Unlock()
 	core.AssertEqual(t, work.QueueFrozen, queueStatus)
+}
+
+func TestRunQueueStopSerializesNewAdmission(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, _, revision := fixture.registerRepository()
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	frozenCommitReached := make(chan struct{}, 1)
+	releaseFrozenCommit := make(chan struct{})
+	fixture.store.mu.Lock()
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Queue != nil && commit.Queue.Status == work.QueueFrozen {
+			frozenCommitReached <- struct{}{}
+			<-releaseFrozenCommit
+		}
+	}
+	fixture.store.mu.Unlock()
+	stopped := make(chan core.Result, 1)
+	go func() { stopped <- fixture.orchestrator.StopQueue(context.Background()) }()
+	select {
+	case <-frozenCommitReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queue stop did not reach the blocked persistence boundary")
+	}
+	run := fixture.queueDispatch(item, revision)
+	close(releaseFrozenCommit)
+	stopResult := <-stopped
+	core.AssertTrue(t, stopResult.OK, stopResult.Error())
+	fixture.store.mu.Lock()
+	fixture.store.beforeCommit = nil
+	fixture.store.mu.Unlock()
+	core.AssertTrue(t, fixture.orchestrator.drainQueue().IsZero())
+	core.AssertEqual(t, 0, fixture.launcher.Count())
+	core.AssertEqual(t, work.RunQueued, fixture.store.Run(run.ID).Value.(work.Run).Status)
 }
 
 func TestRunPreparingPersistenceFailurePreservesFIFO(t *testing.T) {

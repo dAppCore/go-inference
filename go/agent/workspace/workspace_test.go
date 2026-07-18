@@ -115,6 +115,19 @@ func workspaceCommandContains(command Command, fragment string) bool {
 	return core.Contains(core.Join("\x00", command.Args...), fragment)
 }
 
+func workspaceLastPushArguments(t *testing.T, runner *workspaceTestRunner) []string {
+	t.Helper()
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	for index := len(runner.commands) - 1; index >= 0; index-- {
+		if len(runner.commands[index].Args) > 0 && runner.commands[index].Args[0] == "push" {
+			return append([]string(nil), runner.commands[index].Args...)
+		}
+	}
+	t.Fatal("no git push command was recorded")
+	return nil
+}
+
 type workspaceTestServer struct {
 	root        string
 	runner      Runner
@@ -1062,6 +1075,131 @@ func TestWorkspaceReconstructRetainedRecoversTrackingRefreshFailure(t *testing.T
 	core.AssertTrue(t, secondResult.OK, secondResult.Error())
 	second := secondResult.Value.(Capture)
 	core.AssertTrue(t, second.Pushed, second.Summary)
+}
+
+func TestWorkspaceReconstructRetainedPublishesFailedInitialPush(t *testing.T) {
+	fixture := workspaceNewRunFixture(t)
+	workspaceWriteFile(t, core.PathJoin(fixture.prepared.Path, "first.txt"), "first\n")
+	fixture.runner.setFailPush(true)
+	firstResult := fixture.manager.CaptureRun(context.Background(), fixture.prepared)
+	core.AssertTrue(t, firstResult.OK, firstResult.Error())
+	first := firstResult.Value.(Capture)
+	core.AssertFalse(t, first.Pushed)
+	core.AssertTrue(t, first.Retained)
+	fixture.runner.setFailPush(false)
+	remote := fixture.server.EnsureRepository(context.Background(), fixture.project.RepositoryName).Value.(gitserver.Repository)
+	remoteRef := core.Concat("refs/heads/", fixture.prepared.Branch)
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "ls-remote", "--heads", remote.CloneURL, remoteRef))
+
+	reopened := NewManager(ManagerOptions{
+		Root: fixture.root, Files: fixture.files, Git: fixture.runner, Server: fixture.server,
+		IDs: func() string { return "reopen" }, Now: time.Now,
+	}).Value.(*Manager)
+	child := fixture.run
+	child.ID = "child"
+	child.ParentRunID = fixture.run.ID
+	child.Branch = fixture.prepared.Branch
+	child.Worktree = fixture.prepared.Path
+	reconstructedResult := reopened.ReconstructRun(context.Background(), fixture.project, child)
+	core.AssertTrue(t, reconstructedResult.OK, reconstructedResult.Error())
+	reconstructed := reconstructedResult.Value.(RunWorkspace)
+	core.AssertEqual(t, first.Revision, reconstructed.BaseRevision)
+
+	secondResult := reopened.CaptureRun(context.Background(), reconstructed)
+	core.AssertTrue(t, secondResult.OK, secondResult.Error())
+	second := secondResult.Value.(Capture)
+	core.AssertTrue(t, second.Pushed, second.Summary)
+	core.AssertEqual(t, first.Revision, second.Revision)
+	core.AssertEqual(t, first.Revision, workspaceRunGit(t, fixture.runner, remote.CloneURL, "rev-parse", remoteRef))
+	lease := core.Concat("--force-with-lease=", remoteRef, ":")
+	core.AssertTrue(t, workspaceContainsArgument(workspaceLastPushArguments(t, fixture.runner), lease))
+}
+
+func TestWorkspaceReconstructRetainedPublishesFailedSubsequentPush(t *testing.T) {
+	fixture := workspaceNewRunFixture(t)
+	workspaceWriteFile(t, core.PathJoin(fixture.prepared.Path, "first.txt"), "first\n")
+	firstResult := fixture.manager.CaptureRun(context.Background(), fixture.prepared)
+	core.AssertTrue(t, firstResult.OK, firstResult.Error())
+	first := firstResult.Value.(Capture)
+	core.AssertTrue(t, first.Pushed, first.Summary)
+
+	workspaceWriteFile(t, core.PathJoin(fixture.prepared.Path, "second.txt"), "second\n")
+	fixture.runner.setFailPush(true)
+	failedResult := fixture.manager.CaptureRun(context.Background(), fixture.prepared)
+	core.AssertTrue(t, failedResult.OK, failedResult.Error())
+	failed := failedResult.Value.(Capture)
+	core.AssertFalse(t, failed.Pushed)
+	core.AssertTrue(t, failed.Retained)
+	core.AssertTrue(t, failed.Revision != first.Revision)
+	fixture.runner.setFailPush(false)
+
+	reopened := NewManager(ManagerOptions{
+		Root: fixture.root, Files: fixture.files, Git: fixture.runner, Server: fixture.server,
+		IDs: func() string { return "reopen" }, Now: time.Now,
+	}).Value.(*Manager)
+	child := fixture.run
+	child.ID = "child"
+	child.ParentRunID = fixture.run.ID
+	child.Branch = fixture.prepared.Branch
+	child.Worktree = fixture.prepared.Path
+	reconstructedResult := reopened.ReconstructRun(context.Background(), fixture.project, child)
+	core.AssertTrue(t, reconstructedResult.OK, reconstructedResult.Error())
+	reconstructed := reconstructedResult.Value.(RunWorkspace)
+	core.AssertEqual(t, failed.Revision, reconstructed.BaseRevision)
+
+	secondResult := reopened.CaptureRun(context.Background(), reconstructed)
+	core.AssertTrue(t, secondResult.OK, secondResult.Error())
+	second := secondResult.Value.(Capture)
+	core.AssertTrue(t, second.Pushed, second.Summary)
+	core.AssertEqual(t, failed.Revision, second.Revision)
+	remoteRef := core.Concat("refs/heads/", reconstructed.Branch)
+	lease := core.Concat("--force-with-lease=", remoteRef, ":", first.Revision)
+	core.AssertTrue(t, workspaceContainsArgument(workspaceLastPushArguments(t, fixture.runner), lease))
+}
+
+func TestWorkspaceReconstructRetainedRejectsRemoteDivergence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, workspaceRunFixture, gitserver.Repository)
+	}{
+		{
+			name: "changed",
+			mutate: func(t *testing.T, fixture workspaceRunFixture, remote gitserver.Repository) {
+				workspaceRunGit(t, fixture.runner, remote.CloneURL, "update-ref", core.Concat("refs/heads/", fixture.prepared.Branch), fixture.project.SourceRevision)
+			},
+		},
+		{
+			name: "deleted",
+			mutate: func(t *testing.T, fixture workspaceRunFixture, remote gitserver.Repository) {
+				workspaceRunGit(t, fixture.runner, remote.CloneURL, "update-ref", "-d", core.Concat("refs/heads/", fixture.prepared.Branch))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := workspaceNewRunFixture(t)
+			workspaceWriteFile(t, core.PathJoin(fixture.prepared.Path, "first.txt"), "first\n")
+			captureResult := fixture.manager.CaptureRun(context.Background(), fixture.prepared)
+			core.AssertTrue(t, captureResult.OK, captureResult.Error())
+			capture := captureResult.Value.(Capture)
+			core.AssertTrue(t, capture.Pushed, capture.Summary)
+			remote := fixture.server.EnsureRepository(context.Background(), fixture.project.RepositoryName).Value.(gitserver.Repository)
+			test.mutate(t, fixture, remote)
+
+			reopened := NewManager(ManagerOptions{
+				Root: fixture.root, Files: fixture.files, Git: fixture.runner, Server: fixture.server,
+				IDs: func() string { return "reopen" }, Now: time.Now,
+			}).Value.(*Manager)
+			child := fixture.run
+			child.ID = "child"
+			child.ParentRunID = fixture.run.ID
+			child.Branch = fixture.prepared.Branch
+			child.Worktree = fixture.prepared.Path
+			result := reopened.ReconstructRun(context.Background(), fixture.project, child)
+			core.AssertFalse(t, result.OK)
+			core.AssertContains(t, result.Error(), "differs")
+			core.AssertTrue(t, core.Stat(fixture.prepared.Path).OK)
+		})
+	}
 }
 
 func TestWorkspace_Manager_ReconstructRun_Bad(t *testing.T) {

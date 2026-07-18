@@ -580,10 +580,13 @@ func (manager *Manager) refreshRunTracking(ctx context.Context, project work.Pro
 
 func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Project, branch, revision string) core.Result {
 	remoteReference := core.Concat("refs/remotes/lem/", branch)
-	tracked := manager.gitOutput(ctx, manager.root, nil, "--git-dir", project.ClonePath, "rev-parse", remoteReference)
-	if tracked.OK && core.Trim(tracked.Value.(string)) == revision {
-		return core.Ok(nil)
+	trackedResult := manager.gitOutput(ctx, manager.root, nil,
+		"--git-dir", project.ClonePath, "for-each-ref", "--format=%(objectname)", remoteReference,
+	)
+	if !trackedResult.OK {
+		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to inspect local tracking reference", trackedResult.Err()))
 	}
+	trackedRevision := core.Trim(trackedResult.Value.(string))
 	repositoryResult := manager.server.EnsureRepository(ctx, project.RepositoryName)
 	if !repositoryResult.OK {
 		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to resolve private repository", repositoryResult.Err()))
@@ -596,21 +599,35 @@ func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Pro
 	if !environmentResult.OK {
 		return environmentResult
 	}
-	fetched := manager.gitOutput(ctx, manager.root, environmentResult.Value.([]string),
-		"--git-dir", project.ClonePath, "fetch", "--no-tags", repository.CloneURL,
-		core.Concat("+refs/heads/", branch, ":", remoteReference),
+	remoteBranch := core.Concat("refs/heads/", branch)
+	remoteResult := manager.gitOutput(ctx, manager.root, environmentResult.Value.([]string),
+		"--git-dir", project.ClonePath, "ls-remote", "--heads", repository.CloneURL, remoteBranch,
 	)
-	if !fetched.OK {
-		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to refresh durable run branch", fetched.Err()))
+	if !remoteResult.OK {
+		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to inspect durable run branch", remoteResult.Err()))
 	}
-	tracked = manager.gitOutput(ctx, manager.root, nil, "--git-dir", project.ClonePath, "rev-parse", remoteReference)
-	if !tracked.OK {
-		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to inspect refreshed run branch", tracked.Err()))
+	remoteRevision := ""
+	remoteFields := core.Fields(remoteResult.Value.(string))
+	if len(remoteFields) != 0 {
+		if len(remoteFields) != 2 || remoteFields[1] != remoteBranch {
+			return core.Fail(core.NewError("agent workspace private branch inspection returned an unexpected result"))
+		}
+		remoteRevision = remoteFields[0]
 	}
-	if core.Trim(tracked.Value.(string)) != revision {
-		return core.Fail(core.NewError("agent workspace retained checkout differs from its durable private branch"))
+	if remoteRevision == revision {
+		if trackedRevision == revision {
+			return core.Ok(nil)
+		}
+		refreshed := manager.refreshRunTracking(ctx, project, branch, repository, environmentResult.Value.([]string), revision)
+		if !refreshed.OK {
+			return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to refresh pushed run tracking", refreshed.Err()))
+		}
+		return core.Ok(nil)
 	}
-	return core.Ok(nil)
+	if remoteRevision == trackedRevision {
+		return core.Ok(nil)
+	}
+	return core.Fail(core.NewError("agent workspace retained checkout differs from its expected private branch state"))
 }
 
 // ReleaseRun removes a clean worktree only after its branch is durably pushed.

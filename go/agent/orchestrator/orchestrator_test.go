@@ -366,6 +366,12 @@ func (store *orchestratorTestStore) Continuation(runID string) core.Result {
 		return core.Fail(core.NewError("run not found"))
 	}
 	continuation := work.Continuation{Run: run}
+	for _, event := range store.events {
+		if event.RunID == runID && event.Kind == "queued" {
+			continuation.Task = event.Detail
+			break
+		}
+	}
 	for _, log := range store.logs {
 		if log.RunID == runID {
 			continuation.Logs = append(continuation.Logs, log)

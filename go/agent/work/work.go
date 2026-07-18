@@ -195,6 +195,7 @@ type Snapshot struct {
 // Continuation contains the durable context needed for a child attempt.
 type Continuation struct {
 	Run      Run
+	Task     string
 	Logs     []LogChunk
 	Question Question
 	Answer   Answer

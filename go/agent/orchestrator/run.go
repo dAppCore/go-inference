@@ -26,6 +26,16 @@ type rawLine struct {
 	text   string
 }
 
+type queuedPreparation struct {
+	run    work.Run
+	review DispatchReview
+}
+
+type queuedAdmission struct {
+	decision    queue.Decision
+	preparation queuedPreparation
+}
+
 type runExecution struct {
 	orchestrator *Orchestrator
 	run          work.Run
@@ -225,7 +235,7 @@ func (orchestrator *Orchestrator) Dispatch(ctx context.Context, review DispatchR
 		CommandReceipt: fresh.Command.Receipt, Status: work.RunQueued, Number: number, Attempt: 1,
 		QueuedAt: at, UpdatedAt: at,
 	}
-	eventResult := orchestrator.newEvent(run, "queued", "run queued for native admission", "")
+	eventResult := orchestrator.newEvent(run, "queued", "run queued for native admission", fresh.Request.Work.Task)
 	if !eventResult.OK {
 		return eventResult
 	}
@@ -337,6 +347,9 @@ func (orchestrator *Orchestrator) Resume(ctx context.Context, request work.Resum
 	if parent.WorkID != request.Work.ID {
 		return core.Fail(core.NewError("agent resume Work does not match the parent run"))
 	}
+	if durableTask := core.Trim(continuation.Task); durableTask == "" || request.Work.Task != durableTask {
+		return core.Fail(core.NewError("agent resume Work task does not match the durable parent task"))
+	}
 	answer := continuation.Answer
 	if answer.ID == "" {
 		return core.Fail(core.NewError("agent resume requires a stored answer"))
@@ -372,9 +385,13 @@ func (orchestrator *Orchestrator) Retry(ctx context.Context, item work.Item, par
 	if !continuationResult.OK {
 		return continuationResult
 	}
-	parent := continuationResult.Value.(work.Continuation).Run
+	continuation := continuationResult.Value.(work.Continuation)
+	parent := continuation.Run
 	if parent.WorkID != item.ID {
 		return core.Fail(core.NewError("agent retry Work does not match the parent run"))
+	}
+	if durableTask := core.Trim(continuation.Task); durableTask == "" || item.Task != durableTask {
+		return core.Fail(core.NewError("agent retry Work task does not match the durable parent task"))
 	}
 	switch parent.Status {
 	case work.RunFailed, work.RunCancelled, work.RunInterrupted:
@@ -449,7 +466,7 @@ func (orchestrator *Orchestrator) queueChildAttempt(item work.Item, parent work.
 	if child.ID == "" || child.Provider == "" {
 		return core.Fail(core.NewError("agent child attempt requires run and provider IDs"))
 	}
-	eventResult := orchestrator.newEvent(child, "queued", "continuation attempt queued for native admission", "")
+	eventResult := orchestrator.newEvent(child, "queued", "continuation attempt queued for native admission", item.Task)
 	if !eventResult.OK {
 		return eventResult
 	}
@@ -689,23 +706,26 @@ func (orchestrator *Orchestrator) drainQueue() time.Time {
 		if !at.OK {
 			return next
 		}
-		decisionResult := orchestrator.queue.Decide(queue.Candidate{
-			RunID: run.ID, Provider: run.Provider, Model: run.Model, QueuedAt: run.QueuedAt,
-		}, queue.Runtime{Queued: queued, Running: snapshot.Runs, Now: at.Value.(time.Time)})
-		if !decisionResult.OK {
-			continue
+		admissionResult := orchestrator.admitQueuedRun(run, queued, snapshot.Runs, at.Value.(time.Time))
+		if !admissionResult.OK {
+			retryAt := at.Value.(time.Time).Add(queueRetryDelay)
+			if next.IsZero() || retryAt.Before(next) {
+				next = retryAt
+			}
+			break
 		}
-		decision, ok := decisionResult.Value.(queue.Decision)
+		admission, ok := admissionResult.Value.(queuedAdmission)
 		if !ok {
 			continue
 		}
+		decision := admission.decision
 		if !decision.Allowed {
 			if !decision.NotBefore.IsZero() && (next.IsZero() || decision.NotBefore.Before(next)) {
 				next = decision.NotBefore
 			}
 			continue
 		}
-		started := orchestrator.startQueuedRun(run)
+		started := orchestrator.startPreparingRun(admission.preparation)
 		if !started.OK {
 			retryAt := at.Value.(time.Time).Add(queueRetryDelay)
 			if next.IsZero() || retryAt.Before(next) {
@@ -733,7 +753,50 @@ func (orchestrator *Orchestrator) drainQueue() time.Time {
 	return next
 }
 
+func (orchestrator *Orchestrator) admitQueuedRun(run work.Run, queued, running []work.Run, at time.Time) core.Result {
+	orchestrator.queueMu.Lock()
+	defer orchestrator.queueMu.Unlock()
+	decisionResult := orchestrator.queue.Decide(queue.Candidate{
+		RunID: run.ID, Provider: run.Provider, Model: run.Model, QueuedAt: run.QueuedAt,
+	}, queue.Runtime{Queued: queued, Running: running, Now: at})
+	if !decisionResult.OK {
+		return core.Ok(queuedAdmission{})
+	}
+	decision, ok := decisionResult.Value.(queue.Decision)
+	if !ok {
+		return core.Ok(queuedAdmission{})
+	}
+	admission := queuedAdmission{decision: decision}
+	if !decision.Allowed {
+		return core.Ok(admission)
+	}
+	preparationResult := orchestrator.beginQueuedRun(run)
+	if !preparationResult.OK {
+		return preparationResult
+	}
+	preparation, ok := preparationResult.Value.(queuedPreparation)
+	if !ok {
+		return core.Fail(core.Errorf("agent queue preparation returned %T instead of queued preparation", preparationResult.Value))
+	}
+	admission.preparation = preparation
+	return core.Ok(admission)
+}
+
 func (orchestrator *Orchestrator) startQueuedRun(run work.Run) core.Result {
+	orchestrator.queueMu.Lock()
+	preparationResult := orchestrator.beginQueuedRun(run)
+	orchestrator.queueMu.Unlock()
+	if !preparationResult.OK {
+		return preparationResult
+	}
+	preparation, ok := preparationResult.Value.(queuedPreparation)
+	if !ok {
+		return core.Fail(core.Errorf("agent queue preparation returned %T instead of queued preparation", preparationResult.Value))
+	}
+	return orchestrator.startPreparingRun(preparation)
+}
+
+func (orchestrator *Orchestrator) beginQueuedRun(run work.Run) core.Result {
 	if orchestrator.isClosed() {
 		return core.Fail(core.NewError("agent orchestrator is closed"))
 	}
@@ -762,7 +825,12 @@ func (orchestrator *Orchestrator) startQueuedRun(run work.Run) core.Result {
 	if committed := commitStore(orchestrator.store, Commit{Run: &run, ExpectedStatus: &expectedQueued, Event: &event}); !committed.OK {
 		return committed
 	}
+	return core.Ok(queuedPreparation{run: run, review: review})
+}
 
+func (orchestrator *Orchestrator) startPreparingRun(preparation queuedPreparation) core.Result {
+	run := preparation.run
+	review := preparation.review
 	adapterResult := orchestrator.providers.Adapter(run.Provider)
 	if !adapterResult.OK {
 		orchestrator.finishWithoutProcess(run, work.RunPreparing, workspace.RunWorkspace{}, adapterResult.Error())
@@ -809,7 +877,7 @@ func (orchestrator *Orchestrator) startQueuedRun(run work.Run) core.Result {
 			orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, continuationResult.Error())
 			return core.Ok(true)
 		}
-		continuationText = renderContinuation(review.Request.Work, continuationResult.Value.(work.Continuation))
+		continuationText = renderContinuation(continuationResult.Value.(work.Continuation))
 	}
 	commandResult := adapter.Build(provider.Launch{
 		WorkID: run.WorkID, RunID: run.ID, Title: review.Request.Work.Title, Task: review.Request.Work.Task,
@@ -825,7 +893,7 @@ func (orchestrator *Orchestrator) startQueuedRun(run work.Run) core.Result {
 		orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, core.Sprintf("provider returned %T instead of command", commandResult.Value))
 		return core.Ok(true)
 	}
-	atResult = orchestrator.now()
+	atResult := orchestrator.now()
 	if !atResult.OK {
 		orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, atResult.Error())
 		return core.Ok(true)
@@ -836,12 +904,12 @@ func (orchestrator *Orchestrator) startQueuedRun(run work.Run) core.Result {
 	run.UpdatedAt = at
 	run.CommandReceipt = command.Receipt
 	expectedPreparing := work.RunPreparing
-	eventResult = orchestrator.newEvent(run, "running", "native provider admitted", command.Receipt)
+	eventResult := orchestrator.newEvent(run, "running", "native provider admitted", command.Receipt)
 	if !eventResult.OK {
 		orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, eventResult.Error())
 		return core.Ok(true)
 	}
-	event = eventResult.Value.(work.Event)
+	event := eventResult.Value.(work.Event)
 	orchestrator.queueMu.Lock()
 	queueSnapshotResult := orchestrator.durableQueueSnapshot()
 	if !queueSnapshotResult.OK {
@@ -1497,8 +1565,8 @@ func sameStrings(left, right []string) bool {
 	return true
 }
 
-func renderContinuation(item work.Item, continuation work.Continuation) string {
-	sections := []string{core.Concat("Earlier Work task:\n", core.Trim(item.Task))}
+func renderContinuation(continuation work.Continuation) string {
+	sections := []string{core.Concat("Earlier Work task:\n", core.Trim(continuation.Task))}
 	logs := append([]work.LogChunk(nil), continuation.Logs...)
 	core.SliceSortFunc(logs, func(left, right work.LogChunk) bool {
 		return left.Sequence < right.Sequence
