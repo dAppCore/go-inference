@@ -776,15 +776,15 @@ type agentProvider interface {
 }
 ```
 
-- [ ] Extend `appPaths` with host `SoftServe` and `Workspaces` plus medium-relative `Agents` while preserving existing path tests: `<root>/soft-serve`, `<root>/workspaces`, and `agents.yaml`.
-- [ ] Write adapter mapping tests for all available first-slice capabilities, unavailable future capabilities with specific reasons, Work/project translation, project review/registration including separately confirmed Git enablement, ordered events/logs/questions, dispatch review, cancel, answer, retry, resume, queue start/stop, review, accept, reject, and close.
-- [ ] Add private feature names `changes.review`, `accept`, and `reject`; the available first-slice set is exactly Dispatch, Cancel, Answer, Retry, Resume, Queue Start, Queue Stop, Review Changes, Accept, and Reject. Preserve specific unavailable reasons for every other catalogue entry.
-- [ ] Write bootstrap tests for valid policy, malformed policy frozen reason, Soft Serve owner contention degraded reason, missing Git/provider detection, `--check` composition, and cleanup after partial failures. The check path injects an unavailable read-only agent provider and never calls store recovery or constructs the native launcher.
-- [ ] Prove tests fail before implementation.
-- [ ] Map `queue.Policy.Providers` into `provider.Config`, open a go-io medium rooted at the host workspace path, then compose the DuckDB store, Soft Serve options, workspace manager, default provider registry, queue controller, native launcher, and orchestrator only in normal TUI startup. Keep Soft Serve lazy: construction and snapshots do not call Start.
-- [ ] Ensure workspace resource Close calls orchestrator first, then reactive/config/repository resources, preserving all errors.
-- [ ] Map reusable types at the adapter boundary so Bubble Tea files do not depend on Soft Serve, process, queue, or workspace implementations.
-- [ ] Run focused tests/race, format, and commit:
+- [x] Extend `appPaths` with host `SoftServe` and `Workspaces` plus medium-relative `Agents` while preserving existing path tests: `<root>/soft-serve`, `<root>/workspaces`, and `agents.yaml`.
+- [x] Write adapter mapping tests for all available first-slice capabilities, unavailable future capabilities with specific reasons, Work/project translation, project review/registration including separately confirmed Git enablement, ordered events/logs/questions, dispatch review, cancel, answer, retry, resume, queue start/stop, review, accept, reject, and close.
+- [x] Add private feature names `changes.review`, `accept`, and `reject`; the available first-slice set is exactly Dispatch, Cancel, Answer, Retry, Resume, Queue Start, Queue Stop, Review Changes, Accept, and Reject. Preserve specific unavailable reasons for every other catalogue entry.
+- [x] Write bootstrap tests for valid policy, malformed policy frozen reason, Soft Serve owner contention degraded reason, missing Git/provider detection, `--check` composition, and cleanup after partial failures. The check path injects an unavailable read-only agent provider and never calls store recovery or constructs the native launcher.
+- [x] Prove tests fail before implementation.
+- [x] Map `queue.Policy.Providers` into `provider.Config`, open a go-io medium rooted at the host workspace path, then compose the DuckDB store, Soft Serve options, workspace manager, default provider registry, queue controller, native launcher, and orchestrator only in normal TUI startup. Keep Soft Serve lazy: construction and snapshots do not call Start.
+- [x] Ensure workspace resource Close calls orchestrator first, then reactive/config/repository resources, preserving all errors.
+- [x] Map reusable types at the adapter boundary so Bubble Tea files do not depend on Soft Serve, process, queue, or workspace implementations.
+- [x] Run focused tests/race, format, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
