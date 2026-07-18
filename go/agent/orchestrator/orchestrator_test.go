@@ -21,9 +21,16 @@ import (
 type orchestratorTestGitRunner struct {
 	mu        sync.Mutex
 	afterPush func(string)
+	failWhen  func(workspace.Command) bool
 }
 
 func (runner *orchestratorTestGitRunner) Run(ctx context.Context, command workspace.Command) core.Result {
+	runner.mu.Lock()
+	failWhen := runner.failWhen
+	runner.mu.Unlock()
+	if failWhen != nil && failWhen(command) {
+		return core.Fail(core.NewError("injected Git failure"))
+	}
 	program := &coreprocess.Program{Name: command.Executable}
 	if found := program.Find(); !found.OK {
 		return found
@@ -55,6 +62,21 @@ func (runner *orchestratorTestGitRunner) setAfterPush(hook func(string)) {
 	runner.mu.Lock()
 	runner.afterPush = hook
 	runner.mu.Unlock()
+}
+
+func (runner *orchestratorTestGitRunner) setFailure(predicate func(workspace.Command) bool) {
+	runner.mu.Lock()
+	runner.failWhen = predicate
+	runner.mu.Unlock()
+}
+
+func orchestratorWorkspaceCommandHasArgument(command workspace.Command, expected string) bool {
+	for _, argument := range command.Args {
+		if argument == expected {
+			return true
+		}
+	}
+	return false
 }
 
 type orchestratorTestStore struct {

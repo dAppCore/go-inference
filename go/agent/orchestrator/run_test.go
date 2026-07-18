@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/agent/gitserver"
 	"dappco.re/go/inference/agent/provider"
 	"dappco.re/go/inference/agent/queue"
 	"dappco.re/go/inference/agent/work"
@@ -121,6 +122,8 @@ func orchestratorAssertImmutableChild(t *testing.T, fixture *orchestratorFixture
 	core.AssertEqual(t, parent.Attempt+1, child.Attempt)
 	core.AssertEqual(t, parent.Branch, child.Branch)
 	core.AssertEqual(t, parent.Worktree, child.Worktree)
+	core.AssertTrue(t, parent.DurableRevision != "")
+	core.AssertEqual(t, parent.DurableRevision, child.DurableRevision)
 	storedParent := fixture.store.Run(parent.ID)
 	core.AssertTrue(t, storedParent.OK, storedParent.Error())
 	core.AssertEqual(t, parent, storedParent.Value.(work.Run))
@@ -642,12 +645,16 @@ func TestRun_Orchestrator_Retry_Good(t *testing.T) {
 			worktrees := orchestratorRunGit(t, project.ClonePath, "worktree", "list", "--porcelain")
 			core.AssertEqual(t, 1, core.Count(worktrees, parent.Worktree))
 			orchestratorAssertNoStateMarkdown(t, item.Repository, parent.Worktree)
+			writeResult := core.WriteFile(core.PathJoin(parent.Worktree, "durable-child.txt"), []byte("child\n"), 0o600)
+			core.AssertTrue(t, writeResult.OK, writeResult.Error())
 			launch.callback("stdout", orchestratorCompletedEnvelope("retried"))
 			launch.process.Finish(0)
 			finished := orchestratorWaitRunStatus(t, fixture.store, child.ID, work.RunCompleted, work.RunFailed)
 			if finished.Status != work.RunCompleted {
 				t.Fatalf("retried child failed: %s", finished.FailureReason)
 			}
+			core.AssertTrue(t, finished.DurableRevision != parent.DurableRevision)
+			core.AssertEqual(t, parent, fixture.store.Run(parent.ID).Value.(work.Run))
 		})
 	}
 }
@@ -696,6 +703,27 @@ func TestRun_Orchestrator_Retry_Ugly(t *testing.T) {
 	core.AssertContains(t, child.FailureReason, "expected branch")
 	core.AssertEqual(t, 1, fixture.launcher.Count())
 	core.AssertEqual(t, parent, fixture.store.Run(parent.ID).Value.(work.Run))
+}
+
+func TestRunAcknowledgedCaptureRevisionIsDurable(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	launch := fixture.launcher.WaitStart(t)
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		return orchestratorWorkspaceCommandHasArgument(command, "update-ref") || orchestratorWorkspaceCommandHasArgument(command, "fetch")
+	})
+	launch.callback("stdout", orchestratorCompletedEnvelope("captured"))
+	launch.process.Finish(0)
+	finished := orchestratorWaitRunStatus(t, fixture.store, run.ID, work.RunFailed)
+	fixture.git.setFailure(nil)
+	core.AssertTrue(t, finished.DurableRevision != "")
+	core.AssertEqual(t, finished.ExecutionRevision, finished.DurableRevision)
+	core.AssertContains(t, finished.FailureReason, "tracking")
+	core.AssertTrue(t, core.Stat(finished.Worktree).OK)
+	remote := fixture.server.EnsureRepository(context.Background(), project.RepositoryName).Value.(gitserver.Repository)
+	core.AssertEqual(t, finished.DurableRevision, orchestratorRunGit(t, remote.CloneURL, "rev-parse", core.Concat("refs/heads/", finished.Branch)))
 }
 
 func TestRunChildAttemptBoundaryFailures(t *testing.T) {

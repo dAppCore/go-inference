@@ -49,20 +49,22 @@ type RegisterRequest struct {
 
 // RunWorkspace is an isolated checkout leased to one native provider attempt.
 type RunWorkspace struct {
-	Project      work.Project
-	RunID        string
-	Branch       string
-	Path         string
-	BaseRevision string
+	Project         work.Project
+	RunID           string
+	Branch          string
+	Path            string
+	BaseRevision    string
+	DurableRevision string
 }
 
 // Capture reports whether run changes were committed and durably pushed.
 type Capture struct {
-	Revision string
-	Changed  bool
-	Pushed   bool
-	Retained bool
-	Summary  string
+	Revision        string
+	DurableRevision string
+	Changed         bool
+	Pushed          bool
+	Retained        bool
+	Summary         string
 }
 
 // ManagerOptions injects the local medium, Git runner, and private Git service.
@@ -372,49 +374,41 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 
 	repositoryResult := manager.server.EnsureRepository(captureContext, workspace.Project.RepositoryName)
 	if !repositoryResult.OK {
-		return core.Ok(Capture{Retained: true, Summary: core.Concat("private repository unavailable: ", repositoryResult.Error())})
+		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Retained: true, Summary: core.Concat("private repository unavailable: ", repositoryResult.Error())})
 	}
 	repository, ok := repositoryResult.Value.(gitserver.Repository)
 	if !ok {
-		return core.Ok(Capture{Retained: true, Summary: core.Sprintf("private Git returned %T instead of repository", repositoryResult.Value)})
+		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Retained: true, Summary: core.Sprintf("private Git returned %T instead of repository", repositoryResult.Value)})
 	}
 	environmentResult := repositoryEnvironment(repository)
 	if !environmentResult.OK {
-		return core.Ok(Capture{Retained: true, Summary: environmentResult.Error()})
+		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Retained: true, Summary: environmentResult.Error()})
 	}
 	environment := environmentResult.Value.([]string)
 	status := manager.gitOutput(captureContext, workspace.Path, nil, "status", "--porcelain=v1")
 	if !status.OK {
-		return core.Ok(Capture{Retained: true, Summary: core.Concat("status failed: ", status.Error())})
+		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Retained: true, Summary: core.Concat("status failed: ", status.Error())})
 	}
 	changed := core.Trim(status.Value.(string)) != ""
 	if changed {
 		staged := manager.gitOutput(captureContext, workspace.Path, nil, "add", "--all")
 		if !staged.OK {
-			return core.Ok(Capture{Changed: true, Retained: true, Summary: core.Concat("capture staging failed: ", staged.Error())})
+			return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Changed: true, Retained: true, Summary: core.Concat("capture staging failed: ", staged.Error())})
 		}
 		if identity := manager.ensureCommitIdentity(captureContext, workspace.Path); !identity.OK {
-			return core.Ok(Capture{Changed: true, Retained: true, Summary: core.Concat("capture identity failed: ", identity.Error())})
+			return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Changed: true, Retained: true, Summary: core.Concat("capture identity failed: ", identity.Error())})
 		}
 		committed := manager.gitOutput(captureContext, workspace.Path, nil, "commit", "-m", core.Concat("LEM run ", workspace.RunID, " capture"))
 		if !committed.OK {
-			return core.Ok(Capture{Changed: true, Retained: true, Summary: core.Concat("capture commit failed: ", committed.Error())})
+			return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Changed: true, Retained: true, Summary: core.Concat("capture commit failed: ", committed.Error())})
 		}
 	}
 	revisionResult := manager.gitOutput(captureContext, workspace.Path, nil, "rev-parse", "HEAD")
 	if !revisionResult.OK {
-		return core.Ok(Capture{Changed: changed, Retained: true, Summary: core.Concat("capture revision failed: ", revisionResult.Error())})
+		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Changed: changed, Retained: true, Summary: core.Concat("capture revision failed: ", revisionResult.Error())})
 	}
 	revision := core.Trim(revisionResult.Value.(string))
-	remoteReference := core.Concat("refs/remotes/lem/", workspace.Branch)
-	expectedRevision := ""
-	tracked := manager.gitOutput(captureContext, manager.root, nil,
-		"--git-dir", workspace.Project.ClonePath, "rev-parse", remoteReference,
-	)
-	if tracked.OK {
-		expectedRevision = core.Trim(tracked.Value.(string))
-	}
-	lease := core.Concat("--force-with-lease=refs/heads/", workspace.Branch, ":", expectedRevision)
+	lease := core.Concat("--force-with-lease=refs/heads/", workspace.Branch, ":", workspace.DurableRevision)
 	pushed := manager.gitOutput(captureContext, workspace.Path, environment,
 		"push", lease, repository.CloneURL,
 		core.Concat("HEAD:refs/heads/", workspace.Branch),
@@ -422,20 +416,24 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 	if !pushed.OK {
 		manager.durable[workspace.RunID] = false
 		return core.Ok(Capture{
-			Revision: revision,
-			Changed:  changed,
-			Retained: true,
-			Summary:  core.Concat("push failed; worktree retained: ", pushed.Error()),
+			Revision:        revision,
+			DurableRevision: workspace.DurableRevision,
+			Changed:         changed,
+			Retained:        true,
+			Summary:         core.Concat("push failed; worktree retained: ", pushed.Error()),
 		})
 	}
+	workspace.DurableRevision = revision
+	manager.leases[workspace.RunID] = workspace
 	refreshed := manager.refreshRunTracking(captureContext, workspace.Project, workspace.Branch, repository, environment, revision)
 	if !refreshed.OK {
 		manager.durable[workspace.RunID] = false
 		return core.Ok(Capture{
-			Revision: revision,
-			Changed:  changed,
-			Retained: true,
-			Summary:  core.Concat("push succeeded but local tracking refresh failed; worktree retained: ", refreshed.Error()),
+			Revision:        revision,
+			DurableRevision: revision,
+			Changed:         changed,
+			Retained:        true,
+			Summary:         core.Concat("push succeeded but local tracking refresh failed; worktree retained: ", refreshed.Error()),
 		})
 	}
 	manager.durable[workspace.RunID] = true
@@ -443,7 +441,7 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 	if changed {
 		summary = "run changes captured and pushed"
 	}
-	return core.Ok(Capture{Revision: revision, Changed: changed, Pushed: true, Summary: summary})
+	return core.Ok(Capture{Revision: revision, DurableRevision: revision, Changed: changed, Pushed: true, Summary: summary})
 }
 
 // ReconstructRun restores a missing worktree from its durable private branch.
@@ -466,7 +464,7 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 	}
 	reconstructed := validated.Value.(RunWorkspace)
 	if existing, exists := manager.leases[reconstructed.RunID]; exists {
-		if existing.Path != reconstructed.Path || existing.Branch != reconstructed.Branch {
+		if existing.Path != reconstructed.Path || existing.Branch != reconstructed.Branch || existing.DurableRevision != reconstructed.DurableRevision {
 			return core.Fail(core.NewError("agent workspace run lease differs from its durable record"))
 		}
 		return core.Ok(existing)
@@ -486,10 +484,8 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 			return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to inspect retained checkout", revision.Err()))
 		}
 		reconstructed.BaseRevision = core.Trim(revision.Value.(string))
-		if run.ParentRunID != "" {
-			if tracked := manager.recoverRunTracking(ctx, project, reconstructed.Branch, reconstructed.BaseRevision); !tracked.OK {
-				return tracked
-			}
+		if tracked := manager.recoverRunTracking(ctx, project, reconstructed.Branch, reconstructed.DurableRevision); !tracked.OK {
+			return tracked
 		}
 		manager.leases[reconstructed.RunID] = reconstructed
 		manager.durable[reconstructed.RunID] = false
@@ -504,27 +500,10 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 		return core.Fail(core.Errorf("agent workspace branch %s is already attached to retained checkout %s", reconstructed.Branch, attachedPath))
 	}
 
-	repositoryResult := manager.server.EnsureRepository(ctx, project.RepositoryName)
-	if !repositoryResult.OK {
-		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to resolve private repository", repositoryResult.Err()))
+	if tracked := manager.recoverRunTracking(ctx, project, reconstructed.Branch, reconstructed.DurableRevision); !tracked.OK {
+		return tracked
 	}
-	repository, ok := repositoryResult.Value.(gitserver.Repository)
-	if !ok {
-		return core.Fail(core.Errorf("agent workspace Git service returned %T instead of repository", repositoryResult.Value))
-	}
-	environmentResult := repositoryEnvironment(repository)
-	if !environmentResult.OK {
-		return environmentResult
-	}
-	environment := environmentResult.Value.([]string)
 	remoteReference := core.Concat("refs/remotes/lem/", reconstructed.Branch)
-	fetched := manager.gitOutput(ctx, manager.root, environment,
-		"--git-dir", project.ClonePath, "fetch", "--no-tags", repository.CloneURL,
-		core.Concat("+refs/heads/", reconstructed.Branch, ":", remoteReference),
-	)
-	if !fetched.OK {
-		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to fetch durable run branch", fetched.Err()))
-	}
 	branched := manager.gitOutput(ctx, manager.root, nil,
 		"--git-dir", project.ClonePath, "branch", "--force", reconstructed.Branch, remoteReference,
 	)
@@ -578,7 +557,7 @@ func (manager *Manager) refreshRunTracking(ctx context.Context, project work.Pro
 	return core.Ok(nil)
 }
 
-func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Project, branch, revision string) core.Result {
+func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Project, branch, durableRevision string) core.Result {
 	remoteReference := core.Concat("refs/remotes/lem/", branch)
 	trackedResult := manager.gitOutput(ctx, manager.root, nil,
 		"--git-dir", project.ClonePath, "for-each-ref", "--format=%(objectname)", remoteReference,
@@ -614,20 +593,32 @@ func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Pro
 		}
 		remoteRevision = remoteFields[0]
 	}
-	if remoteRevision == revision {
-		if trackedRevision == revision {
-			return core.Ok(nil)
+	if remoteRevision != durableRevision {
+		return core.Fail(core.NewError("agent workspace durable private branch differs from its acknowledged revision"))
+	}
+	if trackedRevision == durableRevision {
+		return core.Ok(nil)
+	}
+	if durableRevision == "" {
+		deleted := manager.gitOutput(ctx, manager.root, nil,
+			"--git-dir", project.ClonePath, "update-ref", "-d", remoteReference,
+		)
+		if !deleted.OK {
+			return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to clear absent run tracking", deleted.Err()))
 		}
-		refreshed := manager.refreshRunTracking(ctx, project, branch, repository, environmentResult.Value.([]string), revision)
-		if !refreshed.OK {
-			return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to refresh pushed run tracking", refreshed.Err()))
+		verified := manager.gitOutput(ctx, manager.root, nil,
+			"--git-dir", project.ClonePath, "for-each-ref", "--format=%(objectname)", remoteReference,
+		)
+		if !verified.OK || core.Trim(verified.Value.(string)) != "" {
+			return core.Fail(core.NewError("agent workspace local tracking reference differs from confirmed remote absence"))
 		}
 		return core.Ok(nil)
 	}
-	if remoteRevision == trackedRevision {
-		return core.Ok(nil)
+	refreshed := manager.refreshRunTracking(ctx, project, branch, repository, environmentResult.Value.([]string), durableRevision)
+	if !refreshed.OK {
+		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to refresh acknowledged run tracking", refreshed.Err()))
 	}
-	return core.Fail(core.NewError("agent workspace retained checkout differs from its expected private branch state"))
+	return core.Ok(nil)
 }
 
 // ReleaseRun removes a clean worktree only after its branch is durably pushed.
@@ -888,6 +879,10 @@ func (manager *Manager) validateRun(project work.Project, run work.Run, reconstr
 	if project.ClonePath != expectedCloneResult.Value.(string) {
 		return core.Fail(core.NewError("agent workspace cached clone is outside the configured internal root"))
 	}
+	durableRevision := core.Trim(run.DurableRevision)
+	if !reconstruct && durableRevision != "" {
+		return core.Fail(core.NewError("agent workspace root run cannot start with a private durable revision"))
+	}
 	branchResult := runBranch(run.WorkID, run.Number)
 	if !branchResult.OK {
 		return branchResult
@@ -916,11 +911,12 @@ func (manager *Manager) validateRun(project work.Project, run work.Run, reconstr
 		return core.Fail(core.NewError("agent workspace run path differs from its deterministic internal path"))
 	}
 	return core.Ok(RunWorkspace{
-		Project:      project,
-		RunID:        run.ID,
-		Branch:       branch,
-		Path:         path,
-		BaseRevision: project.SourceRevision,
+		Project:         project,
+		RunID:           run.ID,
+		Branch:          branch,
+		Path:            path,
+		BaseRevision:    project.SourceRevision,
+		DurableRevision: durableRevision,
 	})
 }
 

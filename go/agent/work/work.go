@@ -80,6 +80,7 @@ type Run struct {
 	Provider          string
 	Model             string
 	SourceRevision    string
+	DurableRevision   string
 	ExecutionRevision string
 	AcceptedRevision  string
 	Branch            string

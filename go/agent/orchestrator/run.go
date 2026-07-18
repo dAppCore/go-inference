@@ -460,7 +460,8 @@ func (orchestrator *Orchestrator) queueChildAttempt(item work.Item, parent work.
 	child := work.Run{
 		ID: core.Trim(runID), WorkID: parent.WorkID, ProjectID: parent.ProjectID, ParentRunID: parent.ID,
 		Provider: core.Lower(core.Trim(providerName)), Model: core.Trim(model), SourceRevision: parent.SourceRevision,
-		Branch: parent.Branch, Worktree: parent.Worktree, Status: work.RunQueued,
+		DurableRevision: parent.DurableRevision,
+		Branch:          parent.Branch, Worktree: parent.Worktree, Status: work.RunQueued,
 		Number: parent.Number, Attempt: parent.Attempt + 1, QueuedAt: at, UpdatedAt: at,
 	}
 	if child.ID == "" || child.Provider == "" {
@@ -1030,6 +1031,7 @@ func (orchestrator *Orchestrator) finishWithoutProcess(run work.Run, expected wo
 				run.FailureReason = core.Join("; ", run.FailureReason, core.Sprintf("workspace returned %T instead of capture", captured.Value))
 			} else {
 				capture = capturedValue
+				run.DurableRevision = capture.DurableRevision
 				if capture.Revision != "" {
 					run.ExecutionRevision = capture.Revision
 				}
@@ -1247,6 +1249,8 @@ func (orchestrator *Orchestrator) finishExecution(execution *runExecution, waite
 		capture, captureOK = captured.Value.(workspace.Capture)
 		if !captureOK {
 			execution.failure = core.Join("; ", execution.failure, core.Sprintf("workspace returned %T instead of capture", captured.Value))
+		} else {
+			run.DurableRevision = capture.DurableRevision
 		}
 		if capture.Revision != "" {
 			run.ExecutionRevision = capture.Revision
