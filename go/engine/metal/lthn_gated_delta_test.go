@@ -27,14 +27,14 @@ import (
 
 // gdTestPrep builds one random gated-delta problem and both sides' views of it.
 type gdTestPrep struct {
-	T, Hk, Hv, Dk, Dv    int
-	qHost, kHost, vHost  []float32 // repeated to Hv, q ℓ2-normalised (host contract)
-	alpha, beta          []float32 // [T,Hv]
-	priorHost            []float32 // [Hv,Dk,Dv] (host layout)
-	qDev, kDev           []float32 // unrepeated [T,Hk,Dk], both ℓ2-normalised (kernel contract)
-	vDev                 []float32 // [T,Hv,Dv]
-	stateDev             []float32 // [kSlots,Hv,Dv,Dk] slot 0 = prior (kernel layout)
-	kSlots               int
+	T, Hk, Hv, Dk, Dv   int
+	qHost, kHost, vHost []float32 // repeated to Hv, q ℓ2-normalised (host contract)
+	alpha, beta         []float32 // [T,Hv]
+	priorHost           []float32 // [Hv,Dk,Dv] (host layout)
+	qDev, kDev          []float32 // unrepeated [T,Hk,Dk], both ℓ2-normalised (kernel contract)
+	vDev                []float32 // [T,Hv,Dv]
+	stateDev            []float32 // [kSlots,Hv,Dv,Dk] slot 0 = prior (kernel layout)
+	kSlots              int
 }
 
 func gdL2NormRows(x []float32, rows, d int) []float32 {
@@ -395,8 +395,8 @@ func (f *gdBlockFixture) inputs(L int) (qkv, z, a, b []float32) {
 func TestGatedDeltaBlockDeviceRun_Good(t *testing.T) {
 	gdRequireKernel(t)
 	for _, shape := range []struct {
-		name           string
-		Hk, Hv, Dk, K  int
+		name          string
+		Hk, Hv, Dk, K int
 	}{
 		{"fixture", 2, 4, 64, 4},
 		{"real27B", 16, 48, 128, 4},
@@ -928,11 +928,11 @@ func TestAttnDevKVRealShape_AB(t *testing.T) {
 		return &model.BF16Weight{Data: f32sToBF16Bytes(cbSyn(outDim*inDim, seed)), OutDim: outDim, InDim: inDim}
 	}
 	for _, tc := range []struct {
-		name        string
-		H, KVH, HD  int
-		RD          int
-		gated       bool
-		qkNorm      bool
+		name       string
+		H, KVH, HD int
+		RD         int
+		gated      bool
+		qkNorm     bool
 	}{
 		{"real-shape", 2, 1, 256, 64, true, false},
 		{"gated-only", 4, 2, 128, 128, true, false},

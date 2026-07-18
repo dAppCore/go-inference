@@ -86,7 +86,7 @@ type ComposedModel struct {
 	// bytes (#26): forwardEmb routes it down the per-layer mixer path exactly like Quantised (the f32
 	// fold ladder's hooks take f32 weights — bypassed).
 	BF16Resident bool
-	Quantised bool
+	Quantised    bool
 	// mmap is the checkpoint mapping this model's zero-copy packed weights VIEW (a QuantWeight.Packed slice
 	// aliases it), owned so the model unmaps it on Close/finalize; nil when no weight aliases a mapping (a
 	// dense model, an all-1-bit pack repacked to owned heap, or the copying LoadComposed path).

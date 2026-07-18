@@ -64,7 +64,7 @@ func init() {
 		composed.ResidualNormMLPProjHeadDevice = ResidualNormMLPProjHeadDevice // folds the model's own final RMSNorm + LM head GEMM onto the back of the LAST layer's tail
 	}
 	if gdBlockEnabled {
-		qwen3.GatedDeltaBlockDevice = gatedDeltaBlockDeviceHook           // the whole post-projection gated-delta block in one CB, state device-resident (#18 S2)
+		qwen3.GatedDeltaBlockDevice = gatedDeltaBlockDeviceHook             // the whole post-projection gated-delta block in one CB, state device-resident (#18 S2)
 		qwen3.GatedDeltaDeviceStateExport = gatedDeltaDeviceStateExportHook // snapshot/clone readback for the resident state
 		qwen3.GatedDeltaQuantLayerDevice = gatedDeltaQuantLayerDeviceHook   // the WHOLE packed layer in one CB — norm + five packed projections + block + FFN tail (#18 S3)
 	}

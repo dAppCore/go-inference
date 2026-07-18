@@ -43,7 +43,7 @@ func init() {
 			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice
 			composed.AttnQuantFullLayerDevice = AttnQuantFullLayerDevice // the packed twin (#26 QUANT)
 			composed.AttnKVExportDevice = attnKVExportHook
-			composed.ComposedChainBeginDevice = ComposedChainBeginDevice   // whole-token chain (#26): one upload, one wait
+			composed.ComposedChainBeginDevice = ComposedChainBeginDevice // whole-token chain (#26): one upload, one wait
 			composed.ComposedChainEndDevice = ComposedChainEndDevice
 			if os.Getenv("LTHN_CHAIN_HEAD") != "0" { // same-binary A/B arm, LTHN_ATTN_DEVKV pattern
 				composed.ComposedChainHeadDevice = ComposedChainHeadDevice // head fold (#18): terminal norm + LM head on the chain
@@ -497,10 +497,10 @@ func attnFrontRunCore(x, inputNorm []float32, projQ, projK, projV tailProjFromBF
 // attnBF16TailScratch stages one [o_proj → FFN tail] CB: the attention-output upload + its bf16
 // cast, the o_proj output pair, the residual upload, and the shared tail stage buffers.
 type attnBF16TailScratch struct {
-	h, attn, mix               *pinnedNoCopyBytes
-	attnBF, mixBF              *pinnedNoCopyBytes
-	normed, nBF, g, gBF        *pinnedNoCopyBytes
-	u, uBF, s, out             *pinnedNoCopyBytes
+	h, attn, mix        *pinnedNoCopyBytes
+	attnBF, mixBF       *pinnedNoCopyBytes
+	normed, nBF, g, gBF *pinnedNoCopyBytes
+	u, uBF, s, out      *pinnedNoCopyBytes
 }
 
 type attnBF16TailKey struct{ L, D, mixCols, FF int }

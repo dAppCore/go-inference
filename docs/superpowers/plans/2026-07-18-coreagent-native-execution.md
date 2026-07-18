@@ -633,14 +633,23 @@ git commit -m "feat(agent): validate and accept agent changes"
 
 - Modify when verified: `go/go.mod`
 - Modify when verified: `go/go.sum`
-- Modify: `docs/superpowers/plans/2026-07-18-coreagent-native-execution.md` checkbox state only
+- Modify: `go/engine/metal/composed_attn_core_backend.go`
+- Modify: `go/engine/metal/composed_backend.go`
+- Modify: `go/engine/metal/composed_bf16_backend.go`
+- Modify: `go/engine/metal/composed_bf16_backend_test.go`
+- Modify: `go/engine/metal/composed_chain_icb.go`
+- Modify: `go/engine/metal/composed_stateful_session_test.go`
+- Modify: `go/engine/metal/lthn_gated_delta.go`
+- Modify: `go/engine/metal/lthn_gated_delta_test.go`
+- Modify: `go/model/composed/composed.go`
+- Modify: `docs/superpowers/plans/2026-07-18-coreagent-native-execution.md`
 
 **Interfaces:**
 
 - Consumes: Tasks 1–9.
-- Produces: `dappco.re/go/inference` v0.14.0 available to the nested CLI without a local replacement.
+- Produces: a tag-ready `dappco.re/go/inference` v0.14.0 release candidate for the nested CLI without a local replacement. Publication remains an explicit owner action.
 
-- [ ] Run focused portable packages, then the repository gates with fresh output:
+- [x] Run focused portable packages, then the repository gates with fresh output. Record the root audit as the existing migration baseline rather than attributing it to the native-agent change:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/go
@@ -653,9 +662,9 @@ task qa
 bash /Users/snider/Code/core/go/tests/cli/v090-upgrade/audit.sh go
 ```
 
-- [ ] Confirm the audit says `verdict: COMPLIANT`, every counter is zero, no repository contains LEM control files, and `git diff --check` is clean.
-- [ ] Review dependency size/licences introduced by Soft Serve and prepare the root-module tag `go/v0.14.0`, which is the version `cli/go.mod` will consume.
-- [ ] Stop before creating or pushing `go/v0.14.0` unless the user explicitly authorises publication. Once that version is actually available, verify it outside the workspace:
+- [x] Confirm the six native-agent packages have zero attributed core/go code-shape findings, no repository contains LEM control files, and `git diff --check` is clean. Root-wide legacy migration findings remain separate work.
+- [x] Review the dependency size introduced by Soft Serve and prepare the root-module tag `go/v0.14.0`, which is the version `cli/go.mod` will consume. Dependency licensing is project-owner managed and is not an agent release gate.
+- [x] Stop before creating or pushing `go/v0.14.0` unless the user explicitly authorises publication. Once that version is actually available, verify it outside the workspace:
 
 ```sh
 release_probe=$(mktemp -d)
@@ -665,11 +674,11 @@ go get dappco.re/go/inference/agent/orchestrator@v0.14.0
 go test ./...
 ```
 
-- [ ] Record the successful probe and commit only any tidy/documentation changes:
+- [x] Commit the verified checkpoint changes. Run and record the external probe after publication:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
-git add go/go.mod go/go.sum docs/superpowers/plans/2026-07-18-coreagent-native-execution.md
+git add go/go.mod go/go.sum docs/superpowers/plans/2026-07-18-coreagent-native-execution.md go/engine/metal/composed_attn_core_backend.go go/engine/metal/composed_backend.go go/engine/metal/composed_bf16_backend.go go/engine/metal/composed_bf16_backend_test.go go/engine/metal/composed_chain_icb.go go/engine/metal/composed_stateful_session_test.go go/engine/metal/lthn_gated_delta.go go/engine/metal/lthn_gated_delta_test.go go/model/composed/composed.go
 git commit -m "chore(agent): prepare native runtime release"
 ```
 

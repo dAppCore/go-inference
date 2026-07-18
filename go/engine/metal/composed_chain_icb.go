@@ -156,9 +156,9 @@ func (s recSink) dispatchThreadgroups(grid, group metal.MTLSize) {
 type chainTarget struct {
 	enc     metal.MTLComputeCommandEncoderObject // live mode
 	rec     *composedChainRecording              // record mode
-	pending bool  // record mode: next command carries a SetBarrier
-	full    bool  // record mode: command capacity exhausted (recording aborts)
-	err     error // record mode: first recording error
+	pending bool                                 // record mode: next command carries a SetBarrier
+	full    bool                                 // record mode: command capacity exhausted (recording aborts)
+	err     error                                // record mode: first recording error
 }
 
 func (t *chainTarget) recording() bool { return t.rec != nil }

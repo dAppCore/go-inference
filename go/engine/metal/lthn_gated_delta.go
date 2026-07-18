@@ -219,15 +219,15 @@ func GatedDeltaStepDevice(q, k, v, g, beta, state, y []float32, T, kSlots, Hk, H
 // --- S2: the device gated-delta BLOCK — conv ring → gates → recurrence → gated norm in one CB ---
 
 var (
-	gdConvDK128Once, gdConvDK64Once   sync.Once
-	gdConvDK128PSO, gdConvDK64PSO     metal.MTLComputePipelineState
-	gdConvDK128Err, gdConvDK64Err     error
-	gdRingOnce, gdGatesOnce           sync.Once
-	gdRingPSO, gdGatesPSO             metal.MTLComputePipelineState
-	gdRingErr, gdGatesErr             error
-	gdNormDV128Once, gdNormDV64Once   sync.Once
-	gdNormDV128PSO, gdNormDV64PSO     metal.MTLComputePipelineState
-	gdNormDV128Err, gdNormDV64Err     error
+	gdConvDK128Once, gdConvDK64Once sync.Once
+	gdConvDK128PSO, gdConvDK64PSO   metal.MTLComputePipelineState
+	gdConvDK128Err, gdConvDK64Err   error
+	gdRingOnce, gdGatesOnce         sync.Once
+	gdRingPSO, gdGatesPSO           metal.MTLComputePipelineState
+	gdRingErr, gdGatesErr           error
+	gdNormDV128Once, gdNormDV64Once sync.Once
+	gdNormDV128PSO, gdNormDV64PSO   metal.MTLComputePipelineState
+	gdNormDV128Err, gdNormDV64Err   error
 )
 
 func gdPlainPipeline(name string, pso *metal.MTLComputePipelineState, errOut *error) {
@@ -673,13 +673,13 @@ func encGatedDeltaBlockStages(
 // readback pair, the five projections' f32+bf16 stages, the block intermediates, and the FFN tail
 // stages — everything between is device-only.
 type gatedDeltaQuantLayerScratch struct {
-	x, normed1, qkv, z, a, b          *pinnedNoCopyBytes // input side (f32)
-	n1BF, qkvBF, zBF, aBF, bBF        *pinnedNoCopyBytes // input-side bf16 qmv stages
-	qN, kN, vN, g, beta, gated        *pinnedNoCopyBytes // block intermediates (f32)
-	gatedBF, mixBF                    *pinnedNoCopyBytes // out_proj bf16 stages
-	mix                               *pinnedNoCopyBytes // out_proj output (f32)
-	normed2, n2BF, gFF, gFFBF         *pinnedNoCopyBytes // tail stages
-	uFF, uFFBF, sFF, out              *pinnedNoCopyBytes
+	x, normed1, qkv, z, a, b   *pinnedNoCopyBytes // input side (f32)
+	n1BF, qkvBF, zBF, aBF, bBF *pinnedNoCopyBytes // input-side bf16 qmv stages
+	qN, kN, vN, g, beta, gated *pinnedNoCopyBytes // block intermediates (f32)
+	gatedBF, mixBF             *pinnedNoCopyBytes // out_proj bf16 stages
+	mix                        *pinnedNoCopyBytes // out_proj output (f32)
+	normed2, n2BF, gFF, gFFBF  *pinnedNoCopyBytes // tail stages
+	uFF, uFFBF, sFF, out       *pinnedNoCopyBytes
 }
 
 type gatedDeltaQuantLayerKey struct{ L, D, FF, Hk, Hv, Dk, K int }
