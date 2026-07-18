@@ -996,6 +996,74 @@ func TestWorkspace_Manager_ReconstructRun_Good(t *testing.T) {
 	core.AssertTrue(t, core.Stat(core.PathJoin(reconstructed.Path, "restored.txt")).OK)
 }
 
+func TestWorkspaceReconstructRetainedCaptureRefreshesLease(t *testing.T) {
+	fixture := workspaceNewRunFixture(t)
+	workspaceWriteFile(t, core.PathJoin(fixture.prepared.Path, "first.txt"), "first\n")
+	firstResult := fixture.manager.CaptureRun(context.Background(), fixture.prepared)
+	core.AssertTrue(t, firstResult.OK, firstResult.Error())
+	first := firstResult.Value.(Capture)
+	core.AssertTrue(t, first.Pushed)
+	core.AssertTrue(t, core.Stat(fixture.prepared.Path).OK)
+
+	reopened := NewManager(ManagerOptions{
+		Root: fixture.root, Files: fixture.files, Git: fixture.runner, Server: fixture.server,
+		IDs: func() string { return "reopen" }, Now: time.Now,
+	}).Value.(*Manager)
+	child := fixture.run
+	child.ID = "child"
+	child.ParentRunID = fixture.run.ID
+	child.Branch = fixture.prepared.Branch
+	child.Worktree = fixture.prepared.Path
+	reconstructedResult := reopened.ReconstructRun(context.Background(), fixture.project, child)
+	core.AssertTrue(t, reconstructedResult.OK, reconstructedResult.Error())
+	reconstructed := reconstructedResult.Value.(RunWorkspace)
+	core.AssertEqual(t, first.Revision, reconstructed.BaseRevision)
+
+	workspaceWriteFile(t, core.PathJoin(reconstructed.Path, "second.txt"), "second\n")
+	secondResult := reopened.CaptureRun(context.Background(), reconstructed)
+	core.AssertTrue(t, secondResult.OK, secondResult.Error())
+	second := secondResult.Value.(Capture)
+	core.AssertTrue(t, second.Pushed, second.Summary)
+	core.AssertTrue(t, second.Revision != first.Revision)
+	remote := fixture.server.EnsureRepository(context.Background(), fixture.project.RepositoryName).Value.(gitserver.Repository)
+	core.AssertEqual(t, second.Revision, workspaceRunGit(t, fixture.runner, remote.CloneURL, "rev-parse", core.Concat("refs/heads/", reconstructed.Branch)))
+}
+
+func TestWorkspaceReconstructRetainedRecoversTrackingRefreshFailure(t *testing.T) {
+	fixture := workspaceNewRunFixture(t)
+	workspaceWriteFile(t, core.PathJoin(fixture.prepared.Path, "first.txt"), "first\n")
+	fixture.runner.setFailure(func(command Command) bool {
+		return workspaceContainsArgument(command.Args, "update-ref") || workspaceContainsArgument(command.Args, "fetch")
+	})
+	firstResult := fixture.manager.CaptureRun(context.Background(), fixture.prepared)
+	core.AssertTrue(t, firstResult.OK, firstResult.Error())
+	first := firstResult.Value.(Capture)
+	core.AssertFalse(t, first.Pushed)
+	core.AssertTrue(t, first.Retained)
+	core.AssertContains(t, first.Summary, "tracking")
+	fixture.runner.setFailure(nil)
+
+	reopened := NewManager(ManagerOptions{
+		Root: fixture.root, Files: fixture.files, Git: fixture.runner, Server: fixture.server,
+		IDs: func() string { return "reopen" }, Now: time.Now,
+	}).Value.(*Manager)
+	child := fixture.run
+	child.ID = "child"
+	child.ParentRunID = fixture.run.ID
+	child.Branch = fixture.prepared.Branch
+	child.Worktree = fixture.prepared.Path
+	reconstructedResult := reopened.ReconstructRun(context.Background(), fixture.project, child)
+	core.AssertTrue(t, reconstructedResult.OK, reconstructedResult.Error())
+	reconstructed := reconstructedResult.Value.(RunWorkspace)
+	core.AssertEqual(t, first.Revision, reconstructed.BaseRevision)
+
+	workspaceWriteFile(t, core.PathJoin(reconstructed.Path, "second.txt"), "second\n")
+	secondResult := reopened.CaptureRun(context.Background(), reconstructed)
+	core.AssertTrue(t, secondResult.OK, secondResult.Error())
+	second := secondResult.Value.(Capture)
+	core.AssertTrue(t, second.Pushed, second.Summary)
+}
+
 func TestWorkspace_Manager_ReconstructRun_Bad(t *testing.T) {
 	var manager *Manager
 	core.AssertFalse(t, manager.ReconstructRun(context.Background(), work.Project{}, work.Run{}).OK)

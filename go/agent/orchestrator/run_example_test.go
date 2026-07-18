@@ -30,6 +30,27 @@ func ExampleOrchestrator_Cancel() {
 	// Output: false
 }
 
+func ExampleOrchestrator_Answer() {
+	var orchestrator *Orchestrator
+	result := orchestrator.Answer(context.Background(), "run-1", "Keep the Adapter API")
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleOrchestrator_Resume() {
+	var orchestrator *Orchestrator
+	result := orchestrator.Resume(context.Background(), work.ResumeRequest{})
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleOrchestrator_Retry() {
+	var orchestrator *Orchestrator
+	result := orchestrator.Retry(context.Background(), work.Item{}, "run-1")
+	core.Println(result.OK)
+	// Output: false
+}
+
 func ExampleOrchestrator_StartQueue() {
 	var orchestrator *Orchestrator
 	result := orchestrator.StartQueue(context.Background())

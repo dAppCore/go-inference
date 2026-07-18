@@ -64,6 +64,7 @@ type orchestratorTestStore struct {
 	events          []work.Event
 	logs            []work.LogChunk
 	questions       []work.Question
+	answers         []work.Answer
 	acceptances     []work.Acceptance
 	queue           work.QueueState
 	providers       map[string]work.ProviderState
@@ -77,12 +78,15 @@ type orchestratorTestStore struct {
 	failCommit      func(Commit) bool
 	projectValue    any
 	projectSet      bool
+	projectIDValue  any
+	projectIDSet    bool
 	runValue        any
 	runSet          bool
 	snapshotValue   any
 	snapshotSet     bool
 	nextResult      *core.Result
 	nextResultAfter int
+	continuation    *core.Result
 }
 
 func newOrchestratorTestStore(at time.Time) *orchestratorTestStore {
@@ -128,6 +132,32 @@ func (store *orchestratorTestStore) clearProjectOverride() {
 	store.mu.Lock()
 	store.projectSet = false
 	store.projectValue = nil
+	store.mu.Unlock()
+}
+
+func (store *orchestratorTestStore) overrideProjectID(value any) {
+	store.mu.Lock()
+	store.projectIDValue = value
+	store.projectIDSet = true
+	store.mu.Unlock()
+}
+
+func (store *orchestratorTestStore) clearProjectIDOverride() {
+	store.mu.Lock()
+	store.projectIDSet = false
+	store.projectIDValue = nil
+	store.mu.Unlock()
+}
+
+func (store *orchestratorTestStore) overrideContinuation(result core.Result) {
+	store.mu.Lock()
+	store.continuation = &result
+	store.mu.Unlock()
+}
+
+func (store *orchestratorTestStore) clearContinuationOverride() {
+	store.mu.Lock()
+	store.continuation = nil
 	store.mu.Unlock()
 }
 
@@ -227,6 +257,13 @@ func (store *orchestratorTestStore) Commit(commit Commit) core.Result {
 			return core.Fail(core.NewError("stale expected status"))
 		}
 	}
+	if commit.Answer != nil {
+		for _, answer := range store.answers {
+			if answer.ID == commit.Answer.ID || answer.QuestionID == commit.Answer.QuestionID || answer.ResumeRunID == commit.Answer.ResumeRunID {
+				return core.Fail(core.NewError("duplicate answer"))
+			}
+		}
+	}
 	if commit.Project != nil {
 		store.projects[commit.Project.ID] = *commit.Project
 	}
@@ -239,6 +276,9 @@ func (store *orchestratorTestStore) Commit(commit Commit) core.Result {
 	store.logs = append(store.logs, commit.Logs...)
 	if commit.Question != nil {
 		store.questions = append(store.questions, *commit.Question)
+	}
+	if commit.Answer != nil {
+		store.answers = append(store.answers, *commit.Answer)
 	}
 	if commit.Acceptance != nil {
 		store.acceptances = append(store.acceptances, *commit.Acceptance)
@@ -256,6 +296,9 @@ func (store *orchestratorTestStore) Commit(commit Commit) core.Result {
 func (store *orchestratorTestStore) Project(id string) core.Result {
 	store.mu.Lock()
 	defer store.mu.Unlock()
+	if store.projectIDSet {
+		return core.Ok(store.projectIDValue)
+	}
 	project, exists := store.projects[id]
 	if !exists {
 		return core.Fail(core.NewError("project not found"))
@@ -312,8 +355,38 @@ func (store *orchestratorTestStore) NextRunNumber(workID string) core.Result {
 	return core.Ok(next)
 }
 
-func (store *orchestratorTestStore) Continuation(string) core.Result {
-	return core.Ok(work.Continuation{})
+func (store *orchestratorTestStore) Continuation(runID string) core.Result {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.continuation != nil {
+		return *store.continuation
+	}
+	run, exists := store.runs[runID]
+	if !exists {
+		return core.Fail(core.NewError("run not found"))
+	}
+	continuation := work.Continuation{Run: run}
+	for _, log := range store.logs {
+		if log.RunID == runID {
+			continuation.Logs = append(continuation.Logs, log)
+		}
+	}
+	core.SliceSortFunc(continuation.Logs, func(left, right work.LogChunk) bool {
+		return left.Sequence < right.Sequence
+	})
+	for _, question := range store.questions {
+		if question.RunID == runID {
+			continuation.Question = question
+			break
+		}
+	}
+	for _, answer := range store.answers {
+		if answer.QuestionID == continuation.Question.ID {
+			continuation.Answer = answer
+			break
+		}
+	}
+	return core.Ok(continuation)
 }
 
 func (store *orchestratorTestStore) Snapshot(workID string) core.Result {
@@ -857,6 +930,11 @@ func TestOrchestrator_Orchestrator_Capabilities_Good(t *testing.T) {
 	capabilities := fixture.orchestrator.Capabilities()
 	core.AssertEqual(t, 10, len(capabilities))
 	core.AssertEqual(t, work.Capability{Name: "dispatch", Available: true}, capabilities[0])
+	core.AssertEqual(t, work.Capability{Name: "queue.start", Available: true}, capabilities[2])
+	core.AssertEqual(t, work.Capability{Name: "queue.stop", Available: true}, capabilities[3])
+	core.AssertEqual(t, work.Capability{Name: "answer", Available: true}, capabilities[4])
+	core.AssertEqual(t, work.Capability{Name: "retry", Available: true}, capabilities[5])
+	core.AssertEqual(t, work.Capability{Name: "resume", Available: true}, capabilities[6])
 }
 
 func TestOrchestrator_Orchestrator_Capabilities_Bad(t *testing.T) {

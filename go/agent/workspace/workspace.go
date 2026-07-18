@@ -406,8 +406,17 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 		return core.Ok(Capture{Changed: changed, Retained: true, Summary: core.Concat("capture revision failed: ", revisionResult.Error())})
 	}
 	revision := core.Trim(revisionResult.Value.(string))
+	remoteReference := core.Concat("refs/remotes/lem/", workspace.Branch)
+	expectedRevision := ""
+	tracked := manager.gitOutput(captureContext, manager.root, nil,
+		"--git-dir", workspace.Project.ClonePath, "rev-parse", remoteReference,
+	)
+	if tracked.OK {
+		expectedRevision = core.Trim(tracked.Value.(string))
+	}
+	lease := core.Concat("--force-with-lease=refs/heads/", workspace.Branch, ":", expectedRevision)
 	pushed := manager.gitOutput(captureContext, workspace.Path, environment,
-		"push", "--force-with-lease", repository.CloneURL,
+		"push", lease, repository.CloneURL,
 		core.Concat("HEAD:refs/heads/", workspace.Branch),
 	)
 	if !pushed.OK {
@@ -417,6 +426,16 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 			Changed:  changed,
 			Retained: true,
 			Summary:  core.Concat("push failed; worktree retained: ", pushed.Error()),
+		})
+	}
+	refreshed := manager.refreshRunTracking(captureContext, workspace.Project, workspace.Branch, repository, environment, revision)
+	if !refreshed.OK {
+		manager.durable[workspace.RunID] = false
+		return core.Ok(Capture{
+			Revision: revision,
+			Changed:  changed,
+			Retained: true,
+			Summary:  core.Concat("push succeeded but local tracking refresh failed; worktree retained: ", refreshed.Error()),
 		})
 	}
 	manager.durable[workspace.RunID] = true
@@ -467,6 +486,11 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 			return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to inspect retained checkout", revision.Err()))
 		}
 		reconstructed.BaseRevision = core.Trim(revision.Value.(string))
+		if run.ParentRunID != "" {
+			if tracked := manager.recoverRunTracking(ctx, project, reconstructed.Branch, reconstructed.BaseRevision); !tracked.OK {
+				return tracked
+			}
+		}
 		manager.leases[reconstructed.RunID] = reconstructed
 		manager.durable[reconstructed.RunID] = false
 		return core.Ok(reconstructed)
@@ -528,6 +552,65 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 	manager.leases[reconstructed.RunID] = reconstructed
 	manager.durable[reconstructed.RunID] = false
 	return core.Ok(reconstructed)
+}
+
+func (manager *Manager) refreshRunTracking(ctx context.Context, project work.Project, branch string, repository gitserver.Repository, environment []string, revision string) core.Result {
+	remoteReference := core.Concat("refs/remotes/lem/", branch)
+	updated := manager.gitOutput(ctx, manager.root, nil,
+		"--git-dir", project.ClonePath, "update-ref", remoteReference, revision,
+	)
+	if !updated.OK {
+		fetched := manager.gitOutput(ctx, manager.root, environment,
+			"--git-dir", project.ClonePath, "fetch", "--no-tags", repository.CloneURL,
+			core.Concat("+refs/heads/", branch, ":", remoteReference),
+		)
+		if !fetched.OK {
+			return core.Fail(core.E("workspace.Manager.refreshRunTracking", updated.Error(), fetched.Err()))
+		}
+	}
+	tracked := manager.gitOutput(ctx, manager.root, nil, "--git-dir", project.ClonePath, "rev-parse", remoteReference)
+	if !tracked.OK {
+		return core.Fail(core.E("workspace.Manager.refreshRunTracking", "failed to inspect local tracking reference", tracked.Err()))
+	}
+	if core.Trim(tracked.Value.(string)) != revision {
+		return core.Fail(core.NewError("agent workspace local tracking reference differs from pushed run revision"))
+	}
+	return core.Ok(nil)
+}
+
+func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Project, branch, revision string) core.Result {
+	remoteReference := core.Concat("refs/remotes/lem/", branch)
+	tracked := manager.gitOutput(ctx, manager.root, nil, "--git-dir", project.ClonePath, "rev-parse", remoteReference)
+	if tracked.OK && core.Trim(tracked.Value.(string)) == revision {
+		return core.Ok(nil)
+	}
+	repositoryResult := manager.server.EnsureRepository(ctx, project.RepositoryName)
+	if !repositoryResult.OK {
+		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to resolve private repository", repositoryResult.Err()))
+	}
+	repository, ok := repositoryResult.Value.(gitserver.Repository)
+	if !ok {
+		return core.Fail(core.Errorf("agent workspace Git service returned %T instead of repository", repositoryResult.Value))
+	}
+	environmentResult := repositoryEnvironment(repository)
+	if !environmentResult.OK {
+		return environmentResult
+	}
+	fetched := manager.gitOutput(ctx, manager.root, environmentResult.Value.([]string),
+		"--git-dir", project.ClonePath, "fetch", "--no-tags", repository.CloneURL,
+		core.Concat("+refs/heads/", branch, ":", remoteReference),
+	)
+	if !fetched.OK {
+		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to refresh durable run branch", fetched.Err()))
+	}
+	tracked = manager.gitOutput(ctx, manager.root, nil, "--git-dir", project.ClonePath, "rev-parse", remoteReference)
+	if !tracked.OK {
+		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to inspect refreshed run branch", tracked.Err()))
+	}
+	if core.Trim(tracked.Value.(string)) != revision {
+		return core.Fail(core.NewError("agent workspace retained checkout differs from its durable private branch"))
+	}
+	return core.Ok(nil)
 }
 
 // ReleaseRun removes a clean worktree only after its branch is durably pushed.
