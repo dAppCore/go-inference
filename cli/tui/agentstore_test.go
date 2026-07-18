@@ -67,7 +67,8 @@ func TestAgentStore_Good(t *testing.T) {
 		{id: "acceptance-b", status: "conflicted", review: testChangeReview(run, []string{"README.md"}, true)},
 		{id: "acceptance-c", status: "validation_failed", review: testChangeReview(run, nil, false)},
 	}
-	for _, fixture := range reviews {
+	for _, index := range []int{2, 0, 1} {
+		fixture := reviews[index]
 		encoded := core.JSONMarshalString(fixture.review)
 		receipt := work.Acceptance{ID: fixture.id, WorkID: run.WorkID, RunID: run.ID, SourceBase: "source", AgentBase: "base", AgentTip: "tip", IntegrationBranch: "integration", IntegrationWorktree: "/tmp/integration", ResultRevision: "result", Status: fixture.status, ValidationJSON: encoded, CreatedAt: acceptanceTime, UpdatedAt: acceptanceTime}
 		if result := agentStore.Commit(orchestrator.Commit{Acceptance: &receipt}); !result.OK {
@@ -99,10 +100,87 @@ func TestAgentStore_Good(t *testing.T) {
 	}
 }
 
+func TestAgentStore_OrderedSnapshot(t *testing.T) {
+	_, repository, agentStore := openTestAgentStore(t)
+	defer closeTestDuckRepository(t, repository)
+	at := time.Date(2026, time.July, 18, 9, 30, 0, 0, time.UTC)
+
+	projectZ := testAgentProject(at)
+	projectZ.ID = "project-z"
+	projectZ.SourcePath = "/source-z"
+	projectZ.RepositoryRoot = "/source-z"
+	projectZ.RepositoryName = "source-z.git"
+	projectZ.ClonePath = "/private/source-z.git"
+	projectA := projectZ
+	projectA.ID = "project-a"
+	projectA.SourcePath = "/source-a"
+	projectA.RepositoryRoot = "/source-a"
+	projectA.RepositoryName = "source-a.git"
+	projectA.ClonePath = "/private/source-a.git"
+
+	runZ := testAgentRun("run-z", work.RunQueued, at)
+	runZ.ProjectID = projectZ.ID
+	runA := testAgentRun("run-a", work.RunQueued, at)
+	runA.ProjectID = projectA.ID
+	runA.Number = 2
+
+	eventZ := work.Event{ID: "event-z", RunID: runZ.ID, WorkID: runZ.WorkID, Kind: "ordered", Title: "z", CreatedAt: at}
+	eventA := work.Event{ID: "event-a", RunID: runA.ID, WorkID: runA.WorkID, Kind: "ordered", Title: "a", CreatedAt: at}
+	logZ := work.LogChunk{RunID: runZ.ID, Sequence: 1, Stream: "stdout", Text: "z", CreatedAt: at}
+	logA := work.LogChunk{RunID: runA.ID, Sequence: 1, Stream: "stdout", Text: "a", CreatedAt: at}
+	questionZ := work.Question{ID: "question-z", RunID: runZ.ID, Text: "z", CreatedAt: at}
+	questionA := work.Question{ID: "question-a", RunID: runA.ID, Text: "a", CreatedAt: at}
+	acceptanceZ := work.Acceptance{ID: "acceptance-z", WorkID: runZ.WorkID, RunID: runZ.ID, Status: "prepared", ValidationJSON: "{}", CreatedAt: at, UpdatedAt: at}
+	acceptanceA := work.Acceptance{ID: "acceptance-a", WorkID: runA.WorkID, RunID: runA.ID, Status: "prepared", ValidationJSON: "{}", CreatedAt: at, UpdatedAt: at}
+	providerZ := work.ProviderState{Provider: "provider-z", WindowStartedAt: at, UpdatedAt: at}
+	providerA := work.ProviderState{Provider: "provider-a", WindowStartedAt: at, UpdatedAt: at}
+
+	for _, commit := range []orchestrator.Commit{
+		{Project: &projectZ, Run: &runZ, CreateRun: true, Event: &eventZ, Logs: []work.LogChunk{logZ}, Question: &questionZ, Acceptance: &acceptanceZ, Provider: &providerZ},
+		{Project: &projectA, Run: &runA, CreateRun: true, Event: &eventA, Logs: []work.LogChunk{logA}, Question: &questionA, Acceptance: &acceptanceA, Provider: &providerA},
+	} {
+		if result := agentStore.Commit(commit); !result.OK {
+			t.Fatalf("commit adversarial snapshot fixture: %v", result.Value)
+		}
+	}
+
+	snapshot := requireAgentValue[work.Snapshot](t, "ordered Snapshot", agentStore.Snapshot(runA.WorkID))
+	if got := []string{snapshot.Projects[0].ID, snapshot.Projects[1].ID}; got[0] != "project-a" || got[1] != "project-z" {
+		t.Fatalf("project order = %#v, want [project-a project-z]", got)
+	}
+	if got := []string{snapshot.Runs[0].ID, snapshot.Runs[1].ID}; got[0] != "run-a" || got[1] != "run-z" {
+		t.Fatalf("run order = %#v, want [run-a run-z]", got)
+	}
+	if got := []string{snapshot.Events[0].ID, snapshot.Events[1].ID}; got[0] != "event-a" || got[1] != "event-z" {
+		t.Fatalf("event order = %#v, want [event-a event-z]", got)
+	}
+	if got := []string{snapshot.Logs[0].RunID, snapshot.Logs[1].RunID}; got[0] != "run-a" || got[1] != "run-z" {
+		t.Fatalf("log order = %#v, want [run-a run-z]", got)
+	}
+	if got := []string{snapshot.Questions[0].ID, snapshot.Questions[1].ID}; got[0] != "question-a" || got[1] != "question-z" {
+		t.Fatalf("question order = %#v, want [question-a question-z]", got)
+	}
+	if got := []string{snapshot.Acceptances[0].ID, snapshot.Acceptances[1].ID}; got[0] != "acceptance-a" || got[1] != "acceptance-z" {
+		t.Fatalf("acceptance order = %#v, want [acceptance-a acceptance-z]", got)
+	}
+	if got := []string{snapshot.Providers[0].Provider, snapshot.Providers[1].Provider}; got[0] != "provider-a" || got[1] != "provider-z" {
+		t.Fatalf("provider order = %#v, want [provider-a provider-z]", got)
+	}
+}
+
 func TestAgentStore_Bad(t *testing.T) {
 	_, repository, agentStore := openTestAgentStore(t)
 	defer closeTestDuckRepository(t, repository)
 	at := time.Date(2026, time.July, 18, 10, 0, 0, 0, time.UTC)
+	orphanExpected := work.RunQueued
+	orphanQueue := work.QueueState{ID: "default", Status: work.QueueFrozen, Reason: "must roll back", UpdatedAt: at}
+	if result := agentStore.Commit(orchestrator.Commit{ExpectedStatus: &orphanExpected, Queue: &orphanQueue}); result.OK {
+		t.Fatal("commit accepted expected status without a run")
+	}
+	orphanSnapshot := requireAgentValue[work.Snapshot](t, "Snapshot after orphan expected status", agentStore.Snapshot(""))
+	if orphanSnapshot.Queue.ID != "" {
+		t.Fatalf("orphan expected-status commit persisted queue state: %#v", orphanSnapshot.Queue)
+	}
 	project := testAgentProject(at)
 	run := testAgentRun("run-cas", work.RunQueued, at)
 	if result := agentStore.Commit(orchestrator.Commit{Project: &project, Run: &run, CreateRun: true}); !result.OK {
@@ -224,6 +302,15 @@ func TestAgentStore_UglyRecoveryAndReopen(t *testing.T) {
 func TestAgentStore_ConcurrentWriterSerialization(t *testing.T) {
 	_, repository, agentStore := openTestAgentStore(t)
 	defer closeTestDuckRepository(t, repository)
+	stores := []*duckAgentStore{agentStore}
+	for len(stores) < 8 {
+		stores = append(stores, requireAgentValue[*duckAgentStore](t, "newDuckAgentStore concurrent", newDuckAgentStore(repository)))
+	}
+	for index, candidate := range stores[1:] {
+		if candidate.writeMu != agentStore.writeMu {
+			t.Fatalf("store %d has independent write mutex", index+1)
+		}
+	}
 	at := time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
 	run := testAgentRun("run-concurrent", work.RunQueued, at)
 	if result := agentStore.Commit(orchestrator.Commit{Run: &run, CreateRun: true}); !result.OK {
@@ -239,7 +326,7 @@ func TestAgentStore_ConcurrentWriterSerialization(t *testing.T) {
 			candidate := run
 			candidate.Status = work.RunPreparing
 			candidate.UpdatedAt = at.Add(time.Duration(index+1) * time.Second)
-			results <- agentStore.Commit(orchestrator.Commit{Run: &candidate, ExpectedStatus: &expected}).OK
+			results <- stores[index].Commit(orchestrator.Commit{Run: &candidate, ExpectedStatus: &expected}).OK
 		}(index)
 	}
 	wait.Wait()
@@ -268,20 +355,59 @@ func TestAgentStore_NoSecretOrRepositoryStateFiles(t *testing.T) {
 		t.Fatalf("write ordinary repository fixture: %v", err)
 	}
 	at := time.Date(2026, time.July, 18, 13, 0, 0, 0, time.UTC)
-	run := testAgentRun("run-no-secret", work.RunQueued, at)
-	if result := agentStore.Commit(orchestrator.Commit{Run: &run, CreateRun: true}); !result.OK {
-		t.Fatalf("commit run: %v", result.Value)
+	rawSecret := "provider-token-7f993"
+	rawReceipt := core.Concat("Authorization: Bearer ", rawSecret)
+	redactedSentinel := "[REDACTED:provider-credential]"
+	redactedReceipt := strings.ReplaceAll(rawReceipt, rawSecret, redactedSentinel)
+	if !strings.Contains(rawReceipt, rawSecret) || strings.Contains(redactedReceipt, rawSecret) || !strings.Contains(redactedReceipt, redactedSentinel) {
+		t.Fatalf("invalid redaction fixture: raw=%q redacted=%q", rawReceipt, redactedReceipt)
 	}
-	secret := "LEM_TEST_SECRET_DO_NOT_PERSIST_7f993"
-	for _, table := range []string{"agent_projects", "agent_runs", "agent_events", "agent_log_chunks", "agent_questions", "agent_answers", "agent_acceptances", "agent_queue_state", "agent_provider_state"} {
-		var columns int
-		query := core.Sprintf(`SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = 'main' AND table_name = ? AND LOWER(column_name) LIKE '%%secret%%'`)
-		if err := repository.(*duckRepository).database.store.Conn().QueryRow(query, table).Scan(&columns); err != nil {
-			t.Fatalf("inspect %s columns: %v", table, err)
+	project := testAgentProject(at)
+	run := testAgentRun("run-no-secret", work.RunQueued, at)
+	run.CommandReceipt = redactedReceipt
+	event := work.Event{ID: "event-no-secret", RunID: run.ID, WorkID: run.WorkID, Kind: "receipt", Title: "redacted", DetailJSON: redactedReceipt, CreatedAt: at}
+	log := work.LogChunk{RunID: run.ID, Sequence: 1, Stream: "stdout", Text: redactedReceipt, CreatedAt: at}
+	question := work.Question{ID: "question-no-secret", RunID: run.ID, Text: redactedReceipt, CreatedAt: at}
+	answer := work.Answer{ID: "answer-no-secret", QuestionID: question.ID, ResumeRunID: run.ID, Text: redactedReceipt, CreatedAt: at}
+	acceptance := work.Acceptance{ID: "acceptance-no-secret", WorkID: run.WorkID, RunID: run.ID, Status: "prepared", ValidationJSON: core.Concat(`{"receipt":`, core.JSONMarshalString(redactedReceipt), `}`), CreatedAt: at, UpdatedAt: at}
+	queue := work.QueueState{ID: "default", Status: work.QueueFrozen, Reason: redactedReceipt, UpdatedAt: at}
+	provider := work.ProviderState{Provider: "codex", BackoffReason: redactedReceipt, WindowStartedAt: at, UpdatedAt: at}
+	if result := agentStore.Commit(orchestrator.Commit{Project: &project, Run: &run, CreateRun: true, Event: &event, Logs: []work.LogChunk{log}, Question: &question, Answer: &answer, Acceptance: &acceptance, Queue: &queue, Provider: &provider}); !result.OK {
+		t.Fatalf("commit redacted records: %v", result.Value)
+	}
+	connection := repository.(workspaceConnectionProvider).workspaceConnection()
+	tables := []struct {
+		name    string
+		columns string
+	}{
+		{name: "agent_projects", columns: "id, source_path, repository_root, source_branch, source_revision, repository_name, clone_path"},
+		{name: "agent_runs", columns: "id, work_id, project_id, parent_run_id, provider, model, source_revision, durable_revision, execution_revision, accepted_revision, branch, worktree, command_receipt, status, failure_reason"},
+		{name: "agent_events", columns: "id, run_id, work_id, kind, title, detail, detail_json"},
+		{name: "agent_log_chunks", columns: "run_id, stream, text"},
+		{name: "agent_questions", columns: "id, run_id, text"},
+		{name: "agent_answers", columns: "id, question_id, resume_run_id, text"},
+		{name: "agent_acceptances", columns: "id, work_id, run_id, source_base, agent_base, agent_tip, integration_branch, integration_worktree, result_revision, status, validation_json, failure_reason"},
+		{name: "agent_queue_state", columns: "id, status, reason"},
+		{name: "agent_provider_state", columns: "provider, backoff_reason, last_run_id"},
+	}
+	redactedRows := 0
+	for _, table := range tables {
+		query := core.Sprintf("SELECT COUNT(*) FROM %s WHERE strpos(concat_ws('|', %s), ?) > 0", table.name, table.columns)
+		var rawRows int
+		if err := connection.QueryRow(query, rawSecret).Scan(&rawRows); err != nil {
+			t.Fatalf("inspect raw values in %s: %v", table.name, err)
 		}
-		if columns != 0 {
-			t.Fatalf("%s has %d secret-bearing columns", table, columns)
+		if rawRows != 0 {
+			t.Fatalf("%s persisted %d rows containing raw secret", table.name, rawRows)
 		}
+		var tableRedactedRows int
+		if err := connection.QueryRow(query, redactedSentinel).Scan(&tableRedactedRows); err != nil {
+			t.Fatalf("inspect redacted values in %s: %v", table.name, err)
+		}
+		redactedRows += tableRedactedRows
+	}
+	if redactedRows < 8 {
+		t.Fatalf("persisted rows containing redacted receipt = %d, want at least 8", redactedRows)
 	}
 	if result := repository.Close(); !result.OK {
 		t.Fatalf("close repository: %v", result.Value)
@@ -290,7 +416,7 @@ func TestAgentStore_NoSecretOrRepositoryStateFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read DuckDB file: %v", err)
 	}
-	if strings.Contains(string(databaseBytes), secret) {
+	if strings.Contains(string(databaseBytes), rawSecret) {
 		t.Fatal("DuckDB contains test secret")
 	}
 	err = filepath.WalkDir(repositoryRoot, func(path string, entry os.DirEntry, walkErr error) error {

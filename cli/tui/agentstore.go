@@ -15,6 +15,7 @@ import (
 type duckAgentStore struct {
 	connection *sql.DB
 	mu         sync.Mutex
+	writeMu    *sync.Mutex
 }
 
 var _ orchestrator.Store = (*duckAgentStore)(nil)
@@ -25,10 +26,11 @@ func newDuckAgentStore(repository workspaceRepository) core.Result {
 		return core.Fail(core.E("tui.newDuckAgentStore", "workspace repository has no open SQL connection", nil))
 	}
 	connection := provider.workspaceConnection()
-	if connection == nil {
+	writeMutex := provider.workspaceWriteMutex()
+	if connection == nil || writeMutex == nil {
 		return core.Fail(core.E("tui.newDuckAgentStore", "workspace repository has no open SQL connection", nil))
 	}
-	return core.Ok(&duckAgentStore{connection: connection})
+	return core.Ok(&duckAgentStore{connection: connection, writeMu: writeMutex})
 }
 
 func (store *duckAgentStore) Recover(at time.Time) core.Result {
@@ -38,6 +40,8 @@ func (store *duckAgentStore) Recover(at time.Time) core.Result {
 	if at.IsZero() {
 		return agentStoreFailure("Recover", "recovery time is required", nil)
 	}
+	store.writeMu.Lock()
+	defer store.writeMu.Unlock()
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	result, err := store.connection.Exec(`UPDATE agent_runs
@@ -67,6 +71,9 @@ func (store *duckAgentStore) Commit(commit orchestrator.Commit) core.Result {
 	if !commit.CreateRun && commit.Run != nil && commit.ExpectedStatus == nil {
 		return agentStoreFailure("Commit", "run update requires expected status", nil)
 	}
+	if commit.Run == nil && commit.ExpectedStatus != nil {
+		return agentStoreFailure("Commit", "expected status requires a run update", nil)
+	}
 	previous := int64(0)
 	for _, chunk := range commit.Logs {
 		if chunk.Sequence <= previous {
@@ -75,6 +82,8 @@ func (store *duckAgentStore) Commit(commit orchestrator.Commit) core.Result {
 		previous = chunk.Sequence
 	}
 
+	store.writeMu.Lock()
+	defer store.writeMu.Unlock()
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	transaction, err := store.connection.Begin()
@@ -571,7 +580,7 @@ func closeAgentRows(rows *sql.Rows) {
 }
 
 func (store *duckAgentStore) ready(operation string) core.Result {
-	if store == nil || store.connection == nil {
+	if store == nil || store.connection == nil || store.writeMu == nil {
 		return agentStoreFailure(operation, "agent store is closed", nil)
 	}
 	return core.Ok(nil)
