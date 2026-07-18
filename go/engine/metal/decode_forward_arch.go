@@ -226,7 +226,8 @@ func (lb *archLayerBufs) cacheKVContents() {
 type archDecodeState struct {
 	specs        []model.LayerSpec
 	lb           []archLayerBufs
-	lbKVReady    bool // ensureLBKVCaches ran (session builds defer the linear KV allocation)
+	lbKVReady    bool               // ensureLBKVCaches ran (session builds defer the linear KV allocation)
+	gatedDelta   []*gatedDeltaLayer // MixerGatedDelta layers' recurrence weights + state (nil for attention layers) — #18
 	moeWeights   []*MoELayerWeights
 	pagedKV      []*devicePagedKVCache
 	asc          attnScratch
@@ -1530,7 +1531,22 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		} else if s.globalRopeFreqs != nil {
 			layerRopeFreqs, rotDim = s.globalRopeFreqs, lhd
 		}
-		if s.specs[li].OwnsCache() {
+		if s.specs[li].Mixer == model.MixerGatedDelta {
+			// MixerGatedDelta: host recurrence (correctness-first) — flush the device work into `in`,
+			// compute the mixer + residual into hBuf on the host, resume on a fresh command buffer. The
+			// composed lane's per-seam round-trip, now inside the ONE factory decode (#18). Attention
+			// layers below are untouched, so gemma4 is byte-identical. Device fusion is a later slice.
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			if err := s.encGatedDeltaHalf(li, in); err != nil {
+				return nil, err
+			}
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
+		} else if s.specs[li].OwnsCache() {
 			if cache := s.layerPagedKV(li); cache != nil {
 				var aerr error
 				if enc, encConc, aerr = encAttnHalfKVPaged(enc, cb, s.gpuProf, encConc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); aerr != nil {
