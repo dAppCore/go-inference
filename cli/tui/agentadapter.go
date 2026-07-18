@@ -207,17 +207,19 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 	}
 	for _, question := range snapshot.Questions {
 		workID := runWork[question.RunID]
+		index, exists := workIndex[workID]
+		if !exists || mapped.Work[index].NativeRunID != question.RunID {
+			continue
+		}
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
 			ExternalID: question.ID, WorkID: workID, RunID: question.RunID, Kind: "question",
 			Title: "Agent question", Detail: question.Text, CreatedAt: question.CreatedAt,
 		})
-		if index, exists := workIndex[workID]; exists {
-			mapped.Work[index].Question = question.Text
-			mapped.Work[index].QuestionID = question.ID
-		}
+		mapped.Work[index].Question = question.Text
+		mapped.Work[index].QuestionID = question.ID
 	}
 	for _, acceptance := range snapshot.Acceptances {
-		if index, exists := workIndex[acceptance.WorkID]; exists {
+		if index, exists := workIndex[acceptance.WorkID]; exists && mapped.Work[index].NativeRunID == acceptance.RunID {
 			mapped.Work[index].ReviewID, mapped.Work[index].ReviewStatus = acceptance.ID, acceptance.Status
 			var review workspace.ChangeReview
 			if decoded := core.JSONUnmarshalString(acceptance.ValidationJSON, &review); decoded.OK {

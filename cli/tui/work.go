@@ -513,11 +513,13 @@ func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
 			continue
 		}
 		previous := panel.agentWork[record.ID]
-		if snapshot.AnswerID == "" {
-			snapshot.AnswerID = previous.AnswerID
-		}
-		if snapshot.ResumeRunID == "" {
-			snapshot.ResumeRunID = previous.ResumeRunID
+		if previous.NativeRunID == snapshot.NativeRunID {
+			if snapshot.AnswerID == "" {
+				snapshot.AnswerID = previous.AnswerID
+			}
+			if snapshot.ResumeRunID == "" {
+				snapshot.ResumeRunID = previous.ResumeRunID
+			}
 		}
 		panel.agentWork[record.ID] = snapshot
 	}
@@ -567,9 +569,20 @@ func (panel *workPanel) refreshEvents() core.Result {
 		}
 		liveEvents := append([]agentEventSnapshot(nil), panel.agentEvents[item.ID]...)
 		sortAgentEvents(liveEvents)
-		if len(liveEvents) > maxRenderedAgentEvents {
-			liveEvents = liveEvents[len(liveEvents)-maxRenderedAgentEvents:]
+		logs := make([]agentEventSnapshot, 0, min(len(liveEvents), maxRenderedAgentEvents))
+		durable := make([]agentEventSnapshot, 0, len(liveEvents))
+		for _, event := range liveEvents {
+			if event.Sequence > 0 {
+				logs = append(logs, event)
+			} else {
+				durable = append(durable, event)
+			}
 		}
+		if len(logs) > maxRenderedAgentEvents {
+			logs = logs[len(logs)-maxRenderedAgentEvents:]
+		}
+		liveEvents = append(durable, logs...)
+		sortAgentEvents(liveEvents)
 		anchors := agentLogAnchors(liveEvents)
 		for _, live := range liveEvents {
 			createdAt := live.CreatedAt.UTC()

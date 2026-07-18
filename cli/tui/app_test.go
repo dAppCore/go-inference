@@ -1642,6 +1642,105 @@ func TestApp_AgentResumeUsesNativeResumeAndInterruptedRetry(t *testing.T) {
 	})
 }
 
+func TestApp_AgentRunReplacementClearsRunScopedContinuation(t *testing.T) {
+	t.Run("answered parent replaced by interrupted child", func(t *testing.T) {
+		engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities()}
+		a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+		if result := a.work.updateWork("waiting", "work-1", func(record *workItemRecord) { record.Status = "waiting" }); !result.OK {
+			t.Fatalf("set waiting: %v", result.Value)
+		}
+		a.work.agentWork["work-1"] = agentWorkSnapshot{NativeRunID: "run-parent", QuestionID: "question-parent", Question: "Which target?", Status: "waiting"}
+		a.work.syncList()
+		engine.snapshot = work.Snapshot{
+			Runs: []work.Run{
+				{ID: "run-parent", WorkID: "work-1", Status: work.RunWaiting},
+				{ID: "run-child", WorkID: "work-1", Status: work.RunInterrupted},
+			},
+			Questions: []work.Question{{ID: "question-parent", RunID: "run-parent", Text: "Which target?", CreatedAt: time.Now().UTC()}},
+		}
+		if result := a.queueAgentAction(agentFeatureAnswer); !result.OK {
+			t.Fatalf("Answer: %v", result.Value)
+		}
+		a.answerOverlay.input.SetValue("Use child target")
+		model, answerCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		a = model.(app)
+		model, snapshotCommand := a.Update(answerCommand())
+		a = model.(app)
+		if snapshotCommand == nil {
+			t.Fatal("answered parent did not schedule a snapshot")
+		}
+		if state := a.work.AgentState(a.work.Items()[0]); state.AnswerID != "answer-1" || state.ResumeRunID != "run-2" {
+			t.Fatalf("parent answer identity = %#v", state)
+		}
+		model, _ = a.Update(snapshotCommand())
+		a = model.(app)
+		state := a.work.AgentState(a.work.Items()[0])
+		if state.NativeRunID != "run-child" || state.AnswerID != "" || state.ResumeRunID != "" || state.QuestionID != "" || state.Question != "" || a.work.Items()[0].Status != "interrupted" {
+			t.Fatalf("child replacement retained parent state: %#v item %#v", state, a.work.Items()[0])
+		}
+		if result := a.queueAgentAction(agentFeatureResume); !result.OK {
+			t.Fatalf("Resume interrupted child: %v", result.Value)
+		}
+		driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+		if engine.retryParent != "run-child" || engine.resumeRequest.ParentRunID != "" {
+			t.Fatalf("interrupted child Resume = retry %q resume %#v", engine.retryParent, engine.resumeRequest)
+		}
+	})
+
+	t.Run("late parent answer cannot attach to selected child", func(t *testing.T) {
+		engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities(), snapshot: work.Snapshot{
+			Runs: []work.Run{
+				{ID: "run-parent", WorkID: "work-1", Status: work.RunWaiting},
+				{ID: "run-child", WorkID: "work-1", Status: work.RunInterrupted},
+			},
+		}}
+		a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+		if result := a.work.updateWork("waiting", "work-1", func(record *workItemRecord) { record.Status = "waiting" }); !result.OK {
+			t.Fatalf("set waiting: %v", result.Value)
+		}
+		a.work.agentWork["work-1"] = agentWorkSnapshot{NativeRunID: "run-parent", QuestionID: "question-parent", Question: "Which target?", Status: "waiting"}
+		a.work.syncList()
+		if result := a.queueAgentAction(agentFeatureAnswer); !result.OK {
+			t.Fatalf("Answer: %v", result.Value)
+		}
+		a.answerOverlay.input.SetValue("Use child target")
+		model, answerCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		a = model.(app)
+		lateAnswer := answerCommand()
+		snapshotCommand := a.requestAgentSnapshot()
+		model, _ = a.Update(snapshotCommand())
+		a = model.(app)
+		model, _ = a.Update(lateAnswer)
+		a = model.(app)
+		state := a.work.AgentState(a.work.Items()[0])
+		if state.NativeRunID != "run-child" || state.AnswerID != "" || state.ResumeRunID != "" {
+			t.Fatalf("late parent answer attached to child: %#v", state)
+		}
+	})
+}
+
+func TestApp_AgentRunReplacementDropsOldPreparedReview(t *testing.T) {
+	review := correctiveChangeReview(true)
+	review.RunID = "run-reviewed-old"
+	engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities(), snapshot: work.Snapshot{
+		Runs: []work.Run{
+			{ID: review.RunID, WorkID: review.WorkID, Status: work.RunCompleted},
+			{ID: "run-new-attempt", WorkID: review.WorkID, Status: work.RunRunning},
+		},
+		Acceptances: []work.Acceptance{{ID: "review-old", WorkID: review.WorkID, RunID: review.RunID, Status: "prepared", ValidationJSON: core.JSONMarshalString(review)}},
+	}}
+	a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+	driveCorrectiveCommand(t, &a, a.requestAgentSnapshot())
+	state := a.work.AgentState(a.work.Items()[0])
+	if state.NativeRunID != "run-new-attempt" || state.ReviewID != "" || state.ReviewStatus != "" || state.Review.Payload != nil {
+		t.Fatalf("new attempt retained old review: %#v", state)
+	}
+	a.refreshAgentPalette()
+	if command := a.palette.byID[agentCommandID(agentFeatureAccept)]; command.Available {
+		t.Fatalf("Accept available for old prepared review: %#v", command)
+	}
+}
+
 func TestApp_AgentReviewPreparedSnapshotAndRejectPreserveLocalWork(t *testing.T) {
 	review := correctiveChangeReview(true)
 	engine := &fixtureNativeAgentEngine{

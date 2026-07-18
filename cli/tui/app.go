@@ -766,8 +766,10 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 	}
 	if receipt, ok := message.result.Value.(agentActionReceipt); ok && receipt.Feature == agentFeatureAnswer && a.work != nil {
 		state := a.work.agentWork[message.request.WorkID]
-		state.AnswerID, state.ResumeRunID = receipt.Detail, receipt.RunID
-		a.work.agentWork[message.request.WorkID] = state
+		if core.Trim(message.request.RunID) != "" && state.NativeRunID == message.request.RunID {
+			state.AnswerID, state.ResumeRunID = receipt.Detail, receipt.RunID
+			a.work.agentWork[message.request.WorkID] = state
+		}
 	}
 	if receipt, ok := message.result.Value.(agentActionReceipt); ok && receipt.Feature == agentFeatureDispatch {
 		workID := core.Trim(message.request.WorkID)

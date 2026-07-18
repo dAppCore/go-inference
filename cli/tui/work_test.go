@@ -99,7 +99,10 @@ func TestWorkPanel_AgentLogsUseSequenceBoundAndRemainWorkIsolated(t *testing.T) 
 			t.Fatalf("SaveEvent local %d: %v", index, result.Value)
 		}
 	}
-	events := make([]agentEventSnapshot, 0, 206)
+	events := []agentEventSnapshot{
+		{ExternalID: "provider-started", WorkID: first.ID, RunID: "run-a", Kind: "started", Title: "Provider started", Detail: "durable provider event", CreatedAt: at},
+		{ExternalID: "question-current", WorkID: first.ID, RunID: "run-a", Kind: "question", Title: "Agent question", Detail: "durable provider question", CreatedAt: at.Add(time.Second)},
+	}
 	for sequence := int64(1); sequence <= 205; sequence++ {
 		createdAt := at.Add(time.Duration(500-sequence) * time.Second)
 		stream := "stdout"
@@ -126,23 +129,30 @@ func TestWorkPanel_AgentLogsUseSequenceBoundAndRemainWorkIsolated(t *testing.T) 
 		t.Fatalf("ApplyAgentSnapshot: %v", result.Value)
 	}
 	merged := panel.Events(first.ID)
-	live := make([]eventRecord, 0, maxRenderedAgentEvents)
+	logs := make([]eventRecord, 0, maxRenderedAgentEvents)
+	providerEvents := make([]eventRecord, 0, 2)
 	local := make([]eventRecord, 0, 3)
 	for _, event := range merged {
-		if event.Status == "live" {
-			live = append(live, event)
-		} else {
+		switch {
+		case event.Status != "live":
 			local = append(local, event)
+		case strings.HasPrefix(event.Kind, "log."):
+			logs = append(logs, event)
+		default:
+			providerEvents = append(providerEvents, event)
 		}
 	}
-	if len(live) != maxRenderedAgentEvents || len(local) != 3 {
-		t.Fatalf("bounded timeline = %d live / %d local, want %d / 3", len(live), len(local), maxRenderedAgentEvents)
+	if len(logs) != maxRenderedAgentEvents || len(providerEvents) != 2 || len(local) != 3 {
+		t.Fatalf("bounded timeline = %d logs / %d provider / %d local, want %d / 2 / 3", len(logs), len(providerEvents), len(local), maxRenderedAgentEvents)
 	}
-	for index, event := range live {
+	for index, event := range logs {
 		want := core.Sprintf("chunk %03d", index+6)
 		if event.Detail != want {
-			t.Fatalf("live[%d] = %q, want %q", index, event.Detail, want)
+			t.Fatalf("logs[%d] = %q, want %q", index, event.Detail, want)
 		}
+	}
+	if providerEvents[0].Detail != "durable provider event" || providerEvents[1].Detail != "durable provider question" {
+		t.Fatalf("durable provider events = %#v", providerEvents)
 	}
 	if events := panel.Events(second.ID); len(events) != 1 || events[0].Detail != "second-work-only" {
 		t.Fatalf("second timeline = %#v", events)
