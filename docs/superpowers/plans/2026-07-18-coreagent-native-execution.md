@@ -704,15 +704,15 @@ git commit -m "chore(agent): prepare native runtime release"
 func newDuckAgentStore(repository workspaceRepository) core.Result
 ```
 
-- [ ] Update `cli/go.mod` normally; never add `replace`:
+- [x] Update `cli/go.mod` normally; never add `replace`:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
 go get dappco.re/go/inference@v0.14.0
 ```
 
-- [ ] Add migration version 2 with exact tables: `agent_projects`, `agent_runs`, `agent_events`, `agent_log_chunks`, `agent_questions`, `agent_answers`, `agent_acceptances`, `agent_queue_state`, and `agent_provider_state`. Add unique `(run_id, sequence)` log ordering, run/work/status indexes, event ordering indexes, and one queue-state check constraint.
-- [ ] Use this exact SQL inventory, split into individually executed statements inside the migration transaction:
+- [x] Add migration version 2 with exact tables: `agent_projects`, `agent_runs`, `agent_events`, `agent_log_chunks`, `agent_questions`, `agent_answers`, `agent_acceptances`, `agent_queue_state`, and `agent_provider_state`. Add unique `(run_id, sequence)` log ordering, run/work/status indexes, event ordering indexes, and one queue-state check constraint.
+- [x] Use this exact SQL inventory, split into individually executed statements inside the migration transaction:
 
 ```sql
 CREATE TABLE agent_projects (id TEXT PRIMARY KEY, source_path TEXT NOT NULL UNIQUE, repository_root TEXT NOT NULL, source_branch TEXT NOT NULL, source_revision TEXT NOT NULL, repository_name TEXT NOT NULL UNIQUE, clone_path TEXT NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL);
@@ -730,12 +730,12 @@ CREATE INDEX agent_runs_status_idx ON agent_runs(status, provider, model, queued
 CREATE INDEX agent_events_run_idx ON agent_events(run_id, created_at, id);
 CREATE INDEX agent_acceptances_work_idx ON agent_acceptances(work_id, updated_at);
 ```
-- [ ] Write migration Good/Bad/Ugly tests for idempotence, transaction rollback, upgrade from version 1, and reopen.
-- [ ] Write Store contract tests for every method, transactionally checked transitions, monotonic log sequences, ordered snapshots, interrupted startup recovery, queue/provider reopen, and concurrent writer serialization. Round-trip `durable_revision` through every Run insert/load/Snapshot/Continuation path; existing rows default to empty and must never infer push acknowledgement from cached Git tracking state. Round-trip the full canonical `ChangeReview` JSON for `prepared`, `conflicted`, and `validation_failed` acceptance rows, and preserve deterministic `(updated_at, id)` ordering so the latest durable review remains authoritative even when timestamps are equal.
-- [ ] Assert SQL tables contain no secret values and repository directory scans contain no LEM state files.
-- [ ] Prove focused tests fail before implementation.
-- [ ] Implement `Store.Commit` as one SQL transaction for every non-nil member, with compare-and-swap status enforcement through `ExpectedStatus`. Derive concurrency from run rows instead of mutable counters.
-- [ ] Run tests/race, format, tidy, and commit:
+- [x] Write migration Good/Bad/Ugly tests for idempotence, transaction rollback, upgrade from version 1, and reopen.
+- [x] Write Store contract tests for every method, transactionally checked transitions, monotonic log sequences, ordered snapshots, interrupted startup recovery, queue/provider reopen, and concurrent writer serialization. Round-trip `durable_revision` through every Run insert/load/Snapshot/Continuation path; existing rows default to empty and must never infer push acknowledgement from cached Git tracking state. Round-trip the full canonical `ChangeReview` JSON for `prepared`, `conflicted`, and `validation_failed` acceptance rows, and preserve deterministic `(updated_at, id)` ordering so the latest durable review remains authoritative even when timestamps are equal.
+- [x] Assert SQL tables contain no secret values and repository directory scans contain no LEM state files.
+- [x] Prove focused tests fail before implementation.
+- [x] Implement `Store.Commit` as one SQL transaction for every non-nil member, with compare-and-swap status enforcement through `ExpectedStatus`. Derive concurrency from run rows instead of mutable counters.
+- [x] Run tests/race, format, tidy, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
