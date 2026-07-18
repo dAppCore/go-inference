@@ -11,6 +11,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/agent/orchestrator"
+	"dappco.re/go/inference/agent/provider"
+	"dappco.re/go/inference/agent/queue"
 	"dappco.re/go/inference/agent/work"
 	"dappco.re/go/inference/agent/workspace"
 )
@@ -339,6 +341,125 @@ func TestAgentAdapter_CloseConcurrentCapabilities_Ugly(t *testing.T) {
 	if engine.closeCalls != 1 {
 		t.Fatalf("engine Close calls = %d, want 1", engine.closeCalls)
 	}
+}
+
+func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) {
+	root, repository, agentStore := openTestAgentStore(t)
+	at := time.Date(2026, time.July, 18, 18, 0, 0, 0, time.UTC)
+	task := "Resume the durable interrupted run"
+	project := testAgentProject(at)
+	parent := testAgentRun("run-interrupted", work.RunInterrupted, at)
+	parent.ProcessID = 0
+	event := work.Event{
+		ID: "event-interrupted", RunID: parent.ID, WorkID: parent.WorkID,
+		Kind: "queued", Title: "queued", Detail: task, CreatedAt: at,
+	}
+	logs := []work.LogChunk{
+		{RunID: parent.ID, Sequence: 1, Stream: "stdout", Text: "durable-one", CreatedAt: at.Add(time.Second)},
+		{RunID: parent.ID, Sequence: 2, Stream: "stderr", Text: "durable-two", CreatedAt: at.Add(2 * time.Second)},
+	}
+	initial := newApp("", 0, 64)
+	if result := initial.attachWork(repository, requireAgentAdapter(t, &fixtureNativeAgentEngine{})); !result.OK {
+		t.Fatalf("attach initial Work: %v", result.Value)
+	}
+	initial.work.ids = sequenceIDs(parent.WorkID)
+	if result := initial.work.CreateWork("Durable restart", task, project.SourcePath); !result.OK {
+		t.Fatalf("create durable Work: %v", result.Value)
+	}
+	if result := agentStore.Commit(orchestrator.Commit{
+		Project: &project, Run: &parent, CreateRun: true, Event: &event, Logs: logs,
+	}); !result.OK {
+		t.Fatalf("persist interrupted parent: %v", result.Value)
+	}
+	if result := repository.Close(); !result.OK {
+		t.Fatalf("close initial repository/store: %v", result.Value)
+	}
+
+	reopenedResult := openDuckRepository(root + "/lem.duckdb")
+	if !reopenedResult.OK {
+		t.Fatalf("reopen durable repository: %v", reopenedResult.Value)
+	}
+	reopened := reopenedResult.Value.(workspaceRepository)
+	reopenedStore := requireAgentValue[*duckAgentStore](t, "newDuckAgentStore reopened", newDuckAgentStore(reopened))
+	reopenedSnapshot := requireAgentValue[work.Snapshot](t, "reopened Snapshot", reopenedStore.Snapshot(parent.WorkID))
+	if len(reopenedSnapshot.Runs) != 1 || reopenedSnapshot.Runs[0].ID != parent.ID || reopenedSnapshot.Runs[0].Status != work.RunInterrupted {
+		t.Fatalf("reopened parent = %#v", reopenedSnapshot.Runs)
+	}
+	if len(reopenedSnapshot.Logs) != 2 || reopenedSnapshot.Logs[0].Text != "durable-one" || reopenedSnapshot.Logs[1].Text != "durable-two" || reopenedSnapshot.Logs[0].Sequence >= reopenedSnapshot.Logs[1].Sequence {
+		t.Fatalf("reopened ordered logs = %#v", reopenedSnapshot.Logs)
+	}
+	storedParent := requireAgentValue[work.Run](t, "parent before UI Resume", reopenedStore.Run(parent.ID))
+	engine := newDurableResumeReceiptEngine(t, reopenedStore, at.Add(time.Hour))
+	adapter := requireAgentAdapter(t, engine)
+	restarted := newApp("", 0, 64)
+	if result := restarted.attachWork(reopened, adapter); !result.OK {
+		t.Fatalf("attach restarted Work: %v", result.Value)
+	}
+	driveCorrectiveCommand(t, &restarted, restarted.requestAgentSnapshot())
+	selected, ok := restarted.work.Selected()
+	if !ok || selected.ID != parent.WorkID || selected.Status != string(work.RunInterrupted) {
+		t.Fatalf("restarted selected Work = %#v, selected=%v", selected, ok)
+	}
+	if result := restarted.queueAgentAction(agentFeatureResume); !result.OK {
+		t.Fatalf("queue interrupted UI Resume: %v", result.Value)
+	}
+	next := driveCorrectiveCommand(t, &restarted, restarted.takeAgentCommand())
+	if next != nil {
+		driveCorrectiveCommand(t, &restarted, next)
+	}
+
+	resumedSnapshot := requireAgentValue[work.Snapshot](t, "Snapshot after UI Resume", reopenedStore.Snapshot(parent.WorkID))
+	var child work.Run
+	for _, candidate := range resumedSnapshot.Runs {
+		if candidate.ParentRunID == parent.ID {
+			child = candidate
+		}
+	}
+	if child.ID == "" || child.ID == parent.ID || child.Status != work.RunQueued || child.Attempt != parent.Attempt+1 || child.Branch != parent.Branch || child.Worktree != parent.Worktree {
+		t.Fatalf("durable resumed child = %#v", child)
+	}
+	afterParent := requireAgentValue[work.Run](t, "parent after UI Resume", reopenedStore.Run(parent.ID))
+	if core.JSONMarshalString(afterParent) != core.JSONMarshalString(storedParent) {
+		t.Fatalf("UI Resume mutated durable parent:\nbefore=%#v\nafter=%#v", storedParent, afterParent)
+	}
+	if len(resumedSnapshot.Logs) != 2 || resumedSnapshot.Logs[0] != reopenedSnapshot.Logs[0] || resumedSnapshot.Logs[1] != reopenedSnapshot.Logs[1] {
+		t.Fatalf("UI Resume changed durable parent logs: %#v", resumedSnapshot.Logs)
+	}
+	if result := adapter.Close(); !result.OK {
+		t.Fatalf("close restarted native adapter: %v", result.Value)
+	}
+	closeTestDuckRepository(t, reopened)
+}
+
+func newDurableResumeReceiptEngine(t *testing.T, store orchestrator.Store, at time.Time) nativeAgentEngine {
+	t.Helper()
+	registryResult := provider.NewRegistry(&fixtureNativeProvider{name: "codex", available: true})
+	if !registryResult.OK {
+		t.Fatalf("construct durable receipt provider registry: %v", registryResult.Value)
+	}
+	policy := queue.Policy{
+		Version: 1,
+		Dispatch: queue.DispatchConfig{
+			DefaultAgent: "codex", GlobalConcurrency: 1, TimeoutMinutes: 1,
+		},
+		Concurrency: map[string]queue.ConcurrencyLimit{"codex": {Total: 1}},
+		Rates:       map[string]queue.RateConfig{},
+		Providers:   map[string]queue.NativeConfig{"codex": {Executable: "codex"}},
+	}
+	queueResult := queue.NewController(policy, work.QueueState{ID: "default", Status: work.QueueFrozen}, nil)
+	if !queueResult.OK {
+		t.Fatalf("construct durable receipt queue: %v", queueResult.Value)
+	}
+	engineResult := orchestrator.New(orchestrator.Options{
+		Store: store, GitServer: &fixtureGitServer{}, Workspaces: &workspace.Manager{},
+		Providers: registryResult.Value.(*provider.Registry), Queue: queueResult.Value.(*queue.Controller),
+		Launcher: &fixtureAgentLauncher{}, Clock: agentClock{now: func() time.Time { return at }},
+		IDs: &fixtureAgentIdentifiers{},
+	})
+	if !engineResult.OK {
+		t.Fatalf("construct durable receipt orchestrator: %v", engineResult.Value)
+	}
+	return engineResult.Value.(nativeAgentEngine)
 }
 
 func requireAgentAdapter(t *testing.T, engine nativeAgentEngine) agentProvider {

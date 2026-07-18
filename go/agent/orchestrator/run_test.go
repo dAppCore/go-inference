@@ -147,13 +147,96 @@ func orchestratorAssertContinuationOrder(t *testing.T, continuation string, piec
 	}
 }
 
-func orchestratorAssertNoStateMarkdown(t *testing.T, roots ...string) {
+func TestRun_RepositoryControlFilesRecursiveReceipt(t *testing.T) {
+	t.Run("allows normal repository files containing lem", func(t *testing.T) {
+		root := t.TempDir()
+		core.AssertTrue(t, core.MkdirAll(core.PathJoin(root, "docs", "nested"), 0o700).OK)
+		core.AssertTrue(t, core.WriteFile(core.PathJoin(root, "docs", "problem.json"), []byte("{}\n"), 0o600).OK)
+		core.AssertTrue(t, core.WriteFile(core.PathJoin(root, "docs", "nested", "implementation.md"), []byte("normal docs\n"), 0o600).OK)
+		result := orchestratorRepositoryControlFiles(root)
+		core.AssertTrue(t, result.OK, result.Error())
+	})
+
+	for _, path := range []string{
+		"nested/.lem/record",
+		"nested/QUESTION.md",
+		"nested/deeper/lem_status.json",
+		"nested/deeper/.lem-control.yaml",
+		"nested/deeper/lem.status",
+	} {
+		t.Run(path, func(t *testing.T) {
+			root := t.TempDir()
+			target := core.PathJoin(root, path)
+			core.AssertTrue(t, core.MkdirAll(core.PathDir(target), 0o700).OK)
+			core.AssertTrue(t, core.WriteFile(target, []byte("state\n"), 0o600).OK)
+			result := orchestratorRepositoryControlFiles(root)
+			core.AssertFalse(t, result.OK)
+			wantPath := target
+			if core.Contains(path, "/.lem/") {
+				wantPath = core.PathDir(target)
+			}
+			core.AssertContains(t, result.Error(), wantPath)
+		})
+	}
+}
+
+func orchestratorRepositoryControlFiles(root string) core.Result {
+	root = core.Trim(root)
+	if root == "" || !core.Stat(root).OK {
+		return core.Ok(nil)
+	}
+	return core.PathWalkDir(root, func(path string, entry core.FsDirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		name := core.Lower(entry.Name())
+		if entry.IsDir() {
+			if name == ".lem" {
+				return core.NewError(core.Concat("unexpected LEM control directory: ", path))
+			}
+			return nil
+		}
+		extension := core.Lower(core.PathExt(name))
+		allowedExtension := false
+		for _, allowed := range []string{".md", ".json", ".yaml", ".yml", ".status"} {
+			if extension == allowed {
+				allowedExtension = true
+				break
+			}
+		}
+		if !allowedExtension {
+			return nil
+		}
+		stem := core.TrimPrefix(core.TrimSuffix(name, extension), ".")
+		stem = core.Replace(core.Replace(stem, "_", "-"), ".", "-")
+		controlName := false
+		for _, exact := range []string{"lem", "question", "answer", "status", "state", "control"} {
+			if stem == exact {
+				controlName = true
+				break
+			}
+		}
+		if !controlName && core.HasPrefix(stem, "lem-") {
+			suffix := core.TrimPrefix(stem, "lem-")
+			for _, exact := range []string{"question", "answer", "status", "state", "control"} {
+				if suffix == exact {
+					controlName = true
+					break
+				}
+			}
+		}
+		if controlName {
+			return core.NewError(core.Concat("unexpected LEM state/control file: ", path))
+		}
+		return nil
+	})
+}
+
+func orchestratorAssertNoControlFiles(t *testing.T, roots ...string) {
 	t.Helper()
 	for _, root := range roots {
-		for _, name := range []string{"QUESTION.md", "ANSWER.md", "STATUS.md", "question.md", "answer.md", "status.md"} {
-			if core.Stat(core.PathJoin(root, name)).OK {
-				t.Fatalf("orchestration state file appeared in repository: %s", core.PathJoin(root, name))
-			}
+		if result := orchestratorRepositoryControlFiles(root); !result.OK {
+			t.Fatalf("repository control-file scan failed: %s", result.Error())
 		}
 	}
 }
@@ -485,7 +568,7 @@ func TestRun_Orchestrator_Answer_Good(t *testing.T) {
 	core.AssertTrue(t, commit.Answer != nil)
 	core.AssertTrue(t, commit.Run == nil)
 	core.AssertEqual(t, parent, fixture.store.Run(parent.ID).Value.(work.Run))
-	orchestratorAssertNoStateMarkdown(t, item.Repository)
+	orchestratorAssertNoControlFiles(t, item.Repository)
 }
 
 func TestRun_Orchestrator_Answer_Bad(t *testing.T) {
@@ -547,7 +630,7 @@ func TestRun_Orchestrator_Resume_Good(t *testing.T) {
 	core.AssertEqual(t, parent.Worktree, built.Worktree)
 	orchestratorAssertContinuationOrder(t, built.Continuation,
 		"Make a tested change", "earlier durable output", "Which API should remain canonical?", "Keep the Adapter API")
-	orchestratorAssertNoStateMarkdown(t, item.Repository, parent.Worktree)
+	orchestratorAssertNoControlFiles(t, item.Repository, parent.Worktree)
 	launch.callback("stdout", orchestratorCompletedEnvelope("resumed"))
 	launch.process.Finish(0)
 	orchestratorWaitRunStatus(t, fixture.store, child.ID, work.RunCompleted)
@@ -644,7 +727,7 @@ func TestRun_Orchestrator_Retry_Good(t *testing.T) {
 			orchestratorAssertContinuationOrder(t, built.Continuation, "Make a tested change", "earlier durable output")
 			worktrees := orchestratorRunGit(t, project.ClonePath, "worktree", "list", "--porcelain")
 			core.AssertEqual(t, 1, core.Count(worktrees, parent.Worktree))
-			orchestratorAssertNoStateMarkdown(t, item.Repository, parent.Worktree)
+			orchestratorAssertNoControlFiles(t, item.Repository, parent.Worktree)
 			writeResult := core.WriteFile(core.PathJoin(parent.Worktree, "durable-child.txt"), []byte("child\n"), 0o600)
 			core.AssertTrue(t, writeResult.OK, writeResult.Error())
 			launch.callback("stdout", orchestratorCompletedEnvelope("retried"))

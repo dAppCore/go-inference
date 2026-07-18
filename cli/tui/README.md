@@ -18,10 +18,12 @@ go run . tui --model /path/to/model --context 8192 --max-tokens 4096
 go run . tui --check
 ```
 
-`--check` performs a read-only workspace bootstrap, renders one 100x30 frame
-without a TTY, closes the workspace, and exits nonzero if required storage
-cannot open. It deliberately does not construct the native agent engine, start
-Soft Serve, discover providers, admit queue work, or launch a process.
+`--check` performs a native-execution-disabled workspace bootstrap, renders one
+100x30 frame without a TTY, closes the workspace, and exits nonzero if required
+storage cannot open. Bootstrap can ensure LEM directories, open DuckDB
+read-write, apply migrations, and recover interrupted workspace records. It
+does not construct the native agent engine, start Soft Serve, discover or launch
+providers, mutate private/source Git, or admit or change native queue work.
 
 ## Primary panels
 
