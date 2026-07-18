@@ -42,30 +42,33 @@ type app struct {
 	knowledgeLimit     int64
 	recentSessionLimit int
 
-	activePanel   panelID
-	inspectorOpen bool
-	styles        uiStyles
-	keys          keyMap
-	markdown      *markdownRenderer
-	activeOverlay overlayKind
-	palette       *commandPalette
-	switcher      *sessionSwitcher
-	search        *historySearch
-	help          *helpOverlay
-	sessions      *sessionManager
-	repository    workspaceRepository
-	preferences   preferenceStore
-	inspector     inspectorState
-	agent         agentProvider
-	work          *workPanel
-	workEditor    *workEditor
-	launchReview  *launchReviewOverlay
-	agentReview   agentReview
-	agentRequest  agentRequest
-	agentCommand  tea.Cmd
-	agentStage    agentReviewStage
-	knowledge     *knowledgeLibrary
-	attachments   []attachmentRecord
+	activePanel        panelID
+	inspectorOpen      bool
+	styles             uiStyles
+	keys               keyMap
+	markdown           *markdownRenderer
+	activeOverlay      overlayKind
+	palette            *commandPalette
+	switcher           *sessionSwitcher
+	search             *historySearch
+	help               *helpOverlay
+	sessions           *sessionManager
+	repository         workspaceRepository
+	preferences        preferenceStore
+	inspector          inspectorState
+	agent              agentProvider
+	work               *workPanel
+	workEditor         *workEditor
+	launchReview       *launchReviewOverlay
+	agentReview        agentReview
+	agentRequest       agentRequest
+	agentCommand       tea.Cmd
+	agentStage         agentReviewStage
+	agentOperationID   uint64
+	agentOperationNext uint64
+	agentInFlight      bool
+	knowledge          *knowledgeLibrary
+	attachments        []attachmentRecord
 
 	picker       list.Model
 	spin         spinner.Model
@@ -487,6 +490,9 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 	if a == nil || a.work == nil || a.agent == nil {
 		return core.Fail(core.E("tui.app.queueAgentAction", "agent work is unavailable", nil))
 	}
+	if a.agentStage != agentReviewNone || a.agentInFlight {
+		return core.Fail(core.E("tui.app.queueAgentAction", "an agent operation is already in progress", nil))
+	}
 	capabilities := a.agent.Capabilities()
 	available := false
 	capability := agentCapability{Feature: feature}
@@ -517,7 +523,7 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 		request.WorkID = selected.ID
 		request.Work = agentWorkRequest{ID: selected.ID, ExternalID: selected.ExternalID, Title: selected.Title, Task: selected.Task, Repository: selected.Repo}
 	}
-	a.agentRequest = request
+	a.beginAgentOperation(request, agentReviewNone)
 	if feature == agentFeatureDispatch || feature == agentFeatureChangesReview {
 		if feature == agentFeatureDispatch {
 			a.agentStage = agentReviewProject
@@ -525,26 +531,50 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 			a.activeOverlay = overlayAgentSelection
 			return core.Ok(nil)
 		}
-		a.agentCommand = a.lifecycle.command(a.agentReviewCommand(request))
+		a.agentInFlight = true
+		a.agentCommand = a.lifecycle.command(a.agentReviewCommand(a.agentOperationID, request, agentReviewNone))
 		return core.Ok(nil)
 	}
-	a.agentCommand = a.lifecycle.command(a.agentRunCommand(request))
+	a.agentInFlight = true
+	a.agentCommand = a.lifecycle.command(a.agentRunCommand(a.agentOperationID, request, agentReviewNone))
 	return core.Ok(nil)
 }
 
-func (a *app) agentReviewCommand(request agentRequest) tea.Cmd {
+func (a *app) beginAgentOperation(request agentRequest, stage agentReviewStage) {
+	if a == nil {
+		return
+	}
+	a.agentOperationNext++
+	a.agentOperationID = a.agentOperationNext
+	a.agentRequest = request
+	a.agentStage = stage
+	a.agentInFlight = false
+}
+
+func (a *app) abortAgentOperation() {
+	if a == nil || a.agentInFlight {
+		return
+	}
+	a.agentOperationID = 0
+	a.agentRequest = agentRequest{}
+	a.agentReview = agentReview{}
+	a.agentStage = agentReviewNone
+	a.agentCommand = nil
+}
+
+func (a *app) agentReviewCommand(operationID uint64, request agentRequest, stage agentReviewStage) tea.Cmd {
 	return func() tea.Msg {
 		result := a.agent.Review(a.lifecycle.context, agentReviewRequest{
 			Feature: request.Feature, WorkID: request.WorkID, Provider: request.Provider,
 			Model: request.Model, Input: request.Input, Work: request.Work,
 		})
-		return agentActionMsg{feature: request.Feature, result: result}
+		return agentActionMsg{operationID: operationID, feature: request.Feature, stage: stage, request: request, result: result}
 	}
 }
 
-func (a *app) agentRunCommand(request agentRequest) tea.Cmd {
+func (a *app) agentRunCommand(operationID uint64, request agentRequest, stage agentReviewStage) tea.Cmd {
 	return func() tea.Msg {
-		return agentActionMsg{feature: request.Feature, result: a.agent.Run(a.lifecycle.context, request)}
+		return agentActionMsg{operationID: operationID, feature: request.Feature, stage: stage, request: request, result: a.agent.Run(a.lifecycle.context, request)}
 	}
 }
 
@@ -555,7 +585,8 @@ func (a *app) queueAgentRun(confirmed, enableGit bool) {
 	request.EnableGit = enableGit
 	a.agentRequest = request
 	a.agentStage = agentReviewLaunch
-	a.agentCommand = a.lifecycle.command(a.agentRunCommand(request))
+	a.agentInFlight = true
+	a.agentCommand = a.lifecycle.command(a.agentRunCommand(a.agentOperationID, request, agentReviewLaunch))
 }
 
 func (a *app) takeAgentCommand() tea.Cmd {
@@ -576,19 +607,25 @@ func (a *app) confirmAgentSelection() core.Result {
 		return core.Fail(core.E("tui.app.confirmAgentSelection", "provider and model are required before project review", nil))
 	}
 	a.agentRequest.Provider, a.agentRequest.Model = provider, model
-	a.agentCommand = a.lifecycle.command(a.agentReviewCommand(a.agentRequest))
+	a.agentInFlight = true
+	a.agentCommand = a.lifecycle.command(a.agentReviewCommand(a.agentOperationID, a.agentRequest, agentReviewProject))
 	return core.Ok(nil)
 }
 
 func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
+	if message.operationID == 0 || message.operationID != a.agentOperationID || !a.agentInFlight {
+		return a, nil
+	}
+	a.agentInFlight = false
 	if !message.result.OK {
 		a.errText = message.result.Error()
 		a.activeOverlay, a.launchReview = overlayNone, nil
+		a.agentStage = agentReviewNone
 		return a, nil
 	}
 	if review, ok := message.result.Value.(agentReview); ok {
-		a.agentReview = review
-		switch a.agentStage {
+		a.agentRequest, a.agentReview, a.agentStage = message.request, review, message.stage
+		switch message.stage {
 		case agentReviewProject:
 			a.activeOverlay = overlayProjectReview
 		case agentReviewLaunch:
@@ -599,6 +636,17 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 			a.activeOverlay = overlayLaunchReview
 		}
 		return a, nil
+	}
+	if receipt, ok := message.result.Value.(agentActionReceipt); ok && receipt.Feature == agentFeatureDispatch {
+		workID := core.Trim(receipt.WorkID)
+		if workID == "" {
+			workID = message.request.WorkID
+		}
+		if a.work != nil && workID != "" && core.Trim(receipt.Status) != "" {
+			if result := a.work.updateWork("AgentReceipt", workID, func(record *workItemRecord) { record.Status = core.Lower(core.Trim(receipt.Status)) }); !result.OK {
+				a.errText = result.Error()
+			}
+		}
 	}
 	a.activeOverlay, a.launchReview = overlayNone, nil
 	a.agentStage = agentReviewNone
@@ -1773,11 +1821,16 @@ func (a *app) drainManagedGenerations() core.Result {
 
 func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if message.String() == "esc" {
+		overlay := a.activeOverlay
 		if a.launchReview != nil {
 			a.launchReview.Update(message)
 		}
 		a.activeOverlay = overlayNone
 		a.workEditor, a.launchReview = nil, nil
+		switch overlay {
+		case overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview:
+			a.abortAgentOperation()
+		}
 		return a, nil
 	}
 	if a.activeOverlay == overlayWorkEditor && message.String() == "enter" && a.workEditor != nil && a.workEditor.focus == 1 {
@@ -2461,7 +2514,7 @@ func (a app) overlayView() string {
 	width := max(1, metrics.mainWidth)
 	height := max(1, metrics.mainHeight)
 	bodyWidth := max(1, min(68, width-8))
-	bodyHeight := max(5, min(14, height-4))
+	bodyHeight := max(5, min(24, height-4))
 	var body string
 	switch a.activeOverlay {
 	case overlayCommands:

@@ -13,9 +13,14 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/agent/orchestrator"
+	"dappco.re/go/inference/agent/provider"
+	"dappco.re/go/inference/agent/work"
+	"dappco.re/go/inference/agent/workspace"
 	"dappco.re/go/inference/decode/parser"
 )
 
@@ -1227,9 +1232,263 @@ func TestApp_AgentReviewLaunchesOnlyAfterBothConfirmations(t *testing.T) {
 	}
 	model, _ = a.Update(command())
 	a = model.(app)
-	if len(provider.runs) != 2 || a.activeOverlay != overlayNone || provider.runs[0].Provider != "codex" || provider.runs[0].Model != "gpt-5" || provider.runs[1].Provider != "codex" || provider.runs[1].Model != "gpt-5" {
+	selected, ok := a.work.Selected()
+	if len(provider.runs) != 2 || a.activeOverlay != overlayNone || !ok || selected.Status != "queued" || provider.runs[0].Provider != "codex" || provider.runs[0].Model != "gpt-5" || provider.runs[1].Provider != "codex" || provider.runs[1].Model != "gpt-5" {
 		t.Fatalf("final dispatch = runs=%#v overlay=%d", provider.runs, a.activeOverlay)
 	}
+	a.refreshAgentPalette()
+	if command := a.palette.byID[agentCommandID(agentFeatureDispatch)]; command.Available {
+		t.Fatalf("dispatch remained available after queued receipt: %#v", command)
+	}
+}
+
+func TestApp_AgentReviewRejectsOverlappingAndStaleOperations(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{caps: []agentCapability{{Feature: agentFeatureDispatch, Available: true}}, reviews: []agentReview{{Feature: agentFeatureDispatch, Title: "Project", ConfirmRequired: true}}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	if result := a.work.CreateWork("Launch", "Run the task", "/tmp/repo"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.queueAgentAction(agentFeatureDispatch); !result.OK {
+		t.Fatalf("first action: %v", result.Value)
+	}
+	a.launchReview.providerInput.SetValue("codex")
+	a.launchReview.modelInput.SetValue("gpt-5")
+	if result := a.confirmAgentSelection(); !result.OK {
+		t.Fatalf("confirm selection: %v", result.Value)
+	}
+	operationID := a.agentOperationID
+	if result := a.queueAgentAction(agentFeatureDispatch); result.OK {
+		t.Fatal("overlapping agent action was accepted")
+	}
+	beforeRequest := a.agentRequest
+	beforeOverlay := a.activeOverlay
+	model, _ := a.Update(agentActionMsg{operationID: operationID + 1, feature: agentFeatureDispatch, stage: agentReviewLaunch, request: agentRequest{Provider: "stale", Model: "stale"}, result: core.Ok(agentReview{Title: "stale"})})
+	a = model.(app)
+	if a.agentRequest != beforeRequest || a.agentOperationID != operationID || a.activeOverlay != beforeOverlay || len(provider.runs) != 0 {
+		t.Fatalf("stale result mutated app: request=%#v operation=%d overlay=%d runs=%d", a.agentRequest, a.agentOperationID, a.activeOverlay, len(provider.runs))
+	}
+}
+
+func TestApp_AgentReviewEscapeAbortsTransaction(t *testing.T) {
+	for _, overlay := range []overlayKind{overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview} {
+		t.Run(core.Sprintf("overlay-%d", overlay), func(t *testing.T) {
+			a := newApp("", 0, 64)
+			a.agentOperationID, a.agentOperationNext = 7, 7
+			a.agentStage = agentReviewProject
+			a.agentRequest = agentRequest{Feature: agentFeatureDispatch, Provider: "codex"}
+			a.agentReview = agentReview{Title: "review"}
+			a.activeOverlay = overlay
+			a.launchReview = newAgentSelectionOverlay("codex", "gpt-5")
+			model, _ := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			a = model.(app)
+			if a.activeOverlay != overlayNone || a.agentStage != agentReviewNone || a.agentOperationID != 0 || a.agentRequest.Feature != "" || a.agentReview.Title != "" {
+				t.Fatalf("escape state = overlay=%d stage=%d id=%d request=%#v review=%#v", a.activeOverlay, a.agentStage, a.agentOperationID, a.agentRequest, a.agentReview)
+			}
+		})
+	}
+}
+
+func TestApp_AgentReviewNativeAdapterTransactions(t *testing.T) {
+	project := testNativeProjectReview("work-1", false)
+	dispatch := testNativeDispatchReview(project)
+	engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities(), projectReview: project, registeredProject: dispatch.Project, dispatchReview: dispatch}
+	adapter := requireAgentAdapter(t, engine)
+	a := testNativeAgentApp(t, adapter)
+
+	if result := a.queueAgentAction(agentFeatureDispatch); !result.OK {
+		t.Fatalf("dispatch: %v", result.Value)
+	}
+	startAgentProjectReview(t, &a, "codex", "gpt-5")
+	if !strings.Contains(a.agentReview.Body, "Included files: 2") {
+		t.Fatalf("ad-hoc included-file review:\n%s", a.agentReview.Body)
+	}
+	registration, ok := a.agentReview.Payload.(agentProjectRegistration)
+	if !ok || core.JSONMarshalString(registration.Review) != core.JSONMarshalString(project) || registration.Provider != "codex" || registration.Model != "gpt-5" {
+		t.Fatalf("project payload = %#v", a.agentReview.Payload)
+	}
+	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	if command == nil || engine.registerCalls != 0 || engine.dispatchCalls != 0 || a.agentRequest.EnableGit {
+		t.Fatalf("clean project confirmation = command=%v register=%d dispatch=%d enableGit=%v", command != nil, engine.registerCalls, engine.dispatchCalls, a.agentRequest.EnableGit)
+	}
+	model, _ = a.Update(command())
+	a = model.(app)
+	launch, ok := a.agentReview.Payload.(orchestrator.DispatchReview)
+	if !ok || core.JSONMarshalString(launch) != core.JSONMarshalString(dispatch) || a.activeOverlay != overlayLaunchReview || engine.registerCalls != 1 || engine.dispatchCalls != 0 {
+		t.Fatalf("launch payload = %#v register=%d dispatch=%d", a.agentReview.Payload, engine.registerCalls, engine.dispatchCalls)
+	}
+	for _, want := range []string{"Provider: codex", "Model: gpt-5", "Command: codex exec --api-key [REDACTED] --model gpt-5", "Source: /src/project", "Branch: main", "Revision: abc123", "Private repository: work-1", "Worktree: /private/runs/pending-run/worktree", "Queue: ready for admission"} {
+		if !strings.Contains(a.agentReview.Body, want) {
+			t.Fatalf("launch body missing %q:\n%s", want, a.agentReview.Body)
+		}
+	}
+	for _, width := range []int{48, 120} {
+		a.width, a.height = width, 22
+		view := a.View()
+		wants := []string{"Command:", "codex", "exec", "--api-key", "[REDACTED]", "--model", "gpt-5", "native host access"}
+		if width >= 100 {
+			wants = append(wants, "Command: codex exec --api-key [REDACTED] --model gpt-5")
+		}
+		for _, want := range wants {
+			if !strings.Contains(view, want) {
+				t.Fatalf("width %d launch view missing %q:\n%s", width, want, view)
+			}
+		}
+		for line, text := range strings.Split(view, "\n") {
+			if got := lipgloss.Width(text); got > width {
+				t.Fatalf("width %d line %d overflows at %d", width, line, got)
+			}
+		}
+	}
+	model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	if command == nil || engine.dispatchCalls != 0 {
+		t.Fatalf("launch confirmation = command=%v dispatch=%d", command != nil, engine.dispatchCalls)
+	}
+	model, _ = a.Update(command())
+	a = model.(app)
+	if engine.dispatchCalls != 1 || a.work.Items()[0].Status != "queued" {
+		t.Fatalf("final dispatch = calls=%d work=%#v", engine.dispatchCalls, a.work.Items())
+	}
+}
+
+func TestApp_AgentReviewNativeAdapterGitConfirmationAndFailure(t *testing.T) {
+	project := testNativeProjectReview("work-1", true)
+	dispatch := testNativeDispatchReview(project)
+	engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities(), projectReview: project, registeredProject: dispatch.Project, dispatchReview: dispatch}
+	adapter := requireAgentAdapter(t, engine)
+	a := testNativeAgentApp(t, adapter)
+	if result := a.queueAgentAction(agentFeatureDispatch); !result.OK {
+		t.Fatalf("dispatch: %v", result.Value)
+	}
+	startAgentProjectReview(t, &a, "codex", "gpt-5")
+	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	if command != nil || a.activeOverlay != overlayGitEnableReview || engine.registerCalls != 0 {
+		t.Fatalf("ad-hoc project enter = command=%v overlay=%d register=%d", command != nil, a.activeOverlay, engine.registerCalls)
+	}
+	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	a = model.(app)
+	if engine.registerCalls != 0 || a.agentStage != agentReviewNone {
+		t.Fatalf("Git cancel = register=%d stage=%d", engine.registerCalls, a.agentStage)
+	}
+
+	if result := a.queueAgentAction(agentFeatureDispatch); !result.OK {
+		t.Fatalf("fresh dispatch: %v", result.Value)
+	}
+	startAgentProjectReview(t, &a, "codex", "gpt-5")
+	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	if command == nil || !a.agentRequest.EnableGit || engine.registerCalls != 0 {
+		t.Fatalf("Git confirmation = command=%v enable=%v register=%d", command != nil, a.agentRequest.EnableGit, engine.registerCalls)
+	}
+	model, _ = a.Update(command())
+	a = model.(app)
+	if engine.registerCalls != 1 || a.activeOverlay != overlayLaunchReview {
+		t.Fatalf("Git registration = register=%d overlay=%d", engine.registerCalls, a.activeOverlay)
+	}
+
+	failure := core.Fail(core.E("test.register", "included file hash changed", nil))
+	failedEngine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities(), projectReview: project, registeredProject: dispatch.Project, dispatchReview: dispatch, registerProject: func(context.Context, orchestrator.ProjectReview, bool) core.Result { return failure }}
+	failedApp := testNativeAgentApp(t, requireAgentAdapter(t, failedEngine))
+	if result := failedApp.queueAgentAction(agentFeatureDispatch); !result.OK {
+		t.Fatalf("failed dispatch: %v", result.Value)
+	}
+	startAgentProjectReview(t, &failedApp, "codex", "gpt-5")
+	model, _ = failedApp.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	failedApp = model.(app)
+	model, command = failedApp.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	failedApp = model.(app)
+	model, _ = failedApp.Update(command())
+	failedApp = model.(app)
+	if !strings.Contains(failedApp.errText, "included file hash changed") || failedEngine.reviewDispatchCalls != 0 || failedEngine.dispatchCalls != 0 {
+		t.Fatalf("changed hash failure = err=%q reviewDispatch=%d dispatch=%d", failedApp.errText, failedEngine.reviewDispatchCalls, failedEngine.dispatchCalls)
+	}
+}
+
+func TestApp_AgentReviewNativeAdapterProjectFailuresDoNotRegister(t *testing.T) {
+	for _, reason := range []string{"source repository is dirty", "source repository is detached"} {
+		t.Run(reason, func(t *testing.T) {
+			engine := &failingProjectNativeEngine{fixtureNativeAgentEngine: &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities()}, failure: core.Fail(core.E("test.project", reason, nil))}
+			a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+			if result := a.queueAgentAction(agentFeatureDispatch); !result.OK {
+				t.Fatalf("dispatch: %v", result.Value)
+			}
+			startAgentProjectReview(t, &a, "codex", "gpt-5")
+			if !strings.Contains(a.errText, reason) || engine.registerCalls != 0 || engine.dispatchCalls != 0 {
+				t.Fatalf("project failure = err=%q register=%d dispatch=%d", a.errText, engine.registerCalls, engine.dispatchCalls)
+			}
+		})
+	}
+}
+
+func TestWorkEditor_CtrlSSavesAndEscapeCancels(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{caps: []agentCapability{{Feature: agentFeatureDispatch, Available: true}}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	if result := a.openWorkEditor(workItemRecord{}); !result.OK {
+		t.Fatalf("open editor: %v", result.Value)
+	}
+	a.workEditor.title.SetValue("Keyboard save")
+	a.workEditor.task.SetValue("Complete task")
+	a.workEditor.repository.SetValue("/tmp/repository")
+	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	a = model.(app)
+	if a.activeOverlay != overlayNone || len(a.work.Items()) != 1 || len(provider.reviewRequests) != 0 || len(provider.runs) != 0 {
+		t.Fatalf("ctrl+s state = overlay=%d work=%#v", a.activeOverlay, a.work.Items())
+	}
+	if result := a.openWorkEditor(workItemRecord{}); !result.OK {
+		t.Fatalf("open cancellation editor: %v", result.Value)
+	}
+	a.workEditor.title.SetValue("Cancelled")
+	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	a = model.(app)
+	if a.activeOverlay != overlayNone || len(a.work.Items()) != 1 {
+		t.Fatalf("escape state = overlay=%d work=%#v", a.activeOverlay, a.work.Items())
+	}
+}
+
+func testNativeAgentApp(t *testing.T, provider agentProvider) app {
+	t.Helper()
+	repository := openTestDuckRepository(t)
+	t.Cleanup(func() { closeTestDuckRepository(t, repository) })
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("work-1")
+	if result := a.work.CreateWork("Ship", "Implement the slice", "/src/project"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	return a
+}
+
+func testNativeProjectReview(workID string, enableGit bool) orchestrator.ProjectReview {
+	return orchestrator.ProjectReview{Work: work.Item{ID: workID, Title: "Ship", Task: "Implement the slice", Repository: "/src/project"}, Source: workspace.SourceReview{Path: "/src/project", Root: "/src/project", Branch: "main", Revision: "abc123", IncludedHash: "hash", Included: []string{"go.mod", "main.go"}}, RepositoryName: workID, RequiresGitEnable: enableGit}
+}
+
+func testNativeDispatchReview(project orchestrator.ProjectReview) orchestrator.DispatchReview {
+	return orchestrator.DispatchReview{Request: work.DispatchRequest{Work: project.Work, Provider: "codex", Model: "gpt-5", ConfirmedSourceRevision: project.Source.Revision}, Project: work.Project{ID: project.Work.ID, SourcePath: project.Source.Path, SourceRevision: project.Source.Revision, RepositoryName: project.RepositoryName}, Source: project.Source, Command: provider.Command{Provider: "codex", Executable: "codex", Args: []string{"exec", "--api-key", "[REDACTED]", "--model", "gpt-5"}, Receipt: "codex exec --api-key [REDACTED] --model gpt-5"}, WorktreePath: "/private/runs/pending-run/worktree", Warning: "native host access"}
+}
+
+type failingProjectNativeEngine struct {
+	*fixtureNativeAgentEngine
+	failure core.Result
+}
+
+func (engine *failingProjectNativeEngine) ReviewProject(context.Context, work.Item) core.Result {
+	return engine.failure
 }
 
 func TestApp_AgentReviewUsesStageInsteadOfReviewTitle(t *testing.T) {

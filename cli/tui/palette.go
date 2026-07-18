@@ -707,7 +707,7 @@ func renderOverlay(body string, width, height int, styles uiStyles) string {
 		return ""
 	}
 	overlayWidth := min(72, max(1, width-2))
-	overlayHeight := min(18, max(3, height-2))
+	overlayHeight := min(26, max(3, height-2))
 	box := styles.outerFrame.Copy().
 		BorderForeground(styles.theme.focus).
 		Width(max(1, overlayWidth-2)).

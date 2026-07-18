@@ -28,7 +28,7 @@ func TestWorkEditor_KeyboardAndLayout(t *testing.T) {
 				t.Fatalf("width %d line %d overflows at %d", width, line, got)
 			}
 		}
-		if !strings.Contains(view, "Work title") || !strings.Contains(view, "Repository") {
+		if !strings.Contains(view, "Work title") || !strings.Contains(view, "Repository") || !strings.Contains(view, "ctrl+s saves") {
 			t.Fatalf("width %d editor view:\n%s", width, view)
 		}
 	}

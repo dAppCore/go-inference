@@ -108,7 +108,7 @@ func (editor *workEditor) View(width, height int, styles uiStyles) string {
 	if editor.editingID != "" {
 		title = "Edit Work"
 	}
-	return fitPane(core.Join("\n", title, "", "Work title", editor.title.View(), "", "Full task", editor.task.View(), "", "Repository", editor.repository.View(), "", "tab changes field · enter saves · esc cancels", editor.validation), width, height, styles.panel)
+	return fitPane(core.Join("\n", title, "", "Work title", editor.title.View(), "", "Full task", editor.task.View(), "", "Repository", editor.repository.View(), "", "tab changes field · ctrl+s saves · esc cancels", editor.validation), width, height, styles.panel)
 }
 
 type launchReviewOverlay struct {
@@ -221,7 +221,7 @@ func (overlay *launchReviewOverlay) View(width, height int, styles uiStyles) str
 		model = "default model"
 	}
 	if !overlay.editable {
-		return fitPane(core.Join("\n", overlay.review.Title, "", "Provider: "+provider, "Model: "+model, "", overlay.review.Body, "", overlay.review.Warning, "", "enter confirms · esc cancels"), width, height, styles.panel)
+		return fitPane(core.Join("\n", overlay.review.Title, "", "Provider: "+provider, "Model: "+model, "", overlay.review.Warning, "", overlay.review.Body, "", "enter confirms · esc cancels"), width, height, styles.panel)
 	}
 	fieldWidth := max(12, width-6)
 	overlay.providerInput.Width = fieldWidth
@@ -230,6 +230,9 @@ func (overlay *launchReviewOverlay) View(width, height int, styles uiStyles) str
 }
 
 type agentActionMsg struct {
-	feature agentFeature
-	result  core.Result
+	operationID uint64
+	feature     agentFeature
+	stage       agentReviewStage
+	request     agentRequest
+	result      core.Result
 }

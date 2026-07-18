@@ -388,9 +388,9 @@ func mapDispatchReview(review orchestrator.DispatchReview) agentReview {
 	}
 	return agentReview{
 		Feature: agentFeatureDispatch, Title: "Review native agent launch",
-		Body: core.Sprintf("Provider: %s\nModel: %s\nSource: %s\nBranch: %s\nRevision: %s\nPrivate repository: %s\nWorktree: %s\nQueue: %s\nCommand: %s",
-			review.Request.Provider, review.Request.Model, review.Source.Path, review.Source.Branch,
-			review.Source.Revision, review.Project.RepositoryName, review.WorktreePath, queueStatus, review.Command.Receipt),
+		Body: core.Sprintf("Provider: %s\nModel: %s\nCommand: %s\nSource: %s\nBranch: %s\nRevision: %s\nPrivate repository: %s\nWorktree: %s\nQueue: %s",
+			review.Request.Provider, review.Request.Model, review.Command.Receipt, review.Source.Path,
+			review.Source.Branch, review.Source.Revision, review.Project.RepositoryName, review.WorktreePath, queueStatus),
 		Warning: review.Warning, ConfirmRequired: true, Payload: review,
 	}
 }
