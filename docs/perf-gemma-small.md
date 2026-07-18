@@ -230,30 +230,60 @@ layers). Commit carries the full receipt.
 The fixed per-token dispatch/barrier tax is shared by every gemma size, so this
 compounds fleet-wide (12B dense owner layers get the same saving).
 
-## Next iterations (bounded, in priority order — for the follow-up campaign)
+## Slice 2 (k-norm-rope hoist) — FALSIFIED, net-zero, reverted
 
-1. **Second barrier via the full attention-half reorder (~2× this win).**
-   The three post-projection ops — qk-norm-rope(q), k-norm-rope(k),
-   value-norm(v) — are *mutually* independent once Q/K/V are all projected.
-   Emitting the three projections first (Q barriers, K+V `emitNB`), then letting
-   the **qk-norm-rope** be the single flushing barrier, lets BOTH k-norm-rope
-   and value-norm ride free — saving 2 barriers/layer instead of 1
-   (est. ~+4–6% at 4-bit). Slice 1 only moved V within the owner/shared
-   branches; this one must also hoist the K-projection ahead of qk-norm-rope in
-   the **common prefix** (lines ~1882–1897), which is why it was left for a
-   dedicated slice — bigger blast radius across the q8 / K==V-share paths.
-2. **FFN half is already at the emitNB floor** (gate barriers, up rides free;
-   gelu·up → down → residual are a true sequential chain). No slack without a
-   kernel fusion — and the two candidate fusions (input-rms→qmv, gelu-fold into
-   down) are both measured net-zero-or-worse and reverted (see above). Skip.
-3. **PLE tail (5 sequential barriered ops)** is a genuine dependency chain with
-   no sibling slack; the one available fusion (post-norm residual) diverges
-   ~2 ULP and is byte-parity-hostile (already reverted). Not worth pursuing.
+The obvious next lever was the **second** attention-half barrier: the three
+post-projection ops — qk-norm-rope(q), k-norm-rope(k), value-norm(v) — are
+*mutually* independent once Q/K/V are all projected, so hoisting the K and V
+projections into the common prefix **ahead** of qk-norm-rope makes that single
+barrier flush all three, letting BOTH k-norm-rope and value-norm ride free
+(`emitNB`) — one more full-drain barrier/layer removed on top of slice 1.
 
-All of these touch the ICB recording core shared by every gemma4 size, so each
-needs the full ICB parity suite + `TestRealE2BChainedGPUParityAndSpeed` +
-large-model regression before landing — one bounded slice at a time, measured,
-as slice 1 was.
+Built it (owner + shared-KV branches, gated `useFusedQKRope && hasQN && fuseK &&
+valueNorm && !qkvBias && !kvQ8.any()` so q8 KV stayed on the proven path). It is
+**byte-perfect**: the full `ICB|Parity|Chain|Q8|KVShare|KEqV|PLE|OpLayout` suite
+passed, `TestRealE2BChainedGPUParityAndSpeed` + `TestRealQuantVerifyBatchedHiddensParity`
+reported host/chained/pipelined tokens identical, and greedy Paris + a 64-token
+essay were md5-identical before→after on E2B qat-4bit, E2B plain-4bit, E4B
+qat-4bit AND **12B** (the all-owner path), with the q8 CLI path unchanged.
+
+But the **perf receipt was net-zero** (same-session A/B, GPU quiet, 3-run):
+
+| model | slice-1 | slice-2 | Δ |
+|---|---:|---:|---:|
+| E2B qat-4bit | 144.2 | 143.5 | −0.5% |
+| E2B plain-4bit | 172.8 | 172.9 | flat |
+| E4B qat-4bit | 93.2 | 93.2 | flat |
+| 12B 4bit | 72.6 | 72.5 | flat |
+
+(E4B and 12B dead-flat across both measurement blocks ⇒ the machine was stable,
+so this is a real result, not drift.)
+
+**Why it loses (the mechanism):** hoisting the two big K/V matvecs *ahead* of
+qk-norm-rope forces that barrier to wait for them — so the saved barrier drain is
+paid back exactly as lost overlap. In slice 1, K/V project `emitNB` *after*
+qk-norm-rope and overlap it plus the k-norm-rope; moving them earlier trades that
+hidden matvec latency for the barrier. Net zero. This is the codebase's standing
+"removing a barrier can cost the overlap it was hiding" caution, confirmed live.
+
+**Reverted** per the working discipline (a lever measured net-zero is not
+shipped into the parity-critical recorder for complexity's sake). Slice 1's clean
++2.4% stands. Banking the falsification here rather than in the tracker since the
+whole root-cause thread lives in this doc.
+
+## Remaining levers (lower priority)
+
+- **FFN half is already at the `emitNB` floor** (gate barriers, up rides free;
+  gelu·up → down → residual are a true sequential chain). No slack without a
+  kernel fusion — and the two candidate fusions (input-rms→qmv, gelu-fold into
+  down) are both measured net-zero-or-worse and reverted. Skip.
+- **PLE tail (5 sequential barriered ops)** is a genuine dependency chain with
+  no sibling slack; the one available fusion (post-norm residual) diverges
+  ~2 ULP and is byte-parity-hostile (already reverted). Not worth pursuing.
+- The attention half is now at its barrier floor for this ICB decode structure:
+  slice 1 took the one free barrier, slice 2 proved the second isn't free. A
+  further win needs a *kernel* change (e.g. a projection megakernel), not a
+  barrier/ordering change — a different, larger campaign.
 
 ## Reproduce
 
