@@ -514,9 +514,11 @@ func waitUntilCompletedFast(cb metal.MTLCommandBufferObject) {
 	if objcMsgSendAddr != 0 && puregoSyscall15XABI0 != 0 {
 		objcMsgSendRaw0(objcMsgSendAddr, uintptr(cb.GetID()), uintptr(selWaitUntilCompleted))
 		runtime.KeepAlive(cb)
+		chargeGPUBusy(cb) // LTHN_GPU_BUSY duty-cycle probe (nil-cheap when unarmed)
 		return
 	}
 	cb.WaitUntilCompleted()
+	chargeGPUBusy(cb)
 }
 
 func bufferLengthFast(buf metal.MTLBuffer) uint {
