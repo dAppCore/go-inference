@@ -727,12 +727,58 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), proj projFn, f
 	return NewGatedDeltaMixer(w, cfg), nil
 }
 
+// sliceBatchedExpertQuant carves expert e's 2-D MLX-affine quant weight out of a batched mlx switch_mlp
+// tensor: <base>.weight [numExperts, outDim, inDim·bits/32] (U32 packed) with the [numExperts, outDim,
+// inDim/groupSize] bf16 <base>.scales/.biases siblings — the layout mlx-lm emits for a fused MoE (all
+// experts in one tensor per projection, gate/up carried separately). bits and groupSize are read off the
+// packed/scales widths against inDim (the projection's contraction dim: D for gate/up, FF for down). Expert
+// e's bytes are COPIED (owned) so the QuantWeight outlives the checkpoint mapping — the composed lane's
+// per-expert twin of engine/metal's view of a batched switch_glu tensor.
+func sliceBatchedExpertQuant(get func(string) (safetensors.Tensor, bool), base string, e, outDim, inDim int) (*model.QuantWeight, error) {
+	wT, ok := get(base + ".weight")
+	sT, sOK := get(base + ".scales")
+	bT, bOK := get(base + ".biases")
+	if !ok || !sOK || !bOK {
+		return nil, core.NewError("composed.sliceBatchedExpertQuant: " + base + " missing .weight/.scales/.biases")
+	}
+	if len(wT.Shape) != 3 || len(sT.Shape) != 3 || wT.Shape[1] != outDim || wT.Shape[0] == 0 {
+		return nil, core.NewError("composed.sliceBatchedExpertQuant: " + base + " is not a [numExperts, outDim, packed] quant tensor")
+	}
+	nE, packedCols, groups := wT.Shape[0], wT.Shape[2], sT.Shape[2]
+	if packedCols*32%inDim != 0 || groups == 0 || inDim%groups != 0 {
+		return nil, core.NewError(core.Sprintf("composed.sliceBatchedExpertQuant: %s geometry (packed %d, groups %d, inDim %d)", base, packedCols, groups, inDim))
+	}
+	slice := func(data []byte) ([]byte, error) {
+		per := len(data) / nE
+		if per == 0 || (e+1)*per > len(data) {
+			return nil, core.NewError(core.Sprintf("composed.sliceBatchedExpertQuant: %s expert %d out of range", base, e))
+		}
+		return append([]byte(nil), data[e*per:(e+1)*per]...), nil
+	}
+	packed, err := slice(wT.Data)
+	if err != nil {
+		return nil, err
+	}
+	scales, err := slice(sT.Data)
+	if err != nil {
+		return nil, err
+	}
+	biases, err := slice(bT.Data)
+	if err != nil {
+		return nil, err
+	}
+	return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: packedCols * 32 / inDim, GroupSize: inDim / groups, OutDim: outDim, InDim: inDim}, nil
+}
+
 // buildFFN builds a layer's feed-forward: a MoE (qwen3_6_moe) when expert weights are present, else a
-// dense SwiGLU MLP. sp is the "…mlp." prefix.
+// dense SwiGLU MLP. sp is the "…mlp." prefix. Experts arrive either per-expert (experts.N.gate_proj — a
+// pre-split checkpoint) or batched (switch_mlp.gate_proj [numExperts,…] — the mlx-lm quantised layout).
 func buildFFN(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
-	if _, ok := get(sp + "experts.0.gate_proj.weight"); ok {
-		// A quant checkpoint's experts resolve through proj — PACKED (model.QuantWeight) when the tensor
-		// carries .scales/.biases siblings, f32 otherwise — exactly like the dense MLP's gate/up/down below.
+	_, perExpert := get(sp + "experts.0.gate_proj.weight")
+	_, batched := get(sp + "switch_mlp.gate_proj.weight")
+	if perExpert || batched {
+		// A quant checkpoint's experts resolve PACKED (model.QuantWeight): per-expert through proj, or
+		// sliced out of the batched switch_mlp tensors — either way the dense MLP path below is skipped.
 		return buildMoE(get, widenProjFn(proj), f32, sp, cfg, arch, D)
 	}
 	gateF, gateQ, gateB, err := proj(sp + "gate_proj.weight")
@@ -778,16 +824,37 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 		return MoEExpert{Gate: g, Up: u, Down: d, GateQ: gQ, UpQ: uQ, DownQ: dQ}, nil
 	}
 	var experts []MoEExpert
-	for e := 0; ; e++ {
-		ep := sp + core.Sprintf("experts.%d.", e)
-		if _, ok := get(ep + "gate_proj.weight"); !ok {
-			break
+	if gT, ok := get(sp + "switch_mlp.gate_proj.weight"); ok {
+		// mlx batched layout: switch_mlp.{gate,up,down}_proj are single [numExperts, outDim, packed]
+		// tensors — slice each expert's own 2-D quant weight out (gate/up: FF×D, down: D×FF).
+		nE, ff := gT.Shape[0], gT.Shape[1]
+		for e := 0; e < nE; e++ {
+			gQ, err := sliceBatchedExpertQuant(get, sp+"switch_mlp.gate_proj", e, ff, D)
+			if err != nil {
+				return nil, err
+			}
+			uQ, err := sliceBatchedExpertQuant(get, sp+"switch_mlp.up_proj", e, ff, D)
+			if err != nil {
+				return nil, err
+			}
+			dQ, err := sliceBatchedExpertQuant(get, sp+"switch_mlp.down_proj", e, D, ff)
+			if err != nil {
+				return nil, err
+			}
+			experts = append(experts, MoEExpert{GateQ: gQ, UpQ: uQ, DownQ: dQ})
 		}
-		ex, err := expert(ep)
-		if err != nil {
-			return nil, err
+	} else {
+		for e := 0; ; e++ {
+			ep := sp + core.Sprintf("experts.%d.", e)
+			if _, ok := get(ep + "gate_proj.weight"); !ok {
+				break
+			}
+			ex, err := expert(ep)
+			if err != nil {
+				return nil, err
+			}
+			experts = append(experts, ex)
 		}
-		experts = append(experts, ex)
 	}
 	if len(experts) == 0 {
 		return nil, core.NewError("composed.buildMoE: experts.0 present but none loaded")
@@ -811,8 +878,9 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 		// shared_expert_gate is the reference's sigmoid gate on the shared expert (Linear(hidden,1)
 		// ⇒ [D]); optional so a checkpoint without it (or a synthetic test) adds the shared expert
 		// ungated.
-		if t, ok := get(sp + "shared_expert_gate.weight"); ok {
-			if v, e := tensorF32(t); e == nil {
+		if _, ok := get(sp + "shared_expert_gate.weight"); ok {
+			// f32() dequantises when the gate carries .scales/.biases (mlx quantises even this [1,D] tensor).
+			if v, e := f32(sp + "shared_expert_gate.weight"); e == nil {
 				sharedGate = v
 			}
 		}
