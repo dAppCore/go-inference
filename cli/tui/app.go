@@ -555,11 +555,22 @@ func (a *app) abortAgentOperation() {
 	if a == nil || a.agentInFlight {
 		return
 	}
+	a.resetAgentOperation()
+}
+
+// resetAgentOperation ends a completed or abandoned transaction without
+// rewinding agentOperationNext; stale command results can never match a later
+// operation ID.
+func (a *app) resetAgentOperation() {
+	if a == nil {
+		return
+	}
 	a.agentOperationID = 0
 	a.agentRequest = agentRequest{}
 	a.agentReview = agentReview{}
 	a.agentStage = agentReviewNone
 	a.agentCommand = nil
+	a.agentInFlight = false
 }
 
 func (a *app) agentReviewCommand(operationID uint64, request agentRequest, stage agentReviewStage) tea.Cmd {
@@ -620,7 +631,7 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 	if !message.result.OK {
 		a.errText = message.result.Error()
 		a.activeOverlay, a.launchReview = overlayNone, nil
-		a.agentStage = agentReviewNone
+		a.resetAgentOperation()
 		return a, nil
 	}
 	if review, ok := message.result.Value.(agentReview); ok {
@@ -638,18 +649,22 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if receipt, ok := message.result.Value.(agentActionReceipt); ok && receipt.Feature == agentFeatureDispatch {
-		workID := core.Trim(receipt.WorkID)
-		if workID == "" {
-			workID = message.request.WorkID
+		workID := core.Trim(message.request.WorkID)
+		if receiptWorkID := core.Trim(receipt.WorkID); receiptWorkID != "" && receiptWorkID != workID {
+			a.errText = core.Sprintf("dispatch receipt WorkID %q does not match requested local Work %q", receiptWorkID, workID)
 		}
 		if a.work != nil && workID != "" && core.Trim(receipt.Status) != "" {
 			if result := a.work.updateWork("AgentReceipt", workID, func(record *workItemRecord) { record.Status = core.Lower(core.Trim(receipt.Status)) }); !result.OK {
-				a.errText = result.Error()
+				if a.errText == "" {
+					a.errText = result.Error()
+				} else {
+					a.errText = core.Concat(a.errText, "; ", result.Error())
+				}
 			}
 		}
 	}
 	a.activeOverlay, a.launchReview = overlayNone, nil
-	a.agentStage = agentReviewNone
+	a.resetAgentOperation()
 	a.refreshAgentPalette()
 	return a, nil
 }

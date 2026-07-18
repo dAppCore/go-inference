@@ -1274,6 +1274,57 @@ func TestApp_AgentReviewRejectsOverlappingAndStaleOperations(t *testing.T) {
 	}
 }
 
+func TestApp_AgentReviewReceiptUsesRequestedLocalWorkIDAndResets(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{caps: []agentCapability{{Feature: agentFeatureDispatch, Available: true}, {Feature: agentFeatureQueueStart, Available: true}}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("requested", "other")
+	first := a.work.CreateWork("Requested", "Task one", "/tmp/one")
+	second := a.work.CreateWork("Other", "Task two", "/tmp/two")
+	if !first.OK || !second.OK {
+		t.Fatalf("CreateWork = %#v / %#v", first, second)
+	}
+	requested := first.Value.(workItemRecord)
+	other := second.Value.(workItemRecord)
+	a.agentOperationID, a.agentOperationNext, a.agentInFlight = 4, 5, true
+	a.agentRequest = agentRequest{Feature: agentFeatureDispatch, WorkID: requested.ID, Review: agentReview{Payload: agentProjectRegistration{Provider: "codex"}}}
+	a.agentReview = a.agentRequest.Review
+	a.agentStage = agentReviewLaunch
+	model, _ := a.Update(agentActionMsg{operationID: 4, feature: agentFeatureDispatch, stage: agentReviewLaunch, request: a.agentRequest, result: core.Ok(agentActionReceipt{Feature: agentFeatureDispatch, WorkID: other.ID, Status: "queued"})})
+	a = model.(app)
+	items := a.work.Items()
+	statuses := map[string]string{}
+	for _, item := range items {
+		statuses[item.ID] = item.Status
+	}
+	if statuses[requested.ID] != "queued" || statuses[other.ID] != workStatusActive || !strings.Contains(a.errText, "receipt WorkID") {
+		t.Fatalf("receipt reconciliation = statuses=%#v error=%q", statuses, a.errText)
+	}
+	if a.agentOperationID != 0 || a.agentRequest.Feature != "" || a.agentReview.Payload != nil || a.agentStage != agentReviewNone || a.agentCommand != nil || a.agentInFlight {
+		t.Fatalf("terminal success retained transaction: id=%d request=%#v review=%#v stage=%d command=%v inFlight=%v", a.agentOperationID, a.agentRequest, a.agentReview, a.agentStage, a.agentCommand != nil, a.agentInFlight)
+	}
+	a.work.selectWork(requested.ID)
+	a.refreshAgentPalette()
+	if command := a.palette.byID[agentCommandID(agentFeatureDispatch)]; command.Available {
+		t.Fatalf("dispatch remained available for queued requested Work: %#v", command)
+	}
+	if result := a.queueAgentAction(agentFeatureQueueStart); !result.OK || a.agentOperationID != 6 {
+		t.Fatalf("fresh operation = result=%#v id=%d", result, a.agentOperationID)
+	}
+
+	a.agentInFlight = true
+	a.agentReview = agentReview{Payload: agentProjectRegistration{Provider: "stale"}}
+	model, _ = a.Update(agentActionMsg{operationID: a.agentOperationID, feature: agentFeatureQueueStart, request: a.agentRequest, result: core.Fail(core.E("test.agent", "provider failed", nil))})
+	a = model.(app)
+	if !strings.Contains(a.errText, "provider failed") || a.agentOperationID != 0 || a.agentRequest.Feature != "" || a.agentReview.Payload != nil || a.agentStage != agentReviewNone || a.agentCommand != nil || a.agentInFlight {
+		t.Fatalf("terminal error retained transaction: err=%q id=%d request=%#v review=%#v stage=%d command=%v inFlight=%v", a.errText, a.agentOperationID, a.agentRequest, a.agentReview, a.agentStage, a.agentCommand != nil, a.agentInFlight)
+	}
+}
+
 func TestApp_AgentReviewEscapeAbortsTransaction(t *testing.T) {
 	for _, overlay := range []overlayKind{overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview} {
 		t.Run(core.Sprintf("overlay-%d", overlay), func(t *testing.T) {
