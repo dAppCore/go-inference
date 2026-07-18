@@ -38,6 +38,15 @@ gzip -9 -c build/dist/lib/lthn_kernels.metallib > go/cmd/lem/lthn_kernels.metall
 - **No bulk perl/sed refactors** — one site at a time, vet after each.
 - Branch **dev**; origin `github.com/dAppCore/go-inference` (push non-force). Task board via the session task tools; git log is the history of record.
 
+## Composed lane (Qwen hybrid) — device levers + the standing gap
+
+The `model/composed` lane serves the Qwen3.5 hybrid (gated-delta recurrence + MoE/dense FFN). Its device seams are declared in `composed.go` and bound in `engine/metal/composed_*_backend.go` (AX-8: lib declares the hook, backend binds it). Runtime levers + the load-bearing facts:
+
+- **Batched MoE**: `composed.MoEExpertsDevice` collapses the routed top-K experts into ONE device dispatch per layer (was top-K×3 quant-seam command-buffer commits). Kill-switch **`LTHN_COMPOSED_MOE_DEVICE=0`** leaves the seam nil → the per-expert host loop (the A/B baseline + revert-safety).
+- **Activation is per-arch, not per-kernel.** The batched kernel `MoEExpertsQuant` is gemma's **GELU** SwitchGLU; the composed Qwen lane is **SiLU** (`MoEExpertsQuantSiLU`, `encSiLUGateMulBF16`). Binding the wrong one produces *coherent-but-wrong* text — GELU≈SiLU stays below the greedy argmax threshold, so a model A/B won't catch it. Gate the fix on a **byte-level unit test** (`TestMoEExpertsQuantSiLU`: SiLU ≡ SiLU-ref AND ≠ GELU-sibling), never on "the output still reads fine".
+- **A/B recipe** (from a worktree, GPU free): `task build` → `bin/lem`; `MLX_METALLIB_PATH=build/dist/lib/mlx.metallib bin/lem generate -temp 0 -max-tokens N <snapshot>` (lem finds `lthn_kernels.metallib` as its sibling). Run once default, once with the kill-switch; greedy makes the output a correctness oracle. **Two worktrees = two checkouts** — edits in one are invisible to a build in the other until committed + ff'd; consolidate onto one branch before you trust an A/B.
+- **The standing gap (the real campaign).** On the mlx-community **Qwen3.5-35B-A3B-4bit** (M3 Ultra, greedy decode): batched-device **~7.6 tok/s** vs per-expert host **~3.1** (the 2.5× above) — but **mlx-lm does ~110 tok/s** on the same checkpoint. The composed lane is ~14× off the ceiling because decode is **host-orchestrated per token** (routing + per-layer submits on the CPU seam); closing it means a device-resident decode loop (ICB-class), not more per-op kernel folds. The batched MoE is a building block toward that, not the finish line.
+
 ## Stability Rules (root contract)
 
 Changes to `go/*.go` interfaces affect every consumer simultaneously.
