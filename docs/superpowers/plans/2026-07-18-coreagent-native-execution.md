@@ -817,14 +817,14 @@ type launchReviewOverlay struct { review agentReview; provider, model string; co
 type agentActionMsg struct { feature agentFeature; result core.Result }
 ```
 
-- [ ] Write tests for creating/editing title, full task, and repository; path with spaces; empty fields; existing clean/dirty/detached Git; ad-hoc included-file review; changed included hash; provider/model selection; exact redacted argv; native-access warning; confirm/cancel; narrow/wide layout; focus/tab/escape/enter handling.
-- [ ] Assert Dispatch is impossible without a selected Work item and always performs project review/registration before dispatch review. Existing clean repositories register without a source mutation prompt; ad-hoc Git enablement requires its own confirmation before launch review, and no run is created until launch confirmation.
-- [ ] Assert Work creation/editing alone never starts Soft Serve; approving Git enablement may start it and is separately confirmed.
-- [ ] Prove tests fail before implementation.
-- [ ] Replace title-only Work creation with the editor and add `workPanel.CreateWork(title, task, repository)` / `EditWork`. Persist task/repository in the existing `lem_work_items` row.
-- [ ] Add overlay kinds for Work editor, Git enable review, and launch review. Route all provider calls through lifecycle-owned `tea.Cmd`; never block `Update` on Git, process, or validation.
-- [ ] Rebuild the palette from current capability plus selected-Work status so only contextual actions are invokable.
-- [ ] Run tests/race, render `--check`, format, and commit:
+- [x] Write tests for creating/editing title, full task, and repository; path with spaces; empty fields; existing clean/dirty/detached Git; ad-hoc included-file review; changed included hash; provider/model selection; exact redacted argv; native-access warning; confirm/cancel; narrow/wide layout; focus/tab/escape/enter handling.
+- [x] Assert Dispatch is impossible without a selected Work item and always performs project review/registration before dispatch review. Existing clean repositories register without a source mutation prompt; ad-hoc Git enablement requires its own confirmation before launch review, and no run is created until launch confirmation.
+- [x] Assert Work creation/editing alone never starts Soft Serve; approving Git enablement may start it and is separately confirmed.
+- [x] Prove tests fail before implementation.
+- [x] Replace title-only Work creation with the editor and add `workPanel.CreateWork(title, task, repository)` / `EditWork`. Persist task/repository in the existing `lem_work_items` row.
+- [x] Add overlay kinds for Work editor, Git enable review, and launch review. Route all provider calls through lifecycle-owned `tea.Cmd`; never block `Update` on Git, process, or validation.
+- [x] Rebuild the palette from current capability plus selected-Work status so only contextual actions are invokable.
+- [x] Run tests/race, render `--check`, format, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
