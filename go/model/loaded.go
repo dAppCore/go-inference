@@ -45,6 +45,9 @@ type LoadedMoE struct {
 	LocalGate, LocalUp, LocalDown                               *Linear
 	Router                                                      *Linear
 	ExpGate, ExpUp, ExpGateUp, ExpDown                          *Linear // experts.switch_glu.*
+	// Shared expert (qwen3_5_moe): SharedGate/Up/Down = the shared_expert SwiGLU trio (gate/up/down_proj);
+	// SharedSigmoid = the shared_expert_gate σ scalar gate ([hidden]→1). All nil ⇒ no shared expert (gemma).
+	SharedGate, SharedUp, SharedDown, SharedSigmoid *Linear
 }
 
 // LoadedAudioClipBound is one optional per-linear activation clamp.

@@ -39,6 +39,11 @@ type MoEWeightNames struct {
 	PreFFNorm, PreFFNorm2, PostFFNorm1, PostFFNorm2, PostFFNorm               string
 	RouterScale, PerExpertScale                                               string
 	LocalGate, LocalUp, LocalDown, Router, ExpGate, ExpUp, ExpGateUp, ExpDown string
+	// Shared expert (qwen3_5_moe): an always-on dense SwiGLU added to the routed output, optionally
+	// scaled by a sigmoid gate — out += σ(SharedSigmoid·x) · SwiGLU(x). SharedGate/Up/Down are the
+	// shared_expert.{gate,up,down}_proj SwiGLU trio; SharedSigmoid is shared_expert_gate.weight (the
+	// [hidden]→1 σ gate; "" ⇒ the shared expert is added ungated). gemma has no shared expert → all "".
+	SharedGate, SharedUp, SharedDown, SharedSigmoid string
 }
 
 // StandardWeightNames returns the canonical HF weight layout — the full superset. An arch with that
@@ -216,5 +221,9 @@ func assembleMoE(t map[string]safetensors.Tensor, p string, arch Arch, names MoE
 		ExpUp:          expUp,
 		ExpGateUp:      lin(p+names.ExpGateUp, d),
 		ExpDown:        lin(p+names.ExpDown, arch.ExpertFF),
+		SharedGate:     lin(p+names.SharedGate, d),
+		SharedUp:       lin(p+names.SharedUp, d),
+		SharedDown:     lin(p+names.SharedDown, arch.ExpertFF),
+		SharedSigmoid:  lin(p+names.SharedSigmoid, d),
 	}
 }
