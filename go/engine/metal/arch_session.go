@@ -1201,6 +1201,12 @@ func (s *ArchSession) icbEligible() bool {
 		if sp.MoE {
 			return false
 		}
+		if sp.Mixer == model.MixerGatedDelta {
+			// A gated-delta (linear_attention) layer is a HOST recurrence with a command-buffer break — not
+			// the uniform device attention the ICB core records/replays. A hybrid decodes via stepToken,
+			// which carries the MixerGatedDelta branch (#18).
+			return false
+		}
 	}
 	return true
 }

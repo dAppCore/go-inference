@@ -259,6 +259,15 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 	return loadComposed(tensors, configJSON, nil, false)
 }
 
+// LoadComposedMmap is the nil-arch ZERO-COPY build model.LoadComposedDir uses for the Qwen 3.6 gated-delta
+// hybrid: like LoadComposed but the packed quant weights VIEW the mapped checkpoint instead of being copied
+// to the heap (the RSS win), the model taking ownership through the RetainMmap handshake. It is the exact
+// build the qwen3_5 Composed hook ran inline before the qwen35 arch package took over the registration —
+// kept exported so that hook (now delegating here) preserves the zero-copy behaviour byte-for-byte.
+func LoadComposedMmap(tensors map[string]safetensors.Tensor, configJSON []byte) (*ComposedModel, error) {
+	return loadComposed(tensors, configJSON, nil, true)
+}
+
 // LoadComposedWithArch assembles a composed model while consuming the neutral MoE policy declared by an
 // architecture package. The policy is validated against the checkpoint instead of re-assuming one family's
 // router behaviour from tensor names. Like LoadComposed, packed weights are COPIED to owned buffers (not

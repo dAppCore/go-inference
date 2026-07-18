@@ -186,7 +186,14 @@ func (m *LoadedModel) ValidateRequired(arch Arch) error {
 	}
 	for i := range m.Layers {
 		L := &m.Layers[i]
-		if L.Q == nil || L.O == nil {
+		if arch.Layer[i].Mixer == MixerGatedDelta {
+			// A gated-delta (linear_attention) layer replaces attention with a recurrence — it carries the
+			// gated-delta weights + input_layernorm + an FFN, but NO q/k/o projections (#18). It never owns a
+			// KV cache (CacheIndex -1), so the k_proj-owner check below is a no-op for it.
+			if L.GatedDelta == nil {
+				return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing gated-delta weights (linear_attention mixer)", i))
+			}
+		} else if L.Q == nil || L.O == nil {
 			return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing input_layernorm/q_proj/o_proj", i))
 		}
 		if arch.NormPlacement == NormPlacementPost {

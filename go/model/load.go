@@ -41,9 +41,11 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 	if !ok {
 		return nil, nil, core.NewError("model.Load: no architecture registered for model_type " + mt)
 	}
-	if spec.Composed != nil {
-		// A composed/hybrid arch is not the reactive transformer Assemble path (its linear_attention
-		// layers have no q/k/v to assemble) — route it through LoadComposedDir, not here.
+	if spec.Composed != nil && spec.Parse == nil {
+		// A composed-ONLY arch is not the reactive transformer Assemble path (its linear_attention layers
+		// have no q/k/v to assemble) — route it through LoadComposedDir, not here. A DUAL-route arch
+		// (Composed AND Parse+Weights, e.g. qwen35) carries both, so it reaches Assemble here when a caller
+		// deliberately bypasses LoadComposedDir (engine/metal's LTHN_QWEN_FACTORY route) — #18.
 		return nil, nil, core.NewError("model.Load: " + mt + " is a composed/hybrid arch — load via LoadComposedDir")
 	}
 	ac, err := spec.Parse(cfg)

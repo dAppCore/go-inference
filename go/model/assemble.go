@@ -143,7 +143,7 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 			// A gated-delta (linear-attention recurrence) layer carries no q/k/v/o — its projections +
 			// conv + recurrence load through assembleGatedDelta. This is the named-kind branch the
 			// composed lane forked an entire parallel engine to avoid (#18); gemma4 never takes it.
-			gd, cfg, gerr := assembleGatedDelta(t, p+"linear_attn.", d, kind)
+			gd, cfg, gerr := assembleGatedDelta(t, p+".linear_attn.", d, kind)
 			if gerr != nil {
 				return nil, gerr
 			}

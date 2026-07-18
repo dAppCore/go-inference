@@ -29,7 +29,9 @@ import (
 func init() {
 	model.RegisterArch(model.ArchSpec{
 		ModelTypes: []string{
-			"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
+			// qwen3_5 / qwen3_5_moe (+ text_config aliases) now register in model/arch/Qwen/qwen35 with BOTH
+			// the factory route and a Composed hook that delegates back here — the #18 unification. This spec
+			// keeps the ids qwen35 does not (yet) own.
 			"qwen3_6", "qwen3_6_moe", "qwen3_next",
 			"composed", "hybrid",
 		},
