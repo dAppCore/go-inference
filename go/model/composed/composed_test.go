@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model"
 )
 
 func syn(n, seed int) []float32 {
@@ -47,10 +47,10 @@ func (c *countingMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHi
 	return c.inner.forwardNoProj(h, L, D, prior)
 }
 
-func mkGatedDeltaMixer(cfg qwen3.GatedDeltaConfig, D, seed int) Mixer {
+func mkGatedDeltaMixer(cfg model.GatedDeltaConfig, D, seed int) Mixer {
 	qd, vd, cd := cfg.KeyHeads*cfg.HeadDim, cfg.ValueHeads*cfg.HeadDim, 2*cfg.KeyHeads*cfg.HeadDim+cfg.ValueHeads*cfg.HeadDim
 	_ = qd
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		InProjQKV:  syn(cd*D, seed+1),
 		ConvWeight: syn(cd*cfg.ConvKernel, seed+2),
 		ConvBias:   syn(cd, seed+3),
@@ -66,7 +66,7 @@ func mkGatedDeltaMixer(cfg qwen3.GatedDeltaConfig, D, seed int) Mixer {
 }
 
 func mkComposedModel(nLayers, D, vocab, FF int) *ComposedModel {
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	layers := make([]Layer, nLayers)
 	for li := range layers {
 		layers[li] = Layer{

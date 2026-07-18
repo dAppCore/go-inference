@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model"
 )
 
 func TestAttnMixerALiBi_Forward_Golden(t *testing.T) {
@@ -320,7 +320,7 @@ func TestAttnMixerDecodeEqualsPrefill(t *testing.T) {
 // through the same loop.
 func TestHybridDecodeEqualsPrefill(t *testing.T) {
 	const D, vocab, FF = 8, 32, 16
-	gdCfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	gdCfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	atCfg := AttnConfig{Heads: 4, KVHeads: 2, HeadDim: 8, RotaryDim: 4, RopeTheta: 1e6, NormEps: 1e-6}
 	mk := func(li int, mx Mixer) Layer {
 		return Layer{

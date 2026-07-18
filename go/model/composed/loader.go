@@ -7,7 +7,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -729,13 +728,13 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), proj projFn, f
 	if err != nil {
 		return nil, err
 	}
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		InProjQKV: qkvF, InProjQKVQ: qkvQ, InProjQKVB: qkvB, ConvWeight: convW, ConvBias: f32opt(sp + "conv1d.bias"),
 		InProjA: inAF, InProjAQ: inAQ, InProjAB: inAB, ALog: aLog, DtBias: f32opt(sp + "dt_bias"),
 		InProjB: inBF, InProjBQ: inBQ, InProjBB: inBB, InProjZ: inZF, InProjZQ: inZQ, InProjZB: inZB,
 		Norm: norm, OutProj: outPF, OutProjQ: outPQ, OutProjB: outPB,
 	}
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: keyHeads, ValueHeads: valueHeads, HeadDim: headDim, ConvKernel: convK, Eps: 1e-6}
+	cfg := model.GatedDeltaConfig{KeyHeads: keyHeads, ValueHeads: valueHeads, HeadDim: headDim, ConvKernel: convK, Eps: 1e-6}
 	return NewGatedDeltaMixer(w, cfg), nil
 }
 

@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 )
@@ -71,9 +70,9 @@ func TestComposedChainMoELayerVsPerSeam(t *testing.T) {
 		}
 	}
 
-	gcfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	gcfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
 	convDim, vDim := gcfg.ConvDim(), gcfg.VDim()
-	gw := &qwen3.GatedDeltaWeights{
+	gw := &model.GatedDeltaWeights{
 		ConvWeight: cbSyn(convDim*gcfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
 		ALog: cbSyn(gcfg.ValueHeads, 13), DtBias: cbSyn(gcfg.ValueHeads, 14), Norm: cbSyn(gcfg.HeadDim, 15),
 		InProjQKVQ: mustQuant(t, 21, convDim, D), InProjZQ: mustQuant(t, 22, vDim, D),

@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -392,7 +391,7 @@ func TestLoadComposedMoEGatedShared(t *testing.T) {
 // prefill (the MoE is per-token stateless; the mixer state threads).
 func TestComposedMoEDecodeEqualsPrefill(t *testing.T) {
 	const D, vocab = 8, 32
-	gd := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	gd := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	mk := func(li int) Layer {
 		return Layer{InputNorm: syn(D, li*13+1), Mixer: mkGatedDeltaMixer(gd, D, li*13+20), PostAttnNorm: syn(D, li*13+2), MLP: mkMoEMLP(D, 12, 6, 2, li*13+100)}
 	}

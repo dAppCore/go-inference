@@ -13,8 +13,8 @@ import (
 	"dappco.re/go/inference/engine"
 	rocmprofile "dappco.re/go/inference/engine/hip/profile"
 	"dappco.re/go/inference/kv"
+	"dappco.re/go/inference/model"
 	sharedmodel "dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
@@ -30,13 +30,13 @@ func hipComposedTestValues(n, seed int) []float32 {
 
 func hipComposedTestTokenModel(layers int) *composed.ComposedTokenModel {
 	const hidden, vocab, intermediate = 8, 32, 16
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	valueDim := cfg.ValueHeads * cfg.HeadDim
 	convDim := 2*cfg.KeyHeads*cfg.HeadDim + valueDim
 	blocks := make([]composed.Layer, layers)
 	for layer := range blocks {
 		seed := layer*13 + 20
-		weights := &qwen3.GatedDeltaWeights{
+		weights := &model.GatedDeltaWeights{
 			InProjQKV:  hipComposedTestValues(convDim*hidden, seed+1),
 			ConvWeight: hipComposedTestValues(convDim*cfg.ConvKernel, seed+2),
 			ConvBias:   hipComposedTestValues(convDim, seed+3),

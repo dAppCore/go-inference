@@ -1,29 +1,32 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package qwen3
+package attn
 
-import core "dappco.re/go"
+import (
+	core "dappco.re/go"
+	"dappco.re/go/inference/model"
+)
 
 func ExampleGatedDeltaConfig_QDim() {
-	cfg := GatedDeltaConfig{KeyHeads: 2, HeadDim: 4}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, HeadDim: 4}
 	core.Println(cfg.QDim())
 	// Output: 8
 }
 
 func ExampleGatedDeltaConfig_VDim() {
-	cfg := GatedDeltaConfig{ValueHeads: 4, HeadDim: 4}
+	cfg := model.GatedDeltaConfig{ValueHeads: 4, HeadDim: 4}
 	core.Println(cfg.VDim())
 	// Output: 16
 }
 
 func ExampleGatedDeltaConfig_ConvDim() {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4}
 	core.Println(cfg.ConvDim())
 	// Output: 32
 }
 
 func ExampleGatedDeltaForwardF32() {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	out, _, _, err := GatedDeltaForwardF32(gdSyn(L*D, 1), w, cfg, nil, nil, L, D)
@@ -32,7 +35,7 @@ func ExampleGatedDeltaForwardF32() {
 }
 
 func ExampleGatedDeltaForwardScratchF32() {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	sc := &GatedDeltaScratch{}
@@ -42,7 +45,7 @@ func ExampleGatedDeltaForwardScratchF32() {
 }
 
 func ExampleGatedDeltaForwardScratchNoProjF32() {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	gated, vDim, _, _, err := GatedDeltaForwardScratchNoProjF32(gdSyn(L*D, 1), w, cfg, nil, nil, L, D, nil)
@@ -51,7 +54,7 @@ func ExampleGatedDeltaForwardScratchNoProjF32() {
 }
 
 func ExampleGatedDeltaForwardScratchFromInputF32() {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	x := gdSyn(L*D, 1)

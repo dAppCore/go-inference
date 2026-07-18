@@ -99,9 +99,9 @@ func putResidualNormMLPProjGDInputScratch(L, D, mixCols, FF, nextConvDim, nextVD
 //	qkv = n @ nextQKVWᵀ, z = n @ nextZWᵀ, a = n @ nextAWᵀ, b = n @ nextBWᵀ
 //
 // Returns y [L,D] (needed on the host for the next layer's mixer-output residual add) plus qkv
-// [L,nextConvDim], z [L,nextVDim], a/b [L,nextVH] — mirrors qwen3.GatedDeltaInputDevice's own output
+// [L,nextConvDim], z [L,nextVDim], a/b [L,nextVH] — mirrors attn.GatedDeltaInputDevice's own output
 // shapes. The caller resumes that layer's gated-delta block from these precomputed projections instead of
-// recomputing them (see qwen3.GatedDeltaForwardScratchFromInputF32).
+// recomputing them (see attn.GatedDeltaForwardScratchFromInputF32).
 func ResidualNormMLPProjGatedDeltaInputDevice(
 	mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32,
 	nextNormW, nextQKVW, nextZW, nextAW, nextBW []float32, nextConvDim, nextVDim, nextVH int,

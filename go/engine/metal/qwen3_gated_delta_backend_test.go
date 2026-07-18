@@ -8,7 +8,8 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 )
 
 func gdbSyn(n, seed int) []float32 {
@@ -23,14 +24,14 @@ func gdbSyn(n, seed int) []float32 {
 // (init-wired) and confirms the output matches a host-matNT run (hook nil'd) within f32 tolerance — the
 // device path is the projection swap only, the delta recurrence + conv unchanged.
 func TestQwen3GatedDeltaDeviceVsHost(t *testing.T) {
-	if qwen3.ProjMatMul == nil {
-		t.Fatal("native init did not wire qwen3.ProjMatMul")
+	if attn.ProjMatMul == nil {
+		t.Fatal("native init did not wire attn.ProjMatMul")
 	}
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	const D, L = 8, 5
 	qDim, vDim, convDim := cfg.KeyHeads*cfg.HeadDim, cfg.ValueHeads*cfg.HeadDim, 2*cfg.KeyHeads*cfg.HeadDim+cfg.ValueHeads*cfg.HeadDim
 	_ = qDim
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		InProjQKV:  gdbSyn(convDim*D, 11),
 		ConvWeight: gdbSyn(convDim*cfg.ConvKernel, 12),
 		ConvBias:   gdbSyn(convDim, 13),
@@ -44,14 +45,14 @@ func TestQwen3GatedDeltaDeviceVsHost(t *testing.T) {
 	}
 	x := gdbSyn(L*D, 1)
 
-	dev, _, _, err := qwen3.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
+	dev, _, _, err := attn.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
 	if err != nil {
 		t.Fatalf("device block: %v", err)
 	}
-	saved := qwen3.ProjMatMul
-	qwen3.ProjMatMul = nil
-	host, _, _, herr := qwen3.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
-	qwen3.ProjMatMul = saved
+	saved := attn.ProjMatMul
+	attn.ProjMatMul = nil
+	host, _, _, herr := attn.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
+	attn.ProjMatMul = saved
 	if herr != nil {
 		t.Fatalf("host block: %v", herr)
 	}
@@ -69,14 +70,14 @@ func TestQwen3GatedDeltaDeviceVsHost(t *testing.T) {
 // f32 tolerance. A call-counter around the hook asserts the fuse actually fired (a below-floor shape
 // would silently fall through to the per-projection path and make the test vacuous).
 func TestQwen3GatedDeltaInputFuseDeviceVsHost(t *testing.T) {
-	if qwen3.GatedDeltaInputDevice == nil {
-		t.Fatal("native init did not wire qwen3.GatedDeltaInputDevice")
+	if attn.GatedDeltaInputDevice == nil {
+		t.Fatal("native init did not wire attn.GatedDeltaInputDevice")
 	}
 	// D·convDim = 768·1536 = 1,179,648 ≥ deviceMinWork (1<<20) at L=1 ⇒ the fuse gate opens.
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 8, ValueHeads: 8, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 8, ValueHeads: 8, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
 	const D, L = 768, 1
 	vDim, convDim := cfg.ValueHeads*cfg.HeadDim, 2*cfg.KeyHeads*cfg.HeadDim+cfg.ValueHeads*cfg.HeadDim
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		InProjQKV:  gdbSyn(convDim*D, 11),
 		ConvWeight: gdbSyn(convDim*cfg.ConvKernel, 12),
 		ConvBias:   gdbSyn(convDim, 13),
@@ -91,13 +92,13 @@ func TestQwen3GatedDeltaInputFuseDeviceVsHost(t *testing.T) {
 	x := gdbSyn(L*D, 1)
 
 	calls := 0
-	savedFuse := qwen3.GatedDeltaInputDevice
-	qwen3.GatedDeltaInputDevice = func(x, qkvW, zW, aW, bW []float32, L, D, convDim, vDim, VH int) ([]float32, []float32, []float32, []float32, error) {
+	savedFuse := attn.GatedDeltaInputDevice
+	attn.GatedDeltaInputDevice = func(x, qkvW, zW, aW, bW []float32, L, D, convDim, vDim, VH int) ([]float32, []float32, []float32, []float32, error) {
 		calls++
 		return GatedDeltaInputDevice(x, qkvW, zW, aW, bW, L, D, convDim, vDim, VH)
 	}
-	dev, _, _, err := qwen3.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
-	qwen3.GatedDeltaInputDevice = savedFuse
+	dev, _, _, err := attn.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
+	attn.GatedDeltaInputDevice = savedFuse
 	if err != nil {
 		t.Fatalf("device (fused) block: %v", err)
 	}
@@ -105,10 +106,10 @@ func TestQwen3GatedDeltaInputFuseDeviceVsHost(t *testing.T) {
 		t.Fatal("fused input hook never engaged — shape below device floor?")
 	}
 
-	savedFuse2, savedProj, savedInto := qwen3.GatedDeltaInputDevice, qwen3.ProjMatMul, qwen3.ProjMatMulInto
-	qwen3.GatedDeltaInputDevice, qwen3.ProjMatMul, qwen3.ProjMatMulInto = nil, nil, nil
-	host, _, _, herr := qwen3.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
-	qwen3.GatedDeltaInputDevice, qwen3.ProjMatMul, qwen3.ProjMatMulInto = savedFuse2, savedProj, savedInto
+	savedFuse2, savedProj, savedInto := attn.GatedDeltaInputDevice, attn.ProjMatMul, attn.ProjMatMulInto
+	attn.GatedDeltaInputDevice, attn.ProjMatMul, attn.ProjMatMulInto = nil, nil, nil
+	host, _, _, herr := attn.GatedDeltaForwardF32(x, w, cfg, nil, nil, L, D)
+	attn.GatedDeltaInputDevice, attn.ProjMatMul, attn.ProjMatMulInto = savedFuse2, savedProj, savedInto
 	if herr != nil {
 		t.Fatalf("host block: %v", herr)
 	}

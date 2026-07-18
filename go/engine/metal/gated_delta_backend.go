@@ -4,7 +4,7 @@
 
 package native
 
-import "dappco.re/go/inference/model/arch/Qwen/qwen3"
+import "dappco.re/go/inference/model/attn"
 
 // gated_delta_backend.go wires native's device GEMM into the engine-neutral Qwen 3.6 gated-delta
 // block's projections (in_proj_qkv/a/b/z + out_proj — its compute hot spot; the delta recurrence + conv
@@ -14,7 +14,7 @@ import "dappco.re/go/inference/model/arch/Qwen/qwen3"
 // native hybrid linear-attention — this readies the gated-delta block's projections for the mixer-decode
 // orchestration (the composed.ComposedModel port) that will serve it.
 func init() {
-	qwen3.ProjMatMul = MatMulF32NT
-	qwen3.ProjMatMulInto = MatMulF32NTInto              // write-into sibling: skips the projection-output alloc, byte-identical
-	qwen3.GatedDeltaInputDevice = GatedDeltaInputDevice // fuses in_proj_qkv/z/a/b (all read x) into one command buffer
+	attn.ProjMatMul = MatMulF32NT
+	attn.ProjMatMulInto = MatMulF32NTInto              // write-into sibling: skips the projection-output alloc, byte-identical
+	attn.GatedDeltaInputDevice = GatedDeltaInputDevice // fuses in_proj_qkv/z/a/b (all read x) into one command buffer
 }

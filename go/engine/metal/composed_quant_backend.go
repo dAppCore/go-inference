@@ -10,13 +10,13 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
 // composed_quant_backend.go binds the composed hybrid lane's quant matvec seam — composed.ProjQuantMatMulInto
-// and its gated-delta twin qwen3.ProjQuantMatMulInto — to the metallib's MLX affine BF16 kernels. A quant
+// and its gated-delta twin attn.ProjQuantMatMulInto — to the metallib's MLX affine BF16 kernels. A quant
 // Qwen 3.6 checkpoint keeps its 2-D projections PACKED on device; this is the op that serves them without
 // widening a 27B weight to f32 (~110 GB). M=1 (decode) dispatches affine_qmv_bfloat16_t (the pooled-scratch
 // decode hot path QMVBF16 already drives); M>1 (prompt prefill) dispatches affine_qmm_t_bfloat16_t, one
@@ -33,7 +33,7 @@ import (
 // stage-1 quant forward: every big matmul (q/k/v/o, in_proj/out_proj, gate/up/down, the LM head) rides it.
 func init() {
 	composed.ProjQuantMatMulInto = MatMulQuantF32NTInto
-	qwen3.ProjQuantMatMulInto = MatMulQuantF32NTInto
+	attn.ProjQuantMatMulInto = MatMulQuantF32NTInto
 	// #8-B slice 1: the packed-weight FFN-tail fold — residual + norm + SwiGLU-over-codes +
 	// residual in ONE command buffer where the bypass paid three quant-seam round trips.
 	composed.ResidualNormMLPQuantDevice = ResidualNormMLPQuantDevice

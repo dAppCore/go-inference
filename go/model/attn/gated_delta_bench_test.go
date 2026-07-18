@@ -1,8 +1,12 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package qwen3
+package attn
 
-import "testing"
+import (
+	"testing"
+
+	"dappco.re/go/inference/model"
+)
 
 // The GatedDeltaForwardF32 bench baselines the Qwen 3.6 gated-delta ("linear_attention")
 // block per decode token (AX-11): in-proj QKV → causal conv → SiLU → GQA split → l2-norm →
@@ -20,11 +24,11 @@ func benchQwenF32(n int) []float32 {
 	return s
 }
 
-func benchGatedDeltaWeights(D, KH, VH, HD, K int) *GatedDeltaWeights {
+func benchGatedDeltaWeights(D, KH, VH, HD, K int) *model.GatedDeltaWeights {
 	qDim := KH * HD
 	vDim := VH * HD
 	convDim := 2*qDim + vDim
-	return &GatedDeltaWeights{
+	return &model.GatedDeltaWeights{
 		InProjQKV: benchQwenF32(convDim * D), ConvWeight: benchQwenF32(convDim * K), ConvBias: benchQwenF32(convDim),
 		InProjA: benchQwenF32(VH * D), ALog: benchQwenF32(VH), DtBias: benchQwenF32(VH),
 		InProjB: benchQwenF32(VH * D), InProjZ: benchQwenF32(vDim * D), Norm: benchQwenF32(HD), OutProj: benchQwenF32(D * vDim),
@@ -39,7 +43,7 @@ func benchGatedDeltaWeights(D, KH, VH, HD, K int) *GatedDeltaWeights {
 func BenchmarkGatedDeltaForwardF32_Decode(b *testing.B) {
 	const D, KH, VH, HD, K = 1024, 4, 8, 128, 4
 	w := benchGatedDeltaWeights(D, KH, VH, HD, K)
-	cfg := GatedDeltaConfig{KeyHeads: KH, ValueHeads: VH, HeadDim: HD, ConvKernel: K, Eps: 1e-6}
+	cfg := model.GatedDeltaConfig{KeyHeads: KH, ValueHeads: VH, HeadDim: HD, ConvKernel: K, Eps: 1e-6}
 	x := benchQwenF32(1 * D)
 	sc := &GatedDeltaScratch{}
 	if _, _, _, err := GatedDeltaForwardScratchF32(x, w, cfg, nil, nil, 1, D, sc); err != nil { // size the scratch

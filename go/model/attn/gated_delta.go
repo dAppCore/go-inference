@@ -1,6 +1,6 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package qwen3
+package attn
 
 import (
 	"math"
@@ -13,25 +13,19 @@ import (
 	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
-// gated_delta.go is the Qwen 3.6 GatedDeltaNet linear-attention block (the "linear_attention" layers of
-// the hybrid schedule), mirroring metal's GatedDeltaMixer.Forward exactly so native can serve it:
+// gated_delta.go is the GENERIC GatedDeltaNet linear-attention mixer — the "linear_attention" layers of a
+// hybrid schedule (Qwen 3.5/3.6 today). It lives in model/attn, NOT an arch package: the mixer is generic
+// (its causal conv is mamba2's, its recurrence deltanet's), so an arch SELECTS it via LayerSpec.Mixer ==
+// MixerGatedDelta and does not own it (#18 — un-forked from qwen3). Config + weights are the factory
+// root's model.GatedDeltaConfig / model.GatedDeltaWeights (they reference model.QuantWeight, so they home
+// there; the recurrence homes here, above model, with its FLA deps). Pipeline:
 //
 //	in_proj_qkv → causal depthwise conv (ring) → SiLU → split q|k|v → GQA-repeat(q,k: key→value heads)
 //	→ l2norm(q) → α=exp(−exp(A_log)·softplus(a+dt_bias)), β=sigmoid(b)
 //	→ GatedDeltaRule → gated RMSNorm: RMSNorm(o)·SiLU(z) → out_proj
 //
-// The causal conv is reused from mamba2 (the shared FLA primitive metal keeps in flakernel), the
-// recurrence from pkg/model/deltanet. Pure Go host f32; the conv-state ring + the delta state thread for
-// decode. Projections go through ProjMatMul (host matNT default; native injects a device GEMM).
-
-// GatedDeltaConfig + GatedDeltaWeights moved to the neutral factory root (model/gated_delta.go): the
-// gated-delta mixer is generic (mamba2 conv + deltanet recurrence), so an arch SELECTS it rather than
-// owning it. These aliases keep qwen3's callers compiling while they migrate to model.*; both aliases —
-// and this whole mis-homed override — are deleted once the arch factory builds/decodes the kind
-// directly (retiring model/composed, the parallel-engine fork). Use the exported QDim/VDim/ConvDim.
-type GatedDeltaConfig = model.GatedDeltaConfig
-
-type GatedDeltaWeights = model.GatedDeltaWeights
+// Pure Go host f32; the conv-state ring + the delta state thread for decode. Projections go through
+// ProjMatMul (host matNT default; a backend injects a device GEMM).
 
 // ProjMatMul is the device-GEMM seam for the gated-delta projections (host matNT default; native injects
 // its steel GEMM). AX-8: the lib declares the hook, the backend sets it.
@@ -266,7 +260,7 @@ type GatedDeltaScratch struct {
 // applies α/β). On success the state advances device-side and the caller carries NO host state
 // slices; the engine exports through GatedDeltaDeviceStateExport for snapshots. AX-8: the lib
 // declares the hook, the backend binds it; nil ⇒ the host path below is the implementation.
-var GatedDeltaBlockDevice func(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L int) (gated []float32, err error)
+var GatedDeltaBlockDevice func(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, priorConv, priorDelta []float32, L int) (gated []float32, err error)
 
 // GatedDeltaDeviceStateExport reads a device-resident recurrent state (a sc.Device handle) back
 // into host-layout slices (conv ring [(K-1),convDim], delta [Hv,Dk,Dv]) — the snapshot/clone seam.
@@ -278,7 +272,7 @@ var GatedDeltaDeviceStateExport func(dev any) (conv, delta []float32, ok bool)
 // handle between calls, so it must stay on the host path). engaged=false ⇒ the caller runs the host
 // block; engaged=true with err ⇒ the device holds this sequence's authoritative state and a host
 // fallback off the stale priors would corrupt it — propagate, never fall back mid-sequence.
-func GatedDeltaBlockDeviceTry(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L int) (gated []float32, engaged bool, err error) {
+func GatedDeltaBlockDeviceTry(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, priorConv, priorDelta []float32, L int) (gated []float32, engaged bool, err error) {
 	if GatedDeltaBlockDevice == nil || sc == nil {
 		return nil, false, nil
 	}
@@ -299,23 +293,23 @@ func GatedDeltaBlockDeviceTry(sc *GatedDeltaScratch, qkv, z, a, b []float32, w *
 // unfused packed path pays seven command buffers per layer for the same work. Engagement requires
 // every projection packed and residualScale == 1 (the caller checks the arch; the binding checks
 // the geometry). AX-8: declared here, bound by the backend, nil ⇒ the per-stage path serves.
-var GatedDeltaQuantLayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, err error)
+var GatedDeltaQuantLayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, err error)
 
 // GatedDeltaBF16LayerDevice is the dense bf16 twin of GatedDeltaQuantLayerDevice: one WHOLE layer
 // in one command buffer over the checkpoint's own bf16 bytes — input RMSNorm, the five raw-bf16
 // projections (gemv over resident views), the gated-delta block, and the bf16 SwiGLU FFN tail.
 // AX-8: declared here, bound by the backend, nil ⇒ the per-stage path serves.
-var GatedDeltaBF16LayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, err error)
+var GatedDeltaBF16LayerDevice func(sc *GatedDeltaScratch, x, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, err error)
 
 // GatedDeltaBF16ChainLayerDevice encodes one dense bf16 gated-delta layer onto an open chain
 // context (composed.ComposedChainBeginDevice) — the whole-layer fold without its own command
 // buffer; the chain owns commit/wait. AX-8: declared here, bound by the backend.
-var GatedDeltaBF16ChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, priorConv, priorDelta []float32, FF int, eps float32) error
+var GatedDeltaBF16ChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, priorConv, priorDelta []float32, FF int, eps float32) error
 
 // GatedDeltaQuantChainLayerDevice is GatedDeltaBF16ChainLayerDevice's PACKED-weight twin: one
 // packed gated-delta layer encoded onto an open chain context, the affine-qmv twin of the raw-bf16
 // chain step. AX-8: declared here, bound by the backend.
-var GatedDeltaQuantChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, priorConv, priorDelta []float32, FF int, eps float32) error
+var GatedDeltaQuantChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, priorConv, priorDelta []float32, FF int, eps float32) error
 
 // GatedDeltaChainGeometryOK reports whether the device gated-delta kernels can actually serve this
 // layer's geometry (the key/value head dims must be an instantiated width) — a cheap, side-effect-
@@ -326,11 +320,11 @@ var GatedDeltaQuantChainLayerDevice func(ctx any, sc *GatedDeltaScratch, inputNo
 // step. Never consulted when nil: chainableBF16/chainableQuant treat a nil probe as "not
 // verifiable" and decline the chain, the same conservative default a nil chain-layer hook already
 // gets. AX-8: declared here, bound by the backend alongside the chain-layer hooks.
-var GatedDeltaChainGeometryOK func(cfg GatedDeltaConfig) bool
+var GatedDeltaChainGeometryOK func(cfg model.GatedDeltaConfig) bool
 
 // GatedDeltaBF16LayerDeviceTry mirrors GatedDeltaQuantLayerDeviceTry's engagement contract for the
 // dense bf16 whole-layer seam.
-func GatedDeltaBF16LayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, engaged bool, err error) {
+func GatedDeltaBF16LayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, engaged bool, err error) {
 	if GatedDeltaBF16LayerDevice == nil || sc == nil {
 		return nil, false, nil
 	}
@@ -347,7 +341,7 @@ func GatedDeltaBF16LayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32,
 // GatedDeltaQuantLayerDeviceTry mirrors GatedDeltaBlockDeviceTry's engagement contract for the
 // whole-layer seam: engaged=false ⇒ run the per-stage path; engaged=true with err ⇒ the device owns
 // this sequence's state — propagate, never fall back mid-sequence.
-func GatedDeltaQuantLayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, engaged bool, err error) {
+func GatedDeltaQuantLayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, L, D, FF int, eps float32, priorConv, priorDelta []float32) (y []float32, engaged bool, err error) {
 	if GatedDeltaQuantLayerDevice == nil || sc == nil {
 		return nil, false, nil
 	}
@@ -364,7 +358,7 @@ func GatedDeltaQuantLayerDeviceTry(sc *GatedDeltaScratch, x, inputNorm []float32
 // GatedDeltaForwardF32 is GatedDeltaForwardScratchF32 with a fresh (nil) scratch — every projection
 // allocates, the behaviour before the write-into seam. Kept for existing callers and the engine backend
 // parity tests; bit-identical to the scratch path.
-func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int) (out, newConv, newDelta []float32, err error) {
+func GatedDeltaForwardF32(x []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, priorConv, priorDelta []float32, L, D int) (out, newConv, newDelta []float32, err error) {
 	return GatedDeltaForwardScratchF32(x, w, cfg, priorConv, priorDelta, L, D, nil)
 }
 
@@ -376,7 +370,7 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 // always freshly allocated — it is carried information, not scratch. It is GatedDeltaForwardScratchNoProjF32
 // plus the out_proj — the projection is split out so the composed session can instead fold it into the
 // FFN-tail command buffer (see composed.projMixer / ResidualNormMLPProjDevice).
-func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (out, newConv, newDelta []float32, err error) {
+func GatedDeltaForwardScratchF32(x []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (out, newConv, newDelta []float32, err error) {
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
@@ -397,7 +391,7 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 // into sc.out (reused across tokens). Split out of GatedDeltaForwardScratchF32 so a caller running
 // the post-projection block on the device seam (GatedDeltaBlockDeviceTry) applies the identical
 // projection to the device block's output.
-func GatedDeltaOutProjF32(gated []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, L, D int, sc *GatedDeltaScratch) ([]float32, error) {
+func GatedDeltaOutProjF32(gated []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, L, D int, sc *GatedDeltaScratch) ([]float32, error) {
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: the output allocates fresh
 	}
@@ -430,7 +424,7 @@ func GatedDeltaOutProjF32(gated []float32, w *GatedDeltaWeights, cfg GatedDeltaC
 // own input projections then hands off to GatedDeltaForwardScratchFromInputF32, which a device fusion
 // (composed.ResidualNormMLPProjGatedDeltaInputDevice) also feeds directly — the two entry points differ
 // only in HOW qkv/z/a/b were produced.
-func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (gated []float32, vDim int, newConv, newDelta []float32, err error) {
+func GatedDeltaForwardScratchNoProjF32(x []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (gated []float32, vDim int, newConv, newDelta []float32, err error) {
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
@@ -447,16 +441,16 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 // (GatedDeltaBlockDeviceTry) instead of the host stages. Same dispatch ladder: packed weights per
 // projection through the quant matvec seam; dense through the fused input hook above the floor,
 // else the per-projection device/host GEMMs. alpha/beta are the RAW projection outputs.
-func GatedDeltaInputProjectF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, L, D int, sc *GatedDeltaScratch) (qkv, zProj, alpha, beta []float32, err error) {
+func GatedDeltaInputProjectF32(x []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, L, D int, sc *GatedDeltaScratch) (qkv, zProj, alpha, beta []float32, err error) {
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
 	if w == nil {
-		return nil, nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
+		return nil, nil, nil, nil, core.NewError("attn.GatedDeltaForwardF32: nil weights")
 	}
 	KH, VH := cfg.KeyHeads, cfg.ValueHeads
 	if KH <= 0 || VH <= 0 || cfg.HeadDim <= 0 || VH%KH != 0 || len(x) != L*D {
-		return nil, nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry or x size")
+		return nil, nil, nil, nil, core.NewError("attn.GatedDeltaForwardF32: bad geometry or x size")
 	}
 	vDim := cfg.VDim()
 	convDim := cfg.ConvDim()
@@ -532,16 +526,16 @@ func GatedDeltaInputProjectF32(x []float32, w *GatedDeltaWeights, cfg GatedDelta
 // delta-rule recurrence and the gated output norm — is identical to GatedDeltaForwardScratchNoProjF32;
 // state threading is the same (priorConv/priorDelta in, newConv/newDelta out). alpha and beta are mutated
 // in place (the α/β gate transform below), so callers must not reuse them after this call.
-func GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (gated []float32, vDim int, newConv, newDelta []float32, err error) {
+func GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (gated []float32, vDim int, newConv, newDelta []float32, err error) {
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
 	if w == nil {
-		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
+		return nil, 0, nil, nil, core.NewError("attn.GatedDeltaForwardF32: nil weights")
 	}
 	KH, VH, HD, K := cfg.KeyHeads, cfg.ValueHeads, cfg.HeadDim, cfg.ConvKernel
 	if KH <= 0 || VH <= 0 || HD <= 0 || VH%KH != 0 {
-		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry")
+		return nil, 0, nil, nil, core.NewError("attn.GatedDeltaForwardF32: bad geometry")
 	}
 	qDim, vDim, convDim := cfg.QDim(), cfg.VDim(), cfg.ConvDim()
 	rep := VH / KH

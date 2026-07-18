@@ -302,7 +302,7 @@ var AttnQuantChainLayerDevice func(ctx, dev any, inputNorm []float32, qw, kw, vw
 
 // AttnChainGeometryOK reports whether the device attention core can actually serve this layer's
 // geometry — attnMixer.chainableBF16/chainableQuant's cheap, side-effect-free pre-flight probe,
-// the attention twin of qwen3.GatedDeltaChainGeometryOK (see that doc for why the session must
+// the attention twin of attn.GatedDeltaChainGeometryOK (see that doc for why the session must
 // verify this BEFORE committing to the chain rather than discovering it via a failed chain step).
 // Never consulted when nil: a nil probe is treated as "not verifiable" and declines the chain. AX-8:
 // declared here, bound by the backend alongside the chain-layer hooks.

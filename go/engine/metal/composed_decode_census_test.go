@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/composed"
 )
 
@@ -159,11 +158,11 @@ func TestComposedDecodeFoldLadderEngagesHermetic(t *testing.T) {
 		}
 	}
 	gdLayer := func(seed int) composed.Layer {
-		cfg := qwen3.GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
+		cfg := model.GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
 		convDim, vDim := cfg.ConvDim(), cfg.VDim()
 		return composed.Layer{
 			InputNorm: cbSyn(D, seed), PostAttnNorm: cbSyn(D, seed+1), MLP: newMLP(seed + 2),
-			Mixer: composed.NewGatedDeltaMixer(&qwen3.GatedDeltaWeights{
+			Mixer: composed.NewGatedDeltaMixer(&model.GatedDeltaWeights{
 				InProjQKV: cbSyn(convDim*D, seed+5), ConvWeight: cbSyn(convDim*cfg.ConvKernel, seed+6), ConvBias: cbSyn(convDim, seed+7),
 				InProjA: cbSyn(cfg.ValueHeads*D, seed+8), ALog: cbSyn(cfg.ValueHeads, seed+9), DtBias: cbSyn(cfg.ValueHeads, seed+10),
 				InProjB: cbSyn(cfg.ValueHeads*D, seed+11), InProjZ: cbSyn(vDim*D, seed+12), Norm: cbSyn(cfg.HeadDim, seed+13), OutProj: cbSyn(D*vDim, seed+14),

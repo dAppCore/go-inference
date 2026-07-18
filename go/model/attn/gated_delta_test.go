@@ -1,21 +1,23 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package qwen3
+package attn
 
 import (
 	"math"
 	"testing"
+
+	"dappco.re/go/inference/model"
 )
 
 func TestGatedDelta_GatedDeltaConfig_QDim_Good(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, HeadDim: 4}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, HeadDim: 4}
 	if got := cfg.QDim(); got != 8 {
 		t.Fatalf("QDim = %d, want 8 (2*4)", got)
 	}
 }
 
 func TestGatedDelta_GatedDeltaConfig_QDim_Bad(t *testing.T) {
-	if got := (GatedDeltaConfig{}).QDim(); got != 0 {
+	if got := (model.GatedDeltaConfig{}).QDim(); got != 0 {
 		t.Fatalf("QDim = %d, want 0 for an unconfigured layer", got)
 	}
 }
@@ -23,21 +25,21 @@ func TestGatedDelta_GatedDeltaConfig_QDim_Bad(t *testing.T) {
 // TestGatedDelta_GatedDeltaConfig_QDim_Ugly pins the extreme-GQA edge:
 // KeyHeads=1 (every value head reads the same single key head).
 func TestGatedDelta_GatedDeltaConfig_QDim_Ugly(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 1, HeadDim: 128}
+	cfg := model.GatedDeltaConfig{KeyHeads: 1, HeadDim: 128}
 	if got := cfg.QDim(); got != 128 {
 		t.Fatalf("QDim = %d, want 128 (1*128)", got)
 	}
 }
 
 func TestGatedDelta_GatedDeltaConfig_VDim_Good(t *testing.T) {
-	cfg := GatedDeltaConfig{ValueHeads: 4, HeadDim: 4}
+	cfg := model.GatedDeltaConfig{ValueHeads: 4, HeadDim: 4}
 	if got := cfg.VDim(); got != 16 {
 		t.Fatalf("VDim = %d, want 16 (4*4)", got)
 	}
 }
 
 func TestGatedDelta_GatedDeltaConfig_VDim_Bad(t *testing.T) {
-	if got := (GatedDeltaConfig{}).VDim(); got != 0 {
+	if got := (model.GatedDeltaConfig{}).VDim(); got != 0 {
 		t.Fatalf("VDim = %d, want 0 for an unconfigured layer", got)
 	}
 }
@@ -45,7 +47,7 @@ func TestGatedDelta_GatedDeltaConfig_VDim_Bad(t *testing.T) {
 // TestGatedDelta_GatedDeltaConfig_VDim_Ugly proves VDim is independent of
 // KeyHeads — unlike QDim, which scales with KeyHeads, not ValueHeads.
 func TestGatedDelta_GatedDeltaConfig_VDim_Ugly(t *testing.T) {
-	cfg := GatedDeltaConfig{ValueHeads: 8, HeadDim: 4, KeyHeads: 2}
+	cfg := model.GatedDeltaConfig{ValueHeads: 8, HeadDim: 4, KeyHeads: 2}
 	if got := cfg.VDim(); got != 32 {
 		t.Fatalf("VDim = %d, want 32 (8*4, independent of KeyHeads=2)", got)
 	}
@@ -55,14 +57,14 @@ func TestGatedDelta_GatedDeltaConfig_VDim_Ugly(t *testing.T) {
 // formula (2*qDim + vDim) for a plain MHA-shaped config (KeyHeads == ValueHeads,
 // no GQA repeat).
 func TestGatedDelta_GatedDeltaConfig_ConvDim_Good(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 4}
+	cfg := model.GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 4}
 	if got, want := cfg.ConvDim(), 2*cfg.QDim()+cfg.VDim(); got != want {
 		t.Fatalf("ConvDim = %d, want %d (2*qDim + vDim)", got, want)
 	}
 }
 
 func TestGatedDelta_GatedDeltaConfig_ConvDim_Bad(t *testing.T) {
-	if got := (GatedDeltaConfig{}).ConvDim(); got != 0 {
+	if got := (model.GatedDeltaConfig{}).ConvDim(); got != 0 {
 		t.Fatalf("ConvDim = %d, want 0 for an unconfigured layer", got)
 	}
 }
@@ -72,7 +74,7 @@ func TestGatedDelta_GatedDeltaConfig_ConvDim_Bad(t *testing.T) {
 // — the conv projects the pre-repeat q/k, matching qDim()'s own KeyHeads-based
 // formula, never the fully-expanded ValueHeads width.
 func TestGatedDelta_GatedDeltaConfig_ConvDim_Ugly(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 8, HeadDim: 4} // GQA: 4x repeat
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 8, HeadDim: 4} // GQA: 4x repeat
 	qDim, vDim := cfg.QDim(), cfg.VDim()
 	want := 2*qDim + vDim
 	if got := cfg.ConvDim(); got != want || got == 2*vDim+vDim {
@@ -85,7 +87,7 @@ func TestGatedDelta_GatedDeltaConfig_ConvDim_Ugly(t *testing.T) {
 // any change that shifts an output bit fails here. Renamed to TestGatedDelta_GatedDeltaForwardF32_Good:
 // a golden bit-pattern pin over real outputs IS the AX-7 "documented happy path with real assertions".
 func TestGatedDelta_GatedDeltaForwardF32_Good(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	out, nc, nd, err := GatedDeltaForwardF32(gdSyn(L*D, 1), w, cfg, nil, nil, L, D)
@@ -120,8 +122,8 @@ func gdSyn(n, seed int) []float32 {
 	return out
 }
 
-func mkGatedDeltaWeights(cfg GatedDeltaConfig, D int) *GatedDeltaWeights {
-	return &GatedDeltaWeights{
+func mkGatedDeltaWeights(cfg model.GatedDeltaConfig, D int) *model.GatedDeltaWeights {
+	return &model.GatedDeltaWeights{
 		InProjQKV:  gdSyn(cfg.ConvDim()*D, 11),
 		ConvWeight: gdSyn(cfg.ConvDim()*cfg.ConvKernel, 12),
 		ConvBias:   gdSyn(cfg.ConvDim(), 13),
@@ -138,7 +140,7 @@ func mkGatedDeltaWeights(cfg GatedDeltaConfig, D int) *GatedDeltaWeights {
 // TestGatedDeltaForwardShape checks the block produces [L,D] and advances both state slots (conv ring +
 // delta state).
 func TestGatedDeltaForwardShape(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	const L, D = 5, 8
 	out, nc, nd, err := GatedDeltaForwardF32(gdSyn(L*D, 1), mkGatedDeltaWeights(cfg, D), cfg, nil, nil, L, D)
 	if err != nil {
@@ -154,7 +156,7 @@ func TestGatedDeltaForwardShape(t *testing.T) {
 }
 
 func TestGatedDelta_GatedDeltaForwardF32_Bad(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	if _, _, _, err := GatedDeltaForwardF32(gdSyn(3*6, 1), nil, cfg, nil, nil, 3, 6); err == nil {
 		t.Fatal("nil weights accepted")
 	}
@@ -164,7 +166,7 @@ func TestGatedDelta_GatedDeltaForwardF32_Bad(t *testing.T) {
 // BIT-EXACT to two chunks carrying BOTH the conv-state ring AND the delta state across the boundary — Qwen
 // 3.6 streaming decode reproduces prefill. A genuine distinct edge from the single-pass _Good case.
 func TestGatedDelta_GatedDeltaForwardF32_Ugly(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	const L, split, D = 7, 4, 8
 	w := mkGatedDeltaWeights(cfg, D)
 	x := gdSyn(L*D, 1)
@@ -199,7 +201,7 @@ func TestGatedDelta_GatedDeltaForwardF32_Ugly(t *testing.T) {
 // produces bit-identical output to the nil-scratch (GatedDeltaForwardF32) path, and that the
 // scratch's out buffer is populated for reuse.
 func TestGatedDelta_GatedDeltaForwardScratchF32_Good(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	x := gdSyn(L*D, 1)
@@ -226,7 +228,7 @@ func TestGatedDelta_GatedDeltaForwardScratchF32_Good(t *testing.T) {
 }
 
 func TestGatedDelta_GatedDeltaForwardScratchF32_Bad(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	if _, _, _, err := GatedDeltaForwardScratchF32(gdSyn(3*6, 1), nil, cfg, nil, nil, 3, 6, nil); err == nil {
 		t.Fatal("nil weights accepted")
 	}
@@ -237,7 +239,7 @@ func TestGatedDelta_GatedDeltaForwardScratchF32_Bad(t *testing.T) {
 // first call's advanced state) stays bit-identical to the no-scratch reference — the buffers are
 // overwritten, not stale-read.
 func TestGatedDelta_GatedDeltaForwardScratchF32_Ugly(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	x1, x2 := gdSyn(L*D, 1), gdSyn(L*D, 2)
@@ -265,7 +267,7 @@ func TestGatedDelta_GatedDeltaForwardScratchF32_Ugly(t *testing.T) {
 // gated output, when projected through out_proj manually, round-trips to EXACTLY the wrapper's
 // (GatedDeltaForwardF32's) output bits — the wrapper is nothing more than NoProjF32 + one GEMM.
 func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Good(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	x := gdSyn(L*D, 1)
@@ -292,7 +294,7 @@ func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Good(t *testing.T) {
 }
 
 func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Bad(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	if _, _, _, _, err := GatedDeltaForwardScratchNoProjF32(gdSyn(3*6, 1), nil, cfg, nil, nil, 3, 6, nil); err == nil {
 		t.Fatal("nil weights accepted")
 	}
@@ -301,7 +303,7 @@ func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Bad(t *testing.T) {
 // TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Ugly rejects a non-GQA-divisible geometry
 // (ValueHeads not a multiple of KeyHeads) — distinct from _Bad's nil-weights rejection.
 func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Ugly(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 3, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5} // 4 % 3 != 0
+	cfg := model.GatedDeltaConfig{KeyHeads: 3, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5} // 4 % 3 != 0
 	w := mkGatedDeltaWeights(cfg, 6)
 	if _, _, _, _, err := GatedDeltaForwardScratchNoProjF32(gdSyn(3*6, 1), w, cfg, nil, nil, 3, 6, nil); err == nil {
 		t.Fatal("non-GQA-divisible KeyHeads/ValueHeads accepted")
@@ -314,7 +316,7 @@ func TestGatedDelta_GatedDeltaForwardScratchNoProjF32_Ugly(t *testing.T) {
 // computing those same projections itself — the two entry points differ only in HOW the inputs
 // were produced.
 func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Good(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	x := gdSyn(L*D, 1)
@@ -349,7 +351,7 @@ func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Good(t *testing.T) {
 }
 
 func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Bad(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5}
 	if _, _, _, _, err := GatedDeltaForwardScratchFromInputF32(nil, nil, nil, nil, nil, cfg, nil, nil, 3, 6, nil); err == nil {
 		t.Fatal("nil weights accepted")
 	}
@@ -358,7 +360,7 @@ func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Bad(t *testing.T) {
 // TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Ugly rejects a non-GQA-divisible geometry
 // before ever touching the (here nil) input projections — distinct from _Bad's nil-weights case.
 func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Ugly(t *testing.T) {
-	cfg := GatedDeltaConfig{KeyHeads: 3, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5} // 4 % 3 != 0
+	cfg := model.GatedDeltaConfig{KeyHeads: 3, ValueHeads: 4, HeadDim: 4, ConvKernel: 3, Eps: 1e-5} // 4 % 3 != 0
 	w := mkGatedDeltaWeights(cfg, 6)
 	if _, _, _, _, err := GatedDeltaForwardScratchFromInputF32(nil, nil, nil, nil, w, cfg, nil, nil, 3, 6, nil); err == nil {
 		t.Fatal("non-GQA-divisible KeyHeads/ValueHeads accepted")

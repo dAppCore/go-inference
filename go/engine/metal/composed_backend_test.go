@@ -12,9 +12,9 @@ import (
 	"time"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/arch/rwkv7"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/composed"
 )
 
@@ -149,11 +149,11 @@ func TestComposedPrefillBatchDeviceEngagement(t *testing.T) {
 		}
 	}
 	gdLayer := func(seed int) composed.Layer {
-		cfg := qwen3.GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
+		cfg := model.GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
 		convDim, vDim := cfg.ConvDim(), cfg.VDim()
 		return composed.Layer{
 			InputNorm: cbSyn(D, seed), PostAttnNorm: cbSyn(D, seed+1), MLP: newMLP(seed + 2),
-			Mixer: composed.NewGatedDeltaMixer(&qwen3.GatedDeltaWeights{
+			Mixer: composed.NewGatedDeltaMixer(&model.GatedDeltaWeights{
 				InProjQKV: cbSyn(convDim*D, seed+5), ConvWeight: cbSyn(convDim*cfg.ConvKernel, seed+6), ConvBias: cbSyn(convDim, seed+7),
 				InProjA: cbSyn(cfg.ValueHeads*D, seed+8), ALog: cbSyn(cfg.ValueHeads, seed+9), DtBias: cbSyn(cfg.ValueHeads, seed+10),
 				InProjB: cbSyn(cfg.ValueHeads*D, seed+11), InProjZ: cbSyn(vDim*D, seed+12), Norm: cbSyn(cfg.HeadDim, seed+13), OutProj: cbSyn(D*vDim, seed+14),
@@ -618,10 +618,10 @@ func TestComposedGatedDeltaProjFuseDeviceVsHost(t *testing.T) {
 		t.Fatal("native init did not wire composed.ResidualNormMLPProjDevice")
 	}
 	const D, FF, vocab = 768, 2048, 4096
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 8, ValueHeads: 8, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 8, ValueHeads: 8, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
 	qDim, vDim := cfg.KeyHeads*cfg.HeadDim, cfg.ValueHeads*cfg.HeadDim
 	convDim := 2*qDim + vDim
-	gdw := &qwen3.GatedDeltaWeights{
+	gdw := &model.GatedDeltaWeights{
 		InProjQKV:  cbSyn(convDim*D, 11),
 		ConvWeight: cbSyn(convDim*cfg.ConvKernel, 12),
 		ConvBias:   cbSyn(convDim, 13),
@@ -665,10 +665,10 @@ func TestComposedGatedDeltaProjFuseDeviceVsHost(t *testing.T) {
 		t.Fatal("gated-delta proj-fused FFN-tail hook never engaged — shape below device floor?")
 	}
 
-	savedProjTail2, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedInput := composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, qwen3.GatedDeltaInputDevice
-	composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, qwen3.GatedDeltaInputDevice = nil, nil, nil, nil, nil, nil, nil
+	savedProjTail2, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedInput := composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, attn.ProjMatMul, attn.ProjMatMulInto, composed.MLPDevice, attn.GatedDeltaInputDevice
+	composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, attn.ProjMatMul, attn.ProjMatMulInto, composed.MLPDevice, attn.GatedDeltaInputDevice = nil, nil, nil, nil, nil, nil, nil
 	host, herr := composed.NewSession(m).Forward(tokens)
-	composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, qwen3.GatedDeltaInputDevice = savedProjTail2, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedInput
+	composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, attn.ProjMatMul, attn.ProjMatMulInto, composed.MLPDevice, attn.GatedDeltaInputDevice = savedProjTail2, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedInput
 	if herr != nil {
 		t.Fatalf("host forward: %v", herr)
 	}
@@ -772,10 +772,10 @@ func TestComposedResidualNormMLPProjGatedDeltaInputFuseDeviceVsHost(t *testing.T
 			QNorm: cbSyn(hd, 29), KNorm: cbSyn(hd, 30),
 		}, composed.AttnConfig{Heads: heads, KVHeads: heads, HeadDim: hd, RotaryDim: hd / 2, RopeTheta: 1e6, NormEps: 1e-6}),
 	}
-	gdCfg := qwen3.GatedDeltaConfig{KeyHeads: 8, ValueHeads: 8, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
+	gdCfg := model.GatedDeltaConfig{KeyHeads: 8, ValueHeads: 8, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
 	qDim, vDim := gdCfg.KeyHeads*gdCfg.HeadDim, gdCfg.ValueHeads*gdCfg.HeadDim
 	convDim := 2*qDim + vDim
-	gdw := &qwen3.GatedDeltaWeights{
+	gdw := &model.GatedDeltaWeights{
 		InProjQKV:  cbSyn(convDim*D, 40),
 		ConvWeight: cbSyn(convDim*gdCfg.ConvKernel, 41),
 		ConvBias:   cbSyn(convDim, 42),
@@ -818,11 +818,11 @@ func TestComposedResidualNormMLPProjGatedDeltaInputFuseDeviceVsHost(t *testing.T
 	}
 
 	savedInput, savedProjTail, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedFuse, savedGDIn :=
-		composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice
-	composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice =
+		composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, attn.ProjMatMul, attn.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, attn.GatedDeltaInputDevice
+	composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, attn.ProjMatMul, attn.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, attn.GatedDeltaInputDevice =
 		nil, nil, nil, nil, nil, nil, nil, nil, nil
 	host, herr := composed.NewSession(m).Forward(tokens)
-	composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice =
+	composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, attn.ProjMatMul, attn.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, attn.GatedDeltaInputDevice =
 		savedInput, savedProjTail, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedFuse, savedGDIn
 	if herr != nil {
 		t.Fatalf("host forward: %v", herr)

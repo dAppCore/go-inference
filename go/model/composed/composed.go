@@ -17,7 +17,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
@@ -87,7 +87,7 @@ type ComposedModel struct {
 	// bytes (#26): forwardEmb routes it down the per-layer mixer path exactly like Quantised (the f32
 	// fold ladder's hooks take f32 weights — bypassed).
 	BF16Resident bool
-	Quantised bool
+	Quantised    bool
 	// mmap is the checkpoint mapping this model's zero-copy packed weights VIEW (a QuantWeight.Packed slice
 	// aliases it), owned so the model unmaps it on Close/finalize; nil when no weight aliases a mapping (a
 	// dense model, an all-1-bit pack repacked to owned heap, or the copying LoadComposed path).
@@ -616,7 +616,7 @@ var ComposedChainRecordingRelease func(rec any)
 // stack rides the re-encode chain (one command buffer per token) rather than the recorded replay.
 // AX-8: declared here, bound by the backend.
 var AttnQuantChainMoELayerDevice func(ctx, dev any, inputNorm []float32, qw, kw, vw, ow *model.QuantWeight, qNormW, kNormW, postNorm []float32, moe *MoEMLP, priorK, priorV []float32, H, KVH, HD, RD, pos0, window, gated, qkNorm int, eps, theta float32) (devOut any, err error)
-var GatedDeltaQuantChainMoELayerDevice func(ctx any, sc *qwen3.GatedDeltaScratch, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, moe *MoEMLP, priorConv, priorDelta []float32, eps float32) error
+var GatedDeltaQuantChainMoELayerDevice func(ctx any, sc *attn.GatedDeltaScratch, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, moe *MoEMLP, priorConv, priorDelta []float32, eps float32) error
 var MoEChainRecordable func(moe *MoEMLP) bool
 
 // chainable reports whether EVERY layer of this model can ride the chained device path — the

@@ -6,7 +6,7 @@ import (
 	"slices"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/attn"
 )
 
 // mixers.go adapts the concrete sequence mixers to the composed Mixer interface. Each wraps a family's
@@ -19,7 +19,7 @@ import (
 // projection weights (in_proj_qkv/z/a/b), it computes the previous layer's tail (out_proj → residual →
 // post-attn RMSNorm → SwiGLU → residual = y) AND this layer's RMSNorm(y) → in_proj_qkv/z/a/b, all in ONE
 // command buffer. Returns y [L,D] plus qkv [L,nextConvDim], z [L,nextVDim], a/b [L,nextVH] — the same
-// shapes qwen3.GatedDeltaInputDevice returns. nil — or an error — leaves the standard per-layer path in
+// shapes attn.GatedDeltaInputDevice returns. nil — or an error — leaves the standard per-layer path in
 // charge (see composed.forwardEmb); the session then resumes this layer via
 // gatedDeltaMixer.forwardFromInput instead of recomputing its input norm + projections. Declared here
 // (not in composed.go) because it needs qwen3's gated-delta shapes, which only this file already imports.
@@ -31,8 +31,8 @@ var ResidualNormMLPProjGatedDeltaInputDevice func(
 // gatedDeltaMixer adapts the Qwen 3.6 gated-delta block. Its state is the causal-conv ring + the delta
 // matrix, carried as gatedDeltaState.
 type gatedDeltaMixer struct {
-	w   *qwen3.GatedDeltaWeights
-	cfg qwen3.GatedDeltaConfig
+	w   *model.GatedDeltaWeights
+	cfg model.GatedDeltaConfig
 }
 
 // gatedDeltaState threads the recurrent state (conv ring + delta matrix) AND the projection scratch. The
@@ -41,18 +41,18 @@ type gatedDeltaMixer struct {
 // it — sessions are concurrent). sc is created lazily on the first (nil-prior) step.
 type gatedDeltaState struct {
 	conv, delta []float32
-	sc          *qwen3.GatedDeltaScratch
+	sc          *attn.GatedDeltaScratch
 }
 
 // NewGatedDeltaMixer builds a gated-delta mixer for one layer.
-func NewGatedDeltaMixer(w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig) Mixer {
+func NewGatedDeltaMixer(w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig) Mixer {
 	return &gatedDeltaMixer{w: w, cfg: cfg}
 }
 
 func (m *gatedDeltaMixer) Kind() string { return "gated_deltanet" }
 
 // CloneState returns a deep copy of gated-delta state: fresh backing arrays for the causal-conv ring and
-// the delta matrix, with the projection scratch sc nil'd — sc (qwen3.GatedDeltaScratch) is per-Forward
+// the delta matrix, with the projection scratch sc nil'd — sc (attn.GatedDeltaScratch) is per-Forward
 // reusable workspace, not logical state, and Forward/forwardNoProj/forwardFromInput already reallocate it
 // lazily whenever it is nil (the same path a fresh, nil-prior session already takes), so nil-ing it here
 // is byte-identical to that path and stops the clone aliasing the live session's scratch buffers. When
@@ -64,8 +64,8 @@ func (m *gatedDeltaMixer) CloneState(prior any) any {
 	if !ok {
 		return nil
 	}
-	if st.sc != nil && st.sc.Device != nil && qwen3.GatedDeltaDeviceStateExport != nil {
-		if conv, delta, ok := qwen3.GatedDeltaDeviceStateExport(st.sc.Device); ok {
+	if st.sc != nil && st.sc.Device != nil && attn.GatedDeltaDeviceStateExport != nil {
+		if conv, delta, ok := attn.GatedDeltaDeviceStateExport(st.sc.Device); ok {
 			return gatedDeltaState{conv: conv, delta: delta}
 		}
 	}
@@ -74,32 +74,32 @@ func (m *gatedDeltaMixer) CloneState(prior any) any {
 
 func (m *gatedDeltaMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
-	qkv, z, a, b, err := qwen3.GatedDeltaInputProjectF32(h, m.w, m.cfg, L, D, sc)
+	qkv, z, a, b, err := attn.GatedDeltaInputProjectF32(h, m.w, m.cfg, L, D, sc)
 	if err != nil {
 		return nil, nil, err
 	}
-	if gated, engaged, derr := qwen3.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
+	if gated, engaged, derr := attn.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
 		if derr != nil {
 			return nil, nil, derr
 		}
-		out, oerr := qwen3.GatedDeltaOutProjF32(gated, m.w, m.cfg, L, D, sc)
+		out, oerr := attn.GatedDeltaOutProjF32(gated, m.w, m.cfg, L, D, sc)
 		if oerr != nil {
 			return nil, nil, oerr
 		}
 		return out, gatedDeltaState{sc: sc}, nil
 	}
-	gated, _, nc, nd, err := qwen3.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
+	gated, _, nc, nd, err := attn.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
 	if err != nil {
 		return nil, nil, err
 	}
-	out, err := qwen3.GatedDeltaOutProjF32(gated, m.w, m.cfg, L, D, sc)
+	out, err := attn.GatedDeltaOutProjF32(gated, m.w, m.cfg, L, D, sc)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -112,24 +112,24 @@ func (m *gatedDeltaMixer) Forward(h []float32, L, D int, prior any) ([]float32, 
 // the recurrent state advances identically to Forward.
 func (m *gatedDeltaMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
-	qkv, z, a, b, err := qwen3.GatedDeltaInputProjectF32(h, m.w, m.cfg, L, D, sc)
+	qkv, z, a, b, err := attn.GatedDeltaInputProjectF32(h, m.w, m.cfg, L, D, sc)
 	if err != nil {
 		return nil, nil, 0, nil, err
 	}
-	if gated, engaged, derr := qwen3.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
+	if gated, engaged, derr := attn.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
 		if derr != nil {
 			return nil, nil, 0, nil, derr
 		}
 		return gated, m.w.OutProj, m.cfg.VDim(), gatedDeltaState{sc: sc}, nil
 	}
-	gated, vDim, nc, nd, err := qwen3.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
+	gated, vDim, nc, nd, err := attn.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
 	if err != nil {
 		return nil, nil, 0, nil, err
 	}
@@ -143,20 +143,20 @@ func (m *gatedDeltaMixer) forwardNoProj(h []float32, L, D int, prior any) (mixer
 // as forwardNoProj does; only the input projection step is skipped.
 func (m *gatedDeltaMixer) forwardFromInput(qkv, z, a, b []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
-	if gated, engaged, derr := qwen3.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
+	if gated, engaged, derr := attn.GatedDeltaBlockDeviceTry(sc, qkv, z, a, b, m.w, m.cfg, pc, pd, L); engaged {
 		if derr != nil {
 			return nil, nil, 0, nil, derr
 		}
 		return gated, m.w.OutProj, m.cfg.VDim(), gatedDeltaState{sc: sc}, nil
 	}
-	gated, vDim, nc, nd, err := qwen3.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
+	gated, vDim, nc, nd, err := attn.GatedDeltaForwardScratchFromInputF32(qkv, z, a, b, m.w, m.cfg, pc, pd, L, D, sc)
 	if err != nil {
 		return nil, nil, 0, nil, err
 	}
@@ -164,18 +164,18 @@ func (m *gatedDeltaMixer) forwardFromInput(qkv, z, a, b []float32, L, D int, pri
 }
 
 // forwardBF16Layer runs one WHOLE dense bf16 gated-delta layer through the bf16 layer seam
-// (qwen3.GatedDeltaBF16LayerDeviceTry) — the quant layer fold's raw-bf16 twin, same engagement and
+// (attn.GatedDeltaBF16LayerDeviceTry) — the quant layer fold's raw-bf16 twin, same engagement and
 // state contracts.
 func (m *gatedDeltaMixer) forwardBF16Layer(h, inputNorm, postNorm []float32, gate, up, down *model.BF16Weight, FF, L, D int, eps float32, prior any) (y []float32, next any, engaged bool, err error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
-	y, engaged, err = qwen3.GatedDeltaBF16LayerDeviceTry(sc, h, inputNorm, m.w, m.cfg, postNorm, gate, up, down, L, D, FF, eps, pc, pd)
+	y, engaged, err = attn.GatedDeltaBF16LayerDeviceTry(sc, h, inputNorm, m.w, m.cfg, postNorm, gate, up, down, L, D, FF, eps, pc, pd)
 	if !engaged {
 		return nil, nil, false, nil
 	}
@@ -187,8 +187,8 @@ func (m *gatedDeltaMixer) forwardBF16Layer(h, inputNorm, postNorm []float32, gat
 
 // chainableBF16 reports whether this gated-delta layer can ride the chained device path.
 func (m *gatedDeltaMixer) chainableBF16(mlp *MLP) bool {
-	return qwen3.GatedDeltaBF16ChainLayerDevice != nil &&
-		qwen3.GatedDeltaChainGeometryOK != nil && qwen3.GatedDeltaChainGeometryOK(m.cfg) &&
+	return attn.GatedDeltaBF16ChainLayerDevice != nil &&
+		attn.GatedDeltaChainGeometryOK != nil && attn.GatedDeltaChainGeometryOK(m.cfg) &&
 		m.w.InProjQKVB != nil && m.w.InProjAB != nil && m.w.InProjBB != nil && m.w.InProjZB != nil && m.w.OutProjB != nil &&
 		mlp != nil && mlp.GateB != nil && mlp.UpB != nil && mlp.DownB != nil
 }
@@ -196,14 +196,14 @@ func (m *gatedDeltaMixer) chainableBF16(mlp *MLP) bool {
 // chainBF16Layer encodes this gated-delta layer onto the chain and returns the advanced state.
 func (m *gatedDeltaMixer) chainBF16Layer(ctx any, inputNorm, postNorm []float32, mlp *MLP, eps float32, prior any) (next any, err error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
-	if cerr := qwen3.GatedDeltaBF16ChainLayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, mlp.GateB, mlp.UpB, mlp.DownB, pc, pd, mlp.FF, eps); cerr != nil {
+	if cerr := attn.GatedDeltaBF16ChainLayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, mlp.GateB, mlp.UpB, mlp.DownB, pc, pd, mlp.FF, eps); cerr != nil {
 		return nil, cerr
 	}
 	return gatedDeltaState{sc: sc}, nil
@@ -212,8 +212,8 @@ func (m *gatedDeltaMixer) chainBF16Layer(ctx any, inputNorm, postNorm []float32,
 // chainableQuant reports whether this gated-delta layer can ride the chained device path over
 // its packed weights — the quant twin of chainableBF16.
 func (m *gatedDeltaMixer) chainableQuant(mlp *MLP) bool {
-	return qwen3.GatedDeltaQuantChainLayerDevice != nil &&
-		qwen3.GatedDeltaChainGeometryOK != nil && qwen3.GatedDeltaChainGeometryOK(m.cfg) &&
+	return attn.GatedDeltaQuantChainLayerDevice != nil &&
+		attn.GatedDeltaChainGeometryOK != nil && attn.GatedDeltaChainGeometryOK(m.cfg) &&
 		m.w.InProjQKVQ != nil && m.w.InProjAQ != nil && m.w.InProjBQ != nil && m.w.InProjZQ != nil && m.w.OutProjQ != nil &&
 		mlp != nil && mlp.GateQ != nil && mlp.UpQ != nil && mlp.DownQ != nil
 }
@@ -222,14 +222,14 @@ func (m *gatedDeltaMixer) chainableQuant(mlp *MLP) bool {
 // the advanced state — the quant twin of chainBF16Layer.
 func (m *gatedDeltaMixer) chainQuantLayer(ctx any, inputNorm, postNorm []float32, mlp *MLP, eps float32, prior any) (next any, err error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
-	if cerr := qwen3.GatedDeltaQuantChainLayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, pc, pd, mlp.FF, eps); cerr != nil {
+	if cerr := attn.GatedDeltaQuantChainLayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, mlp.GateQ, mlp.UpQ, mlp.DownQ, pc, pd, mlp.FF, eps); cerr != nil {
 		return nil, cerr
 	}
 	return gatedDeltaState{sc: sc}, nil
@@ -240,7 +240,7 @@ func (m *gatedDeltaMixer) chainQuantLayer(ctx any, inputNorm, postNorm []float32
 // recordability (batched experts + lean gather present).
 func (m *gatedDeltaMixer) chainableMoEQuant(moe *MoEMLP) bool {
 	return GatedDeltaQuantChainMoELayerDevice != nil && MoEChainRecordable != nil && MoEChainRecordable(moe) &&
-		qwen3.GatedDeltaChainGeometryOK != nil && qwen3.GatedDeltaChainGeometryOK(m.cfg) &&
+		attn.GatedDeltaChainGeometryOK != nil && attn.GatedDeltaChainGeometryOK(m.cfg) &&
 		m.w.InProjQKVQ != nil && m.w.InProjAQ != nil && m.w.InProjBQ != nil && m.w.InProjZQ != nil && m.w.OutProjQ != nil
 }
 
@@ -248,12 +248,12 @@ func (m *gatedDeltaMixer) chainableMoEQuant(moe *MoEMLP) bool {
 // weights — the MoE twin of chainQuantLayer.
 func (m *gatedDeltaMixer) chainQuantMoELayer(ctx any, inputNorm, postNorm []float32, moe *MoEMLP, eps float32, prior any) (next any, err error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
 	if cerr := GatedDeltaQuantChainMoELayerDevice(ctx, sc, inputNorm, m.w, m.cfg, postNorm, moe, pc, pd, eps); cerr != nil {
 		return nil, cerr
@@ -262,21 +262,21 @@ func (m *gatedDeltaMixer) chainQuantMoELayer(ctx any, inputNorm, postNorm []floa
 }
 
 // forwardQuantLayer runs one WHOLE packed gated-delta layer through the device layer seam
-// (qwen3.GatedDeltaQuantLayerDeviceTry): input norm, the five packed projections, the block and the
+// (attn.GatedDeltaQuantLayerDeviceTry): input norm, the five packed projections, the block and the
 // packed FFN tail in one command buffer, x in / y out, state device-resident. engaged=false leaves
 // the standard quant branch (per-stage seams) in charge; engaged=true with err propagates — the
 // device owns this sequence's state (see the Try contract). Called from forwardEmb's quant branch
 // for a dense packed SwiGLU at residual scale 1.
 func (m *gatedDeltaMixer) forwardQuantLayer(h, inputNorm, postNorm []float32, gate, up, down *model.QuantWeight, FF, L, D int, eps float32, prior any) (y []float32, next any, engaged bool, err error) {
 	var pc, pd []float32
-	var sc *qwen3.GatedDeltaScratch
+	var sc *attn.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
 		pc, pd, sc = st.conv, st.delta, st.sc
 	}
 	if sc == nil {
-		sc = &qwen3.GatedDeltaScratch{}
+		sc = &attn.GatedDeltaScratch{}
 	}
-	y, engaged, err = qwen3.GatedDeltaQuantLayerDeviceTry(sc, h, inputNorm, m.w, m.cfg, postNorm, gate, up, down, L, D, FF, eps, pc, pd)
+	y, engaged, err = attn.GatedDeltaQuantLayerDeviceTry(sc, h, inputNorm, m.w, m.cfg, postNorm, gate, up, down, L, D, FF, eps, pc, pd)
 	if !engaged {
 		return nil, nil, false, nil
 	}

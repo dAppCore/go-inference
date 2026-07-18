@@ -11,7 +11,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
@@ -29,11 +29,11 @@ var bf16SeamEnabled = os.Getenv("LTHN_BF16_SEAM") != "0"
 func init() {
 	if bf16SeamEnabled {
 		composed.ProjBF16MatMulInto = MatMulBF16WeightF32NTInto
-		qwen3.ProjBF16MatMulInto = MatMulBF16WeightF32NTInto
-		qwen3.GatedDeltaBF16LayerDevice = gatedDeltaBF16LayerDeviceHook // the WHOLE dense bf16 layer in one CB (#26)
-		composed.AttnBF16FrontDevice = AttnBF16FrontDevice              // attention front: norm + q/k/v in one CB (#26/#18 S6a)
-		composed.AttnBF16TailDevice = AttnBF16TailDevice                // attention tail: o_proj + FFN tail in one CB
-		composed.AttnQuantFrontDevice = AttnQuantFrontDevice            // the packed twins — the 27B's attention layers
+		attn.ProjBF16MatMulInto = MatMulBF16WeightF32NTInto
+		attn.GatedDeltaBF16LayerDevice = gatedDeltaBF16LayerDeviceHook // the WHOLE dense bf16 layer in one CB (#26)
+		composed.AttnBF16FrontDevice = AttnBF16FrontDevice             // attention front: norm + q/k/v in one CB (#26/#18 S6a)
+		composed.AttnBF16TailDevice = AttnBF16TailDevice               // attention tail: o_proj + FFN tail in one CB
+		composed.AttnQuantFrontDevice = AttnQuantFrontDevice           // the packed twins — the 27B's attention layers
 		composed.AttnQuantTailDevice = AttnQuantTailDevice
 		if os.Getenv("LTHN_ATTN_DEVKV") != "0" {
 			// Device-KV full attention layer (#26): the whole layer in one CB over the resident
@@ -43,7 +43,7 @@ func init() {
 			composed.AttnBF16FullLayerDevice = AttnBF16FullLayerDevice
 			composed.AttnQuantFullLayerDevice = AttnQuantFullLayerDevice // the packed twin (#26 QUANT)
 			composed.AttnKVExportDevice = attnKVExportHook
-			composed.ComposedChainBeginDevice = ComposedChainBeginDevice   // whole-token chain (#26): one upload, one wait
+			composed.ComposedChainBeginDevice = ComposedChainBeginDevice // whole-token chain (#26): one upload, one wait
 			composed.ComposedChainEndDevice = ComposedChainEndDevice
 			if os.Getenv("LTHN_CHAIN_HEAD") != "0" { // same-binary A/B arm, LTHN_ATTN_DEVKV pattern
 				composed.ComposedChainHeadDevice = ComposedChainHeadDevice // head fold (#18): terminal norm + LM head on the chain
@@ -57,8 +57,8 @@ func init() {
 			}
 			composed.AttnBF16ChainLayerDevice = attnBF16ChainLayerDevice
 			composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice // the packed chain twin
-			qwen3.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice
-			qwen3.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice // the packed chain twin
+			attn.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice
+			attn.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice // the packed chain twin
 			// Chain-eligibility geometry probes: chainableBF16/chainableQuant (composed package) call
 			// these BEFORE committing a model to the whole-token chain — chaining cannot gracefully
 			// fall back mid-layer once begun, so an un-servable geometry (e.g. a HeadDim the device
@@ -67,7 +67,7 @@ func init() {
 			composed.AttnChainGeometryOK = func(cfg composed.AttnConfig) bool {
 				return attnCoreUsable(cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim)
 			}
-			qwen3.GatedDeltaChainGeometryOK = func(cfg qwen3.GatedDeltaConfig) bool {
+			attn.GatedDeltaChainGeometryOK = func(cfg model.GatedDeltaConfig) bool {
 				return gatedDeltaBlockUsable(cfg.HeadDim, cfg.HeadDim, cfg.KeyHeads, cfg.ValueHeads, cfg.ConvKernel)
 			}
 		}
@@ -178,7 +178,7 @@ func encResidualNormMLPBF16Tail(enc metal.MTLComputeCommandEncoder, tb quantTail
 func gatedDeltaBF16LayerRun(
 	h *gatedDeltaDeviceState,
 	x, inputNorm []float32,
-	w *qwen3.GatedDeltaWeights,
+	w *model.GatedDeltaWeights,
 	postNorm []float32,
 	gate, up, down *model.BF16Weight,
 	L, D, FF int, eps float32,
@@ -307,7 +307,7 @@ func gatedDeltaBF16LayerRun(
 
 // gatedDeltaBF16LayerDeviceHook adapts gatedDeltaBF16LayerRun to qwen3's declared bf16 layer seam —
 // the same handle discipline as the quant layer hook.
-func gatedDeltaBF16LayerDeviceHook(sc *qwen3.GatedDeltaScratch, x, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) ([]float32, error) {
+func gatedDeltaBF16LayerDeviceHook(sc *attn.GatedDeltaScratch, x, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, L, D, FF int, eps float32, priorConv, priorDelta []float32) ([]float32, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
@@ -497,10 +497,10 @@ func attnFrontRunCore(x, inputNorm []float32, projQ, projK, projV tailProjFromBF
 // attnBF16TailScratch stages one [o_proj → FFN tail] CB: the attention-output upload + its bf16
 // cast, the o_proj output pair, the residual upload, and the shared tail stage buffers.
 type attnBF16TailScratch struct {
-	h, attn, mix               *pinnedNoCopyBytes
-	attnBF, mixBF              *pinnedNoCopyBytes
-	normed, nBF, g, gBF        *pinnedNoCopyBytes
-	u, uBF, s, out             *pinnedNoCopyBytes
+	h, attn, mix        *pinnedNoCopyBytes
+	attnBF, mixBF       *pinnedNoCopyBytes
+	normed, nBF, g, gBF *pinnedNoCopyBytes
+	u, uBF, s, out      *pinnedNoCopyBytes
 }
 
 type attnBF16TailKey struct{ L, D, mixCols, FF int }

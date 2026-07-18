@@ -5,11 +5,11 @@ package composed
 import (
 	"testing"
 
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model"
 )
 
 // The mixers bench baselines the gated-delta Mixer adapter (AX-11): gatedDeltaMixer.Forward
-// wraps qwen3.GatedDeltaForwardF32 for the composed session, adding the per-token state
+// wraps attn.GatedDeltaForwardF32 for the composed session, adding the per-token state
 // boxing — the prior.(gatedDeltaState) type assertion in and the gatedDeltaState wrap out
 // that the session threads opaquely. This measures the Qwen 3.6 linear-attention layer's
 // per-token cost AS THE SESSION DRIVES IT (interface dispatch + state box included). Dims: a
@@ -26,7 +26,7 @@ func benchGatedDeltaMixer() Mixer {
 	qDim := KH * HD
 	vDim := VH * HD
 	convDim := 2*qDim + vDim
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		InProjQKV:  benchF32(convDim * D),
 		ConvWeight: benchF32(convDim * K),
 		ConvBias:   benchF32(convDim),
@@ -38,7 +38,7 @@ func benchGatedDeltaMixer() Mixer {
 		Norm:       benchF32(HD),
 		OutProj:    benchF32(D * vDim),
 	}
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: KH, ValueHeads: VH, HeadDim: HD, ConvKernel: K, Eps: 1e-6}
+	cfg := model.GatedDeltaConfig{KeyHeads: KH, ValueHeads: VH, HeadDim: HD, ConvKernel: K, Eps: 1e-6}
 	return NewGatedDeltaMixer(w, cfg)
 }
 

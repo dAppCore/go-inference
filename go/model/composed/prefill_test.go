@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/arch/rwkv7"
 )
@@ -62,7 +61,7 @@ func mkRWKV7OnlyComposedModel(nLayers, D, vocab, FF int) *ComposedModel {
 // mkHybridComposedModel interleaves gated-delta and full-attention layers (the Qwen 3.6 schedule shape) —
 // the same construction TestHybridDecodeEqualsPrefill (attention_test.go) uses.
 func mkHybridComposedModel(D, vocab, FF int) *ComposedModel {
-	gdCfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	gdCfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	atCfg := AttnConfig{Heads: 4, KVHeads: 2, HeadDim: 8, RotaryDim: 4, RopeTheta: 1e6, NormEps: 1e-6}
 	mk := func(li int, mx Mixer) Layer {
 		return Layer{

@@ -10,7 +10,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
@@ -509,7 +509,7 @@ func ComposedChainTakeLogits(ctxAny any) []float32 {
 // gatedDeltaBF16ChainLayerDevice encodes one dense bf16 gated-delta layer onto the chain — the
 // gatedDeltaBF16LayerRun body against the context's ping-pong hidden, sharing one pooled scratch
 // across every gd layer of the chain (encoder boundaries serialise their reuse).
-func gatedDeltaBF16ChainLayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, priorConv, priorDelta []float32, FF int, eps float32) error {
+func gatedDeltaBF16ChainLayerDevice(ctxAny any, sc *attn.GatedDeltaScratch, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.BF16Weight, priorConv, priorDelta []float32, FF int, eps float32) error {
 	ctx, ok := ctxAny.(*composedChainCtx)
 	if !ok {
 		return core.NewError("native.gatedDeltaBF16ChainLayerDevice: not a chain context")
@@ -631,7 +631,7 @@ func gatedDeltaBF16ChainLayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, inp
 // sharing the chain's one pooled gd scratch (the same buffer shapes the bf16 chain step uses —
 // both weight forms cast to bf16 at the qmv/gemv boundary). The quant twin of
 // gatedDeltaBF16ChainLayerDevice.
-func gatedDeltaQuantChainLayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, priorConv, priorDelta []float32, FF int, eps float32) error {
+func gatedDeltaQuantChainLayerDevice(ctxAny any, sc *attn.GatedDeltaScratch, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, gate, up, down *model.QuantWeight, priorConv, priorDelta []float32, FF int, eps float32) error {
 	ctx, ok := ctxAny.(*composedChainCtx)
 	if !ok {
 		return core.NewError("native.gatedDeltaQuantChainLayerDevice: not a chain context")
@@ -1245,7 +1245,7 @@ func attnQuantChainMoELayerDevice(ctxAny, dev any, inputNorm []float32, qw, kw, 
 // gatedDeltaQuantChainMoELayerDevice is attnQuantChainMoELayerDevice's gated-delta twin:
 // gatedDeltaQuantChainLayerDevice's mixer body verbatim, then the MoE tail. LIVE-only (declines
 // recording), same as the attn MoE layer.
-func gatedDeltaQuantChainMoELayerDevice(ctxAny any, sc *qwen3.GatedDeltaScratch, inputNorm []float32, w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig, postNorm []float32, moe *composed.MoEMLP, priorConv, priorDelta []float32, eps float32) error {
+func gatedDeltaQuantChainMoELayerDevice(ctxAny any, sc *attn.GatedDeltaScratch, inputNorm []float32, w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, postNorm []float32, moe *composed.MoEMLP, priorConv, priorDelta []float32, eps float32) error {
 	ctx, ok := ctxAny.(*composedChainCtx)
 	if !ok {
 		return core.NewError("native.gatedDeltaQuantChainMoELayerDevice: not a chain context")

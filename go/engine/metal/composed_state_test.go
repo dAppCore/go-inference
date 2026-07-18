@@ -11,7 +11,6 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/composed"
 	state "dappco.re/go/inference/model/state"
 )
@@ -39,13 +38,13 @@ func synComposedF32(n, seed int) []float32 {
 // CPU. It mirrors model/composed's mkComposedModel fixture; D/vocab/FF are fixed small.
 func newTinyComposedModel(nLayers int) model.SessionModel {
 	const D, vocab, FF = 8, 32, 16
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
 	vd := cfg.ValueHeads * cfg.HeadDim
 	cd := 2*cfg.KeyHeads*cfg.HeadDim + cfg.ValueHeads*cfg.HeadDim
 	layers := make([]composed.Layer, nLayers)
 	for li := range layers {
 		seed := li*13 + 20
-		w := &qwen3.GatedDeltaWeights{
+		w := &model.GatedDeltaWeights{
 			InProjQKV:  synComposedF32(cd*D, seed+1),
 			ConvWeight: synComposedF32(cd*cfg.ConvKernel, seed+2),
 			ConvBias:   synComposedF32(cd, seed+3),

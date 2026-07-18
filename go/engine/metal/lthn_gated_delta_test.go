@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/arch/deltanet"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 )
@@ -27,14 +27,14 @@ import (
 
 // gdTestPrep builds one random gated-delta problem and both sides' views of it.
 type gdTestPrep struct {
-	T, Hk, Hv, Dk, Dv    int
-	qHost, kHost, vHost  []float32 // repeated to Hv, q ℓ2-normalised (host contract)
-	alpha, beta          []float32 // [T,Hv]
-	priorHost            []float32 // [Hv,Dk,Dv] (host layout)
-	qDev, kDev           []float32 // unrepeated [T,Hk,Dk], both ℓ2-normalised (kernel contract)
-	vDev                 []float32 // [T,Hv,Dv]
-	stateDev             []float32 // [kSlots,Hv,Dv,Dk] slot 0 = prior (kernel layout)
-	kSlots               int
+	T, Hk, Hv, Dk, Dv   int
+	qHost, kHost, vHost []float32 // repeated to Hv, q ℓ2-normalised (host contract)
+	alpha, beta         []float32 // [T,Hv]
+	priorHost           []float32 // [Hv,Dk,Dv] (host layout)
+	qDev, kDev          []float32 // unrepeated [T,Hk,Dk], both ℓ2-normalised (kernel contract)
+	vDev                []float32 // [T,Hv,Dv]
+	stateDev            []float32 // [kSlots,Hv,Dv,Dk] slot 0 = prior (kernel layout)
+	kSlots              int
 }
 
 func gdL2NormRows(x []float32, rows, d int) []float32 {
@@ -346,19 +346,19 @@ func TestGatedDeltaStepDeviceBeatsHost(t *testing.T) {
 	}
 }
 
-// --- S2: the device block vs qwen3.GatedDeltaForwardScratchFromInputF32 ---
+// --- S2: the device block vs attn.GatedDeltaForwardScratchFromInputF32 ---
 
 // gdBlockFixture builds one random gated-delta layer (weights + cfg) and a stream of raw
 // projection outputs, for driving both the host block and the device block over a carried state.
 type gdBlockFixture struct {
-	cfg qwen3.GatedDeltaConfig
-	w   *qwen3.GatedDeltaWeights
+	cfg model.GatedDeltaConfig
+	w   *model.GatedDeltaWeights
 	rng *rand.Rand
 }
 
 func newGDBlockFixture(seed int64, Hk, Hv, Dk, K int) *gdBlockFixture {
 	rng := rand.New(rand.NewSource(seed))
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: Hk, ValueHeads: Hv, HeadDim: Dk, ConvKernel: K, Eps: 1e-6}
+	cfg := model.GatedDeltaConfig{KeyHeads: Hk, ValueHeads: Hv, HeadDim: Dk, ConvKernel: K, Eps: 1e-6}
 	fill := func(n int, lo, hi float32) []float32 {
 		out := make([]float32, n)
 		for i := range out {
@@ -367,7 +367,7 @@ func newGDBlockFixture(seed int64, Hk, Hv, Dk, K int) *gdBlockFixture {
 		return out
 	}
 	convDim, vDim := cfg.ConvDim(), cfg.VDim()
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		ConvWeight: fill(convDim*K, -0.5, 0.5),
 		ConvBias:   fill(convDim, -0.2, 0.2),
 		ALog:       fill(Hv, -1, 1.2),
@@ -395,8 +395,8 @@ func (f *gdBlockFixture) inputs(L int) (qkv, z, a, b []float32) {
 func TestGatedDeltaBlockDeviceRun_Good(t *testing.T) {
 	gdRequireKernel(t)
 	for _, shape := range []struct {
-		name           string
-		Hk, Hv, Dk, K  int
+		name          string
+		Hk, Hv, Dk, K int
 	}{
 		{"fixture", 2, 4, 64, 4},
 		{"real27B", 16, 48, 128, 4},
@@ -416,7 +416,7 @@ func TestGatedDeltaBlockDeviceRun_Good(t *testing.T) {
 				qkv, z, a, b := f.inputs(L)
 				// The host mutates alpha/beta in place — give each side its own copies.
 				aHost, bHost := append([]float32(nil), a...), append([]float32(nil), b...)
-				gatedHost, vDim, nc, nd, herr := qwen3.GatedDeltaForwardScratchFromInputF32(
+				gatedHost, vDim, nc, nd, herr := attn.GatedDeltaForwardScratchFromInputF32(
 					append([]float32(nil), qkv...), z, aHost, bHost, f.w, f.cfg, hostConv, hostDelta, L, D, nil)
 				if herr != nil {
 					t.Fatalf("host block step %d: %v", step, herr)
@@ -521,7 +521,7 @@ func TestGatedDeltaBlockDeviceRun_Ugly(t *testing.T) {
 func gdQuantTestModel(t *testing.T) *composed.ComposedModel {
 	t.Helper()
 	const D, FF, vocab = 512, 1024, 64
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
 	convDim, vDim := cfg.ConvDim(), cfg.VDim()
 	quant := func(seed, outDim, inDim int) *model.QuantWeight {
 		packed, scales, biases, err := mlxaffine.QuantizeTensor(cbSyn(outDim*inDim, seed), outDim, inDim, 4, 64)
@@ -530,7 +530,7 @@ func gdQuantTestModel(t *testing.T) *composed.ComposedModel {
 		}
 		return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: 4, GroupSize: 64, OutDim: outDim, InDim: inDim}
 	}
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		ConvWeight: cbSyn(convDim*cfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
 		ALog: cbSyn(cfg.ValueHeads, 13), DtBias: cbSyn(cfg.ValueHeads, 14), Norm: cbSyn(cfg.HeadDim, 15),
 		InProjQKVQ: quant(21, convDim, D), InProjZQ: quant(22, vDim, D),
@@ -552,12 +552,12 @@ func gdQuantTestModel(t *testing.T) *composed.ComposedModel {
 // state and all — the hiddens must agree at f32 rounding scale every step.
 func TestGatedDeltaQuantLayerDevice_Good(t *testing.T) {
 	gdRequireKernel(t)
-	if qwen3.GatedDeltaQuantLayerDevice == nil {
+	if attn.GatedDeltaQuantLayerDevice == nil {
 		t.Skip("quant layer hook unbound (LTHN_GD_BLOCK=0?)")
 	}
 	m := gdQuantTestModel(t)
-	saved := qwen3.GatedDeltaQuantLayerDevice
-	defer func() { qwen3.GatedDeltaQuantLayerDevice = saved }()
+	saved := attn.GatedDeltaQuantLayerDevice
+	defer func() { attn.GatedDeltaQuantLayerDevice = saved }()
 
 	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
 	run := func() [][]float32 {
@@ -572,9 +572,9 @@ func TestGatedDeltaQuantLayerDevice_Good(t *testing.T) {
 		}
 		return outs
 	}
-	qwen3.GatedDeltaQuantLayerDevice = saved
+	attn.GatedDeltaQuantLayerDevice = saved
 	fused := run()
-	qwen3.GatedDeltaQuantLayerDevice = nil
+	attn.GatedDeltaQuantLayerDevice = nil
 	staged := run()
 	for i := range fused {
 		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
@@ -590,15 +590,15 @@ func TestGatedDeltaQuantLayerDevice_Good(t *testing.T) {
 // token), and the direct run rejects wrong sizes before any dispatch.
 func TestGatedDeltaQuantLayerDevice_Bad(t *testing.T) {
 	gdRequireKernel(t)
-	if qwen3.GatedDeltaQuantLayerDevice == nil {
+	if attn.GatedDeltaQuantLayerDevice == nil {
 		t.Skip("quant layer hook unbound")
 	}
 	// HeadDim 32: convDim = 2*2*32 + 4*32 = 256, vDim = 128 — packable, but no dk32 kernel, so the
 	// layer hook must decline on its first call and the per-stage branch serves.
 	const D, FF, vocab = 256, 512, 32
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
 	convDim, vDim := cfg.ConvDim(), cfg.VDim()
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		ConvWeight: cbSyn(convDim*cfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
 		ALog: cbSyn(cfg.ValueHeads, 13), DtBias: cbSyn(cfg.ValueHeads, 14), Norm: cbSyn(cfg.HeadDim, 15),
 		InProjQKVQ: mustQuant(t, 21, convDim, D), InProjZQ: mustQuant(t, 22, vDim, D),
@@ -623,7 +623,7 @@ func TestGatedDeltaQuantLayerDevice_Bad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newGatedDeltaDeviceState: %v", err)
 	}
-	w64 := &qwen3.GatedDeltaWeights{
+	w64 := &model.GatedDeltaWeights{
 		ConvWeight: cbSyn((2*2*64+4*64)*4, 51), ConvBias: cbSyn(2*2*64+4*64, 52),
 		ALog: cbSyn(4, 53), DtBias: cbSyn(4, 54), Norm: cbSyn(64, 55),
 		InProjQKVQ: mustQuant(t, 61, 2*2*64+4*64, 512), InProjZQ: mustQuant(t, 62, 4*64, 512),
@@ -652,12 +652,12 @@ func mustQuant(t *testing.T, seed, outDim, inDim int) *model.QuantWeight {
 func gdBF16TestModel(t *testing.T) *composed.ComposedModel {
 	t.Helper()
 	const D, FF, vocab = 512, 1024, 64
-	cfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
 	convDim, vDim := cfg.ConvDim(), cfg.VDim()
 	bw := func(seed, outDim, inDim int) *model.BF16Weight {
 		return &model.BF16Weight{Data: f32sToBF16Bytes(cbSyn(outDim*inDim, seed)), OutDim: outDim, InDim: inDim}
 	}
-	w := &qwen3.GatedDeltaWeights{
+	w := &model.GatedDeltaWeights{
 		ConvWeight: cbSyn(convDim*cfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
 		ALog: cbSyn(cfg.ValueHeads, 13), DtBias: cbSyn(cfg.ValueHeads, 14), Norm: cbSyn(cfg.HeadDim, 15),
 		InProjQKVB: bw(21, convDim, D), InProjZB: bw(22, vDim, D),
@@ -679,12 +679,12 @@ func gdBF16TestModel(t *testing.T) *composed.ComposedModel {
 // (hook nil) — carried state and all, at f32 rounding scale.
 func TestGatedDeltaBF16LayerDevice_Good(t *testing.T) {
 	gdRequireKernel(t)
-	if qwen3.GatedDeltaBF16LayerDevice == nil {
+	if attn.GatedDeltaBF16LayerDevice == nil {
 		t.Skip("bf16 layer hook unbound (LTHN_BF16_SEAM=0?)")
 	}
 	m := gdBF16TestModel(t)
-	saved := qwen3.GatedDeltaBF16LayerDevice
-	defer func() { qwen3.GatedDeltaBF16LayerDevice = saved }()
+	saved := attn.GatedDeltaBF16LayerDevice
+	defer func() { attn.GatedDeltaBF16LayerDevice = saved }()
 
 	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
 	run := func() [][]float32 {
@@ -699,9 +699,9 @@ func TestGatedDeltaBF16LayerDevice_Good(t *testing.T) {
 		}
 		return outs
 	}
-	qwen3.GatedDeltaBF16LayerDevice = saved
+	attn.GatedDeltaBF16LayerDevice = saved
 	fused := run()
-	qwen3.GatedDeltaBF16LayerDevice = nil
+	attn.GatedDeltaBF16LayerDevice = nil
 	staged := run()
 	for i := range fused {
 		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
@@ -733,7 +733,7 @@ func TestGatedDeltaBF16LayerDevice_Bad(t *testing.T) {
 	m := gdBF16TestModel(t)
 	gm := m.Layers[0].Mixer
 	_ = gm
-	w := &qwen3.GatedDeltaWeights{}
+	w := &model.GatedDeltaWeights{}
 	if err := gatedDeltaBF16LayerRun(h, make([]float32, 5), cbSyn(512, 1), w, cbSyn(512, 2),
 		nil, nil, nil, 1, 512, 1024, 1e-6, nil, nil, y); err == nil {
 		t.Fatal("empty weights must error")
@@ -749,12 +749,12 @@ func TestAttnBF16FoldDevice_Good(t *testing.T) {
 		t.Skip("attention fold hooks unbound (LTHN_BF16_SEAM=0?)")
 	}
 	const D, FF, vocab = 512, 1024, 64
-	gcfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	gcfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
 	convDim, vDim := gcfg.ConvDim(), gcfg.VDim()
 	bw := func(seed, outDim, inDim int) *model.BF16Weight {
 		return &model.BF16Weight{Data: f32sToBF16Bytes(cbSyn(outDim*inDim, seed)), OutDim: outDim, InDim: inDim}
 	}
-	gw := &qwen3.GatedDeltaWeights{
+	gw := &model.GatedDeltaWeights{
 		ConvWeight: cbSyn(convDim*gcfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
 		ALog: cbSyn(gcfg.ValueHeads, 13), DtBias: cbSyn(gcfg.ValueHeads, 14), Norm: cbSyn(gcfg.HeadDim, 15),
 		InProjQKVB: bw(21, convDim, D), InProjZB: bw(22, vDim, D),
@@ -781,11 +781,11 @@ func TestAttnBF16FoldDevice_Good(t *testing.T) {
 		},
 	}
 	savedF, savedT := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
-	savedL := qwen3.GatedDeltaBF16LayerDevice
+	savedL := attn.GatedDeltaBF16LayerDevice
 	savedFull := composed.AttnBF16FullLayerDevice
 	defer func() {
 		composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
-		qwen3.GatedDeltaBF16LayerDevice = savedL
+		attn.GatedDeltaBF16LayerDevice = savedL
 		composed.AttnBF16FullLayerDevice = savedFull
 	}()
 
@@ -803,11 +803,11 @@ func TestAttnBF16FoldDevice_Good(t *testing.T) {
 		return outs
 	}
 	composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
-	qwen3.GatedDeltaBF16LayerDevice = savedL
+	attn.GatedDeltaBF16LayerDevice = savedL
 	composed.AttnBF16FullLayerDevice = savedFull
 	fused := run()
 	composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = nil, nil
-	qwen3.GatedDeltaBF16LayerDevice = nil
+	attn.GatedDeltaBF16LayerDevice = nil
 	composed.AttnBF16FullLayerDevice = nil
 	staged := run()
 	for i := range fused {
@@ -843,9 +843,9 @@ func TestAttnQuantFoldDevice_Good(t *testing.T) {
 		t.Skip("quant attention fold hooks unbound (LTHN_BF16_SEAM=0?)")
 	}
 	const D, FF, vocab = 512, 1024, 64
-	gcfg := qwen3.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
+	gcfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 64, ConvKernel: 4, Eps: 1e-5}
 	convDim, vDim := gcfg.ConvDim(), gcfg.VDim()
-	gw := &qwen3.GatedDeltaWeights{
+	gw := &model.GatedDeltaWeights{
 		ConvWeight: cbSyn(convDim*gcfg.ConvKernel, 11), ConvBias: cbSyn(convDim, 12),
 		ALog: cbSyn(gcfg.ValueHeads, 13), DtBias: cbSyn(gcfg.ValueHeads, 14), Norm: cbSyn(gcfg.HeadDim, 15),
 		InProjQKVQ: mustQuant(t, 21, convDim, D), InProjZQ: mustQuant(t, 22, vDim, D),
@@ -874,12 +874,12 @@ func TestAttnQuantFoldDevice_Good(t *testing.T) {
 	savedF, savedT := composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice
 	savedFull, savedExp := composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice
 	savedBegin, savedEnd := composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice
-	savedChainA, savedChainG := composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice
+	savedChainA, savedChainG := composed.AttnQuantChainLayerDevice, attn.GatedDeltaQuantChainLayerDevice
 	defer func() {
 		composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT
 		composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = savedFull, savedExp
 		composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = savedBegin, savedEnd
-		composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = savedChainA, savedChainG
+		composed.AttnQuantChainLayerDevice, attn.GatedDeltaQuantChainLayerDevice = savedChainA, savedChainG
 	}()
 
 	steps := [][]int32{{1, 2, 3, 4}, {5}, {6}, {7}}
@@ -901,12 +901,12 @@ func TestAttnQuantFoldDevice_Good(t *testing.T) {
 	composed.ComposedChainBeginDevice = ComposedChainBeginDevice // the whole-token chain rides on top
 	composed.ComposedChainEndDevice = ComposedChainEndDevice
 	composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice
-	qwen3.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice
+	attn.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice
 	fused := run()
 	composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = nil, nil
 	composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = nil, nil
 	composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = nil, nil
-	composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = nil, nil
+	composed.AttnQuantChainLayerDevice, attn.GatedDeltaQuantChainLayerDevice = nil, nil
 	staged := run()
 	for i := range fused {
 		rel := gdScaledDiff(t, "hidden", fused[i], staged[i])
@@ -928,11 +928,11 @@ func TestAttnDevKVRealShape_AB(t *testing.T) {
 		return &model.BF16Weight{Data: f32sToBF16Bytes(cbSyn(outDim*inDim, seed)), OutDim: outDim, InDim: inDim}
 	}
 	for _, tc := range []struct {
-		name        string
-		H, KVH, HD  int
-		RD          int
-		gated       bool
-		qkNorm      bool
+		name       string
+		H, KVH, HD int
+		RD         int
+		gated      bool
+		qkNorm     bool
 	}{
 		{"real-shape", 2, 1, 256, 64, true, false},
 		{"gated-only", 4, 2, 128, 128, true, false},
@@ -965,12 +965,12 @@ func TestAttnDevKVRealShape_AB(t *testing.T) {
 			savedFull, savedExp := composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice
 			savedF, savedT := composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice
 			savedBegin, savedEnd := composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice
-			savedChainA, savedChainG := composed.AttnBF16ChainLayerDevice, qwen3.GatedDeltaBF16ChainLayerDevice
+			savedChainA, savedChainG := composed.AttnBF16ChainLayerDevice, attn.GatedDeltaBF16ChainLayerDevice
 			defer func() {
 				composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice = savedFull, savedExp
 				composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = savedF, savedT
 				composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = savedBegin, savedEnd
-				composed.AttnBF16ChainLayerDevice, qwen3.GatedDeltaBF16ChainLayerDevice = savedChainA, savedChainG
+				composed.AttnBF16ChainLayerDevice, attn.GatedDeltaBF16ChainLayerDevice = savedChainA, savedChainG
 			}()
 			steps := [][]int32{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}, {18}, {19}}
 			run := func() [][]float32 {
@@ -990,12 +990,12 @@ func TestAttnDevKVRealShape_AB(t *testing.T) {
 			composed.ComposedChainBeginDevice = ComposedChainBeginDevice // the whole-token chain rides on top
 			composed.ComposedChainEndDevice = ComposedChainEndDevice
 			composed.AttnBF16ChainLayerDevice = attnBF16ChainLayerDevice
-			qwen3.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice
+			attn.GatedDeltaBF16ChainLayerDevice = gatedDeltaBF16ChainLayerDevice
 			devKV := run()
 			composed.AttnBF16FullLayerDevice, composed.AttnKVExportDevice = nil, nil
 			composed.AttnBF16FrontDevice, composed.AttnBF16TailDevice = nil, nil
 			composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = nil, nil
-			composed.AttnBF16ChainLayerDevice, qwen3.GatedDeltaBF16ChainLayerDevice = nil, nil
+			composed.AttnBF16ChainLayerDevice, attn.GatedDeltaBF16ChainLayerDevice = nil, nil
 			staged := run()
 			for i := range devKV {
 				rel := gdScaledDiff(t, "hidden", devKV[i], staged[i])
@@ -1063,12 +1063,12 @@ func TestAttnQuantDevKVRealShape_AB(t *testing.T) {
 			savedFull, savedExp := composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice
 			savedF, savedT := composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice
 			savedBegin, savedEnd := composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice
-			savedChainA, savedChainG := composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice
+			savedChainA, savedChainG := composed.AttnQuantChainLayerDevice, attn.GatedDeltaQuantChainLayerDevice
 			defer func() {
 				composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = savedFull, savedExp
 				composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = savedF, savedT
 				composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = savedBegin, savedEnd
-				composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = savedChainA, savedChainG
+				composed.AttnQuantChainLayerDevice, attn.GatedDeltaQuantChainLayerDevice = savedChainA, savedChainG
 			}()
 			steps := [][]int32{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17}, {18}, {19}}
 			run := func() [][]float32 {
@@ -1088,12 +1088,12 @@ func TestAttnQuantDevKVRealShape_AB(t *testing.T) {
 			composed.ComposedChainBeginDevice = ComposedChainBeginDevice // the whole-token chain rides on top
 			composed.ComposedChainEndDevice = ComposedChainEndDevice
 			composed.AttnQuantChainLayerDevice = attnQuantChainLayerDevice
-			qwen3.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice
+			attn.GatedDeltaQuantChainLayerDevice = gatedDeltaQuantChainLayerDevice
 			devKV := run()
 			composed.AttnQuantFullLayerDevice, composed.AttnKVExportDevice = nil, nil
 			composed.AttnQuantFrontDevice, composed.AttnQuantTailDevice = nil, nil
 			composed.ComposedChainBeginDevice, composed.ComposedChainEndDevice = nil, nil
-			composed.AttnQuantChainLayerDevice, qwen3.GatedDeltaQuantChainLayerDevice = nil, nil
+			composed.AttnQuantChainLayerDevice, attn.GatedDeltaQuantChainLayerDevice = nil, nil
 			staged := run()
 			for i := range devKV {
 				rel := gdScaledDiff(t, "hidden", devKV[i], staged[i])
