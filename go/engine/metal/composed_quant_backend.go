@@ -5,6 +5,7 @@
 package native
 
 import (
+	"os"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -38,7 +39,11 @@ func init() {
 	composed.ResidualNormMLPQuantDevice = ResidualNormMLPQuantDevice
 	// The batched routed-MoE kernel: the whole top-K MoE (select + SwiGLU + weighted combine) in ONE
 	// dispatch, where the composed host loop fired topK×3 per-projection quant-seam submits per layer.
-	composed.MoEExpertsDevice = MoEExpertsQuantDevice
+	// Kill-switch LTHN_COMPOSED_MOE_DEVICE=0 leaves the seam nil so forward runs the per-expert host
+	// loop — the revert-safety A/B lever (default on, one lever per commit).
+	if os.Getenv("LTHN_COMPOSED_MOE_DEVICE") != "0" {
+		composed.MoEExpertsDevice = MoEExpertsQuantDevice
+	}
 }
 
 // MoEExpertsQuantDevice binds composed.MoEExpertsDevice to the metallib's batched packed-expert MoE kernel
