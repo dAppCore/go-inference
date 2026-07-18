@@ -9,6 +9,8 @@ import (
 
 const (
 	appConfigPath     = "config.yaml"
+	appAgentsPath     = "agents.yaml"
+	appSoftServePath  = "soft-serve"
 	appWorkspacesPath = "workspaces"
 	appPacksPath      = "packs"
 	appExportsPath    = "exports"
@@ -20,6 +22,8 @@ type appPaths struct {
 	Database   string
 	State      string
 	Config     string
+	Agents     string
+	SoftServe  string
 	Workspaces string
 	Packs      string
 	Exports    string
@@ -54,7 +58,9 @@ func appPathsAt(root string) core.Result {
 		Database:   core.Path(root, "lem.duckdb"),
 		State:      core.Path(root, "state.db"),
 		Config:     appConfigPath,
-		Workspaces: appWorkspacesPath,
+		Agents:     appAgentsPath,
+		SoftServe:  core.Path(root, appSoftServePath),
+		Workspaces: core.Path(root, appWorkspacesPath),
 		Packs:      appPacksPath,
 		Exports:    appExportsPath,
 	})
@@ -84,7 +90,7 @@ func ensureAppFiles(medium coreio.Medium, paths appPaths) core.Result {
 	if medium == nil {
 		return core.Fail(core.E("tui.ensureAppFiles", "file medium is required", nil))
 	}
-	for _, directory := range []string{"", paths.Workspaces, paths.Packs, paths.Exports} {
+	for _, directory := range []string{"", appWorkspacesPath, paths.Packs, paths.Exports} {
 		if err := medium.EnsureDir(directory); err != nil {
 			label := directory
 			if label == "" {

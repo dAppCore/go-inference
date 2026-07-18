@@ -533,7 +533,7 @@ func TestAppQuit_Ugly(t *testing.T) {
 	}
 	resources := opened.Value.(*workspaceResources)
 	a := newApp("", 0, 64)
-	a.agent = &orderedAgentProvider{order: &order}
+	resources.Agent = &orderedAgentProvider{order: &order}
 	if result := a.connectWorkspace(resources); !result.OK {
 		t.Fatalf("connect workspace: %v", result.Value)
 	}
@@ -727,6 +727,10 @@ func (*orderedAgentProvider) Capabilities() []agentCapability {
 
 func (*orderedAgentProvider) Snapshot(context.Context) core.Result {
 	return core.Ok(agentSnapshot{Work: []agentWorkSnapshot{}, Events: []agentEventSnapshot{}})
+}
+
+func (*orderedAgentProvider) Review(context.Context, agentReviewRequest) core.Result {
+	return core.Ok(agentReview{})
 }
 
 func (*orderedAgentProvider) Run(context.Context, agentRequest) core.Result {

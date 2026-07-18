@@ -26,7 +26,9 @@ func TestAppPaths_Good(t *testing.T) {
 		Database:   core.Path(root, "lem.duckdb"),
 		State:      core.Path(root, "state.db"),
 		Config:     "config.yaml",
-		Workspaces: "workspaces",
+		Agents:     "agents.yaml",
+		SoftServe:  core.Path(root, "soft-serve"),
+		Workspaces: core.Path(root, "workspaces"),
 		Packs:      "packs",
 		Exports:    "exports",
 	}
@@ -54,9 +56,14 @@ func TestAppFiles_Good(t *testing.T) {
 	if !ok {
 		t.Fatalf("openAppFilesAt value = %T, want appFiles", result.Value)
 	}
-	for _, directory := range []string{files.Paths.Workspaces, files.Paths.Packs, files.Paths.Exports} {
+	for _, directory := range []string{appWorkspacesPath, files.Paths.Packs, files.Paths.Exports} {
 		if !files.Medium.IsDir(directory) {
 			t.Errorf("medium directory %q was not created", directory)
+		}
+	}
+	for _, directory := range []string{files.Paths.SoftServe, files.Paths.Workspaces} {
+		if !core.PathIsAbs(directory) {
+			t.Errorf("host directory %q is not absolute", directory)
 		}
 	}
 	if err := files.Medium.Write(files.Paths.Config, "theme: midnight\n"); err != nil {

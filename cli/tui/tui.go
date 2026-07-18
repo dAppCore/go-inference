@@ -15,7 +15,15 @@ import (
 // Run is the `lem tui` verb. It opens the durable ~/.lem workspace before
 // starting Bubble Tea and closes every workspace resource before returning.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	return runWithWorkspace(ctx, args, stdout, stderr, loadDefaultWorkspace)
+	return runWithWorkspace(ctx, args, stdout, stderr, workspaceLoaders{
+		Normal: loadDefaultWorkspace,
+		Check:  loadDefaultCheckWorkspace,
+	})
+}
+
+type workspaceLoaders struct {
+	Normal func() core.Result
+	Check  func() core.Result
 }
 
 func loadDefaultWorkspace() core.Result {
@@ -27,7 +35,19 @@ func loadDefaultWorkspace() core.Result {
 	if !ok {
 		return core.Fail(core.E("tui.loadDefaultWorkspace", "invalid application paths result", nil))
 	}
-	return openWorkspace(paths.Root, workspaceOpeners{})
+	return openWorkspace(paths.Root, workspaceOpeners{Agent: openNativeWorkspaceAgent})
+}
+
+func loadDefaultCheckWorkspace() core.Result {
+	pathsResult := defaultAppPaths()
+	if !pathsResult.OK {
+		return pathsResult
+	}
+	paths, ok := pathsResult.Value.(appPaths)
+	if !ok {
+		return core.Fail(core.E("tui.loadDefaultCheckWorkspace", "invalid application paths result", nil))
+	}
+	return openWorkspace(paths.Root, workspaceOpeners{Agent: openReadOnlyWorkspaceAgent})
 }
 
 func runWithWorkspace(
@@ -35,7 +55,7 @@ func runWithWorkspace(
 	args []string,
 	stdout io.Writer,
 	stderr io.Writer,
-	loader func() core.Result,
+	loaders workspaceLoaders,
 ) int {
 	fs := flag.NewFlagSet("tui", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -65,6 +85,10 @@ func runWithWorkspace(
 		return 2
 	}
 
+	loader := loaders.Normal
+	if *check {
+		loader = loaders.Check
+	}
 	a := newWorkspaceApp(*modelPath, *ctxLen, *maxTokens, loader)
 	if *check {
 		return runWorkspaceCheck(a, stdout, stderr)

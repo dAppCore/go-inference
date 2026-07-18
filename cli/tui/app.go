@@ -699,7 +699,7 @@ func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
 	a.sessions = manager
 	a.warnings = append([]string(nil), resources.Warnings...)
 	a.attachPreferences(resources.Preferences)
-	if result := a.attachWork(resources.Repository, a.agent); !result.OK {
+	if result := a.attachWork(resources.Repository, resources.Agent); !result.OK {
 		return result
 	}
 	values := resources.Preferences.Values()
@@ -1511,7 +1511,9 @@ func (a *app) shutdown() core.Result {
 			record(a.jobs.CancelAll())
 		}
 		record(a.drainManagedGenerations())
-		if a.agent != nil {
+		if a.resources != nil {
+			record(a.resources.closeAgent())
+		} else if a.agent != nil {
 			record(a.agent.Close())
 		}
 		a.svc.teardown("stopped (quit)")

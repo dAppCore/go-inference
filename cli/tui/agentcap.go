@@ -40,6 +40,9 @@ const (
 	agentFeatureRemote        agentFeature = "remote"
 	agentFeatureQA            agentFeature = "qa"
 	agentFeatureReview        agentFeature = "review"
+	agentFeatureChangesReview agentFeature = "changes.review"
+	agentFeatureAccept        agentFeature = "accept"
+	agentFeatureReject        agentFeature = "reject"
 	agentFeaturePRCreate      agentFeature = "pr.create"
 	agentFeaturePRMerge       agentFeature = "pr.merge"
 )
@@ -77,14 +80,56 @@ type agentSnapshot struct {
 }
 
 type agentRequest struct {
+	Feature   agentFeature
+	WorkID    string
+	Provider  string
+	Model     string
+	Input     string
+	Work      agentWorkRequest
+	Review    agentReview
+	Confirmed bool
+	EnableGit bool
+}
+
+type agentWorkRequest struct {
+	ID         string
+	ExternalID string
+	Title      string
+	Task       string
+	Repository string
+}
+
+type agentReviewRequest struct {
+	Feature  agentFeature
+	WorkID   string
+	Provider string
+	Model    string
+	Input    string
+	Work     agentWorkRequest
+}
+
+type agentReview struct {
+	Feature            agentFeature
+	Title              string
+	Body               string
+	Warning            string
+	ConfirmRequired    bool
+	GitConfirmRequired bool
+	Payload            any
+}
+
+type agentActionReceipt struct {
 	Feature agentFeature
 	WorkID  string
-	Input   string
+	RunID   string
+	Status  string
+	Detail  string
 }
 
 type agentProvider interface {
 	Capabilities() []agentCapability
 	Snapshot(ctx context.Context) core.Result
+	Review(ctx context.Context, request agentReviewRequest) core.Result
 	Run(ctx context.Context, request agentRequest) core.Result
 	Close() core.Result
 }
@@ -101,11 +146,11 @@ var agentFeatureGroups = []agentFeatureGroup{
 	{Title: "SCAN + MONITOR", Features: []agentFeature{agentFeatureScan, agentFeatureAudit, agentFeaturePipeline, agentFeatureMonitor, agentFeatureHarvest}},
 	{Title: "BRAIN + MESSAGES", Features: []agentFeature{agentFeatureBrainRecall, agentFeatureBrainRemember, agentFeatureMessage}},
 	{Title: "FLEET + FORGE", Features: []agentFeature{agentFeatureFleet, agentFeatureForge, agentFeatureRemote}},
-	{Title: "QA + REVIEW + PR", Features: []agentFeature{agentFeatureQA, agentFeatureReview, agentFeaturePRCreate, agentFeaturePRMerge}},
+	{Title: "QA + REVIEW + PR", Features: []agentFeature{agentFeatureQA, agentFeatureReview, agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject, agentFeaturePRCreate, agentFeaturePRMerge}},
 }
 
 func agentFeatureCatalog(reason string) []agentCapability {
-	catalog := make([]agentCapability, 0, 28)
+	catalog := make([]agentCapability, 0, 31)
 	for _, group := range agentFeatureGroups {
 		for _, feature := range group.Features {
 			catalog = append(catalog, agentCapability{Feature: feature, Reason: reason})
@@ -128,6 +173,8 @@ func agentFeatureTitle(feature agentFeature) string {
 		return "Create pull request"
 	case agentFeaturePRMerge:
 		return "Merge pull request"
+	case agentFeatureChangesReview:
+		return "Review changes"
 	case agentFeatureQA:
 		return "Run QA"
 	default:
@@ -161,6 +208,18 @@ func (provider *unavailableAgentProvider) Capabilities() []agentCapability {
 
 func (*unavailableAgentProvider) Snapshot(context.Context) core.Result {
 	return core.Ok(agentSnapshot{Work: []agentWorkSnapshot{}, Events: []agentEventSnapshot{}})
+}
+
+func (provider *unavailableAgentProvider) Review(_ context.Context, request agentReviewRequest) core.Result {
+	reason := defaultAgentUnavailableReason
+	if provider != nil && provider.reason != "" {
+		reason = provider.reason
+	}
+	return core.Fail(core.E(
+		"tui.agentProvider.Review",
+		core.Concat("agent review ", string(request.Feature), " is unavailable: ", reason),
+		nil,
+	))
 }
 
 func (provider *unavailableAgentProvider) Run(_ context.Context, request agentRequest) core.Result {

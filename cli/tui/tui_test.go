@@ -23,7 +23,7 @@ func TestRunWithWorkspace_Good(t *testing.T) {
 		[]string{"--check"},
 		&stdout,
 		&stderr,
-		func() core.Result { return core.Ok(resources) },
+		workspaceLoaders{Check: func() core.Result { return core.Ok(resources) }},
 	)
 
 	if code != 0 {
@@ -46,9 +46,9 @@ func TestRunWithWorkspace_Bad(t *testing.T) {
 		[]string{"--check"},
 		&stdout,
 		&stderr,
-		func() core.Result {
+		workspaceLoaders{Check: func() core.Result {
 			return core.Fail(core.E("test.run", "storage offline", nil))
-		},
+		}},
 	)
 
 	if code != 1 {
@@ -63,10 +63,32 @@ func TestRunWithWorkspace_Ugly(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	code := runWithWorkspace(context.Background(), []string{"--check"}, &stdout, &stderr, nil)
+	code := runWithWorkspace(context.Background(), []string{"--check"}, &stdout, &stderr, workspaceLoaders{})
 
 	if code != 1 || !strings.Contains(stdout.String(), "workspace loader is unavailable") {
 		t.Fatalf("nil loader = code %d frame %q", code, stdout.String())
+	}
+}
+
+func TestAgentBootstrap_CheckModeDoesNotConstructNormalAgent(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	normalCalls := 0
+	checkCalls := 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runWithWorkspace(context.Background(), []string{"--check"}, &stdout, &stderr, workspaceLoaders{
+		Normal: func() core.Result {
+			normalCalls++
+			return core.Fail(core.E("test.normal", "normal composition must not run", nil))
+		},
+		Check: func() core.Result {
+			checkCalls++
+			resources.Agent = newUnavailableAgentProvider("check mode is read-only")
+			return core.Ok(resources)
+		},
+	})
+	if code != 0 || normalCalls != 0 || checkCalls != 1 {
+		t.Fatalf("check composition = code %d normal %d check %d stderr %q", code, normalCalls, checkCalls, stderr.String())
 	}
 }
 

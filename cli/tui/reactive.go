@@ -37,7 +37,7 @@ func openReactiveState(paths appPaths) core.Result {
 
 	opened := store.New(
 		paths.State,
-		store.WithWorkspaceStateDirectory(core.Path(paths.Root, paths.Workspaces)),
+		store.WithWorkspaceStateDirectory(paths.Workspaces),
 	)
 	if !opened.OK {
 		return core.Fail(core.E("tui.openReactiveState", core.Concat("open state database: ", paths.State), resultError(opened)))

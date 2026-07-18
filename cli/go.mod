@@ -15,6 +15,7 @@ require (
 	dappco.re/go/container v0.11.0
 	dappco.re/go/io v0.15.1
 	dappco.re/go/orm v0.1.1
+	dappco.re/go/process v0.16.1
 	dappco.re/go/store v0.14.1
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -34,7 +35,6 @@ require (
 	dappco.re/go/cgo v0.11.2 // indirect
 	dappco.re/go/i18n v0.12.1 // indirect
 	dappco.re/go/log v0.13.1 // indirect
-	dappco.re/go/process v0.16.1 // indirect
 	dappco.re/go/ratelimit v0.12.1 // indirect
 	forge.lthn.ai/Snider/Enchantrix v0.0.5 // indirect
 	github.com/99designs/gqlgen v0.17.88 // indirect

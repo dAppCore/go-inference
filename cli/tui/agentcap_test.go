@@ -21,6 +21,7 @@ func TestAgentFeatureCatalog_Good(t *testing.T) {
 		agentFeatureMonitor, agentFeatureHarvest, agentFeatureBrainRecall, agentFeatureBrainRemember,
 		agentFeatureMessage, agentFeatureFleet, agentFeatureForge, agentFeatureRemote,
 		agentFeatureQA, agentFeatureReview, agentFeaturePRCreate, agentFeaturePRMerge,
+		agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject,
 	}
 	catalog := agentFeatureCatalog(reason)
 	if len(catalog) != len(want) {
@@ -53,6 +54,10 @@ func TestUnavailableAgentProvider_Bad(t *testing.T) {
 	run := provider.Run(context.Background(), agentRequest{Feature: agentFeatureDispatch, WorkID: "work-1"})
 	if run.OK || !strings.Contains(run.Error(), string(agentFeatureDispatch)) || !strings.Contains(run.Error(), "port go/agent") {
 		t.Fatalf("Run = %#v", run)
+	}
+	review := provider.Review(context.Background(), agentReviewRequest{Feature: agentFeatureDispatch, WorkID: "work-1"})
+	if review.OK || !strings.Contains(review.Error(), string(agentFeatureDispatch)) || !strings.Contains(review.Error(), "port go/agent") {
+		t.Fatalf("Review = %#v", review)
 	}
 	if result := provider.Close(); !result.OK {
 		t.Fatalf("first Close: %v", result.Value)
@@ -121,6 +126,10 @@ func (provider *fixtureAgentProvider) Capabilities() []agentCapability {
 func (provider *fixtureAgentProvider) Snapshot(context.Context) core.Result {
 	provider.snapshots++
 	return core.Ok(provider.snapshot)
+}
+
+func (*fixtureAgentProvider) Review(context.Context, agentReviewRequest) core.Result {
+	return core.Ok(agentReview{})
 }
 
 func (provider *fixtureAgentProvider) Run(context.Context, agentRequest) core.Result {
