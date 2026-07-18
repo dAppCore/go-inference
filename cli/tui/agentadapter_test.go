@@ -83,6 +83,18 @@ func TestAgentAdapter_Snapshot_Good(t *testing.T) {
 	}
 }
 
+func TestAgentAdapter_SnapshotProjectWithoutRunDoesNotCreateWork(t *testing.T) {
+	adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{Projects: []work.Project{{ID: "project-only", RepositoryName: "private-project"}}}})
+	result := adapter.Snapshot(context.Background())
+	if !result.OK {
+		t.Fatalf("Snapshot: %s", result.Error())
+	}
+	snapshot := result.Value.(agentSnapshot)
+	if len(snapshot.Work) != 0 {
+		t.Fatalf("project-only snapshot created Work: %#v", snapshot.Work)
+	}
+}
+
 func TestAgentAdapter_ProjectAndDispatchReview_Good(t *testing.T) {
 	projectReview := orchestrator.ProjectReview{
 		Work:           work.Item{ID: "work-1", Title: "Ship it", Task: "Implement the slice", Repository: "/src/project"},

@@ -111,6 +111,44 @@ func TestCommandPalette_AgentWorkStatus(t *testing.T) {
 	}
 }
 
+func TestCommandPalette_AgentNativeRunAndReviewState(t *testing.T) {
+	caps := []agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureChangesReview, Available: true}, {Feature: agentFeatureAccept, Available: true}, {Feature: agentFeatureReject, Available: true}}
+	selected := workItemRecord{ID: "local", Status: "running"}
+	state := agentWorkSnapshot{NativeRunID: "run-7"}
+	p := newCommandPalette(newUIStyles(midnightTheme()))
+	p.SetAgentContext(caps, &selected, state)
+	if !p.byID[agentCommandID(agentFeatureCancel)].Available || !p.byID[agentCommandID(agentFeatureChangesReview)].Available {
+		t.Fatalf("run actions unavailable: %#v", p.byID)
+	}
+	if p.byID[agentCommandID(agentFeatureAccept)].Available || p.byID[agentCommandID(agentFeatureReject)].Available {
+		t.Fatalf("accept/reject available before reviewed receipt")
+	}
+	state.ReviewID, state.ReviewStatus, state.Review = "review-1", "prepared", agentReview{Feature: agentFeatureChangesReview, Payload: "opaque", AcceptanceAllowed: true}
+	p.SetAgentContext(caps, &selected, state)
+	if !p.byID[agentCommandID(agentFeatureAccept)].Available || !p.byID[agentCommandID(agentFeatureReject)].Available {
+		t.Fatalf("review actions unavailable: %#v", p.byID)
+	}
+	state.ReviewStatus = "validation_failed"
+	p.SetAgentContext(caps, &selected, state)
+	if p.byID[agentCommandID(agentFeatureAccept)].Available || !p.byID[agentCommandID(agentFeatureReject)].Available {
+		t.Fatalf("failed review actions = %#v", p.byID)
+	}
+}
+
+func TestCommandPalette_AgentQueueState(t *testing.T) {
+	caps := []agentCapability{{Feature: agentFeatureQueueStart, Available: true}, {Feature: agentFeatureQueueStop, Available: true}}
+	for _, test := range []struct {
+		status      string
+		start, stop bool
+	}{{"frozen", true, false}, {"accepting", false, true}, {"draining", false, false}} {
+		p := newCommandPalette(newUIStyles(midnightTheme()))
+		p.SetAgentContext(caps, nil, agentWorkSnapshot{QueueStatus: test.status})
+		if p.byID[agentCommandID(agentFeatureQueueStart)].Available != test.start || p.byID[agentCommandID(agentFeatureQueueStop)].Available != test.stop {
+			t.Fatalf("queue %s = %#v", test.status, p.byID)
+		}
+	}
+}
+
 func TestCommandPaletteLocalRefresh_Bad(t *testing.T) {
 	palette := newCommandPalette(newUIStyles(midnightTheme()))
 	a := newApp("", 0, 64)

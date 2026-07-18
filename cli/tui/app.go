@@ -60,6 +60,8 @@ type app struct {
 	work               *workPanel
 	workEditor         *workEditor
 	launchReview       *launchReviewOverlay
+	answerOverlay      *agentAnswerOverlay
+	changeOverlay      *changeAcceptanceOverlay
 	agentReview        agentReview
 	agentRequest       agentRequest
 	agentCommand       tea.Cmd
@@ -67,6 +69,7 @@ type app struct {
 	agentOperationID   uint64
 	agentOperationNext uint64
 	agentInFlight      bool
+	agentRefreshArmed  bool
 	knowledge          *knowledgeLibrary
 	attachments        []attachmentRecord
 
@@ -136,6 +139,8 @@ type workspaceReadyMsg struct{ resources *workspaceResources }
 type workspaceFailedMsg struct{ err error }
 type runtimeDetectedMsg struct{ result core.Result }
 type knowledgeDiscoveredMsg struct{ result core.Result }
+type agentSnapshotMsg struct{ result core.Result }
+type agentRefreshMsg struct{}
 
 type sessionGeneration struct {
 	generation *generation
@@ -247,7 +252,7 @@ func (lifecycle *appLifecycle) closePending() {
 
 func lifecycleOwnsMessage(message tea.Msg) bool {
 	switch message.(type) {
-	case loadedMsg, workspaceReadyMsg, agentActionMsg:
+	case loadedMsg, workspaceReadyMsg, agentActionMsg, agentSnapshotMsg:
 		return true
 	default:
 		return false
@@ -455,7 +460,15 @@ func (a *app) refreshAgentPalette() {
 			selected = &record
 		}
 	}
-	a.palette.SetAgentContext(a.agent.Capabilities(), selected)
+	state := agentWorkSnapshot{}
+	if a.work != nil {
+		state.QueueStatus, state.QueueReason = a.work.queueStatus, a.work.queueReason
+	}
+	if selected != nil {
+		state = a.work.AgentState(*selected)
+		state.QueueStatus, state.QueueReason = a.work.queueStatus, a.work.queueReason
+	}
+	a.palette.SetAgentContext(a.agent.Capabilities(), selected, state)
 	a.palette.SetWorkSelection(selected != nil)
 }
 
@@ -513,17 +526,39 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 	if agentFeatureNeedsWork(feature) && !hasSelected {
 		return core.Fail(core.E("tui.app.queueAgentAction", "select a Work item first", nil))
 	}
+	state := agentWorkSnapshot{QueueStatus: a.work.queueStatus, QueueReason: a.work.queueReason}
 	if hasSelected {
-		if actionAvailable, reason := agentCommandAvailability(capability, &selected); !actionAvailable {
+		state = a.work.AgentState(selected)
+		state.QueueStatus, state.QueueReason = a.work.queueStatus, a.work.queueReason
+	}
+	if hasSelected || feature == agentFeatureQueueStart || feature == agentFeatureQueueStop {
+		var selection *workItemRecord
+		if hasSelected {
+			selection = &selected
+		}
+		if actionAvailable, reason := agentCommandAvailability(capability, selection, state); !actionAvailable {
 			return core.Fail(core.E("tui.app.queueAgentAction", core.Concat(agentFeatureTitle(feature), " is unavailable: ", reason), nil))
 		}
 	}
 	request := agentRequest{Feature: feature}
 	if hasSelected {
 		request.WorkID = selected.ID
+		state := a.work.AgentState(selected)
+		request.RunID, request.QuestionID = state.NativeRunID, state.QuestionID
+		if feature == agentFeatureResume {
+			request.Input = state.AnswerID
+		}
+		if feature == agentFeatureAccept {
+			request.Review = state.Review
+		}
 		request.Work = agentWorkRequest{ID: selected.ID, ExternalID: selected.ExternalID, Title: selected.Title, Task: selected.Task, Repository: selected.Repo}
 	}
 	a.beginAgentOperation(request, agentReviewNone)
+	if feature == agentFeatureAnswer {
+		a.answerOverlay = newAgentAnswerOverlay(request.RunID, request.QuestionID, selected.Question)
+		a.activeOverlay = overlayAgentAnswer
+		return core.Ok(nil)
+	}
 	if feature == agentFeatureDispatch || feature == agentFeatureChangesReview {
 		if feature == agentFeatureDispatch {
 			a.agentStage = agentReviewProject
@@ -575,8 +610,12 @@ func (a *app) resetAgentOperation() {
 
 func (a *app) agentReviewCommand(operationID uint64, request agentRequest, stage agentReviewStage) tea.Cmd {
 	return func() tea.Msg {
+		workID := request.WorkID
+		if request.Feature == agentFeatureChangesReview && request.RunID != "" {
+			workID = request.RunID
+		}
 		result := a.agent.Review(a.lifecycle.context, agentReviewRequest{
-			Feature: request.Feature, WorkID: request.WorkID, Provider: request.Provider,
+			Feature: request.Feature, WorkID: workID, Provider: request.Provider,
 			Model: request.Model, Input: request.Input, Work: request.Work,
 		})
 		return agentActionMsg{operationID: operationID, feature: request.Feature, stage: stage, request: request, result: result}
@@ -609,6 +648,47 @@ func (a *app) takeAgentCommand() tea.Cmd {
 	return command
 }
 
+func (a *app) agentSnapshotCommand() tea.Cmd {
+	return func() tea.Msg {
+		if a == nil || a.agent == nil {
+			return agentSnapshotMsg{result: core.Fail(core.E("tui.app.agentSnapshot", "agent provider is unavailable", nil))}
+		}
+		return agentSnapshotMsg{result: a.agent.Snapshot(a.lifecycle.context)}
+	}
+}
+
+func (a *app) hasLiveAgentWork() bool {
+	if a == nil || a.work == nil {
+		return false
+	}
+	for _, record := range a.work.Items() {
+		state := a.work.AgentState(record)
+		if state.NativeRunID == "" {
+			continue
+		}
+		switch core.Lower(core.Trim(record.Status)) {
+		case "queued", "preparing", "running", "cancelling":
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) armAgentRefresh() tea.Cmd {
+	if a == nil || a.lifecycle == nil || a.lifecycle.isStopped() || a.agentRefreshArmed || !a.hasLiveAgentWork() {
+		return nil
+	}
+	a.agentRefreshArmed = true
+	return a.lifecycle.command(func() tea.Msg {
+		select {
+		case <-time.After(time.Second):
+			return agentRefreshMsg{}
+		case <-a.lifecycle.context.Done():
+			return lifecycleStoppedMsg{}
+		}
+	})
+}
+
 func (a *app) confirmAgentSelection() core.Result {
 	if a == nil || a.launchReview == nil {
 		return core.Fail(core.E("tui.app.confirmAgentSelection", "agent selection is unavailable", nil))
@@ -635,6 +715,12 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if review, ok := message.result.Value.(agentReview); ok {
+		if message.feature == agentFeatureChangesReview {
+			a.agentRequest, a.agentReview = message.request, review
+			a.changeOverlay = newChangeAcceptanceOverlay(review)
+			a.activeOverlay = overlayChangeReview
+			return a, nil
+		}
 		a.agentRequest, a.agentReview, a.agentStage = message.request, review, message.stage
 		switch message.stage {
 		case agentReviewProject:
@@ -647,6 +733,11 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 			a.activeOverlay = overlayLaunchReview
 		}
 		return a, nil
+	}
+	if receipt, ok := message.result.Value.(agentActionReceipt); ok && receipt.Feature == agentFeatureAnswer && a.work != nil {
+		state := a.work.agentWork[message.request.WorkID]
+		state.AnswerID, state.ResumeRunID = receipt.Detail, receipt.RunID
+		a.work.agentWork[message.request.WorkID] = state
 	}
 	if receipt, ok := message.result.Value.(agentActionReceipt); ok && receipt.Feature == agentFeatureDispatch {
 		workID := core.Trim(message.request.WorkID)
@@ -662,11 +753,16 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		if a.work != nil && workID != "" && receipt.RunID != "" {
+			state := a.work.agentWork[workID]
+			state.NativeRunID, state.Status = receipt.RunID, receipt.Status
+			a.work.agentWork[workID] = state
+		}
 	}
 	a.activeOverlay, a.launchReview = overlayNone, nil
 	a.resetAgentOperation()
 	a.refreshAgentPalette()
-	return a, nil
+	return a, a.lifecycle.command(a.agentSnapshotCommand())
 }
 
 func (a *app) attachKnowledge(repository workspaceRepository, maxBytes int64) core.Result {
@@ -831,6 +927,28 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		return a.applyAgentAction(msg)
+
+	case agentRefreshMsg:
+		a.agentRefreshArmed = false
+		return a, a.lifecycle.command(a.agentSnapshotCommand())
+
+	case agentSnapshotMsg:
+		if !msg.result.OK {
+			a.errText = msg.result.Error()
+			return a, a.armAgentRefresh()
+		}
+		snapshot, ok := msg.result.Value.(agentSnapshot)
+		if !ok {
+			a.errText = "invalid agent snapshot"
+			return a, a.armAgentRefresh()
+		}
+		if a.work != nil {
+			if result := a.work.ApplyAgentSnapshot(snapshot); !result.OK {
+				a.errText = result.Error()
+			}
+		}
+		a.refreshAgentPalette()
+		return a, a.armAgentRefresh()
 
 	case tea.WindowSizeMsg:
 		offset := a.view.YOffset
@@ -1841,9 +1959,9 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.launchReview.Update(message)
 		}
 		a.activeOverlay = overlayNone
-		a.workEditor, a.launchReview = nil, nil
+		a.workEditor, a.launchReview, a.answerOverlay, a.changeOverlay = nil, nil, nil, nil
 		switch overlay {
-		case overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview:
+		case overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview, overlayAgentAnswer, overlayChangeReview:
 			a.abortAgentOperation()
 		}
 		return a, nil
@@ -1886,6 +2004,39 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 			a.activeOverlay, a.workEditor = overlayNone, nil
+		case overlayAgentAnswer:
+			if a.answerOverlay == nil || !a.answerOverlay.Update(message) {
+				a.errText = "an answer is required"
+				return a, nil
+			}
+			a.agentRequest.Input = a.answerOverlay.answer()
+			a.agentInFlight = true
+			a.agentCommand = a.lifecycle.command(a.agentRunCommand(a.agentOperationID, a.agentRequest, agentReviewNone))
+			a.activeOverlay, a.answerOverlay = overlayNone, nil
+			return a, a.takeAgentCommand()
+		case overlayChangeReview:
+			if a.changeOverlay == nil {
+				a.errText = "change review is unavailable"
+				return a, nil
+			}
+			if !a.changeOverlay.review.AcceptanceAllowed {
+				a.errText = "conflicts or failed validation prevent acceptance; reject this reviewed result or retry the run"
+				return a, nil
+			}
+			if a.changeOverlay.review.NeedsAcknowledgement && !a.changeOverlay.acknowledged {
+				a.errText = "acknowledge the missing validation before acceptance"
+				return a, nil
+			}
+			if !a.changeOverlay.final {
+				a.changeOverlay.final = true
+				return a, nil
+			}
+			request := a.agentRequest
+			request.Feature, request.Review, request.Confirmed = agentFeatureAccept, a.changeOverlay.review, true
+			a.agentRequest, a.agentInFlight = request, true
+			a.agentCommand = a.lifecycle.command(a.agentRunCommand(a.agentOperationID, request, agentReviewLaunch))
+			a.activeOverlay, a.changeOverlay = overlayNone, nil
+			return a, a.takeAgentCommand()
 		case overlayAgentSelection:
 			if result := a.confirmAgentSelection(); !result.OK {
 				a.errText = result.Error()
@@ -1964,6 +2115,14 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case overlayWorkEditor:
 		if a.workEditor != nil {
 			command = a.workEditor.Update(message)
+		}
+	case overlayAgentAnswer:
+		if a.answerOverlay != nil {
+			a.answerOverlay.Update(message)
+		}
+	case overlayChangeReview:
+		if a.changeOverlay != nil && message.String() == "a" {
+			a.changeOverlay.acknowledged = true
 		}
 	case overlayProjectReview, overlayGitEnableReview, overlayLaunchReview, overlayAgentSelection:
 		// Reviews deliberately consume keys until an explicit confirm or cancel.
@@ -2553,6 +2712,18 @@ func (a app) overlayView() string {
 			body = overlayEmpty("Work editor", "work editor is unavailable")
 		} else {
 			body = a.workEditor.View(bodyWidth, bodyHeight, a.styles)
+		}
+	case overlayAgentAnswer:
+		if a.answerOverlay == nil {
+			body = overlayEmpty("Answer agent question", "question is unavailable")
+		} else {
+			body = a.answerOverlay.View(bodyWidth, bodyHeight, a.styles)
+		}
+	case overlayChangeReview:
+		if a.changeOverlay == nil {
+			body = overlayEmpty("Review agent changes", "review receipt is unavailable")
+		} else {
+			body = a.changeOverlay.View(bodyWidth, bodyHeight, a.styles)
 		}
 	case overlayProjectReview:
 		body = newLaunchReviewOverlay(a.agentReview, a.agentRequest.Provider, a.agentRequest.Model).View(bodyWidth, bodyHeight, a.styles)

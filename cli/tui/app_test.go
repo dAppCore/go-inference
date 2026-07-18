@@ -1325,6 +1325,88 @@ func TestApp_AgentReviewReceiptUsesRequestedLocalWorkIDAndResets(t *testing.T) {
 	}
 }
 
+func TestApp_AgentActionTargetsNativeRunAndRequiresReviewReceipt(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{caps: []agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureAnswer, Available: true}, {Feature: agentFeatureChangesReview, Available: true}, {Feature: agentFeatureAccept, Available: true}, {Feature: agentFeatureReject, Available: true}}, reviews: []agentReview{{Feature: agentFeatureChangesReview, Title: "Review", ConfirmRequired: true, Payload: "opaque-review"}}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("local")
+	if result := a.work.CreateWork("Local", "task", "/tmp/repo"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.work.updateWork("snapshot", "local", func(record *workItemRecord) { record.Status = "running" }); !result.OK {
+		t.Fatalf("update: %v", result.Value)
+	}
+	a.work.agentWork["local"] = agentWorkSnapshot{NativeRunID: "run-immutable"}
+	if result := a.queueAgentAction(agentFeatureCancel); !result.OK {
+		t.Fatalf("cancel: %v", result.Value)
+	}
+	if a.agentRequest.WorkID != "local" || a.agentRequest.RunID != "run-immutable" {
+		t.Fatalf("cancel request = %#v", a.agentRequest)
+	}
+	if result := a.queueAgentAction(agentFeatureAccept); result.OK {
+		t.Fatal("accepted without exact change review receipt")
+	}
+}
+
+func TestApp_AgentRefreshRunsWhileAnotherPanelIsActive(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, newUnavailableAgentProvider(defaultAgentUnavailableReason)); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("local")
+	if result := a.work.CreateWork("Local", "task", "/tmp/repo"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.work.updateWork("running", "local", func(record *workItemRecord) { record.Status = "running" }); !result.OK {
+		t.Fatalf("update: %v", result.Value)
+	}
+	a.work.agentWork["local"] = agentWorkSnapshot{NativeRunID: "run-1", Status: "running"}
+	a.activePanel = panelChat
+	if command := a.armAgentRefresh(); command == nil || !a.agentRefreshArmed {
+		t.Fatalf("refresh = %v armed=%v", command != nil, a.agentRefreshArmed)
+	}
+}
+
+func TestApp_AgentAnswerStoresExactResumeIdentity(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{caps: []agentCapability{{Feature: agentFeatureAnswer, Available: true}, {Feature: agentFeatureResume, Available: true}}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("local")
+	if result := a.work.CreateWork("Local", "task", "/tmp/repo"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.work.updateWork("waiting", "local", func(record *workItemRecord) { record.Status = "waiting"; record.Question = "Which target?" }); !result.OK {
+		t.Fatalf("update: %v", result.Value)
+	}
+	a.work.agentWork["local"] = agentWorkSnapshot{NativeRunID: "run-parent", QuestionID: "question-1"}
+	if result := a.queueAgentAction(agentFeatureAnswer); !result.OK {
+		t.Fatalf("answer: %v", result.Value)
+	}
+	a.agentInFlight = true
+	model, _ := a.Update(agentActionMsg{operationID: a.agentOperationID, feature: agentFeatureAnswer, request: a.agentRequest, result: core.Ok(agentActionReceipt{Feature: agentFeatureAnswer, WorkID: "local", RunID: "run-reserved", Detail: "answer-1", Status: "answered"})})
+	a = model.(app)
+	if result := a.work.ApplyAgentSnapshot(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-parent", Status: "waiting"}}}); !result.OK {
+		t.Fatalf("snapshot: %v", result.Value)
+	}
+	state := a.work.AgentState(a.work.Items()[0])
+	if state.NativeRunID != "run-parent" || state.AnswerID != "answer-1" || state.ResumeRunID != "run-reserved" {
+		t.Fatalf("answer state = %#v", state)
+	}
+	if result := a.queueAgentAction(agentFeatureResume); !result.OK || a.agentRequest.RunID != "run-parent" || a.agentRequest.Input != "answer-1" {
+		t.Fatalf("resume request = %#v / %#v", result, a.agentRequest)
+	}
+}
+
 func TestApp_AgentReviewEscapeAbortsTransaction(t *testing.T) {
 	for _, overlay := range []overlayKind{overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview} {
 		t.Run(core.Sprintf("overlay-%d", overlay), func(t *testing.T) {

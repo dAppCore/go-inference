@@ -54,20 +54,32 @@ type agentCapability struct {
 }
 
 type agentWorkSnapshot struct {
-	ExternalID string
-	Title      string
-	Status     string
-	Agent      string
-	Repo       string
-	Branch     string
-	Runtime    string
-	Question   string
-	PRURL      string
+	ExternalID   string
+	NativeRunID  string
+	QuestionID   string
+	AnswerID     string
+	ResumeRunID  string
+	QueueStatus  string
+	QueueReason  string
+	ReviewID     string
+	ReviewStatus string
+	Review       agentReview
+	Title        string
+	Status       string
+	Agent        string
+	Repo         string
+	Branch       string
+	Runtime      string
+	Question     string
+	PRURL        string
 }
 
 type agentEventSnapshot struct {
 	ExternalID string
 	WorkID     string
+	RunID      string
+	Sequence   int64
+	Stream     string
 	Kind       string
 	Title      string
 	Detail     string
@@ -75,20 +87,24 @@ type agentEventSnapshot struct {
 }
 
 type agentSnapshot struct {
-	Work   []agentWorkSnapshot
-	Events []agentEventSnapshot
+	Work        []agentWorkSnapshot
+	Events      []agentEventSnapshot
+	QueueStatus string
+	QueueReason string
 }
 
 type agentRequest struct {
-	Feature   agentFeature
-	WorkID    string
-	Provider  string
-	Model     string
-	Input     string
-	Work      agentWorkRequest
-	Review    agentReview
-	Confirmed bool
-	EnableGit bool
+	Feature    agentFeature
+	WorkID     string
+	RunID      string
+	QuestionID string
+	Provider   string
+	Model      string
+	Input      string
+	Work       agentWorkRequest
+	Review     agentReview
+	Confirmed  bool
+	EnableGit  bool
 }
 
 type agentWorkRequest struct {
@@ -109,13 +125,15 @@ type agentReviewRequest struct {
 }
 
 type agentReview struct {
-	Feature            agentFeature
-	Title              string
-	Body               string
-	Warning            string
-	ConfirmRequired    bool
-	GitConfirmRequired bool
-	Payload            any
+	Feature              agentFeature
+	Title                string
+	Body                 string
+	Warning              string
+	ConfirmRequired      bool
+	GitConfirmRequired   bool
+	NeedsAcknowledgement bool
+	AcceptanceAllowed    bool
+	Payload              any
 }
 
 type agentActionReceipt struct {

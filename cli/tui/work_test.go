@@ -11,6 +11,72 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+func TestWorkPanel_AgentSnapshotKeepsLocalEventsAndOrderedLogs(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	now := time.Date(2026, time.July, 18, 11, 0, 0, 0, time.UTC)
+	provider := &fixtureAgentProvider{snapshot: agentSnapshot{
+		Work: []agentWorkSnapshot{{ExternalID: "local-1", NativeRunID: "run-9", Title: "Provider title", Repo: "/provider/repo", Status: "running"}},
+		Events: []agentEventSnapshot{
+			{ExternalID: "stderr-2", WorkID: "local-1", RunID: "run-9", Sequence: 2, Stream: "stderr", Kind: "log.stderr", Detail: "second", CreatedAt: now},
+			{ExternalID: "stdout-1", WorkID: "local-1", RunID: "run-9", Sequence: 1, Stream: "stdout", Kind: "log.stdout", Detail: "first", CreatedAt: now},
+		},
+	}}
+	opened := newWorkPanel(repository, provider, sequenceIDs("local-1"), func() time.Time { return now })
+	if !opened.OK {
+		t.Fatalf("newWorkPanel: %v", opened.Value)
+	}
+	panel := opened.Value.(*workPanel)
+	if result := panel.CreateWork("Local", "keep local identity", "/tmp/local"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	local := panel.Items()[0]
+	if result := repository.SaveEvent(eventRecord{ID: "local-event", SessionID: workEventSessionID(local), WorkItemID: local.ID, Kind: "local.note", Status: "recorded", Title: "Local note", PayloadJSON: "{}", CreatedAt: now}); !result.OK {
+		t.Fatalf("SaveEvent: %v", result.Value)
+	}
+	if result := panel.Refresh(context.Background()); !result.OK {
+		t.Fatalf("Refresh: %v", result.Value)
+	}
+	if items := panel.Items(); len(items) != 1 || items[0].ID != local.ID || items[0].Title != "Local" || items[0].Repo != "/tmp/local" || panel.AgentState(items[0]).NativeRunID != "run-9" {
+		t.Fatalf("local identity/run = %#v / %#v", items, panel.AgentState(items[0]))
+	}
+	events := panel.Events(local.ID)
+	if len(events) != 3 || events[0].Kind != "log.stdout" || events[1].Kind != "log.stderr" || events[2].ID != "local-event" {
+		t.Fatalf("merged events = %#v", events)
+	}
+	if stored := repository.Events(workEventSessionID(local)).Value.([]eventRecord); len(stored) != 1 || stored[0].ID != "local-event" {
+		t.Fatalf("provider events were copied into lem_events: %#v", stored)
+	}
+	view := panel.View(120, 24, newUIStyles(midnightTheme()))
+	if !strings.Contains(view, "STDOUT") || !strings.Contains(view, "STDERR") || !strings.Contains(view, "first") || !strings.Contains(view, "second") {
+		t.Fatalf("live log view:\n%s", view)
+	}
+}
+
+func TestWorkPanel_AgentStatusRenderingMatrix(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	statuses := []string{"queued", "preparing", "running", "completed", "waiting", "cancelling", "cancelled", "failed", "interrupted", "accepted", "rejected"}
+	for index, status := range statuses {
+		record := testWorkRecord("status-"+status, status, status, time.Now().Add(time.Duration(index)*time.Second))
+		if result := repository.SaveWorkItem(record); !result.OK {
+			t.Fatalf("SaveWorkItem(%s): %v", status, result.Value)
+		}
+	}
+	opened := newWorkPanel(repository, newUnavailableAgentProvider(defaultAgentUnavailableReason), nil, time.Now)
+	if !opened.OK {
+		t.Fatalf("newWorkPanel: %v", opened.Value)
+	}
+	panel := opened.Value.(*workPanel)
+	for _, status := range statuses {
+		panel.selectWork("status-" + status)
+		view := panel.View(120, 22, newUIStyles(midnightTheme()))
+		if !strings.Contains(view, strings.ToUpper(status)) {
+			t.Fatalf("status %s was not rendered:\n%s", status, view)
+		}
+	}
+}
+
 func TestWorkPanel_Good(t *testing.T) {
 	repository := openTestDuckRepository(t)
 	defer closeTestDuckRepository(t, repository)

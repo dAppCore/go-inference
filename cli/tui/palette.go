@@ -165,7 +165,7 @@ func (palette *commandPalette) SetAgentCapabilities(capabilities []agentCapabili
 	palette.SetAgentContext(capabilities, nil)
 }
 
-func (palette *commandPalette) SetAgentContext(capabilities []agentCapability, selected *workItemRecord) {
+func (palette *commandPalette) SetAgentContext(capabilities []agentCapability, selected *workItemRecord, state ...agentWorkSnapshot) {
 	if palette == nil {
 		return
 	}
@@ -175,7 +175,7 @@ func (palette *commandPalette) SetAgentContext(capabilities []agentCapability, s
 			commands = append(commands, command)
 		}
 	}
-	commands = append(commands, agentWorkspaceCommandsForContext(capabilities, selected)...)
+	commands = append(commands, agentWorkspaceCommandsForContext(capabilities, selected, state...)...)
 	items := make([]list.Item, 0, len(commands))
 	byID := make(map[commandID]workspaceCommand, len(commands))
 	for _, command := range commands {
@@ -347,11 +347,11 @@ func agentWorkspaceCommands(capabilities []agentCapability) []workspaceCommand {
 	return agentWorkspaceCommandsForContext(capabilities, nil)
 }
 
-func agentWorkspaceCommandsForContext(capabilities []agentCapability, selected *workItemRecord) []workspaceCommand {
+func agentWorkspaceCommandsForContext(capabilities []agentCapability, selected *workItemRecord, state ...agentWorkSnapshot) []workspaceCommand {
 	commands := make([]workspaceCommand, 0, len(capabilities))
 	for _, capability := range capabilities {
 		capability := capability
-		available, reason := agentCommandAvailability(capability, selected)
+		available, reason := agentCommandAvailability(capability, selected, state...)
 		commands = append(commands, workspaceCommand{
 			ID:          agentCommandID(capability.Feature),
 			Title:       agentFeatureTitle(capability.Feature),
@@ -371,9 +371,27 @@ func agentWorkspaceCommandsForContext(capabilities []agentCapability, selected *
 	return commands
 }
 
-func agentCommandAvailability(capability agentCapability, selected *workItemRecord) (bool, string) {
+func agentCommandAvailability(capability agentCapability, selected *workItemRecord, state ...agentWorkSnapshot) (bool, string) {
 	if !capability.Available {
 		return false, capability.Reason
+	}
+	selectedState := agentWorkSnapshot{}
+	hasSnapshotState := len(state) > 0
+	if hasSnapshotState {
+		selectedState = state[0]
+	}
+	if capability.Feature == agentFeatureQueueStart || capability.Feature == agentFeatureQueueStop {
+		if !hasSnapshotState {
+			return true, ""
+		}
+		queue := core.Lower(core.Trim(selectedState.QueueStatus))
+		if queue == "" {
+			return true, ""
+		}
+		if capability.Feature == agentFeatureQueueStart {
+			return queue == "frozen", "queue is not frozen; draining completes existing work before it can restart"
+		}
+		return queue == "accepting", "queue is not accepting; it is already frozen or draining"
 	}
 	if !agentFeatureNeedsWork(capability.Feature) {
 		return true, ""
@@ -389,21 +407,32 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 		allowed = status == "" || status == workStatusActive || status == "ready"
 		reason = "selected Work must be ready before it can dispatch"
 	case agentFeatureCancel:
-		allowed = status == "queued" || status == "running"
+		allowed = (!hasSnapshotState || selectedState.NativeRunID != "") && (status == "queued" || status == "preparing" || status == "running" || status == "cancelling")
 		reason = "selected Work is not queued or running"
 	case agentFeatureAnswer:
-		allowed = status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input"
+		allowed = (!hasSnapshotState || (selectedState.NativeRunID != "" && selectedState.QuestionID != "")) && (status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input")
 		reason = "selected Work is not waiting for an answer"
 	case agentFeatureRetry:
-		allowed = status == workStatusFailed || status == "error" || status == "cancelled" || status == "canceled"
+		allowed = (!hasSnapshotState || selectedState.NativeRunID != "") && (status == workStatusFailed || status == "error" || status == "cancelled" || status == "canceled")
 		reason = "selected Work is not failed or cancelled"
 	case agentFeatureResume:
-		allowed = status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input" || status == "interrupted"
-		reason = "selected Work is not waiting or interrupted"
+		allowed = (!hasSnapshotState || (selectedState.NativeRunID != "" && selectedState.AnswerID != "")) && (status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input" || status == "interrupted")
+		reason = "answer the selected native run before resuming it"
 	case agentFeatureChangesReview:
-		return false, "change review overlay is scheduled for Task 14"
-	case agentFeatureAccept, agentFeatureReject:
-		return false, "no durable review-ready state is exposed yet"
+		if !hasSnapshotState {
+			return false, "change review overlay is scheduled for Task 14"
+		}
+		return selectedState.NativeRunID != "", "selected Work has no immutable native run"
+	case agentFeatureAccept:
+		if !hasSnapshotState {
+			return false, "no durable review-ready state is exposed yet"
+		}
+		return selectedState.ReviewID != "" && selectedState.ReviewStatus == "prepared" && selectedState.Review.Payload != nil && selectedState.Review.AcceptanceAllowed && !selectedState.Review.NeedsAcknowledgement, "review changes first; conflicts, failed validation, and unacknowledged validation require review"
+	case agentFeatureReject:
+		if !hasSnapshotState {
+			return false, "no durable review-ready state is exposed yet"
+		}
+		return selectedState.ReviewID != "" && selectedState.ReviewStatus != "accepted" && selectedState.ReviewStatus != "rejected", "review changes first before rejecting a native run"
 	}
 	if !allowed {
 		return false, reason
@@ -678,6 +707,8 @@ const (
 	overlayGitEnableReview
 	overlayLaunchReview
 	overlayAgentSelection
+	overlayAgentAnswer
+	overlayChangeReview
 )
 
 type helpOverlay struct {

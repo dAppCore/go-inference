@@ -122,6 +122,92 @@ type launchReviewOverlay struct {
 	confirmed     bool
 }
 
+type agentAnswerOverlay struct {
+	runID      string
+	questionID string
+	question   string
+	input      textarea.Model
+}
+
+func newAgentAnswerOverlay(runID, questionID, question string) *agentAnswerOverlay {
+	input := textarea.New()
+	input.Prompt = ""
+	input.Placeholder = "Type the answer for this native run"
+	input.SetHeight(4)
+	input.ShowLineNumbers = false
+	input.Focus()
+	return &agentAnswerOverlay{runID: core.Trim(runID), questionID: core.Trim(questionID), question: core.Trim(question), input: input}
+}
+
+func (overlay *agentAnswerOverlay) Update(message tea.KeyMsg) bool {
+	if overlay == nil {
+		return false
+	}
+	if message.String() == "enter" {
+		return overlay.answer() != ""
+	}
+	var command tea.Cmd
+	overlay.input, command = overlay.input.Update(message)
+	_ = command
+	return false
+}
+
+func (overlay *agentAnswerOverlay) answer() string {
+	if overlay == nil {
+		return ""
+	}
+	return core.Trim(overlay.input.Value())
+}
+
+func (overlay *agentAnswerOverlay) View(width, height int, styles uiStyles) string {
+	if overlay == nil {
+		return ""
+	}
+	overlay.input.SetWidth(max(12, width-6))
+	return fitPane(core.Join("\n", "Answer agent question", "", overlay.question, "", overlay.input.View(), "", "enter submits · esc cancels"), width, height, styles.panel)
+}
+
+type changeAcceptanceOverlay struct {
+	review       agentReview
+	acknowledged bool
+	final        bool
+}
+
+func newChangeAcceptanceOverlay(review agentReview) *changeAcceptanceOverlay {
+	return &changeAcceptanceOverlay{review: review}
+}
+
+func (overlay *changeAcceptanceOverlay) Update(message tea.KeyMsg) bool {
+	if overlay == nil || message.String() != "enter" {
+		return false
+	}
+	if !overlay.review.AcceptanceAllowed {
+		return false
+	}
+	if overlay.review.NeedsAcknowledgement && !overlay.acknowledged {
+		return false
+	}
+	if !overlay.final {
+		overlay.final = true
+		return false
+	}
+	return true
+}
+
+func (overlay *changeAcceptanceOverlay) View(width, height int, styles uiStyles) string {
+	if overlay == nil {
+		return ""
+	}
+	prompt := "enter continues · esc cancels"
+	if overlay.review.NeedsAcknowledgement && !overlay.acknowledged {
+		prompt = "a acknowledges no validation · enter continues · esc cancels"
+	}
+	if overlay.final {
+		prompt = "enter applies this exact reviewed receipt · esc cancels"
+	}
+	return fitPane(core.Join("\n", overlay.review.Title, "", overlay.review.Warning, "", overlay.review.Body, "", prompt), width, height, styles.panel)
+}
+
 func newLaunchReviewOverlay(review agentReview, provider, model string) *launchReviewOverlay {
 	provider = core.Trim(provider)
 	model = core.Trim(model)

@@ -85,6 +85,26 @@ func TestLaunchReview_ProviderAndModelSelection(t *testing.T) {
 	}
 }
 
+func TestAgentAnswerAndAcceptanceOverlays_RequireExplicitConfirmation(t *testing.T) {
+	answer := newAgentAnswerOverlay("run-9", "question-2", "Which target?")
+	answer.input.SetValue("release")
+	if accepted := answer.Update(tea.KeyMsg{Type: tea.KeyEnter}); !accepted || answer.answer() != "release" {
+		t.Fatalf("answer confirmation = %v/%q", accepted, answer.answer())
+	}
+	review := agentReview{Feature: agentFeatureChangesReview, Title: "Review agent changes", Body: "Diff:\n+change", Warning: "No validation command is configured; acknowledge this explicitly.", ConfirmRequired: true, NeedsAcknowledgement: true, AcceptanceAllowed: true}
+	confirm := newChangeAcceptanceOverlay(review)
+	if confirm.Update(tea.KeyMsg{Type: tea.KeyEnter}) {
+		t.Fatal("accepted without acknowledgement")
+	}
+	confirm.acknowledged = true
+	if confirm.Update(tea.KeyMsg{Type: tea.KeyEnter}) || !confirm.final {
+		t.Fatal("acknowledged review did not open final confirmation")
+	}
+	if !confirm.Update(tea.KeyMsg{Type: tea.KeyEnter}) {
+		t.Fatal("final confirmation was not explicit")
+	}
+}
+
 type launchReviewProvider struct {
 	caps           []agentCapability
 	reviews        []agentReview

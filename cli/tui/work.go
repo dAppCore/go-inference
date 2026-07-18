@@ -21,6 +21,8 @@ const (
 	workStatusFailed    = "failed"
 )
 
+const maxRenderedAgentEvents = 200
+
 type workListItem struct{ record workItemRecord }
 
 func (item workListItem) Title() string {
@@ -46,15 +48,19 @@ func (item workListItem) FilterValue() string {
 }
 
 type workPanel struct {
-	repository workspaceRepository
-	provider   agentProvider
-	ids        func() string
-	now        func() time.Time
-	items      []workItemRecord
-	events     map[string][]eventRecord
-	list       list.Model
-	actions    []agentCapability
-	action     int
+	repository  workspaceRepository
+	provider    agentProvider
+	ids         func() string
+	now         func() time.Time
+	items       []workItemRecord
+	events      map[string][]eventRecord
+	agentWork   map[string]agentWorkSnapshot
+	agentEvents map[string][]agentEventSnapshot
+	queueStatus string
+	queueReason string
+	list        list.Model
+	actions     []agentCapability
+	action      int
 }
 
 func newWorkPanel(
@@ -81,13 +87,15 @@ func newWorkPanel(
 	model.SetFilteringEnabled(true)
 	model.SetShowHelp(false)
 	panel := &workPanel{
-		repository: repository,
-		provider:   provider,
-		ids:        ids,
-		now:        now,
-		events:     make(map[string][]eventRecord),
-		list:       model,
-		actions:    provider.Capabilities(),
+		repository:  repository,
+		provider:    provider,
+		ids:         ids,
+		now:         now,
+		events:      make(map[string][]eventRecord),
+		agentWork:   make(map[string]agentWorkSnapshot),
+		agentEvents: make(map[string][]agentEventSnapshot),
+		list:        model,
+		actions:     provider.Capabilities(),
 	}
 	if result := panel.RefreshLocal(); !result.OK {
 		return result
@@ -107,12 +115,18 @@ func (panel *workPanel) Refresh(ctx context.Context) core.Result {
 	if !ok {
 		return core.Fail(core.E("tui.workPanel.Refresh", "invalid agent snapshot", nil))
 	}
+	return panel.ApplyAgentSnapshot(snapshot)
+}
+
+func (panel *workPanel) ApplyAgentSnapshot(snapshot agentSnapshot) core.Result {
+	if panel == nil || panel.repository == nil {
+		return core.Fail(core.E("tui.workPanel.ApplyAgentSnapshot", "work panel is unavailable", nil))
+	}
 	if result := panel.mergeAgentWork(snapshot.Work); !result.OK {
 		return result
 	}
-	if result := panel.mergeAgentEvents(snapshot.Events); !result.OK {
-		return result
-	}
+	panel.mergeAgentEvents(snapshot.Events)
+	panel.queueStatus, panel.queueReason = core.Trim(snapshot.QueueStatus), core.Trim(snapshot.QueueReason)
 	panel.actions = panel.provider.Capabilities()
 	return panel.RefreshLocal()
 }
@@ -157,6 +171,13 @@ func (panel *workPanel) Capabilities() []agentCapability {
 		return nil
 	}
 	return append([]agentCapability(nil), panel.actions...)
+}
+
+func (panel *workPanel) AgentState(record workItemRecord) agentWorkSnapshot {
+	if panel == nil {
+		return agentWorkSnapshot{}
+	}
+	return panel.agentWork[record.ID]
 }
 
 func (panel *workPanel) CreateWork(title, task, repository string) core.Result {
@@ -398,6 +419,12 @@ func (panel *workPanel) renderDetail(width, height int, styles uiStyles) string 
 	if record.PRURL != "" {
 		workDetailRow(builder, styles, "pull request", record.PRURL)
 	}
+	if state := panel.AgentState(record); state.NativeRunID != "" {
+		workDetailRow(builder, styles, "native run", state.NativeRunID)
+	}
+	if panel.queueStatus != "" {
+		workDetailRow(builder, styles, "queue", core.Trim(core.Concat(panel.queueStatus, " ", panel.queueReason)))
+	}
 	events := panel.events[record.ID]
 	builder.WriteString("\n")
 	builder.WriteString(styles.accent.Render("TIMELINE"))
@@ -408,6 +435,10 @@ func (panel *workPanel) renderDetail(width, height int, styles uiStyles) string 
 		for _, event := range events {
 			builder.WriteString(styles.status.Render("· " + event.Kind + "  "))
 			builder.WriteString(styles.answer.Render(event.Title))
+			if event.Detail != "" {
+				builder.WriteString(" ")
+				builder.WriteString(styles.thought.Render(event.Detail))
+			}
 			builder.WriteString("\n")
 		}
 	}
@@ -460,6 +491,14 @@ func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
 		}
 		record, exists := byExternal[externalID]
 		if !exists {
+			for _, candidate := range existing {
+				if candidate.ID == externalID {
+					record, exists = candidate, true
+					break
+				}
+			}
+		}
+		if !exists {
 			record.ID = core.Trim(panel.ids())
 			if record.ID == "" {
 				return core.Fail(core.E("tui.workPanel.mergeAgentWork", "work ID generator returned an empty value", nil))
@@ -468,17 +507,24 @@ func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
 			record.StartedAt = panel.now().UTC()
 			record.ArchivedAt = unsetRecordTime()
 		}
-		record.Source = "agent"
-		record.Title = core.Trim(snapshot.Title)
-		if record.Title == "" {
-			record.Title = externalID
+		isLocal := record.Source == "local"
+		if record.Source == "" {
+			record.Source = "agent"
+		}
+		if !isLocal {
+			record.Title = core.Trim(snapshot.Title)
+			if record.Title == "" {
+				record.Title = externalID
+			}
 		}
 		record.Status = core.Lower(core.Trim(snapshot.Status))
 		if record.Status == "" {
 			record.Status = workStatusActive
 		}
 		record.Agent = snapshot.Agent
-		record.Repo = snapshot.Repo
+		if !isLocal {
+			record.Repo = snapshot.Repo
+		}
 		record.Branch = snapshot.Branch
 		record.Runtime = snapshot.Runtime
 		record.Question = snapshot.Question
@@ -487,24 +533,28 @@ func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
 		if result := panel.repository.SaveWorkItem(record); !result.OK {
 			return result
 		}
+		previous := panel.agentWork[record.ID]
+		if snapshot.AnswerID == "" {
+			snapshot.AnswerID = previous.AnswerID
+		}
+		if snapshot.ResumeRunID == "" {
+			snapshot.ResumeRunID = previous.ResumeRunID
+		}
 		byExternal[externalID] = record
+		panel.agentWork[record.ID] = snapshot
 	}
 	return core.Ok(nil)
 }
 
-func (panel *workPanel) mergeAgentEvents(events []agentEventSnapshot) core.Result {
-	listed := panel.repository.ListWorkItems(true)
-	if !listed.OK {
-		return listed
+func (panel *workPanel) mergeAgentEvents(events []agentEventSnapshot) {
+	if panel == nil {
+		return
 	}
-	work, ok := listed.Value.([]workItemRecord)
-	if !ok {
-		return core.Fail(core.E("tui.workPanel.mergeAgentEvents", "invalid work list result", nil))
+	byExternal := make(map[string]string, len(panel.items)*2)
+	for _, record := range panel.items {
+		byExternal[record.ExternalID], byExternal[record.ID] = record.ID, record.ID
 	}
-	byExternal := make(map[string]workItemRecord, len(work))
-	for _, record := range work {
-		byExternal[record.ExternalID] = record
-	}
+	panel.agentEvents = make(map[string][]agentEventSnapshot, len(byExternal))
 	ordered := append([]agentEventSnapshot(nil), events...)
 	sort.SliceStable(ordered, func(left, right int) bool {
 		if ordered[left].CreatedAt.Equal(ordered[right].CreatedAt) {
@@ -513,41 +563,10 @@ func (panel *workPanel) mergeAgentEvents(events []agentEventSnapshot) core.Resul
 		return ordered[left].CreatedAt.Before(ordered[right].CreatedAt)
 	})
 	for _, snapshot := range ordered {
-		record, exists := byExternal[snapshot.WorkID]
-		if !exists {
-			return core.Fail(core.E("tui.workPanel.mergeAgentEvents", core.Concat("unknown agent work: ", snapshot.WorkID), nil))
-		}
-		createdAt := snapshot.CreatedAt.UTC()
-		if createdAt.IsZero() {
-			createdAt = panel.now().UTC()
-		}
-		seed := core.Trim(snapshot.ExternalID)
-		if seed == "" {
-			seed = core.Concat(snapshot.WorkID, "|", snapshot.Kind, "|", snapshot.Title, "|", createdAt.Format(time.RFC3339Nano))
-		}
-		hash := core.SHA256HexString(seed)
-		event := eventRecord{
-			ID:          "agent-event-" + hash[:32],
-			SessionID:   workEventSessionID(record),
-			WorkItemID:  record.ID,
-			Kind:        snapshot.Kind,
-			Status:      "recorded",
-			Title:       snapshot.Title,
-			Detail:      snapshot.Detail,
-			PayloadJSON: core.JSONMarshalString(snapshot),
-			CreatedAt:   createdAt,
-		}
-		if event.Kind == "" {
-			event.Kind = "agent.event"
-		}
-		if event.Title == "" {
-			event.Title = agentFeatureTitle(agentFeature(event.Kind))
-		}
-		if result := panel.repository.SaveEvent(event); !result.OK {
-			return result
+		if localID := byExternal[snapshot.WorkID]; localID != "" {
+			panel.agentEvents[localID] = append(panel.agentEvents[localID], snapshot)
 		}
 	}
-	return core.Ok(nil)
 }
 
 func (panel *workPanel) refreshEvents() core.Result {
@@ -566,6 +585,48 @@ func (panel *workPanel) refreshEvents() core.Result {
 			if event.WorkItemID == item.ID {
 				filtered = append(filtered, event)
 			}
+		}
+		for _, live := range panel.agentEvents[item.ID] {
+			createdAt := live.CreatedAt.UTC()
+			if createdAt.IsZero() {
+				createdAt = panel.now().UTC()
+			}
+			kind := core.Trim(live.Kind)
+			if kind == "" {
+				kind = "agent.event"
+			}
+			title := core.Trim(live.Title)
+			if live.Stream != "" {
+				title = core.Upper(core.Trim(live.Stream))
+			}
+			if title == "" {
+				title = agentFeatureTitle(agentFeature(kind))
+			}
+			id := core.Trim(live.ExternalID)
+			if id == "" {
+				id = core.Concat(live.RunID, ":", core.Sprintf("%020d", live.Sequence), ":", kind)
+			}
+			if live.Sequence > 0 {
+				id = core.Concat("agent-log:", core.Sprintf("%020d", live.Sequence), ":", id)
+			} else {
+				id = "agent-event:" + id
+			}
+			filtered = append(filtered, eventRecord{ID: id, SessionID: workEventSessionID(item), WorkItemID: item.ID, Kind: kind, Status: "live", Title: title, Detail: live.Detail, PayloadJSON: core.JSONMarshalString(live), CreatedAt: createdAt})
+		}
+		if len(filtered) > maxRenderedAgentEvents {
+			local := make([]eventRecord, 0, len(filtered))
+			live := make([]eventRecord, 0, maxRenderedAgentEvents)
+			for _, event := range filtered {
+				if event.Status == "live" {
+					live = append(live, event)
+				} else {
+					local = append(local, event)
+				}
+			}
+			if len(live) > maxRenderedAgentEvents {
+				live = live[len(live)-maxRenderedAgentEvents:]
+			}
+			filtered = append(local, live...)
 		}
 		sort.SliceStable(filtered, func(left, right int) bool {
 			if filtered[left].CreatedAt.Equal(filtered[right].CreatedAt) {
@@ -623,7 +684,9 @@ func normalizeWorkStatus(status string) string {
 		return workStatusWaiting
 	case "completed", "done", "success", "succeeded":
 		return workStatusCompleted
-	case "failed", "error", "cancelled", "canceled", "interrupted":
+	case "accepted":
+		return workStatusCompleted
+	case "failed", "error", "cancelled", "canceled", "interrupted", "rejected":
 		return workStatusFailed
 	default:
 		return workStatusActive

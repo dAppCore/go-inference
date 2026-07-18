@@ -155,21 +155,11 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		Work:   make([]agentWorkSnapshot, 0, len(snapshot.Projects)+len(snapshot.Runs)),
 		Events: make([]agentEventSnapshot, 0, len(snapshot.Events)+len(snapshot.Logs)+len(snapshot.Questions)),
 	}
+	mapped.QueueStatus, mapped.QueueReason = string(snapshot.Queue.Status), snapshot.Queue.Reason
 	workIndex := make(map[string]int)
 	projects := make(map[string]work.Project, len(snapshot.Projects))
 	for _, project := range snapshot.Projects {
 		projects[project.ID] = project
-		if project.ID == "" {
-			continue
-		}
-		workIndex[project.ID] = len(mapped.Work)
-		mapped.Work = append(mapped.Work, agentWorkSnapshot{
-			ExternalID: project.ID,
-			Title:      firstAgentText(project.RepositoryName, project.ID),
-			Status:     "active",
-			Repo:       project.SourcePath,
-			Branch:     project.SourceBranch,
-		})
 	}
 	runWork := make(map[string]string, len(snapshot.Runs))
 	for _, run := range snapshot.Runs {
@@ -192,6 +182,7 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 			item.Branch = run.Branch
 		}
 		item.Status = string(run.Status)
+		item.NativeRunID = run.ID
 		item.Agent = run.Provider
 		item.Runtime = run.Model
 	}
@@ -201,28 +192,44 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 			workID = runWork[event.RunID]
 		}
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
-			ExternalID: event.ID, WorkID: workID, Kind: event.Kind,
+			ExternalID: event.ID, WorkID: workID, RunID: event.RunID, Kind: event.Kind,
 			Title: event.Title, Detail: event.Detail, CreatedAt: event.CreatedAt,
 		})
 	}
 	for _, log := range snapshot.Logs {
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
 			ExternalID: core.Sprintf("log:%s:%d", log.RunID, log.Sequence),
-			WorkID:     runWork[log.RunID],
-			Kind:       core.Concat("log.", core.Lower(core.Trim(log.Stream))),
-			Title:      core.Concat(core.Upper(core.Trim(log.Stream)), " output"),
-			Detail:     log.Text,
-			CreatedAt:  log.CreatedAt,
+			WorkID:     runWork[log.RunID], RunID: log.RunID, Sequence: log.Sequence, Stream: log.Stream,
+			Kind:      core.Concat("log.", core.Lower(core.Trim(log.Stream))),
+			Title:     core.Concat(core.Upper(core.Trim(log.Stream)), " output"),
+			Detail:    log.Text,
+			CreatedAt: log.CreatedAt,
 		})
 	}
 	for _, question := range snapshot.Questions {
 		workID := runWork[question.RunID]
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
-			ExternalID: question.ID, WorkID: workID, Kind: "question",
+			ExternalID: question.ID, WorkID: workID, RunID: question.RunID, Kind: "question",
 			Title: "Agent question", Detail: question.Text, CreatedAt: question.CreatedAt,
 		})
 		if index, exists := workIndex[workID]; exists {
 			mapped.Work[index].Question = question.Text
+			mapped.Work[index].QuestionID = question.ID
+		}
+	}
+	for _, acceptance := range snapshot.Acceptances {
+		if index, exists := workIndex[acceptance.WorkID]; exists {
+			mapped.Work[index].ReviewID, mapped.Work[index].ReviewStatus = acceptance.ID, acceptance.Status
+			var review workspace.ChangeReview
+			if decoded := core.JSONUnmarshalString(acceptance.ValidationJSON, &review); decoded.OK {
+				allowed := len(review.Conflicts) == 0
+				for _, validation := range review.Validation {
+					if !validation.Passed {
+						allowed = false
+					}
+				}
+				mapped.Work[index].Review = agentReview{Feature: agentFeatureChangesReview, Payload: review, NeedsAcknowledgement: len(review.Validation) == 0, AcceptanceAllowed: allowed}
+			}
 		}
 	}
 	sort.SliceStable(mapped.Events, func(left, right int) bool {
@@ -285,21 +292,51 @@ func (adapter *nativeAgentAdapter) Review(ctx context.Context, request agentRevi
 		if !ok {
 			return core.Fail(core.E("tui.agentAdapter.Review", core.Sprintf("change review has type %T", reviewResult.Value), nil))
 		}
+		allowed := len(review.Conflicts) == 0
+		for _, validation := range review.Validation {
+			if !validation.Passed {
+				allowed = false
+			}
+		}
 		warning := "Accept applies the reviewed result to the source only after explicit final confirmation."
 		if len(review.Conflicts) > 0 {
 			warning = "Integration conflicts must be resolved by a later reviewed attempt; the source remains unchanged."
+		} else if !allowed {
+			warning = "At least one validation failed; the source remains unchanged until a later reviewed attempt passes."
 		} else if len(review.Validation) == 0 {
 			warning = "No validation command is configured; acceptance requires explicit acknowledgement."
 		}
 		return core.Ok(agentReview{
 			Feature: agentFeatureChangesReview, Title: "Review agent changes",
-			Body: core.Sprintf("Commits:\n%s\n\nDiff:\n%s\n\nValidation checks: %d\nConflicts: %d",
-				review.CommitLog, review.Diff, len(review.Validation), len(review.Conflicts)),
-			Warning: warning, ConfirmRequired: true, Payload: review,
+			Body:    renderAgentChangeReview(review),
+			Warning: warning, ConfirmRequired: true, NeedsAcknowledgement: len(review.Validation) == 0, AcceptanceAllowed: allowed, Payload: review,
 		})
 	default:
 		return core.Fail(core.E("tui.agentAdapter.Review", core.Concat("agent feature does not support review: ", string(request.Feature)), nil))
 	}
+}
+
+func renderAgentChangeReview(review workspace.ChangeReview) string {
+	builder := core.NewBuilder()
+	builder.WriteString(core.Sprintf("Source branch: %s\nSource revision: %s\nAgent base: %s\nAgent tip: %s\nResult revision: %s\nIntegration: %s\n\nCommits:\n%s\n\nDiff:\n%s\n\nValidation:\n", review.SourceBranch, review.SourceRevision, review.AgentBase, review.AgentTip, review.ResultRevision, review.IntegrationPath, review.CommitLog, review.Diff))
+	if len(review.Validation) == 0 {
+		builder.WriteString("No validation command configured\n")
+	}
+	for _, validation := range review.Validation {
+		status := "FAILED"
+		if validation.Passed {
+			status = "PASSED"
+		}
+		builder.WriteString(core.Sprintf("%s  %s %s  receipt: %s\n%s\n", status, validation.Command.Executable, core.Join(" ", validation.Command.Args...), validation.Receipt, validation.Output))
+	}
+	builder.WriteString("Conflicts:\n")
+	if len(review.Conflicts) == 0 {
+		builder.WriteString("none\n")
+	}
+	for _, conflict := range review.Conflicts {
+		builder.WriteString(conflict + "\n")
+	}
+	return builder.String()
 }
 
 func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest) core.Result {
@@ -307,18 +344,19 @@ func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest
 		return core.Fail(core.E("tui.agentAdapter.Run", "native agent engine is unavailable", nil))
 	}
 	var result core.Result
+	runID := firstNonEmptyAgentText(request.RunID, request.WorkID)
 	switch request.Feature {
 	case agentFeatureDispatch:
 		return adapter.runDispatch(ctx, request)
 	case agentFeatureCancel:
-		result = adapter.engine.Cancel(ctx, request.WorkID)
+		result = adapter.engine.Cancel(ctx, runID)
 	case agentFeatureAnswer:
-		result = adapter.engine.Answer(ctx, request.WorkID, request.Input)
+		result = adapter.engine.Answer(ctx, runID, request.Input)
 	case agentFeatureRetry:
-		result = adapter.engine.Retry(ctx, nativeWorkItem(request.Work, request.Work.ID, ""), request.WorkID)
+		result = adapter.engine.Retry(ctx, nativeWorkItem(request.Work, request.Work.ID, ""), runID)
 	case agentFeatureResume:
 		result = adapter.engine.Resume(ctx, work.ResumeRequest{
-			Work: nativeWorkItem(request.Work, request.Work.ID, ""), ParentRunID: request.WorkID,
+			Work: nativeWorkItem(request.Work, request.Work.ID, ""), ParentRunID: runID,
 			AnswerID: request.Input, Provider: request.Provider, Model: request.Model,
 		})
 	case agentFeatureQueueStart:
@@ -332,7 +370,7 @@ func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest
 		}
 		result = adapter.engine.Accept(ctx, workspace.AcceptRequest{Review: review, Confirmed: request.Confirmed})
 	case agentFeatureReject:
-		result = adapter.engine.Reject(ctx, request.WorkID)
+		result = adapter.engine.Reject(ctx, runID)
 	default:
 		return core.Fail(core.E("tui.agentAdapter.Run", core.Concat("unsupported native agent action: ", string(request.Feature)), nil))
 	}
