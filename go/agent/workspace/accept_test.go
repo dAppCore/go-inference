@@ -342,18 +342,25 @@ func TestAcceptReviewConflictAndValidationFailureLeaveSourceUntouched(t *testing
 		fixture.capture(t)
 		fixture.sourceCommit(t, "README.md", "source\n", "source conflict")
 		before := acceptanceSourceSnapshot(t, fixture)
+		beforeContent := core.ReadFile(core.PathJoin(fixture.source, "README.md"))
+		core.AssertTrue(t, beforeContent.OK, beforeContent.Error())
 		result := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil)
 		core.AssertTrue(t, result.OK, result.Error())
 		review := result.Value.(ChangeReview)
 		core.AssertTrue(t, len(review.Conflicts) > 0)
 		core.AssertEqual(t, "", review.ResultRevision)
 		core.AssertEqual(t, before, acceptanceSourceSnapshot(t, fixture))
+		afterContent := core.ReadFile(core.PathJoin(fixture.source, "README.md"))
+		core.AssertTrue(t, afterContent.OK, afterContent.Error())
+		core.AssertEqual(t, string(beforeContent.Value.([]byte)), string(afterContent.Value.([]byte)))
 	})
 	t.Run("validation", func(t *testing.T) {
 		fixture := newAcceptanceFixture(t)
 		fixture.agentCommit(t, "change.txt", "agent\n", "agent validation")
 		fixture.capture(t)
 		before := acceptanceSourceSnapshot(t, fixture)
+		beforeContent := core.ReadFile(core.PathJoin(fixture.source, "README.md"))
+		core.AssertTrue(t, beforeContent.OK, beforeContent.Error())
 		result := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, []queue.Command{
 			{Command: "git", Args: []string{"rev-parse", "--verify", "refs/heads/does-not-exist"}},
 			{Command: "lem-command-that-does-not-exist"},
@@ -366,6 +373,10 @@ func TestAcceptReviewConflictAndValidationFailureLeaveSourceUntouched(t *testing
 		core.AssertFalse(t, review.Validation[1].Passed)
 		core.AssertContains(t, review.Validation[1].Output, "lem-command-that-does-not-exist")
 		core.AssertEqual(t, before, acceptanceSourceSnapshot(t, fixture))
+		afterContent := core.ReadFile(core.PathJoin(fixture.source, "README.md"))
+		core.AssertTrue(t, afterContent.OK, afterContent.Error())
+		core.AssertEqual(t, string(beforeContent.Value.([]byte)), string(afterContent.Value.([]byte)))
+		core.AssertFalse(t, core.Stat(core.PathJoin(fixture.source, "change.txt")).OK)
 	})
 }
 
