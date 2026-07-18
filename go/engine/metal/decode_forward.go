@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
 
@@ -44,6 +45,11 @@ type DecodeLayerWeights struct {
 	// are then unused (the local MLP lives in MoE.WGate/WUp/WDown). Only honoured by
 	// the arch executor (DecodeForwardArch) when the layer's spec.MoE is set.
 	MoE *MoELayerWeights
+	// GatedDelta, when non-nil (a MixerGatedDelta layer — Qwen3.5 hybrid), replaces the attention
+	// half with the linear-attention recurrence; WQ/WK/WV/WO are then unused. The neutral factory-root
+	// weights flow through the converter; the decode reads them via archDecodeState.gatedDelta (#18).
+	GatedDelta    *model.GatedDeltaWeights
+	GatedDeltaCfg model.GatedDeltaConfig
 	// gemma4 norms the loader populates but the decode does NOT consume yet: QK-norm
 	// (per-head RMSNorm on Q/K before RoPE), post-attention norm, post-feed-forward
 	// norm. The native dense decode currently does pre-attn + pre-FF only; wiring these

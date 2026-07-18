@@ -690,6 +690,7 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 		state := newArchDecodeState(arch.Layer, lb, moeWeights, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, attnScale, arch.Eps, arch.ValueNorm, maxLen)
 		state.ropeScale = archRopeScale(arch)               // RoPE position scale, distinct from the attention scale
 		state.ropeFreqs = uploadRopePeriods(arch.RopeFreqs) // YaRN long-context spectrum (nil ⇒ base rope)
+		state.bindGatedDeltaBF16(g.Layers)                  // MixerGatedDelta recurrence weights (#18); no-op for an all-attention model
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return
@@ -934,7 +935,8 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		state := newArchDecodeState(arch.Layer, lb, moeWeights, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, attnScale, arch.Eps, arch.ValueNorm, maxLen)
 		state.ropeScale = archRopeScale(arch) // RoPE position scale, distinct from the attention scale
 		state.moeQuant = moeQuant
-		state.moeScratchOwnable = true // long-lived session: own the MoE scratch, decode wait-free
+		state.moeScratchOwnable = true      // long-lived session: own the MoE scratch, decode wait-free
+		state.bindGatedDeltaQuant(g.Layers) // MixerGatedDelta recurrence weights (#18); no-op for an all-attention model
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return

@@ -55,6 +55,28 @@ func rmsNormHostF32(x []float32, w []float32, eps float32) []float32 {
 	return out
 }
 
+// bindGatedDeltaQuant / bindGatedDeltaBF16 build the per-layer recurrence holders from the session's
+// converted layer weights — the weight-flow that lets encGatedDeltaHalf read a MixerGatedDelta layer's
+// projections + geometry. nil holder for an attention layer (the branch is never taken there). Called
+// once by NewArchSession(Quant) after newArchDecodeState.
+func (s *archDecodeState) bindGatedDeltaQuant(layers []QuantizedLayerWeights) {
+	s.gatedDelta = make([]*gatedDeltaLayer, len(layers))
+	for i := range layers {
+		if i < len(s.specs) && s.specs[i].Mixer == model.MixerGatedDelta && layers[i].GatedDelta != nil {
+			s.gatedDelta[i] = &gatedDeltaLayer{w: layers[i].GatedDelta, cfg: layers[i].GatedDeltaCfg}
+		}
+	}
+}
+
+func (s *archDecodeState) bindGatedDeltaBF16(layers []DecodeLayerWeights) {
+	s.gatedDelta = make([]*gatedDeltaLayer, len(layers))
+	for i := range layers {
+		if i < len(s.specs) && s.specs[i].Mixer == model.MixerGatedDelta && layers[i].GatedDelta != nil {
+			s.gatedDelta[i] = &gatedDeltaLayer{w: layers[i].GatedDelta, cfg: layers[i].GatedDeltaCfg}
+		}
+	}
+}
+
 // encGatedDeltaHalf computes one MixerGatedDelta layer's mixer for a single decode token and writes the
 // residual output (in + maybe_postNorm(gatedDelta(RMSNorm(in)))) to hBuf — the recurrence twin of
 // encAttnHalfKV. Host path (correctness-first). Advances the layer's conv/delta state.

@@ -63,6 +63,7 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 		}
 		ql.PerLayerGate, ql.PerLayerProjection = qw(L.PerLayerGate), qw(L.PerLayerProjection)
 		ql.PostPerLayerInputNormW = L.PostPerLayerInputNorm
+		ql.GatedDelta, ql.GatedDeltaCfg = L.GatedDelta, L.GatedDeltaCfg // MixerGatedDelta recurrence (#18); nil for attention layers
 		if L.MoE != nil {
 			ql.MoE = moeToQuant(L.MoE, m.Arch.Experts, m.Arch.TopK, m.Arch.ExpertFF, m.Arch.Hidden, m.Arch.FuseExpertGateUp)
 		} else {
@@ -207,6 +208,7 @@ func loadedToBF16(m *model.LoadedModel) *BF16Model {
 		}
 		l.PerLayerGate, l.PerLayerProjection = bw(L.PerLayerGate), bw(L.PerLayerProjection)
 		l.PostPerLayerInputNormW = L.PostPerLayerInputNorm
+		l.GatedDelta, l.GatedDeltaCfg = L.GatedDelta, L.GatedDeltaCfg // MixerGatedDelta recurrence (#18); nil for attention layers
 	}
 	return g
 }

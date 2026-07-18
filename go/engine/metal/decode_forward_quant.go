@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
 
@@ -55,6 +56,11 @@ type QuantizedLayerWeights struct {
 	// MoE, when non-nil (gemma4 26B-A4B), replaces the dense MLP half with the 4-bit dual-branch
 	// MoEBlockQuant for this layer; the dense MLPNormW/Gate/Up/Down are then unused.
 	MoE *MoEQuantLayerWeights
+	// GatedDelta, when non-nil (a MixerGatedDelta layer — Qwen3.5 hybrid), replaces the attention
+	// half with the linear-attention recurrence; Q/K/V/O are then unused. The neutral factory-root
+	// weights flow straight through the converter; the decode reads them via archDecodeState.gatedDelta (#18).
+	GatedDelta    *model.GatedDeltaWeights
+	GatedDeltaCfg model.GatedDeltaConfig
 }
 
 type decodeForwardQuantLayerBufs struct {
