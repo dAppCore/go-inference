@@ -592,7 +592,7 @@ git commit -m "feat(agent): resume immutable agent attempts"
 ```go
 type ChangeReview struct { WorkID, RunID, SourceBranch, SourceRevision, AgentBase, AgentTip, IntegrationBranch, IntegrationPath, ResultRevision, Diff, CommitLog string; Validation []ValidationResult; Conflicts []string }
 type ValidationResult struct { Command Command; ExitCode int; Output, Receipt string; Passed bool }
-type AcceptRequest struct { Review ChangeReview; Confirmed bool }
+type AcceptRequest struct { Review ChangeReview; Project work.Project; Confirmed bool }
 
 func (manager *Manager) ReviewChanges(context.Context, work.Project, work.Run, []queue.Command) core.Result
 func (manager *Manager) Apply(context.Context, AcceptRequest) core.Result
@@ -603,14 +603,15 @@ func (orchestrator *Orchestrator) Accept(context.Context, workspace.AcceptReques
 func (orchestrator *Orchestrator) Reject(context.Context, string) core.Result
 ```
 
-- [ ] Write real-Git tests for unchanged source fast-forward, diverged source replay, multi-commit order, merge conflict, validation pass/fail, no validation acknowledgement, source movement after review, dirty source after review, rejected history retention, and idempotent acceptance receipt.
-- [ ] Snapshot source branch, HEAD, index, worktree, remotes, and refs before each conflict/failure test; assert they remain unchanged.
-- [ ] Prove tests fail before implementation.
-- [ ] Review fetches source into the cached internal repository, creates a disposable integration worktree, fast-forwards when possible or replays the exact agent range, records conflicts, runs validation argv commands there, and returns the complete receipt without touching source.
-- [ ] Apply requires `Confirmed`, rechecks source branch/HEAD/cleanliness, fetches the validated result only after confirmation, and advances with `git merge --ff-only`. If any recheck differs, return a stale-review failure and prepare nothing automatically.
-- [ ] Reject records the decision and retains internal refs/worktrees under normal retention.
-- [ ] One Store commit transactionally writes the acceptance receipt/event and moves the run from completed to accepted; rejection does the same from completed to rejected. Neither operation deletes the internal branch or prior run/event/log records.
-- [ ] Run workspace/orchestrator tests and race, format, and commit:
+- [x] Write real-Git tests for unchanged source fast-forward, diverged source replay, multi-commit order, merge conflict, validation pass/fail, no validation acknowledgement, source movement after review, dirty source after review, rejected history retention, restart recovery, concurrent decisions, and idempotent acceptance receipt.
+- [x] Snapshot source branch, HEAD, index, worktree, remotes, and refs before each conflict/failure test; assert they remain unchanged.
+- [x] Prove tests fail before implementation.
+- [x] Review fetches source into the cached internal repository, creates a disposable integration worktree, fast-forwards when possible or replays the exact agent range, records conflicts, runs validation argv commands there, and returns the complete receipt without touching source.
+- [x] Persist every complete review as canonical `ChangeReview` JSON plus a `changes_reviewed` event in one Store commit, with status `prepared`, `conflicted`, or `validation_failed`, while leaving the completed Run unchanged. Accept/Reject load the latest durable review after restart and reject caller tampering or superseded receipts.
+- [x] Apply requires `Confirmed`, replaces the transient `AcceptRequest.Project` with the Store-owned Project, reconstructs and verifies the internal Git receipt, rechecks source branch/HEAD/cleanliness, fetches the validated result only after confirmation, and advances with `git merge --ff-only`. If any recheck differs, return a stale-review failure and prepare nothing automatically.
+- [x] Reject records the decision and retains internal refs/worktrees under normal retention.
+- [x] One Store commit transactionally writes the final acceptance receipt/event and moves the run from completed to accepted; rejection does the same from completed to rejected. Neither operation deletes the internal branch or prior run/event/log records.
+- [x] Run workspace/orchestrator tests and race, format, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/go
@@ -717,7 +718,7 @@ CREATE INDEX agent_events_run_idx ON agent_events(run_id, created_at, id);
 CREATE INDEX agent_acceptances_work_idx ON agent_acceptances(work_id, updated_at);
 ```
 - [ ] Write migration Good/Bad/Ugly tests for idempotence, transaction rollback, upgrade from version 1, and reopen.
-- [ ] Write Store contract tests for every method, transactionally checked transitions, monotonic log sequences, ordered snapshots, interrupted startup recovery, queue/provider reopen, and concurrent writer serialization. Round-trip `durable_revision` through every Run insert/load/Snapshot/Continuation path; existing rows default to empty and must never infer push acknowledgement from cached Git tracking state.
+- [ ] Write Store contract tests for every method, transactionally checked transitions, monotonic log sequences, ordered snapshots, interrupted startup recovery, queue/provider reopen, and concurrent writer serialization. Round-trip `durable_revision` through every Run insert/load/Snapshot/Continuation path; existing rows default to empty and must never infer push acknowledgement from cached Git tracking state. Round-trip the full canonical `ChangeReview` JSON for `prepared`, `conflicted`, and `validation_failed` acceptance rows, and preserve deterministic `(updated_at, id)` ordering so the latest durable review remains authoritative even when timestamps are equal.
 - [ ] Assert SQL tables contain no secret values and repository directory scans contain no LEM state files.
 - [ ] Prove focused tests fail before implementation.
 - [ ] Implement `Store.Commit` as one SQL transaction for every non-nil member, with compare-and-swap status enforcement through `ExpectedStatus`. Derive concurrency from run rows instead of mutable counters.
