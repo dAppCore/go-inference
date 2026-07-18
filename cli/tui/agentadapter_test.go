@@ -345,6 +345,15 @@ func TestAgentAdapter_CloseConcurrentCapabilities_Ugly(t *testing.T) {
 
 func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) {
 	root, repository, agentStore := openTestAgentStore(t)
+	initialRepositoryClosed := false
+	t.Cleanup(func() {
+		if initialRepositoryClosed {
+			return
+		}
+		if result := repository.Close(); !result.OK {
+			t.Errorf("cleanup initial repository/store: %v", result.Value)
+		}
+	})
 	at := time.Date(2026, time.July, 18, 18, 0, 0, 0, time.UTC)
 	task := "Resume the durable interrupted run"
 	project := testAgentProject(at)
@@ -374,12 +383,18 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	if result := repository.Close(); !result.OK {
 		t.Fatalf("close initial repository/store: %v", result.Value)
 	}
+	initialRepositoryClosed = true
 
 	reopenedResult := openDuckRepository(root + "/lem.duckdb")
 	if !reopenedResult.OK {
 		t.Fatalf("reopen durable repository: %v", reopenedResult.Value)
 	}
 	reopened := reopenedResult.Value.(workspaceRepository)
+	t.Cleanup(func() {
+		if result := reopened.Close(); !result.OK {
+			t.Errorf("cleanup reopened repository/store: %v", result.Value)
+		}
+	})
 	reopenedStore := requireAgentValue[*duckAgentStore](t, "newDuckAgentStore reopened", newDuckAgentStore(reopened))
 	reopenedSnapshot := requireAgentValue[work.Snapshot](t, "reopened Snapshot", reopenedStore.Snapshot(parent.WorkID))
 	if len(reopenedSnapshot.Runs) != 1 || reopenedSnapshot.Runs[0].ID != parent.ID || reopenedSnapshot.Runs[0].Status != work.RunInterrupted {
@@ -390,7 +405,19 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	}
 	storedParent := requireAgentValue[work.Run](t, "parent before UI Resume", reopenedStore.Run(parent.ID))
 	engine := newDurableResumeReceiptEngine(t, reopenedStore, at.Add(time.Hour))
-	adapter := requireAgentAdapter(t, engine)
+	var adapter agentProvider
+	t.Cleanup(func() {
+		var result core.Result
+		if adapter != nil {
+			result = adapter.Close()
+		} else {
+			result = engine.Close()
+		}
+		if !result.OK {
+			t.Errorf("cleanup restarted native adapter/orchestrator: %v", result.Value)
+		}
+	})
+	adapter = requireAgentAdapter(t, engine)
 	restarted := newApp("", 0, 64)
 	if result := restarted.attachWork(reopened, adapter); !result.OK {
 		t.Fatalf("attach restarted Work: %v", result.Value)
@@ -425,10 +452,6 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	if len(resumedSnapshot.Logs) != 2 || resumedSnapshot.Logs[0] != reopenedSnapshot.Logs[0] || resumedSnapshot.Logs[1] != reopenedSnapshot.Logs[1] {
 		t.Fatalf("UI Resume changed durable parent logs: %#v", resumedSnapshot.Logs)
 	}
-	if result := adapter.Close(); !result.OK {
-		t.Fatalf("close restarted native adapter: %v", result.Value)
-	}
-	closeTestDuckRepository(t, reopened)
 }
 
 func newDurableResumeReceiptEngine(t *testing.T, store orchestrator.Store, at time.Time) nativeAgentEngine {

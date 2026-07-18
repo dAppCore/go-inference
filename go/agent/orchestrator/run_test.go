@@ -159,10 +159,16 @@ func TestRun_RepositoryControlFilesRecursiveReceipt(t *testing.T) {
 
 	for _, path := range []string{
 		"nested/.lem/record",
+		"nested/.lem",
 		"nested/QUESTION.md",
 		"nested/deeper/lem_status.json",
 		"nested/deeper/.lem-control.yaml",
 		"nested/deeper/lem.status",
+		"nested/deeper/lem-run.json",
+		"nested/deeper/lem-log.json",
+		"nested/deeper/lem-queue.yaml",
+		"nested/deeper/lem-backoff.json",
+		"nested/deeper/lem-acceptance.json",
 	} {
 		t.Run(path, func(t *testing.T) {
 			root := t.TempDir()
@@ -190,10 +196,10 @@ func orchestratorRepositoryControlFiles(root string) core.Result {
 			return walkErr
 		}
 		name := core.Lower(entry.Name())
+		if name == ".lem" {
+			return core.NewError(core.Concat("unexpected LEM control path: ", path))
+		}
 		if entry.IsDir() {
-			if name == ".lem" {
-				return core.NewError(core.Concat("unexpected LEM control directory: ", path))
-			}
 			return nil
 		}
 		extension := core.Lower(core.PathExt(name))
@@ -217,13 +223,7 @@ func orchestratorRepositoryControlFiles(root string) core.Result {
 			}
 		}
 		if !controlName && core.HasPrefix(stem, "lem-") {
-			suffix := core.TrimPrefix(stem, "lem-")
-			for _, exact := range []string{"question", "answer", "status", "state", "control"} {
-				if suffix == exact {
-					controlName = true
-					break
-				}
-			}
+			controlName = true
 		}
 		if controlName {
 			return core.NewError(core.Concat("unexpected LEM state/control file: ", path))
