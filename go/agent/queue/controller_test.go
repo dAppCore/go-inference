@@ -440,10 +440,14 @@ func TestController_Controller_Validation_Good(t *testing.T) {
 
 func TestController_Controller_Validation_Bad(t *testing.T) {
 	var controller *Controller
-	core.AssertEqual(t, []Command(nil), controller.Validation())
+	commands := controller.Validation()
+	core.AssertNil(t, commands)
+	core.AssertEqual(t, 0, len(commands))
 }
 
 func TestController_Controller_Validation_Ugly(t *testing.T) {
 	controller := exampleQueueController(work.QueueFrozen)
-	core.AssertEqual(t, 0, len(controller.Validation()))
+	commands := controller.Validation()
+	core.AssertNotNil(t, commands, "configured empty validation should return a detached empty slice")
+	core.AssertEqual(t, 0, len(commands))
 }
