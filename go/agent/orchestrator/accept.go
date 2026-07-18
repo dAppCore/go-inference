@@ -202,13 +202,25 @@ func (orchestrator *Orchestrator) Accept(ctx context.Context, request workspace.
 	}
 	if committed := orchestrator.store.Commit(commit); !committed.OK {
 		reconciledRun := orchestrator.store.Run(run.ID)
-		if reconciledRun.OK {
-			if current, currentOK := reconciledRun.Value.(work.Run); currentOK && current.Status == work.RunAccepted && current.AcceptedRevision == review.ResultRevision {
-				reconciled := orchestrator.acceptanceForRun(run.ID, "accepted")
-				if reconciled.OK && reconciled.Value.(work.Acceptance).ResultRevision == review.ResultRevision {
-					return reconciled
-				}
+		if !reconciledRun.OK {
+			return ambiguousAcceptanceResult(committed, reconciledRun.Err())
+		}
+		current, currentOK := reconciledRun.Value.(work.Run)
+		if !currentOK {
+			return ambiguousAcceptanceResult(committed, core.Errorf("agent store returned %T instead of run during acceptance reconciliation", reconciledRun.Value))
+		}
+		if current.Status == work.RunAccepted && current.AcceptedRevision == review.ResultRevision {
+			reconciled := orchestrator.acceptanceForRun(run.ID, "accepted")
+			if !reconciled.OK {
+				return ambiguousAcceptanceResult(committed, reconciled.Err())
 			}
+			if reconciled.Value.(work.Acceptance).ResultRevision != review.ResultRevision {
+				return ambiguousAcceptanceResult(committed, core.NewError("durable acceptance receipt differs from the applied result"))
+			}
+			return reconciled
+		}
+		if current.Status != work.RunCompleted {
+			return ambiguousAcceptanceResult(committed, core.Errorf("durable run has status %q after acceptance commit failure", current.Status))
 		}
 		rollback, rollbackOK := applied.Value.(interface {
 			Rollback(context.Context) core.Result
@@ -223,6 +235,14 @@ func (orchestrator *Orchestrator) Accept(ctx context.Context, request workspace.
 		return committed
 	}
 	return core.Ok(receipt)
+}
+
+func ambiguousAcceptanceResult(commitFailure core.Result, reconciliation error) core.Result {
+	return core.Fail(core.E(
+		"orchestrator.Accept",
+		core.Concat("acceptance commit outcome is ambiguous; source retained for retry; commit failure: ", commitFailure.Error()),
+		reconciliation,
+	))
 }
 
 // Reject atomically records a completed run as rejected without deleting history.

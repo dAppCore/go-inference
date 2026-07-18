@@ -586,6 +586,10 @@ git commit -m "feat(agent): resume immutable agent attempts"
 - Create: `go/agent/orchestrator/accept.go`
 - Create: `go/agent/orchestrator/accept_test.go`
 - Create: `go/agent/orchestrator/accept_example_test.go`
+- Modify: `go/agent/orchestrator/orchestrator.go`
+- Modify: `go/agent/queue/controller.go`
+- Modify: `go/agent/queue/controller_test.go`
+- Modify: `go/agent/queue/controller_example_test.go`
 
 **Interfaces:**
 
@@ -611,15 +615,15 @@ func (orchestrator *Orchestrator) Reject(context.Context, string) core.Result
 - [x] Apply requires `Confirmed`, replaces the transient `AcceptRequest.Project` with the Store-owned Project, reconstructs and verifies the internal Git receipt, rechecks source branch/HEAD/cleanliness, fetches the validated result only after confirmation, and advances with `git merge --ff-only`. If any recheck differs, return a stale-review failure and prepare nothing automatically.
 - [x] Reject records the decision and retains internal refs/worktrees under normal retention.
 - [x] One Store commit transactionally writes the final acceptance receipt/event and moves the run from completed to accepted; rejection does the same from completed to rejected. Neither operation deletes the internal branch or prior run/event/log records.
-- [x] Run workspace/orchestrator tests and race, format, and commit:
+- [x] Run workspace/orchestrator/queue tests and race, format, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/go
-go test ./agent/workspace ./agent/orchestrator -count=1
-go test -race ./agent/workspace ./agent/orchestrator -count=1
+go test ./agent/workspace ./agent/orchestrator ./agent/queue -count=1
+go test -race ./agent/workspace ./agent/orchestrator ./agent/queue -count=1
 cd ..
-gofmt -w go/agent/workspace go/agent/orchestrator
-git add go/agent/workspace/accept.go go/agent/workspace/accept_test.go go/agent/workspace/accept_example_test.go go/agent/orchestrator/accept.go go/agent/orchestrator/accept_test.go go/agent/orchestrator/accept_example_test.go
+gofmt -w go/agent/workspace go/agent/orchestrator go/agent/queue
+git add go/agent/workspace/accept.go go/agent/workspace/accept_test.go go/agent/workspace/accept_example_test.go go/agent/orchestrator/accept.go go/agent/orchestrator/accept_test.go go/agent/orchestrator/accept_example_test.go go/agent/orchestrator/orchestrator.go go/agent/queue/controller.go go/agent/queue/controller_test.go go/agent/queue/controller_example_test.go
 git commit -m "feat(agent): validate and accept agent changes"
 ```
 

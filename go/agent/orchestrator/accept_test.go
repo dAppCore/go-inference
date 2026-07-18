@@ -352,6 +352,136 @@ func TestAcceptStoreFailureReconcilesMatchingDurableDecision(t *testing.T) {
 	core.AssertEqual(t, work.RunAccepted, fixture.store.runs[run.ID].Status)
 }
 
+func TestAcceptAmbiguousCommitDoesNotRollbackMatchingAcceptedRunWhenReceiptReadFails(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	project, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	review := fixture.orchestrator.ReviewChanges(context.Background(), run.ID).Value.(workspace.ChangeReview)
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Run == nil || commit.Acceptance == nil || commit.Acceptance.Status != "accepted" {
+			return
+		}
+		fixture.store.mu.Lock()
+		fixture.store.runs[commit.Run.ID] = *commit.Run
+		fixture.store.acceptances = append(fixture.store.acceptances, *commit.Acceptance)
+		if commit.Event != nil {
+			fixture.store.events = append(fixture.store.events, *commit.Event)
+		}
+		fixture.store.commits = append(fixture.store.commits, commit)
+		fixture.store.snapshotFail = true
+		fixture.store.beforeCommit = nil
+		fixture.store.mu.Unlock()
+	}
+	fixture.store.failNext(func(commit Commit) bool {
+		return commit.Acceptance != nil && commit.Acceptance.Status == "accepted"
+	})
+	result := fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true})
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "ambiguous")
+	core.AssertEqual(t, work.RunAccepted, fixture.store.runs[run.ID].Status)
+	core.AssertEqual(t, 1, orchestratorAcceptanceCount(fixture.store, "accepted"))
+	core.AssertEqual(t, review.ResultRevision, orchestratorRunGit(t, project.RepositoryRoot, "rev-parse", "HEAD"))
+}
+
+func TestAcceptAmbiguousCommitDoesNotRollbackWhenRunOutcomeCannotBeRead(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	project, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	review := fixture.orchestrator.ReviewChanges(context.Background(), run.ID).Value.(workspace.ChangeReview)
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Acceptance == nil || commit.Acceptance.Status != "accepted" {
+			return
+		}
+		fixture.store.mu.Lock()
+		fixture.store.runSet = true
+		fixture.store.runValue = "temporarily unreadable run"
+		fixture.store.beforeCommit = nil
+		fixture.store.mu.Unlock()
+	}
+	fixture.store.failNext(func(commit Commit) bool {
+		return commit.Acceptance != nil && commit.Acceptance.Status == "accepted"
+	})
+	result := fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true})
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "ambiguous")
+	fixture.store.clearRunOverride()
+	core.AssertEqual(t, work.RunCompleted, fixture.store.runs[run.ID].Status)
+	core.AssertEqual(t, 0, orchestratorAcceptanceCount(fixture.store, "accepted"))
+	core.AssertEqual(t, review.ResultRevision, orchestratorRunGit(t, project.RepositoryRoot, "rev-parse", "HEAD"))
+}
+
+func TestAcceptAmbiguousCommitRetainsSourceForUnreadableOrMismatchedDurableOutcomes(t *testing.T) {
+	t.Run("missing run", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		project, run := orchestratorCompletedAcceptanceRun(t, fixture)
+		review := fixture.orchestrator.ReviewChanges(context.Background(), run.ID).Value.(workspace.ChangeReview)
+		fixture.store.beforeCommit = func(commit Commit) {
+			if commit.Acceptance == nil || commit.Acceptance.Status != "accepted" {
+				return
+			}
+			fixture.store.mu.Lock()
+			delete(fixture.store.runs, run.ID)
+			fixture.store.beforeCommit = nil
+			fixture.store.mu.Unlock()
+		}
+		fixture.store.failNext(func(commit Commit) bool {
+			return commit.Acceptance != nil && commit.Acceptance.Status == "accepted"
+		})
+		result := fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true})
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "ambiguous")
+		fixture.store.runs[run.ID] = run
+		core.AssertEqual(t, review.ResultRevision, orchestratorRunGit(t, project.RepositoryRoot, "rev-parse", "HEAD"))
+	})
+	t.Run("non-completed run", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		project, run := orchestratorCompletedAcceptanceRun(t, fixture)
+		review := fixture.orchestrator.ReviewChanges(context.Background(), run.ID).Value.(workspace.ChangeReview)
+		fixture.store.beforeCommit = func(commit Commit) {
+			if commit.Acceptance == nil || commit.Acceptance.Status != "accepted" {
+				return
+			}
+			fixture.store.mu.Lock()
+			stored := fixture.store.runs[run.ID]
+			stored.Status = work.RunRejected
+			fixture.store.runs[run.ID] = stored
+			fixture.store.beforeCommit = nil
+			fixture.store.mu.Unlock()
+		}
+		fixture.store.failNext(func(commit Commit) bool {
+			return commit.Acceptance != nil && commit.Acceptance.Status == "accepted"
+		})
+		result := fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true})
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "ambiguous")
+		core.AssertEqual(t, work.RunRejected, fixture.store.runs[run.ID].Status)
+		core.AssertEqual(t, review.ResultRevision, orchestratorRunGit(t, project.RepositoryRoot, "rev-parse", "HEAD"))
+	})
+	t.Run("mismatched receipt", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		project, run := orchestratorCompletedAcceptanceRun(t, fixture)
+		review := fixture.orchestrator.ReviewChanges(context.Background(), run.ID).Value.(workspace.ChangeReview)
+		fixture.store.beforeCommit = func(commit Commit) {
+			if commit.Run == nil || commit.Acceptance == nil || commit.Acceptance.Status != "accepted" {
+				return
+			}
+			fixture.store.mu.Lock()
+			fixture.store.runs[commit.Run.ID] = *commit.Run
+			mismatched := *commit.Acceptance
+			mismatched.ResultRevision = review.SourceRevision
+			fixture.store.acceptances = append(fixture.store.acceptances, mismatched)
+			fixture.store.beforeCommit = nil
+			fixture.store.mu.Unlock()
+		}
+		fixture.store.failNext(func(commit Commit) bool {
+			return commit.Acceptance != nil && commit.Acceptance.Status == "accepted"
+		})
+		result := fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true})
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "ambiguous")
+		core.AssertEqual(t, work.RunAccepted, fixture.store.runs[run.ID].Status)
+		core.AssertEqual(t, review.ResultRevision, orchestratorRunGit(t, project.RepositoryRoot, "rev-parse", "HEAD"))
+	})
+}
+
 func TestAcceptConcurrentCallsKeepWinningReceiptAndResult(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	project, run := orchestratorCompletedAcceptanceRun(t, fixture)
