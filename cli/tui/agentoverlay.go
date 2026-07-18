@@ -5,6 +5,7 @@ package tui
 import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	core "dappco.re/go"
@@ -171,10 +172,11 @@ type changeAcceptanceOverlay struct {
 	review       agentReview
 	acknowledged bool
 	final        bool
+	viewport     viewport.Model
 }
 
 func newChangeAcceptanceOverlay(review agentReview) *changeAcceptanceOverlay {
-	return &changeAcceptanceOverlay{review: review}
+	return &changeAcceptanceOverlay{review: review, viewport: viewport.New(1, 1)}
 }
 
 func (overlay *changeAcceptanceOverlay) Update(message tea.KeyMsg) bool {
@@ -205,7 +207,9 @@ func (overlay *changeAcceptanceOverlay) View(width, height int, styles uiStyles)
 	if overlay.final {
 		prompt = "enter applies this exact reviewed receipt · esc cancels"
 	}
-	return fitPane(core.Join("\n", overlay.review.Title, "", overlay.review.Warning, "", overlay.review.Body, "", prompt), width, height, styles.panel)
+	overlay.viewport.Width, overlay.viewport.Height = max(1, width-4), max(1, height-6)
+	overlay.viewport.SetContent(overlay.review.Body)
+	return fitPane(core.Join("\n", overlay.review.Title, overlay.review.Warning, "", overlay.viewport.View(), "", prompt), width, height, styles.panel)
 }
 
 func newLaunchReviewOverlay(review agentReview, provider, model string) *launchReviewOverlay {

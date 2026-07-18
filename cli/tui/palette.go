@@ -3,8 +3,6 @@
 package tui
 
 import (
-	"context"
-
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -329,7 +327,8 @@ func defaultWorkspaceCommands() []workspaceCommand {
 			if target == nil || target.work == nil {
 				return core.Fail(core.E("tui.command.refreshWork", "work panel is unavailable", nil))
 			}
-			return target.work.Refresh(context.Background())
+			target.agentCommand = target.requestAgentSnapshot()
+			return core.Ok(nil)
 		}},
 		unavailable(commandRefreshRuntimes, "Refresh runtimes", "Refresh local runtime capabilities", "manual refresh is not connected; restart LEM to rescan"),
 		unavailable(commandRefreshKnowledge, "Refresh knowledge", "Refresh local knowledge packs", "manual refresh is not connected; restart LEM to rescan"),
@@ -407,7 +406,7 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 		allowed = status == "" || status == workStatusActive || status == "ready"
 		reason = "selected Work must be ready before it can dispatch"
 	case agentFeatureCancel:
-		allowed = (!hasSnapshotState || selectedState.NativeRunID != "") && (status == "queued" || status == "preparing" || status == "running" || status == "cancelling")
+		allowed = (!hasSnapshotState || selectedState.NativeRunID != "") && (status == "queued" || status == "running")
 		reason = "selected Work is not queued or running"
 	case agentFeatureAnswer:
 		allowed = (!hasSnapshotState || (selectedState.NativeRunID != "" && selectedState.QuestionID != "")) && (status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input")
@@ -422,7 +421,7 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 		if !hasSnapshotState {
 			return false, "change review overlay is scheduled for Task 14"
 		}
-		return selectedState.NativeRunID != "", "selected Work has no immutable native run"
+		return selectedState.NativeRunID != "" && status == "completed", "selected native run is not completed and reviewable"
 	case agentFeatureAccept:
 		if !hasSnapshotState {
 			return false, "no durable review-ready state is exposed yet"

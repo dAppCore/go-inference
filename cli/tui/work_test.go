@@ -240,26 +240,8 @@ func TestWorkPanel_PreservesAgentExecutionStatuses(t *testing.T) {
 	if result := panel.Refresh(context.Background()); !result.OK {
 		t.Fatalf("Refresh: %v", result.Value)
 	}
-	items := panel.Items()
-	byStatus := make(map[string]workItemRecord, len(items))
-	for _, item := range items {
-		byStatus[item.Status] = item
-	}
-	for _, status := range []string{"queued", "running", "interrupted"} {
-		if _, ok := byStatus[status]; !ok {
-			t.Fatalf("persisted statuses = %#v", items)
-		}
-	}
-	palette := newCommandPalette(newUIStyles(midnightTheme()))
-	running := byStatus["running"]
-	palette.SetAgentContext([]agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureResume, Available: true}}, &running)
-	if !palette.byID[agentCommandID(agentFeatureCancel)].Available || palette.byID[agentCommandID(agentFeatureResume)].Available {
-		t.Fatalf("running actions = cancel %#v resume %#v", palette.byID[agentCommandID(agentFeatureCancel)], palette.byID[agentCommandID(agentFeatureResume)])
-	}
-	interrupted := byStatus["interrupted"]
-	palette.SetAgentContext([]agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureResume, Available: true}}, &interrupted)
-	if palette.byID[agentCommandID(agentFeatureCancel)].Available || !palette.byID[agentCommandID(agentFeatureResume)].Available {
-		t.Fatalf("interrupted actions = cancel %#v resume %#v", palette.byID[agentCommandID(agentFeatureCancel)], palette.byID[agentCommandID(agentFeatureResume)])
+	if items := panel.Items(); len(items) != 0 {
+		t.Fatalf("provider state persisted as Work rows: %#v", items)
 	}
 }
 

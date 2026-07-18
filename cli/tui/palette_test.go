@@ -113,11 +113,11 @@ func TestCommandPalette_AgentWorkStatus(t *testing.T) {
 
 func TestCommandPalette_AgentNativeRunAndReviewState(t *testing.T) {
 	caps := []agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureChangesReview, Available: true}, {Feature: agentFeatureAccept, Available: true}, {Feature: agentFeatureReject, Available: true}}
-	selected := workItemRecord{ID: "local", Status: "running"}
+	selected := workItemRecord{ID: "local", Status: "completed"}
 	state := agentWorkSnapshot{NativeRunID: "run-7"}
 	p := newCommandPalette(newUIStyles(midnightTheme()))
 	p.SetAgentContext(caps, &selected, state)
-	if !p.byID[agentCommandID(agentFeatureCancel)].Available || !p.byID[agentCommandID(agentFeatureChangesReview)].Available {
+	if p.byID[agentCommandID(agentFeatureCancel)].Available || !p.byID[agentCommandID(agentFeatureChangesReview)].Available {
 		t.Fatalf("run actions unavailable: %#v", p.byID)
 	}
 	if p.byID[agentCommandID(agentFeatureAccept)].Available || p.byID[agentCommandID(agentFeatureReject)].Available {

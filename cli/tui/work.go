@@ -156,7 +156,26 @@ func (panel *workPanel) Items() []workItemRecord {
 	if panel == nil {
 		return nil
 	}
-	return append([]workItemRecord(nil), panel.items...)
+	items := make([]workItemRecord, len(panel.items))
+	for index, item := range panel.items {
+		items[index] = panel.effective(item)
+	}
+	return items
+}
+
+func (panel *workPanel) effective(record workItemRecord) workItemRecord {
+	if panel == nil {
+		return record
+	}
+	state := panel.agentWork[record.ID]
+	if state.NativeRunID == "" {
+		return record
+	}
+	if status := core.Trim(state.Status); status != "" {
+		record.Status = status
+	}
+	record.Agent, record.Branch, record.Runtime, record.Question, record.PRURL = state.Agent, state.Branch, state.Runtime, state.Question, state.PRURL
+	return record
 }
 
 func (panel *workPanel) Events(workID string) []eventRecord {
@@ -470,17 +489,9 @@ func (panel *workPanel) updateWork(operation, id string, mutate func(*workItemRe
 }
 
 func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
-	listed := panel.repository.ListWorkItems(true)
-	if !listed.OK {
-		return listed
-	}
-	existing, ok := listed.Value.([]workItemRecord)
-	if !ok {
-		return core.Fail(core.E("tui.workPanel.mergeAgentWork", "invalid work list result", nil))
-	}
-	byExternal := make(map[string]workItemRecord, len(existing))
-	for _, record := range existing {
-		byExternal[record.ExternalID] = record
+	byExternal := make(map[string]workItemRecord, len(panel.items)*2)
+	for _, record := range panel.items {
+		byExternal[record.ExternalID], byExternal[record.ID] = record, record
 	}
 	ordered := append([]agentWorkSnapshot(nil), work...)
 	sort.SliceStable(ordered, func(left, right int) bool { return ordered[left].ExternalID < ordered[right].ExternalID })
@@ -491,47 +502,7 @@ func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
 		}
 		record, exists := byExternal[externalID]
 		if !exists {
-			for _, candidate := range existing {
-				if candidate.ID == externalID {
-					record, exists = candidate, true
-					break
-				}
-			}
-		}
-		if !exists {
-			record.ID = core.Trim(panel.ids())
-			if record.ID == "" {
-				return core.Fail(core.E("tui.workPanel.mergeAgentWork", "work ID generator returned an empty value", nil))
-			}
-			record.ExternalID = externalID
-			record.StartedAt = panel.now().UTC()
-			record.ArchivedAt = unsetRecordTime()
-		}
-		isLocal := record.Source == "local"
-		if record.Source == "" {
-			record.Source = "agent"
-		}
-		if !isLocal {
-			record.Title = core.Trim(snapshot.Title)
-			if record.Title == "" {
-				record.Title = externalID
-			}
-		}
-		record.Status = core.Lower(core.Trim(snapshot.Status))
-		if record.Status == "" {
-			record.Status = workStatusActive
-		}
-		record.Agent = snapshot.Agent
-		if !isLocal {
-			record.Repo = snapshot.Repo
-		}
-		record.Branch = snapshot.Branch
-		record.Runtime = snapshot.Runtime
-		record.Question = snapshot.Question
-		record.PRURL = snapshot.PRURL
-		record.UpdatedAt = panel.now().UTC()
-		if result := panel.repository.SaveWorkItem(record); !result.OK {
-			return result
+			continue
 		}
 		previous := panel.agentWork[record.ID]
 		if snapshot.AnswerID == "" {
@@ -540,7 +511,6 @@ func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
 		if snapshot.ResumeRunID == "" {
 			snapshot.ResumeRunID = previous.ResumeRunID
 		}
-		byExternal[externalID] = record
 		panel.agentWork[record.ID] = snapshot
 	}
 	return core.Ok(nil)
@@ -629,6 +599,9 @@ func (panel *workPanel) refreshEvents() core.Result {
 			filtered = append(local, live...)
 		}
 		sort.SliceStable(filtered, func(left, right int) bool {
+			if core.HasPrefix(filtered[left].ID, "agent-log:") && core.HasPrefix(filtered[right].ID, "agent-log:") {
+				return filtered[left].ID < filtered[right].ID
+			}
 			if filtered[left].CreatedAt.Equal(filtered[right].CreatedAt) {
 				return filtered[left].ID < filtered[right].ID
 			}
@@ -646,7 +619,7 @@ func (panel *workPanel) syncList() {
 	}
 	items := make([]list.Item, 0, len(panel.items))
 	for _, record := range panel.items {
-		items = append(items, workListItem{record: record})
+		items = append(items, workListItem{record: panel.effective(record)})
 	}
 	panel.list.SetItems(items)
 	if selectedID != "" {

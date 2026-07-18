@@ -355,10 +355,14 @@ func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest
 	case agentFeatureRetry:
 		result = adapter.engine.Retry(ctx, nativeWorkItem(request.Work, request.Work.ID, ""), runID)
 	case agentFeatureResume:
-		result = adapter.engine.Resume(ctx, work.ResumeRequest{
-			Work: nativeWorkItem(request.Work, request.Work.ID, ""), ParentRunID: runID,
-			AnswerID: request.Input, Provider: request.Provider, Model: request.Model,
-		})
+		if core.Trim(request.Input) == "" {
+			result = adapter.engine.Retry(ctx, nativeWorkItem(request.Work, request.Work.ID, ""), runID)
+		} else {
+			result = adapter.engine.Resume(ctx, work.ResumeRequest{
+				Work: nativeWorkItem(request.Work, request.Work.ID, ""), ParentRunID: runID,
+				AnswerID: request.Input, Provider: request.Provider, Model: request.Model,
+			})
+		}
 	case agentFeatureQueueStart:
 		result = adapter.engine.StartQueue(ctx)
 	case agentFeatureQueueStop:

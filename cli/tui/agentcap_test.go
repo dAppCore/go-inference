@@ -92,12 +92,8 @@ func TestAgentProviderBoundary_Ugly(t *testing.T) {
 			t.Fatalf("Refresh pass %d: %v", pass, result.Value)
 		}
 	}
-	items := panel.Items()
-	if len(items) != 2 || items[0].ExternalID != "agent-1" || items[1].ExternalID != "agent-2" {
-		t.Fatalf("deterministic items = %#v", items)
-	}
-	if got := len(panel.Events(items[0].ID)) + len(panel.Events(items[1].ID)); got != 3 {
-		t.Fatalf("deduplicated events = %d, want 3", got)
+	if items := panel.Items(); len(items) != 0 {
+		t.Fatalf("provider snapshot created Work rows: %#v", items)
 	}
 	if provider.snapshots != 2 {
 		t.Fatalf("Snapshot calls = %d, want 2", provider.snapshots)

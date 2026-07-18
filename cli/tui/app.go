@@ -42,36 +42,40 @@ type app struct {
 	knowledgeLimit     int64
 	recentSessionLimit int
 
-	activePanel        panelID
-	inspectorOpen      bool
-	styles             uiStyles
-	keys               keyMap
-	markdown           *markdownRenderer
-	activeOverlay      overlayKind
-	palette            *commandPalette
-	switcher           *sessionSwitcher
-	search             *historySearch
-	help               *helpOverlay
-	sessions           *sessionManager
-	repository         workspaceRepository
-	preferences        preferenceStore
-	inspector          inspectorState
-	agent              agentProvider
-	work               *workPanel
-	workEditor         *workEditor
-	launchReview       *launchReviewOverlay
-	answerOverlay      *agentAnswerOverlay
-	changeOverlay      *changeAcceptanceOverlay
-	agentReview        agentReview
-	agentRequest       agentRequest
-	agentCommand       tea.Cmd
-	agentStage         agentReviewStage
-	agentOperationID   uint64
-	agentOperationNext uint64
-	agentInFlight      bool
-	agentRefreshArmed  bool
-	knowledge          *knowledgeLibrary
-	attachments        []attachmentRecord
+	activePanel           panelID
+	inspectorOpen         bool
+	styles                uiStyles
+	keys                  keyMap
+	markdown              *markdownRenderer
+	activeOverlay         overlayKind
+	palette               *commandPalette
+	switcher              *sessionSwitcher
+	search                *historySearch
+	help                  *helpOverlay
+	sessions              *sessionManager
+	repository            workspaceRepository
+	preferences           preferenceStore
+	inspector             inspectorState
+	agent                 agentProvider
+	work                  *workPanel
+	workEditor            *workEditor
+	launchReview          *launchReviewOverlay
+	answerOverlay         *agentAnswerOverlay
+	changeOverlay         *changeAcceptanceOverlay
+	agentReview           agentReview
+	agentRequest          agentRequest
+	agentCommand          tea.Cmd
+	agentStage            agentReviewStage
+	agentOperationID      uint64
+	agentOperationNext    uint64
+	agentInFlight         bool
+	agentRefreshArmed     bool
+	agentSnapshotNext     uint64
+	agentSnapshotCurrent  uint64
+	agentSnapshotInFlight bool
+	agentSnapshotPending  bool
+	knowledge             *knowledgeLibrary
+	attachments           []attachmentRecord
 
 	picker       list.Model
 	spin         spinner.Model
@@ -139,7 +143,10 @@ type workspaceReadyMsg struct{ resources *workspaceResources }
 type workspaceFailedMsg struct{ err error }
 type runtimeDetectedMsg struct{ result core.Result }
 type knowledgeDiscoveredMsg struct{ result core.Result }
-type agentSnapshotMsg struct{ result core.Result }
+type agentSnapshotMsg struct {
+	requestID uint64
+	result    core.Result
+}
 type agentRefreshMsg struct{}
 
 type sessionGeneration struct {
@@ -547,6 +554,7 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 		request.RunID, request.QuestionID = state.NativeRunID, state.QuestionID
 		if feature == agentFeatureResume {
 			request.Input = state.AnswerID
+			request.Provider, request.Model = state.Agent, state.Runtime
 		}
 		if feature == agentFeatureAccept {
 			request.Review = state.Review
@@ -557,6 +565,11 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 	if feature == agentFeatureAnswer {
 		a.answerOverlay = newAgentAnswerOverlay(request.RunID, request.QuestionID, selected.Question)
 		a.activeOverlay = overlayAgentAnswer
+		return core.Ok(nil)
+	}
+	if feature == agentFeatureAccept {
+		a.changeOverlay = newChangeAcceptanceOverlay(request.Review)
+		a.activeOverlay = overlayChangeReview
 		return core.Ok(nil)
 	}
 	if feature == agentFeatureDispatch || feature == agentFeatureChangesReview {
@@ -648,12 +661,26 @@ func (a *app) takeAgentCommand() tea.Cmd {
 	return command
 }
 
-func (a *app) agentSnapshotCommand() tea.Cmd {
+func (a *app) requestAgentSnapshot() tea.Cmd {
+	if a == nil || a.lifecycle == nil {
+		return nil
+	}
+	if a.agentSnapshotInFlight {
+		a.agentSnapshotPending = true
+		return nil
+	}
+	a.agentSnapshotNext++
+	a.agentSnapshotCurrent = a.agentSnapshotNext
+	a.agentSnapshotInFlight = true
+	return a.lifecycle.command(a.agentSnapshotCommand(a.agentSnapshotCurrent))
+}
+
+func (a *app) agentSnapshotCommand(requestID uint64) tea.Cmd {
 	return func() tea.Msg {
 		if a == nil || a.agent == nil {
-			return agentSnapshotMsg{result: core.Fail(core.E("tui.app.agentSnapshot", "agent provider is unavailable", nil))}
+			return agentSnapshotMsg{requestID: requestID, result: core.Fail(core.E("tui.app.agentSnapshot", "agent provider is unavailable", nil))}
 		}
-		return agentSnapshotMsg{result: a.agent.Snapshot(a.lifecycle.context)}
+		return agentSnapshotMsg{requestID: requestID, result: a.agent.Snapshot(a.lifecycle.context)}
 	}
 }
 
@@ -762,7 +789,7 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 	a.activeOverlay, a.launchReview = overlayNone, nil
 	a.resetAgentOperation()
 	a.refreshAgentPalette()
-	return a, a.lifecycle.command(a.agentSnapshotCommand())
+	return a, a.requestAgentSnapshot()
 }
 
 func (a *app) attachKnowledge(repository workspaceRepository, maxBytes int64) core.Result {
@@ -930,16 +957,28 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agentRefreshMsg:
 		a.agentRefreshArmed = false
-		return a, a.lifecycle.command(a.agentSnapshotCommand())
+		return a, a.requestAgentSnapshot()
 
 	case agentSnapshotMsg:
+		if msg.requestID == 0 || msg.requestID != a.agentSnapshotCurrent {
+			return a, nil
+		}
+		a.agentSnapshotInFlight = false
+		pending := a.agentSnapshotPending
+		a.agentSnapshotPending = false
 		if !msg.result.OK {
 			a.errText = msg.result.Error()
+			if pending {
+				return a, a.requestAgentSnapshot()
+			}
 			return a, a.armAgentRefresh()
 		}
 		snapshot, ok := msg.result.Value.(agentSnapshot)
 		if !ok {
 			a.errText = "invalid agent snapshot"
+			if pending {
+				return a, a.requestAgentSnapshot()
+			}
 			return a, a.armAgentRefresh()
 		}
 		if a.work != nil {
@@ -948,6 +987,9 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.refreshAgentPalette()
+		if pending {
+			return a, a.requestAgentSnapshot()
+		}
 		return a, a.armAgentRefresh()
 
 	case tea.WindowSizeMsg:
@@ -1093,6 +1135,7 @@ func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
 
 func (a app) workspaceReadyCommands() tea.Cmd {
 	commands := []tea.Cmd{discoverModels}
+	commands = append(commands, a.requestAgentSnapshot())
 	if a.runtimeDetector != nil {
 		detector := a.runtimeDetector
 		commands = append(commands, func() tea.Msg { return runtimeDetectedMsg{result: detector.Detect()} })
@@ -2121,8 +2164,14 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.answerOverlay.Update(message)
 		}
 	case overlayChangeReview:
-		if a.changeOverlay != nil && message.String() == "a" {
-			a.changeOverlay.acknowledged = true
+		if a.changeOverlay != nil {
+			if message.String() == "a" {
+				a.changeOverlay.acknowledged = true
+			} else {
+				var ignored tea.Cmd
+				a.changeOverlay.viewport, ignored = a.changeOverlay.viewport.Update(message)
+				_ = ignored
+			}
 		}
 	case overlayProjectReview, overlayGitEnableReview, overlayLaunchReview, overlayAgentSelection:
 		// Reviews deliberately consume keys until an explicit confirm or cancel.
