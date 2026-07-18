@@ -24,57 +24,14 @@ import (
 // recurrence from pkg/model/deltanet. Pure Go host f32; the conv-state ring + the delta state thread for
 // decode. Projections go through ProjMatMul (host matNT default; native injects a device GEMM).
 
-// GatedDeltaConfig is the per-layer geometry. The delta state is square, so KeyHeadDim == ValueHeadDim ==
-// HeadDim; q/k use KeyHeads (GQA-repeated up to ValueHeads), v uses ValueHeads.
-type GatedDeltaConfig struct {
-	KeyHeads, ValueHeads, HeadDim, ConvKernel int
-	Eps                                       float32
-}
+// GatedDeltaConfig + GatedDeltaWeights moved to the neutral factory root (model/gated_delta.go): the
+// gated-delta mixer is generic (mamba2 conv + deltanet recurrence), so an arch SELECTS it rather than
+// owning it. These aliases keep qwen3's callers compiling while they migrate to model.*; both aliases —
+// and this whole mis-homed override — are deleted once the arch factory builds/decodes the kind
+// directly (retiring model/composed, the parallel-engine fork). Use the exported QDim/VDim/ConvDim.
+type GatedDeltaConfig = model.GatedDeltaConfig
 
-func (c GatedDeltaConfig) qDim() int    { return c.KeyHeads * c.HeadDim }
-func (c GatedDeltaConfig) vDim() int    { return c.ValueHeads * c.HeadDim }
-func (c GatedDeltaConfig) convDim() int { return 2*c.qDim() + c.vDim() } // q | k | v
-
-// QDim, VDim and ConvDim are the exported forms of qDim/vDim/convDim — the projection-shape formulas a
-// caller OUTSIDE this package needs to target a gated-delta layer's input projections (in_proj_qkv/z/a/b)
-// without duplicating the arithmetic. Exported for composed's device-fusion seam (see
-// composed.ResidualNormMLPProjGatedDeltaInputDevice), which reads a NEXT layer's gated-delta geometry to
-// size the fused command buffer's projection outputs.
-func (c GatedDeltaConfig) QDim() int    { return c.qDim() }
-func (c GatedDeltaConfig) VDim() int    { return c.vDim() }
-func (c GatedDeltaConfig) ConvDim() int { return c.convDim() }
-
-// GatedDeltaWeights is one layer's f32 weights (the loader widens the bf16 checkpoint). InProjQKV is
-// [convDim, D]; ConvWeight [convDim, K]; InProjA/InProjB [ValueHeads, D]; ALog/DtBias [ValueHeads];
-// InProjZ [vDim, D]; Norm [HeadDim] (per-value-head gated RMSNorm); OutProj [D, vDim].
-type GatedDeltaWeights struct {
-	InProjQKV  []float32
-	ConvWeight []float32
-	ConvBias   []float32
-	InProjA    []float32
-	ALog       []float32
-	DtBias     []float32
-	InProjB    []float32
-	InProjZ    []float32
-	Norm       []float32
-	OutProj    []float32
-	// Packed forms in a quant checkpoint (nil ⇒ the dense f32 field is used). The five projections
-	// (in_proj_qkv/a/b/z + out_proj) dispatch to the quant matvec seam; the conv/A_log/norm/dt_bias stay
-	// host f32 (small, unquantised) so the recurrent state math is exact.
-	InProjQKVQ *model.QuantWeight
-	InProjAQ   *model.QuantWeight
-	InProjBQ   *model.QuantWeight
-	InProjZQ   *model.QuantWeight
-	OutProjQ   *model.QuantWeight
-	// bf16-resident forms in a dense bf16 checkpoint (#26 — zero-copy views, never widened; nil ⇒
-	// the f32 or packed field is used). Same dispatch shape as the packed forms, through the bf16
-	// matvec seam.
-	InProjQKVB *model.BF16Weight
-	InProjAB   *model.BF16Weight
-	InProjBB   *model.BF16Weight
-	InProjZB   *model.BF16Weight
-	OutProjB   *model.BF16Weight
-}
+type GatedDeltaWeights = model.GatedDeltaWeights
 
 // ProjMatMul is the device-GEMM seam for the gated-delta projections (host matNT default; native injects
 // its steel GEMM). AX-8: the lib declares the hook, the backend sets it.
@@ -444,7 +401,7 @@ func GatedDeltaOutProjF32(gated []float32, w *GatedDeltaWeights, cfg GatedDeltaC
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: the output allocates fresh
 	}
-	vDim := cfg.vDim()
+	vDim := cfg.VDim()
 	var out []float32
 	var err error
 	if w.OutProjB != nil { // bf16-resident out_proj through the bf16 matvec seam (#26)
@@ -501,8 +458,8 @@ func GatedDeltaInputProjectF32(x []float32, w *GatedDeltaWeights, cfg GatedDelta
 	if KH <= 0 || VH <= 0 || cfg.HeadDim <= 0 || VH%KH != 0 || len(x) != L*D {
 		return nil, nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry or x size")
 	}
-	vDim := cfg.vDim()
-	convDim := cfg.convDim()
+	vDim := cfg.VDim()
+	convDim := cfg.ConvDim()
 
 	// Input fuse: in_proj_qkv/z/a/b all read x [L,D]. When the backend supplies the fused hook and the
 	// dominant qkv projection crosses the device floor, all four are computed up front in ONE command
@@ -586,7 +543,7 @@ func GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta []float32, w *
 	if KH <= 0 || VH <= 0 || HD <= 0 || VH%KH != 0 {
 		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry")
 	}
-	qDim, vDim, convDim := cfg.qDim(), cfg.vDim(), cfg.convDim()
+	qDim, vDim, convDim := cfg.QDim(), cfg.VDim(), cfg.ConvDim()
 	rep := VH / KH
 	scale := float32(1.0 / math.Sqrt(float64(HD)))
 

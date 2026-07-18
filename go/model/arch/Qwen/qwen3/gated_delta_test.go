@@ -122,16 +122,16 @@ func gdSyn(n, seed int) []float32 {
 
 func mkGatedDeltaWeights(cfg GatedDeltaConfig, D int) *GatedDeltaWeights {
 	return &GatedDeltaWeights{
-		InProjQKV:  gdSyn(cfg.convDim()*D, 11),
-		ConvWeight: gdSyn(cfg.convDim()*cfg.ConvKernel, 12),
-		ConvBias:   gdSyn(cfg.convDim(), 13),
+		InProjQKV:  gdSyn(cfg.ConvDim()*D, 11),
+		ConvWeight: gdSyn(cfg.ConvDim()*cfg.ConvKernel, 12),
+		ConvBias:   gdSyn(cfg.ConvDim(), 13),
 		InProjA:    gdSyn(cfg.ValueHeads*D, 14),
 		ALog:       gdSyn(cfg.ValueHeads, 15),
 		DtBias:     gdSyn(cfg.ValueHeads, 16),
 		InProjB:    gdSyn(cfg.ValueHeads*D, 17),
-		InProjZ:    gdSyn(cfg.vDim()*D, 18),
+		InProjZ:    gdSyn(cfg.VDim()*D, 18),
 		Norm:       gdSyn(cfg.HeadDim, 19),
-		OutProj:    gdSyn(D*cfg.vDim(), 20),
+		OutProj:    gdSyn(D*cfg.VDim(), 20),
 	}
 }
 
@@ -147,7 +147,7 @@ func TestGatedDeltaForwardShape(t *testing.T) {
 	if len(out) != L*D {
 		t.Fatalf("out len %d, want %d", len(out), L*D)
 	}
-	if len(nc) != (cfg.ConvKernel-1)*cfg.convDim() || len(nd) != cfg.ValueHeads*cfg.HeadDim*cfg.HeadDim {
+	if len(nc) != (cfg.ConvKernel-1)*cfg.ConvDim() || len(nd) != cfg.ValueHeads*cfg.HeadDim*cfg.HeadDim {
 		t.Fatalf("state shapes wrong: conv %d delta %d", len(nc), len(nd))
 	}
 	t.Logf("qwen3 gated-delta block: [%d,%d] in → out, conv-state %d + delta-state %d advanced", L, D, len(nc), len(nd))
@@ -318,7 +318,7 @@ func TestGatedDelta_GatedDeltaForwardScratchFromInputF32_Good(t *testing.T) {
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	x := gdSyn(L*D, 1)
-	vDim, convDim := cfg.vDim(), cfg.convDim()
+	vDim, convDim := cfg.VDim(), cfg.ConvDim()
 	qkv := matNT(x, w.InProjQKV, L, D, convDim)
 	alpha := matNT(x, w.InProjA, L, D, cfg.ValueHeads)
 	beta := matNT(x, w.InProjB, L, D, cfg.ValueHeads)

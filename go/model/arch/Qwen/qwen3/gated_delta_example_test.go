@@ -55,7 +55,7 @@ func ExampleGatedDeltaForwardScratchFromInputF32() {
 	const L, D = 3, 6
 	w := mkGatedDeltaWeights(cfg, D)
 	x := gdSyn(L*D, 1)
-	vDim, convDim := cfg.vDim(), cfg.convDim()
+	vDim, convDim := cfg.VDim(), cfg.ConvDim()
 	qkv := matNT(x, w.InProjQKV, L, D, convDim)
 	alpha := matNT(x, w.InProjA, L, D, cfg.ValueHeads)
 	beta := matNT(x, w.InProjB, L, D, cfg.ValueHeads)
