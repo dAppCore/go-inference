@@ -415,7 +415,9 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 		allowed = (!hasSnapshotState || selectedState.NativeRunID != "") && (status == workStatusFailed || status == "error" || status == "cancelled" || status == "canceled")
 		reason = "selected Work is not failed or cancelled"
 	case agentFeatureResume:
-		allowed = (!hasSnapshotState || (selectedState.NativeRunID != "" && selectedState.AnswerID != "")) && (status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input" || status == "interrupted")
+		waiting := status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input"
+		interrupted := status == "interrupted"
+		allowed = (waiting || interrupted) && (!hasSnapshotState || (selectedState.NativeRunID != "" && ((waiting && selectedState.AnswerID != "") || interrupted)))
 		reason = "answer the selected native run before resuming it"
 	case agentFeatureChangesReview:
 		if !hasSnapshotState {
@@ -426,7 +428,7 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 		if !hasSnapshotState {
 			return false, "no durable review-ready state is exposed yet"
 		}
-		return selectedState.ReviewID != "" && selectedState.ReviewStatus == "prepared" && selectedState.Review.Payload != nil && selectedState.Review.AcceptanceAllowed && !selectedState.Review.NeedsAcknowledgement, "review changes first; conflicts, failed validation, and unacknowledged validation require review"
+		return selectedState.ReviewID != "" && selectedState.ReviewStatus == "prepared" && selectedState.Review.Payload != nil && selectedState.Review.AcceptanceAllowed, "review changes first; conflicts and failed validation cannot be accepted"
 	case agentFeatureReject:
 		if !hasSnapshotState {
 			return false, "no durable review-ready state is exposed yet"

@@ -707,8 +707,10 @@ func (a *app) armAgentRefresh() tea.Cmd {
 	}
 	a.agentRefreshArmed = true
 	return a.lifecycle.command(func() tea.Msg {
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
 		select {
-		case <-time.After(time.Second):
+		case <-timer.C:
 			return agentRefreshMsg{}
 		case <-a.lifecycle.context.Done():
 			return lifecycleStoppedMsg{}
@@ -746,7 +748,8 @@ func (a app) applyAgentAction(message agentActionMsg) (tea.Model, tea.Cmd) {
 			a.agentRequest, a.agentReview = message.request, review
 			a.changeOverlay = newChangeAcceptanceOverlay(review)
 			a.activeOverlay = overlayChangeReview
-			return a, nil
+			command := a.requestAgentSnapshot()
+			return a, command
 		}
 		a.agentRequest, a.agentReview, a.agentStage = message.request, review, message.stage
 		switch message.stage {
@@ -1133,7 +1136,7 @@ func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
 	return core.Ok(nil)
 }
 
-func (a app) workspaceReadyCommands() tea.Cmd {
+func (a *app) workspaceReadyCommands() tea.Cmd {
 	commands := []tea.Cmd{discoverModels}
 	commands = append(commands, a.requestAgentSnapshot())
 	if a.runtimeDetector != nil {

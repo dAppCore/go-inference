@@ -228,7 +228,7 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 						allowed = false
 					}
 				}
-				mapped.Work[index].Review = agentReview{Feature: agentFeatureChangesReview, Payload: review, NeedsAcknowledgement: len(review.Validation) == 0, AcceptanceAllowed: allowed}
+				mapped.Work[index].Review = mapChangeReview(review, allowed)
 			}
 		}
 	}
@@ -239,6 +239,18 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		return mapped.Events[left].CreatedAt.Before(mapped.Events[right].CreatedAt)
 	})
 	return mapped
+}
+
+func mapChangeReview(review workspace.ChangeReview, allowed bool) agentReview {
+	warning := "Accept applies the reviewed result to the source only after explicit final confirmation."
+	if len(review.Conflicts) > 0 {
+		warning = "Integration conflicts must be resolved by a later reviewed attempt; the source remains unchanged."
+	} else if !allowed {
+		warning = "At least one validation failed; the source remains unchanged until a later reviewed attempt passes."
+	} else if len(review.Validation) == 0 {
+		warning = "No validation command is configured; acceptance requires explicit acknowledgement."
+	}
+	return agentReview{Feature: agentFeatureChangesReview, Title: "Review agent changes", Body: renderAgentChangeReview(review), Warning: warning, ConfirmRequired: true, NeedsAcknowledgement: len(review.Validation) == 0, AcceptanceAllowed: allowed, Payload: review}
 }
 
 func firstAgentText(values ...string) string {
@@ -298,19 +310,7 @@ func (adapter *nativeAgentAdapter) Review(ctx context.Context, request agentRevi
 				allowed = false
 			}
 		}
-		warning := "Accept applies the reviewed result to the source only after explicit final confirmation."
-		if len(review.Conflicts) > 0 {
-			warning = "Integration conflicts must be resolved by a later reviewed attempt; the source remains unchanged."
-		} else if !allowed {
-			warning = "At least one validation failed; the source remains unchanged until a later reviewed attempt passes."
-		} else if len(review.Validation) == 0 {
-			warning = "No validation command is configured; acceptance requires explicit acknowledgement."
-		}
-		return core.Ok(agentReview{
-			Feature: agentFeatureChangesReview, Title: "Review agent changes",
-			Body:    renderAgentChangeReview(review),
-			Warning: warning, ConfirmRequired: true, NeedsAcknowledgement: len(review.Validation) == 0, AcceptanceAllowed: allowed, Payload: review,
-		})
+		return core.Ok(mapChangeReview(review, allowed))
 	default:
 		return core.Fail(core.E("tui.agentAdapter.Review", core.Concat("agent feature does not support review: ", string(request.Feature)), nil))
 	}
