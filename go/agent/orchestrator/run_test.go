@@ -1990,11 +1990,17 @@ func TestRunTerminalMetadataFailureRetainsUntilCloseRecovery(t *testing.T) {
 	tests := []struct {
 		name      string
 		configure func(*orchestratorFixture)
+		consumed  func(*orchestratorFixture) bool
 	}{
 		{
 			name: "clock",
 			configure: func(fixture *orchestratorFixture) {
 				fixture.clock.ZeroAfter(1)
+			},
+			consumed: func(fixture *orchestratorFixture) bool {
+				fixture.clock.mu.Lock()
+				defer fixture.clock.mu.Unlock()
+				return fixture.clock.zeroAfter == 0
 			},
 		},
 		{
@@ -2003,6 +2009,11 @@ func TestRunTerminalMetadataFailureRetainsUntilCloseRecovery(t *testing.T) {
 				fixture.ids.mu.Lock()
 				fixture.ids.failNext = 1
 				fixture.ids.mu.Unlock()
+			},
+			consumed: func(fixture *orchestratorFixture) bool {
+				fixture.ids.mu.Lock()
+				defer fixture.ids.mu.Unlock()
+				return fixture.ids.failNext == 0
 			},
 		},
 	}
@@ -2029,7 +2040,13 @@ func TestRunTerminalMetadataFailureRetainsUntilCloseRecovery(t *testing.T) {
 			}
 			test.configure(fixture)
 			launch.process.Finish(0)
-			time.Sleep(100 * time.Millisecond)
+			consumedDeadline := time.Now().Add(5 * time.Second)
+			for !test.consumed(fixture) {
+				if time.Now().After(consumedDeadline) {
+					t.Fatalf("%s one-shot terminal metadata failure was not consumed", test.name)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
 			stored := fixture.store.Run(run.ID)
 			core.AssertTrue(t, stored.OK, stored.Error())
 			core.AssertEqual(t, work.RunRunning, stored.Value.(work.Run).Status)
