@@ -95,6 +95,29 @@ func TestAgentAdapter_SnapshotProjectWithoutRunDoesNotCreateWork(t *testing.T) {
 	}
 }
 
+func TestAgentAdapter_SnapshotKeepsHistoricalQuestionWithoutStaleAttention(t *testing.T) {
+	at := time.Date(2026, time.July, 18, 15, 0, 0, 0, time.UTC)
+	adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{
+		Runs: []work.Run{
+			{ID: "run-parent", WorkID: "work-1", Status: work.RunWaiting},
+			{ID: "run-child", WorkID: "work-1", Status: work.RunInterrupted},
+		},
+		Questions: []work.Question{{ID: "question-parent", RunID: "run-parent", Text: "Which target?", CreatedAt: at}},
+	}})
+
+	result := adapter.Snapshot(context.Background())
+	if !result.OK {
+		t.Fatalf("Snapshot: %s", result.Error())
+	}
+	snapshot := result.Value.(agentSnapshot)
+	if len(snapshot.Work) != 1 || snapshot.Work[0].NativeRunID != "run-child" || snapshot.Work[0].Question != "" || snapshot.Work[0].QuestionID != "" {
+		t.Fatalf("selected child attention = %#v", snapshot.Work)
+	}
+	if len(snapshot.Events) != 1 || snapshot.Events[0].ExternalID != "question-parent" || snapshot.Events[0].RunID != "run-parent" || snapshot.Events[0].WorkID != "work-1" || snapshot.Events[0].Kind != "question" || snapshot.Events[0].Detail != "Which target?" {
+		t.Fatalf("historical question timeline = %#v", snapshot.Events)
+	}
+}
+
 func TestAgentAdapter_SnapshotReviewUsesFreshReviewPresentation(t *testing.T) {
 	review := workspace.ChangeReview{
 		WorkID: "work-1", RunID: "run-1", SourceBranch: "main", SourceRevision: "source-123",

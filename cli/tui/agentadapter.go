@@ -207,14 +207,14 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 	}
 	for _, question := range snapshot.Questions {
 		workID := runWork[question.RunID]
-		index, exists := workIndex[workID]
-		if !exists || mapped.Work[index].NativeRunID != question.RunID {
-			continue
-		}
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
 			ExternalID: question.ID, WorkID: workID, RunID: question.RunID, Kind: "question",
 			Title: "Agent question", Detail: question.Text, CreatedAt: question.CreatedAt,
 		})
+		index, exists := workIndex[workID]
+		if !exists || mapped.Work[index].NativeRunID != question.RunID {
+			continue
+		}
 		mapped.Work[index].Question = question.Text
 		mapped.Work[index].QuestionID = question.ID
 	}
