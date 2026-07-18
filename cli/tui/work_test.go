@@ -20,7 +20,7 @@ func TestWorkPanel_Good(t *testing.T) {
 		t.Fatalf("newWorkPanel: %v", opened.Value)
 	}
 	panel := opened.Value.(*workPanel)
-	created := panel.Create("Draft release notes")
+	created := panel.CreateWork("Draft release notes", "Prepare the release notes for review.", "/tmp/release-notes")
 	if !created.OK {
 		t.Fatalf("Create: %v", created.Value)
 	}
@@ -47,8 +47,40 @@ func TestWorkPanel_Good(t *testing.T) {
 	allResult := repository.ListWorkItems(true)
 	assertRecordSliceLength[workItemRecord](t, "all work", allResult, 1)
 	stored := allResult.Value.([]workItemRecord)[0]
-	if stored.Title != "Ship release notes" || stored.Status != workStatusActive || stored.SessionID != "session-42" || !stored.Archived {
+	if stored.Title != "Ship release notes" || stored.Task != "Prepare the release notes for review." || stored.Repo != "/tmp/release-notes" || stored.Status != workStatusActive || stored.SessionID != "session-42" || !stored.Archived {
 		t.Fatalf("stored work = %#v", stored)
+	}
+}
+
+func TestWorkEditor_PersistsTitleTaskAndRepository(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	now := time.Date(2026, time.July, 18, 10, 0, 0, 0, time.UTC)
+	opened := newWorkPanel(repository, newUnavailableAgentProvider(defaultAgentUnavailableReason), sequenceIDs("work-editor"), func() time.Time { return now })
+	if !opened.OK {
+		t.Fatalf("newWorkPanel: %v", opened.Value)
+	}
+	panel := opened.Value.(*workPanel)
+	created := panel.CreateWork("Ship agent review", "Exercise the complete launch flow.", "/tmp/repositories/with spaces")
+	if !created.OK {
+		t.Fatalf("CreateWork: %v", created.Value)
+	}
+	record := created.Value.(workItemRecord)
+	if record.Title != "Ship agent review" || record.Task != "Exercise the complete launch flow." || record.Repo != "/tmp/repositories/with spaces" {
+		t.Fatalf("created work = %#v", record)
+	}
+	edited := panel.EditWork(record.ID, "Ship reviewed agent flow", "Keep the source untouched.", "/tmp/other repository")
+	if !edited.OK {
+		t.Fatalf("EditWork: %v", edited.Value)
+	}
+	stored := repository.ListWorkItems(false).Value.([]workItemRecord)[0]
+	if stored.Title != "Ship reviewed agent flow" || stored.Task != "Keep the source untouched." || stored.Repo != "/tmp/other repository" {
+		t.Fatalf("stored work = %#v", stored)
+	}
+	for _, args := range [][3]string{{"", "task", "/tmp/repo"}, {"title", "", "/tmp/repo"}, {"title", "task", ""}} {
+		if result := panel.CreateWork(args[0], args[1], args[2]); result.OK {
+			t.Fatalf("CreateWork%q succeeded", args)
+		}
 	}
 }
 
@@ -67,9 +99,9 @@ func TestWorkPanel_Bad(t *testing.T) {
 		if !panel.SelectAction(capability.Feature) {
 			t.Fatalf("SelectAction(%q) = false", capability.Feature)
 		}
-		result := panel.ActivateSelectedAction(context.Background(), "")
-		if result.OK || !strings.Contains(result.Error(), reason) {
-			t.Fatalf("disabled %q result = %#v", capability.Feature, result)
+		selected := panel.SelectedAction()
+		if selected.Available || !strings.Contains(selected.Reason, reason) {
+			t.Fatalf("disabled %q = %#v", capability.Feature, selected)
 		}
 	}
 	after := repository.ListWorkItems(true)
@@ -123,6 +155,45 @@ func TestWorkPanel_Ugly(t *testing.T) {
 				t.Fatalf("width %d cropped detail %q:\n%s", width, want, view)
 			}
 		}
+	}
+}
+
+func TestWorkPanel_PreservesAgentExecutionStatuses(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &fixtureAgentProvider{snapshot: agentSnapshot{Work: []agentWorkSnapshot{
+		{ExternalID: "queued", Title: "Queued", Status: "queued"},
+		{ExternalID: "running", Title: "Running", Status: "running"},
+		{ExternalID: "interrupted", Title: "Interrupted", Status: "interrupted"},
+	}}}
+	opened := newWorkPanel(repository, provider, sequenceIDs("queued-id", "running-id", "interrupted-id"), time.Now)
+	if !opened.OK {
+		t.Fatalf("newWorkPanel: %v", opened.Value)
+	}
+	panel := opened.Value.(*workPanel)
+	if result := panel.Refresh(context.Background()); !result.OK {
+		t.Fatalf("Refresh: %v", result.Value)
+	}
+	items := panel.Items()
+	byStatus := make(map[string]workItemRecord, len(items))
+	for _, item := range items {
+		byStatus[item.Status] = item
+	}
+	for _, status := range []string{"queued", "running", "interrupted"} {
+		if _, ok := byStatus[status]; !ok {
+			t.Fatalf("persisted statuses = %#v", items)
+		}
+	}
+	palette := newCommandPalette(newUIStyles(midnightTheme()))
+	running := byStatus["running"]
+	palette.SetAgentContext([]agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureResume, Available: true}}, &running)
+	if !palette.byID[agentCommandID(agentFeatureCancel)].Available || palette.byID[agentCommandID(agentFeatureResume)].Available {
+		t.Fatalf("running actions = cancel %#v resume %#v", palette.byID[agentCommandID(agentFeatureCancel)], palette.byID[agentCommandID(agentFeatureResume)])
+	}
+	interrupted := byStatus["interrupted"]
+	palette.SetAgentContext([]agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureResume, Available: true}}, &interrupted)
+	if palette.byID[agentCommandID(agentFeatureCancel)].Available || !palette.byID[agentCommandID(agentFeatureResume)].Available {
+		t.Fatalf("interrupted actions = cancel %#v resume %#v", palette.byID[agentCommandID(agentFeatureCancel)], palette.byID[agentCommandID(agentFeatureResume)])
 	}
 }
 

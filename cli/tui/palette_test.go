@@ -50,6 +50,67 @@ func TestCommandPalette_Bad(t *testing.T) {
 	}
 }
 
+func TestCommandPalette_AgentDispatchNeedsSelectedWork(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	palette := newCommandPalette(styles)
+	palette.SetAgentContext([]agentCapability{{Feature: agentFeatureDispatch, Available: true}}, nil)
+	a := newApp("", 0, 64)
+	command := palette.byID[agentCommandID(agentFeatureDispatch)]
+	if command.Available || !strings.Contains(command.Reason, "selected Work") {
+		t.Fatalf("dispatch without Work = %#v", command)
+	}
+	if result := palette.Invoke(agentCommandID(agentFeatureDispatch), &a); result.OK {
+		t.Fatal("dispatch without Work was invokable")
+	}
+	selected := workItemRecord{Status: workStatusActive}
+	palette.SetAgentContext([]agentCapability{{Feature: agentFeatureDispatch, Available: true}}, &selected)
+	if command = palette.byID[agentCommandID(agentFeatureDispatch)]; !command.Available {
+		t.Fatalf("dispatch with selected Work = %#v", command)
+	}
+}
+
+func TestCommandPalette_AgentWorkStatus(t *testing.T) {
+	capabilities := []agentCapability{
+		{Feature: agentFeatureDispatch, Available: true}, {Feature: agentFeatureCancel, Available: true},
+		{Feature: agentFeatureAnswer, Available: true}, {Feature: agentFeatureRetry, Available: true},
+		{Feature: agentFeatureResume, Available: true}, {Feature: agentFeatureChangesReview, Available: true},
+		{Feature: agentFeatureAccept, Available: true}, {Feature: agentFeatureReject, Available: true},
+	}
+	cases := []struct {
+		status string
+		ready  []agentFeature
+	}{
+		{workStatusActive, []agentFeature{agentFeatureDispatch}}, {"queued", []agentFeature{agentFeatureCancel}}, {"running", []agentFeature{agentFeatureCancel}},
+		{workStatusWaiting, []agentFeature{agentFeatureAnswer, agentFeatureResume}}, {workStatusFailed, []agentFeature{agentFeatureRetry}}, {"interrupted", []agentFeature{agentFeatureResume}},
+		{workStatusCompleted, []agentFeature{}},
+	}
+	for _, test := range cases {
+		t.Run(test.status, func(t *testing.T) {
+			palette := newCommandPalette(newUIStyles(midnightTheme()))
+			selected := workItemRecord{Status: test.status}
+			palette.SetAgentContext(capabilities, &selected)
+			for _, feature := range []agentFeature{agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry, agentFeatureResume, agentFeatureChangesReview} {
+				command := palette.byID[agentCommandID(feature)]
+				want := false
+				for _, ready := range test.ready {
+					want = want || feature == ready
+				}
+				if got := command.Available; got != want {
+					t.Fatalf("%s for %s available=%v reason=%q", feature, test.status, got, command.Reason)
+				}
+			}
+			if command := palette.byID[agentCommandID(agentFeatureChangesReview)]; command.Available || !strings.Contains(command.Reason, "Task 14") {
+				t.Fatalf("change review state = %#v", command)
+			}
+			for _, feature := range []agentFeature{agentFeatureAccept, agentFeatureReject} {
+				if command := palette.byID[agentCommandID(feature)]; command.Available || !strings.Contains(command.Reason, "review-ready") {
+					t.Fatalf("%s state = %#v", feature, command)
+				}
+			}
+		})
+	}
+}
+
 func TestCommandPaletteLocalRefresh_Bad(t *testing.T) {
 	palette := newCommandPalette(newUIStyles(midnightTheme()))
 	a := newApp("", 0, 64)

@@ -1189,6 +1189,160 @@ func TestTranscriptFollow_Ugly(t *testing.T) {
 	}
 }
 
+func TestApp_AgentReviewLaunchesOnlyAfterBothConfirmations(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{
+		caps:    []agentCapability{{Feature: agentFeatureDispatch, Available: true}},
+		reviews: []agentReview{{Feature: agentFeatureDispatch, Title: "Review project registration", Body: "Source: /tmp/repo", ConfirmRequired: true}},
+	}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	if result := a.work.CreateWork("Launch", "Run the approved task", "/tmp/repo"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.palette.Invoke(agentCommandID(agentFeatureDispatch), &a); !result.OK {
+		t.Fatalf("dispatch palette invoke: %v", result.Value)
+	}
+	startAgentProjectReview(t, &a, "codex", "gpt-5")
+	if a.activeOverlay != overlayProjectReview || len(provider.runs) != 0 {
+		t.Fatalf("project review state = overlay %d runs %d", a.activeOverlay, len(provider.runs))
+	}
+	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	if len(provider.runs) != 0 || command == nil {
+		t.Fatalf("registration confirmation = runs=%d command=%v", len(provider.runs), command != nil)
+	}
+	model, _ = a.Update(command())
+	a = model.(app)
+	if a.activeOverlay != overlayLaunchReview || len(provider.runs) != 1 {
+		t.Fatalf("launch review state = overlay %d runs %d", a.activeOverlay, len(provider.runs))
+	}
+	model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	if command == nil || len(provider.runs) != 1 {
+		t.Fatalf("launch confirmation = runs=%d command=%v", len(provider.runs), command != nil)
+	}
+	model, _ = a.Update(command())
+	a = model.(app)
+	if len(provider.runs) != 2 || a.activeOverlay != overlayNone || provider.runs[0].Provider != "codex" || provider.runs[0].Model != "gpt-5" || provider.runs[1].Provider != "codex" || provider.runs[1].Model != "gpt-5" {
+		t.Fatalf("final dispatch = runs=%#v overlay=%d", provider.runs, a.activeOverlay)
+	}
+}
+
+func TestApp_AgentReviewUsesStageInsteadOfReviewTitle(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{caps: []agentCapability{{Feature: agentFeatureDispatch, Available: true}}, reviews: []agentReview{{Feature: agentFeatureDispatch, Title: "Localised provider wording", Body: "Source: /tmp/repo", ConfirmRequired: true}}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	if result := a.work.CreateWork("Launch", "Run the task", "/tmp/repo"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.palette.Invoke(agentCommandID(agentFeatureDispatch), &a); !result.OK {
+		t.Fatalf("dispatch: %v", result.Value)
+	}
+	startAgentProjectReview(t, &a, "codex", "gpt-5")
+	if a.activeOverlay != overlayProjectReview {
+		t.Fatalf("project review overlay = %d, want %d", a.activeOverlay, overlayProjectReview)
+	}
+}
+
+func TestApp_AgentReviewSelectsProviderAndModelBeforeProjectReview(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &launchReviewProvider{caps: []agentCapability{{Feature: agentFeatureDispatch, Available: true}}, reviews: []agentReview{{Feature: agentFeatureDispatch, Title: "Project", ConfirmRequired: true}}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	if result := a.work.CreateWork("Launch", "Run the task", "/tmp/repo"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.palette.Invoke(agentCommandID(agentFeatureDispatch), &a); !result.OK {
+		t.Fatalf("dispatch: %v", result.Value)
+	}
+	if a.activeOverlay != overlayAgentSelection || a.agentCommand != nil {
+		t.Fatalf("selection state = overlay %d command=%v", a.activeOverlay, a.agentCommand != nil)
+	}
+	a.launchReview.providerInput.SetValue("codex")
+	a.launchReview.modelInput.SetValue("gpt-5")
+	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	if command == nil {
+		t.Fatal("provider selection did not schedule a project review")
+	}
+	model, _ = a.Update(command())
+	a = model.(app)
+	if len(provider.reviewRequests) != 1 || provider.reviewRequests[0].Provider != "codex" || provider.reviewRequests[0].Model != "gpt-5" || a.activeOverlay != overlayProjectReview {
+		t.Fatalf("project review = requests=%#v overlay=%d", provider.reviewRequests, a.activeOverlay)
+	}
+}
+
+func TestApp_AgentReviewFailureDoesNotRun(t *testing.T) {
+	for _, reason := range []string{"source repository is dirty", "source repository is detached", "included file hash changed"} {
+		t.Run(reason, func(t *testing.T) {
+			repository := openTestDuckRepository(t)
+			defer closeTestDuckRepository(t, repository)
+			provider := &failingLaunchReviewProvider{reason: reason}
+			a := newApp("", 0, 64)
+			if result := a.attachWork(repository, provider); !result.OK {
+				t.Fatalf("attachWork: %v", result.Value)
+			}
+			if result := a.work.CreateWork("Launch", "Run the task", "/tmp/repo"); !result.OK {
+				t.Fatalf("CreateWork: %v", result.Value)
+			}
+			if result := a.palette.Invoke(agentCommandID(agentFeatureDispatch), &a); !result.OK {
+				t.Fatalf("dispatch: %v", result.Value)
+			}
+			startAgentProjectReview(t, &a, "codex", "gpt-5")
+			if !strings.Contains(a.errText, reason) || provider.runs != 0 || a.activeOverlay != overlayNone {
+				t.Fatalf("failure=%q err=%q runs=%d overlay=%d", reason, a.errText, provider.runs, a.activeOverlay)
+			}
+		})
+	}
+}
+
+func startAgentProjectReview(t *testing.T, target *app, provider, model string) {
+	t.Helper()
+	if target.activeOverlay != overlayAgentSelection || target.launchReview == nil {
+		t.Fatalf("agent selection = overlay %d review=%v", target.activeOverlay, target.launchReview != nil)
+	}
+	target.launchReview.providerInput.SetValue(provider)
+	target.launchReview.modelInput.SetValue(model)
+	next, command := target.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	*target = next.(app)
+	if command == nil {
+		t.Fatal("agent selection did not schedule project review")
+	}
+	next, _ = target.Update(command())
+	*target = next.(app)
+}
+
+type failingLaunchReviewProvider struct {
+	reason string
+	runs   int
+}
+
+func (*failingLaunchReviewProvider) Capabilities() []agentCapability {
+	return []agentCapability{{Feature: agentFeatureDispatch, Available: true}}
+}
+func (*failingLaunchReviewProvider) Snapshot(context.Context) core.Result {
+	return core.Ok(agentSnapshot{})
+}
+func (provider *failingLaunchReviewProvider) Review(context.Context, agentReviewRequest) core.Result {
+	return core.Fail(core.E("test.review", provider.reason, nil))
+}
+func (provider *failingLaunchReviewProvider) Run(context.Context, agentRequest) core.Result {
+	provider.runs++
+	return core.Ok(agentActionReceipt{})
+}
+func (*failingLaunchReviewProvider) Close() core.Result { return core.Ok(nil) }
+
 func transcriptTestApp(t *testing.T) app {
 	t.Helper()
 	a := newApp("", 0, 64)

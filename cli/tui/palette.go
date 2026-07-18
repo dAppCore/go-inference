@@ -33,6 +33,8 @@ const (
 	commandRefreshWork      commandID = "work.refresh"
 	commandRefreshRuntimes  commandID = "runtimes.refresh"
 	commandRefreshKnowledge commandID = "knowledge.refresh"
+	commandNewWork          commandID = "work.new"
+	commandEditWork         commandID = "work.edit"
 )
 
 type workspaceCommand struct {
@@ -107,6 +109,9 @@ func (palette *commandPalette) Invoke(id commandID, target *app) core.Result {
 	if palette == nil {
 		return core.Fail(core.E("tui.commandPalette.Invoke", "command palette is unavailable", nil))
 	}
+	if target != nil {
+		target.refreshAgentPalette()
+	}
 	command, exists := palette.byID[id]
 	if !exists {
 		return core.Fail(core.E("tui.commandPalette.Invoke", core.Concat("unknown command: ", string(id)), nil))
@@ -157,6 +162,10 @@ func (palette *commandPalette) View(width, height int) string {
 }
 
 func (palette *commandPalette) SetAgentCapabilities(capabilities []agentCapability) {
+	palette.SetAgentContext(capabilities, nil)
+}
+
+func (palette *commandPalette) SetAgentContext(capabilities []agentCapability, selected *workItemRecord) {
 	if palette == nil {
 		return
 	}
@@ -166,7 +175,7 @@ func (palette *commandPalette) SetAgentCapabilities(capabilities []agentCapabili
 			commands = append(commands, command)
 		}
 	}
-	commands = append(commands, agentWorkspaceCommands(capabilities)...)
+	commands = append(commands, agentWorkspaceCommandsForContext(capabilities, selected)...)
 	items := make([]list.Item, 0, len(commands))
 	byID := make(map[commandID]workspaceCommand, len(commands))
 	for _, command := range commands {
@@ -175,6 +184,28 @@ func (palette *commandPalette) SetAgentCapabilities(capabilities []agentCapabili
 	}
 	palette.commands = commands
 	palette.byID = byID
+	palette.list.SetItems(items)
+}
+
+func (palette *commandPalette) SetWorkSelection(hasSelectedWork bool) {
+	if palette == nil {
+		return
+	}
+	for index := range palette.commands {
+		if palette.commands[index].ID != commandEditWork {
+			continue
+		}
+		palette.commands[index].Available = hasSelectedWork
+		palette.commands[index].Reason = ""
+		if !hasSelectedWork {
+			palette.commands[index].Reason = "a selected Work item is required"
+		}
+		palette.byID[commandEditWork] = palette.commands[index]
+	}
+	items := make([]list.Item, 0, len(palette.commands))
+	for _, command := range palette.commands {
+		items = append(items, commandListItem{command: command})
+	}
 	palette.list.SetItems(items)
 }
 
@@ -279,6 +310,19 @@ func defaultWorkspaceCommands() []workspaceCommand {
 		{ID: commandSaveSettings, Title: "Save settings", Description: "Commit generation and appearance preferences", Available: true, run: func(target *app) core.Result {
 			return target.inspector.Save(target)
 		}},
+		{ID: commandNewWork, Title: "New Work", Description: "Create a reviewed agent Work item", Available: true, run: func(target *app) core.Result {
+			return target.openWorkEditor(workItemRecord{})
+		}},
+		{ID: commandEditWork, Title: "Edit Work", Description: "Edit the selected Work item", Reason: "a selected Work item is required", run: func(target *app) core.Result {
+			if target == nil || target.work == nil {
+				return core.Fail(core.E("tui.command.work.edit", "work panel is unavailable", nil))
+			}
+			record, ok := target.work.Selected()
+			if !ok {
+				return core.Fail(core.E("tui.command.work.edit", "a selected Work item is required", nil))
+			}
+			return target.openWorkEditor(record)
+		}},
 		unavailable(commandExportMarkdown, "Export Markdown", "Export the active session as Markdown", "export adapter not connected"),
 		unavailable(commandExportJSON, "Export JSON", "Export the active session as structured JSON", "export adapter not connected"),
 		{ID: commandRefreshWork, Title: "Refresh work", Description: "Refresh local work and provider snapshots", Available: true, run: func(target *app) core.Result {
@@ -298,29 +342,83 @@ func agentCommandID(feature agentFeature) commandID {
 }
 
 func agentWorkspaceCommands(capabilities []agentCapability) []workspaceCommand {
+	// The static catalogue is informational. Runtime invokability is rebuilt
+	// through SetAgentContext once an app has a Work selection.
+	return agentWorkspaceCommandsForContext(capabilities, nil)
+}
+
+func agentWorkspaceCommandsForContext(capabilities []agentCapability, selected *workItemRecord) []workspaceCommand {
 	commands := make([]workspaceCommand, 0, len(capabilities))
 	for _, capability := range capabilities {
 		capability := capability
+		available, reason := agentCommandAvailability(capability, selected)
 		commands = append(commands, workspaceCommand{
 			ID:          agentCommandID(capability.Feature),
 			Title:       agentFeatureTitle(capability.Feature),
 			Description: core.Concat("Agent capability · ", string(capability.Feature)),
-			Available:   capability.Available,
-			Reason:      capability.Reason,
+			Available:   available,
+			Reason:      reason,
 			run: func(target *app) core.Result {
 				if target == nil || target.work == nil {
 					return core.Fail(core.E("tui.agentCommand", "work panel is unavailable", nil))
 				}
-				if !target.work.SelectAction(capability.Feature) {
-					return core.Fail(core.E("tui.agentCommand", "agent action is unavailable", nil))
-				}
 				target.activePanel = panelWork
 				target.inspectorOpen = true
-				return core.Ok(nil)
+				return target.queueAgentAction(capability.Feature)
 			},
 		})
 	}
 	return commands
+}
+
+func agentCommandAvailability(capability agentCapability, selected *workItemRecord) (bool, string) {
+	if !capability.Available {
+		return false, capability.Reason
+	}
+	if !agentFeatureNeedsWork(capability.Feature) {
+		return true, ""
+	}
+	if selected == nil {
+		return false, "a selected Work item is required"
+	}
+	status := core.Lower(core.Trim(selected.Status))
+	allowed := false
+	reason := "selected Work is not in a state that allows this action"
+	switch capability.Feature {
+	case agentFeatureDispatch:
+		allowed = status == "" || status == workStatusActive || status == "ready"
+		reason = "selected Work must be ready before it can dispatch"
+	case agentFeatureCancel:
+		allowed = status == "queued" || status == "running"
+		reason = "selected Work is not queued or running"
+	case agentFeatureAnswer:
+		allowed = status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input"
+		reason = "selected Work is not waiting for an answer"
+	case agentFeatureRetry:
+		allowed = status == workStatusFailed || status == "error" || status == "cancelled" || status == "canceled"
+		reason = "selected Work is not failed or cancelled"
+	case agentFeatureResume:
+		allowed = status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input" || status == "interrupted"
+		reason = "selected Work is not waiting or interrupted"
+	case agentFeatureChangesReview:
+		return false, "change review overlay is scheduled for Task 14"
+	case agentFeatureAccept, agentFeatureReject:
+		return false, "no durable review-ready state is exposed yet"
+	}
+	if !allowed {
+		return false, reason
+	}
+	return true, ""
+}
+
+func agentFeatureNeedsWork(feature agentFeature) bool {
+	switch feature {
+	case agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry,
+		agentFeatureResume, agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject:
+		return true
+	default:
+		return false
+	}
 }
 
 type sessionSwitcherItem struct {
@@ -575,6 +673,11 @@ const (
 	overlaySessions
 	overlaySearch
 	overlayHelp
+	overlayWorkEditor
+	overlayProjectReview
+	overlayGitEnableReview
+	overlayLaunchReview
+	overlayAgentSelection
 )
 
 type helpOverlay struct {

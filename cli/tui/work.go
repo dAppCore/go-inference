@@ -159,7 +159,15 @@ func (panel *workPanel) Capabilities() []agentCapability {
 	return append([]agentCapability(nil), panel.actions...)
 }
 
-func (panel *workPanel) Create(title string) core.Result {
+func (panel *workPanel) CreateWork(title, task, repository string) core.Result {
+	title, task, repository = core.Trim(title), core.Trim(task), core.Trim(repository)
+	if title == "" || task == "" || repository == "" {
+		return core.Fail(core.E("tui.workPanel.CreateWork", "work title, task, and repository are required", nil))
+	}
+	return panel.create(title, task, repository)
+}
+
+func (panel *workPanel) create(title, task, repository string) core.Result {
 	if panel == nil {
 		return core.Fail(core.E("tui.workPanel.Create", "work panel is unavailable", nil))
 	}
@@ -177,6 +185,8 @@ func (panel *workPanel) Create(title string) core.Result {
 		ExternalID: "local:" + id,
 		Source:     "local",
 		Title:      title,
+		Task:       task,
+		Repo:       repository,
 		Status:     workStatusActive,
 		StartedAt:  now,
 		UpdatedAt:  now,
@@ -190,6 +200,16 @@ func (panel *workPanel) Create(title string) core.Result {
 	}
 	panel.selectWork(id)
 	return core.Ok(record)
+}
+
+func (panel *workPanel) EditWork(id, title, task, repository string) core.Result {
+	title, task, repository = core.Trim(title), core.Trim(task), core.Trim(repository)
+	if title == "" || task == "" || repository == "" {
+		return core.Fail(core.E("tui.workPanel.EditWork", "work title, task, and repository are required", nil))
+	}
+	return panel.updateWork("EditWork", id, func(record *workItemRecord) {
+		record.Title, record.Task, record.Repo = title, task, repository
+	})
 }
 
 func (panel *workPanel) Rename(id, title string) core.Result {
@@ -247,28 +267,6 @@ func (panel *workPanel) SelectedAction() agentCapability {
 		panel.action = 0
 	}
 	return panel.actions[panel.action]
-}
-
-func (panel *workPanel) ActivateSelectedAction(ctx context.Context, input string) core.Result {
-	if panel == nil || panel.provider == nil {
-		return core.Fail(core.E("tui.workPanel.ActivateSelectedAction", "agent provider is unavailable", nil))
-	}
-	capability := panel.SelectedAction()
-	if capability.Feature == "" {
-		return core.Fail(core.E("tui.workPanel.ActivateSelectedAction", "no agent action is selected", nil))
-	}
-	if !capability.Available {
-		return core.Fail(core.E(
-			"tui.workPanel.ActivateSelectedAction",
-			core.Concat(agentFeatureTitle(capability.Feature), " is unavailable: ", capability.Reason),
-			nil,
-		))
-	}
-	workID := ""
-	if selected, ok := panel.Selected(); ok {
-		workID = selected.ID
-	}
-	return panel.provider.Run(ctx, agentRequest{Feature: capability.Feature, WorkID: workID, Input: input})
 }
 
 func (panel *workPanel) Selected() (workItemRecord, bool) {
@@ -385,6 +383,7 @@ func (panel *workPanel) renderDetail(width, height int, styles uiStyles) string 
 	builder.WriteString("\n\n")
 	workDetailRow(builder, styles, "source", record.Source)
 	workDetailRow(builder, styles, "agent", record.Agent)
+	workDetailRow(builder, styles, "task", record.Task)
 	workDetailRow(builder, styles, "repository", record.Repo)
 	workDetailRow(builder, styles, "branch", record.Branch)
 	workDetailRow(builder, styles, "runtime", record.Runtime)
@@ -474,7 +473,10 @@ func (panel *workPanel) mergeAgentWork(work []agentWorkSnapshot) core.Result {
 		if record.Title == "" {
 			record.Title = externalID
 		}
-		record.Status = normalizeWorkStatus(snapshot.Status)
+		record.Status = core.Lower(core.Trim(snapshot.Status))
+		if record.Status == "" {
+			record.Status = workStatusActive
+		}
 		record.Agent = snapshot.Agent
 		record.Repo = snapshot.Repo
 		record.Branch = snapshot.Branch
