@@ -47,7 +47,8 @@ func init() {
 }
 
 // MoEExpertsQuantDevice binds composed.MoEExpertsDevice to the metallib's batched packed-expert MoE kernel
-// (MoEExpertsQuant): the whole routed MoE — select the topK experts, run each expert's SwiGLU over the
+// (MoEExpertsQuantSiLU — the composed hybrid is a SwiGLU/SiLU MoE, qwen3_5_moe; the GELU MoEExpertsQuant is
+// gemma's): the whole routed MoE — select the topK experts, run each expert's SwiGLU over the
 // quantised gate/up/down, and combine by the router weights — in ONE device dispatch, where the composed
 // host loop pays three quant-seam round trips per routed expert. It marshals the composed lane's f32/host
 // types to the kernel's bf16/native ones: xt→bf16 bytes, sel→int32, the combine weights→bf16 bytes, each
@@ -68,7 +69,7 @@ func MoEExpertsQuantDevice(xt []float32, sel []int, weights []float64, gate, up,
 	qw := func(w *model.QuantWeight) QuantWeight {
 		return QuantWeight{Packed: w.Packed, Scales: w.Scales, Biases: w.Biases, GroupSize: w.GroupSize, Bits: w.Bits}
 	}
-	ob, err := MoEExpertsQuant(xb, idx, wb, qw(gate), qw(up), qw(down), numExperts, topK, dModel, dFF, gate.GroupSize, gate.Bits)
+	ob, err := MoEExpertsQuantSiLU(xb, idx, wb, qw(gate), qw(up), qw(down), numExperts, topK, dModel, dFF, gate.GroupSize, gate.Bits)
 	if err != nil {
 		return nil, err
 	}

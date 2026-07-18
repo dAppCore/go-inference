@@ -100,6 +100,72 @@ func TestMoEExpertsQuant(t *testing.T) {
 	t.Logf("4-bit batched experts: topK SwiGLU over the SwitchGLU tensor ≡ composed QMV reference, selection-sensitive")
 }
 
+// TestMoEExpertsQuantSiLU gates the SwiGLU (SiLU-gated) batched experts — the composed qwen3_5_moe lane.
+// MoEExpertsQuantSiLU must equal a composed reference whose gate nonlinearity is SiLU (silu(gate)·up), the
+// same batched-expert dispatch as MoEExpertsQuant but encSiLUGateMulBF16 in place of gemma's GELU — AND must
+// DIFFER from the GELU MoEExpertsQuant on identical inputs. That inequality is the one correctness fact a
+// model-level greedy A/B cannot show: GELU≈SiLU stays below the argmax threshold on real prompts, so only a
+// byte-level assertion proves the activation branch is genuinely live (the composed lane was mis-bound to the
+// GELU kernel and produced coherent-but-wrong output until this split).
+func TestMoEExpertsQuantSiLU(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const numExperts, topK, dModel, dFF, gs, bits = 4, 2, 64, 128, 32, 4
+	mk := func(n, salt int) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = float32((i*salt+11)%89-44) * 0.02
+		}
+		return s
+	}
+	gate, up, down := quantMoEExpertsFixture(t, numExperts, dModel, dFF, gs, bits)
+	x := toBF16Bytes(mk(dModel, 5))
+	idx := []int32{2, 0}
+	weights := toBF16Bytes([]float32{0.7, 0.3})
+
+	got, err := MoEExpertsQuantSiLU(x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantSiLU: %v", err)
+	}
+
+	gp, gsz := dFF*dModel*bits/8, dFF*(dModel/gs)*bf16Size
+	dp, dsz := dModel*dFF*bits/8, dModel*(dFF/gs)*bf16Size
+	must := func(b []byte, e error) []byte {
+		t.Helper()
+		if e != nil {
+			t.Fatalf("ref op: %v", e)
+		}
+		return b
+	}
+	var acc []byte
+	for i, e := range idx {
+		ee := int(e)
+		ge := must(QMVBF16(x, gate.Packed[ee*gp:(ee+1)*gp], gate.Scales[ee*gsz:(ee+1)*gsz], gate.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
+		ue := must(QMVBF16(x, up.Packed[ee*gp:(ee+1)*gp], up.Scales[ee*gsz:(ee+1)*gsz], up.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
+		gg := must(MulBF16(must(SiLUBF16(ge)), ue)) // silu(gate)·up — the SwiGLU gate
+		de := must(QMVBF16(gg, down.Packed[ee*dp:(ee+1)*dp], down.Scales[ee*dsz:(ee+1)*dsz], down.Biases[ee*dsz:(ee+1)*dsz], dModel, dFF, gs, bits))
+		scaled := must(MulBF16(de, scalarFillBF16(weights[i*bf16Size:(i+1)*bf16Size], dModel)))
+		if i == 0 {
+			acc = scaled
+		} else {
+			acc = must(AddBF16(acc, scaled))
+		}
+	}
+	if !bytes.Equal(got, acc) {
+		t.Fatal("MoEExpertsQuantSiLU != composed SiLU quant reference")
+	}
+	// the activation branch is genuinely live: the GELU sibling on identical inputs must differ.
+	gelu, err := MoEExpertsQuant(x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuant(GELU): %v", err)
+	}
+	if bytes.Equal(got, gelu) {
+		t.Fatal("SiLU and GELU MoE produced identical output — the activation branch is not engaged")
+	}
+	t.Logf("4-bit batched SwiGLU experts: silu(gate)·up ≡ composed SiLU reference, distinct from the GELU sibling")
+}
+
 func TestMoEExpertsQuantBindsWholeBatchedExpertTensors(t *testing.T) {
 	requireNativeRuntime(t)
 	resetResidentBufsForTest()
