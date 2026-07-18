@@ -335,6 +335,24 @@ output, question, and answer are used to build the continuation prompt.
 - accepted source commits;
 - reviewer decision and timestamps.
 
+### `agent_queue_state`
+
+- singleton queue identifier;
+- frozen, accepting, or draining status;
+- status reason and updated timestamp.
+
+### `agent_provider_state`
+
+- provider identifier;
+- persisted backoff deadline and reason;
+- last admitted run and start timestamp;
+- current quota-window start and admitted count;
+- updated timestamp.
+
+Concurrency is derived from non-terminal `agent_runs`; it is never maintained
+as a second counter that could drift. Per-model and per-provider rate-window
+queries use `agent_runs` together with `agent_provider_state`.
+
 ## Lifecycle and state transitions
 
 Runs use these states:
@@ -583,6 +601,8 @@ network access.
 
 - DuckDB close/reopen for projects, runs, events, logs, questions, answers, and
   acceptance receipts.
+- DuckDB close/reopen for queue admission, provider backoff, last-start, and
+  quota-window state.
 - Startup interruption of non-terminal runs.
 - Queue policy preserved while runtime state remains in DuckDB.
 - Repository scans proving no LEM state or status files enter execution or
