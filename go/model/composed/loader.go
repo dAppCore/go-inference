@@ -824,6 +824,20 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 	if arch != nil && sharedExperts != arch.SharedExperts {
 		return nil, core.NewError(core.Sprintf("composed.buildMoE: checkpoint shared experts %d != architecture %d", sharedExperts, arch.SharedExperts))
 	}
+	// Fuse each packed expert's gate+up into one [gate‖up] projection when the arch opts in
+	// (Arch.FuseExpertGateUp) — one quant matvec per routed expert instead of two, mirroring the metal
+	// lane's fusedExperts path. Off by default: it materialises the concat on the heap (trading the
+	// gate/up mmap zero-copy the composed lane exists to keep), so it is a per-model opt-in the device
+	// bench justifies, not automatic. No-op on a dense (f32) checkpoint.
+	if arch != nil && arch.FuseExpertGateUp {
+		for i := range experts {
+			fuseExpertGateUp(&experts[i])
+		}
+		if shared != nil {
+			fuseExpertGateUp(shared)
+		}
+	}
+
 	topK := cfg.NumExpertsPerTok
 	normTopK := cfg.normTopKProb()
 	if arch != nil {

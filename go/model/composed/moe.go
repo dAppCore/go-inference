@@ -23,9 +23,35 @@ import (
 // packed forms in a quant checkpoint (model.QuantWeight — mlx affine codes + bf16 group scales/biases);
 // nil ⇒ dense f32 in Gate/Up/Down. Exactly one representation is populated per expert (mirrors MLP's
 // GateQ/UpQ/DownQ) — moeExpertFF and the forward loop's dispatch both branch on GateQ to pick it.
+//
+// GateUpQ is the OPTIONAL fused form of a packed expert's gate+up: the [2·FF, D] concat
+// (model.ConcatQuantRows) synthesised at load when the arch opts into the fusion (Arch.FuseExpertGateUp,
+// via fuseExpertGateUp). When set, GateQ and UpQ are nil and swigluExpertQuantInto dispatches ONE quant
+// matvec at 2·FF and splits the halves — one launch per routed expert instead of two. DownQ is unchanged.
 type MoEExpert struct {
 	Gate, Up, Down    []float32
 	GateQ, UpQ, DownQ *model.QuantWeight
+	GateUpQ           *model.QuantWeight
+}
+
+// packed reports whether the expert's projections are PACKED (quantised): GateQ set (separate gate/up)
+// or GateUpQ set (fused). A dense expert has both nil and runs swigluExpertInto. The forward loop's
+// per-expert dispatch branches on this.
+func (e *MoEExpert) packed() bool { return e.GateQ != nil || e.GateUpQ != nil }
+
+// fuseExpertGateUp replaces a packed expert's separate GateQ/UpQ with the single [gate‖up] GateUpQ
+// (model.ConcatQuantRows), dropping the originals — their mmap views are no longer read, so the forward
+// makes one quant matvec per expert instead of two (the composed MoE fusion; the single-expert twin of
+// engine/metal's fuseExpertGateUpQuant). No-op for a dense expert, one already fused, or if either half
+// is absent. Materialises the fused concat on the heap, trading the gate/up mmap zero-copy for the
+// fused-path launch — which is why it is opt-in per model (Arch.FuseExpertGateUp), not automatic.
+func fuseExpertGateUp(e *MoEExpert) {
+	if e.GateQ == nil || e.UpQ == nil || e.GateUpQ != nil {
+		return
+	}
+	if gu := model.ConcatQuantRows(e.GateQ, e.UpQ); gu != nil {
+		e.GateUpQ, e.GateQ, e.UpQ = gu, nil, nil
+	}
 }
 
 // MoEMLP routes a token to TopK of its experts plus the shared expert:
@@ -78,10 +104,13 @@ func swigluExpert(xt []float32, e MoEExpert, D int) []float32 {
 	return out
 }
 
-// moeExpertFF returns expert e's hidden width FF: GateQ.OutDim for a packed expert (Gate is nil, so
-// len(Gate)/D reads as 0), else len(Gate)/D for a dense one — the same derivation swigluExpertInto's FF
-// local uses inline.
+// moeExpertFF returns expert e's hidden width FF: GateUpQ.OutDim/2 for a fused packed expert (gate and up
+// share the concat's 2·FF rows), GateQ.OutDim for an unfused packed one (Gate is nil, so len(Gate)/D reads
+// as 0), else len(Gate)/D for a dense one — the same derivation swigluExpertInto's FF local uses inline.
 func moeExpertFF(e *MoEExpert, D int) int {
+	if e.GateUpQ != nil {
+		return e.GateUpQ.OutDim / 2
+	}
 	if e.GateQ != nil {
 		return e.GateQ.OutDim
 	}
@@ -100,10 +129,23 @@ func moeExpertFF(e *MoEExpert, D int) int {
 // dense loop stays f64 from xt to out throughout — so a packed expert's result differs from the SAME
 // weights dequantised and run through swigluExpertInto by a few ULPs (a rounding-TIER difference, not a
 // bug: TestSwigluExpertQuantInto_MatchesDequantised pins the tolerance).
+//
+// A FUSED expert (GateUpQ set, GateQ/UpQ nil — fuseExpertGateUp) makes ONE matvec at 2·FF and slices the
+// [gate‖up] halves out of the single result: because matNTQuant dequantises each output row independently,
+// the fused halves are BYTE-IDENTICAL to the two separate gate/up matvecs (TestSwigluExpertQuantInto_-
+// FusedMatchesUnfused pins the byte equality), so the fusion is a pure launch-count saving.
 func swigluExpertQuantInto(xt []float32, e MoEExpert, D int, out []float32) {
-	FF := e.GateQ.OutDim
-	g := matNTQuant(nil, xt, e.GateQ, 1, D, FF)
-	u := matNTQuant(nil, xt, e.UpQ, 1, D, FF)
+	var g, u []float32
+	if e.GateUpQ != nil {
+		FF := e.GateUpQ.OutDim / 2
+		gu := matNTQuant(nil, xt, e.GateUpQ, 1, D, 2*FF)
+		g, u = gu[:FF], gu[FF:2*FF]
+	} else {
+		FF := e.GateQ.OutDim
+		g = matNTQuant(nil, xt, e.GateQ, 1, D, FF)
+		u = matNTQuant(nil, xt, e.UpQ, 1, D, FF)
+	}
+	FF := len(g)
 	h := make([]float32, FF)
 	for f := range FF {
 		h[f] = float32(silu(float64(g[f])) * float64(u[f]))
@@ -144,7 +186,7 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 		ot := out[t*D : (t+1)*D]
 		for _, e := range sel {
 			w := probs[e] / denom
-			if m.Experts[e].GateQ != nil {
+			if m.Experts[e].packed() {
 				swigluExpertQuantInto(xt, m.Experts[e], D, eo)
 			} else {
 				swigluExpertInto(xt, m.Experts[e], D, hbuf, eo)
@@ -154,7 +196,7 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 			}
 		}
 		if m.Shared != nil {
-			if m.Shared.GateQ != nil {
+			if m.Shared.packed() {
 				swigluExpertQuantInto(xt, *m.Shared, D, eo)
 			} else {
 				swigluExpertInto(xt, *m.Shared, D, hbuf, eo)

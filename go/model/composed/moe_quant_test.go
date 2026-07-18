@@ -76,7 +76,7 @@ func TestSwigluExpertQuantInto_MatchesDequantised(t *testing.T) {
 // quantiseSynthetic quantises a syn(seed)-derived (outDim x inDim) weight and returns both the packed
 // model.QuantWeight and its exact dequantised f32 values — the pair every packed-vs-dense parity test in
 // this file compares.
-func quantiseSynthetic(t *testing.T, outDim, inDim, bits, gs, seed int) (*model.QuantWeight, []float32) {
+func quantiseSynthetic(t testing.TB, outDim, inDim, bits, gs, seed int) (*model.QuantWeight, []float32) {
 	t.Helper()
 	w := syn(outDim*inDim, seed)
 	packed, scales, biases, err := mlxaffine.QuantizeTensor(w, outDim, inDim, bits, gs)
@@ -114,7 +114,7 @@ func relError(t *testing.T, label string, got, want []float32, tol float64) floa
 // mkMoEExpertQuant builds one packed SwiGLU expert (Gate/Up [FF,D], Down [D,FF], quantised bits/gs) from
 // syn(seed)-derived values, returning the packed MoEExpert plus a DENSE MoEExpert over the SAME
 // (dequantised) values — the pair TestMoEMLP_Forward_PackedMatchesDequantised compares.
-func mkMoEExpertQuant(t *testing.T, D, FF, bits, gs, seed int) (packed, dense MoEExpert) {
+func mkMoEExpertQuant(t testing.TB, D, FF, bits, gs, seed int) (packed, dense MoEExpert) {
 	t.Helper()
 	gateQ, gateW := quantiseSynthetic(t, FF, D, bits, gs, seed+1)
 	upQ, upW := quantiseSynthetic(t, FF, D, bits, gs, seed+2)
