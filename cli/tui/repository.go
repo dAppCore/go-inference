@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"database/sql"
 	"time"
 
 	core "dappco.re/go"
@@ -40,6 +41,10 @@ type duckRepository struct {
 	database *workspaceDatabase
 }
 
+type workspaceConnectionProvider interface {
+	workspaceConnection() *sql.DB
+}
+
 func openDuckRepository(path string) core.Result {
 	opened := openWorkspaceDatabase(path)
 	if !opened.OK {
@@ -59,6 +64,13 @@ func (repository *duckRepository) Close() core.Result {
 	result := repository.database.Close()
 	repository.database = nil
 	return result
+}
+
+func (repository *duckRepository) workspaceConnection() *sql.DB {
+	if repository == nil || repository.database == nil || repository.database.store == nil {
+		return nil
+	}
+	return repository.database.store.Conn()
 }
 
 func (repository *duckRepository) Session(id string) core.Result {

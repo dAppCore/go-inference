@@ -37,6 +37,25 @@ var workspaceMigrations = []workspaceMigration{
 			"CREATE INDEX IF NOT EXISTS lem_attachments_session_idx ON lem_attachments(session_id, archived, added_at)",
 		},
 	},
+	{
+		Version: 2,
+		Statements: []string{
+			"CREATE TABLE agent_projects (id TEXT PRIMARY KEY, source_path TEXT NOT NULL UNIQUE, repository_root TEXT NOT NULL, source_branch TEXT NOT NULL, source_revision TEXT NOT NULL, repository_name TEXT NOT NULL UNIQUE, clone_path TEXT NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+			"CREATE TABLE agent_runs (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, project_id TEXT NOT NULL, parent_run_id TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, source_revision TEXT NOT NULL, durable_revision TEXT NOT NULL DEFAULT '', execution_revision TEXT NOT NULL, accepted_revision TEXT NOT NULL, branch TEXT NOT NULL, worktree TEXT NOT NULL, command_receipt TEXT NOT NULL, run_number INTEGER NOT NULL, attempt INTEGER NOT NULL, process_id BIGINT NOT NULL, status TEXT NOT NULL, exit_code INTEGER NOT NULL, failure_reason TEXT NOT NULL, queued_at TIMESTAMP NOT NULL, started_at TIMESTAMP NOT NULL, finished_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+			"CREATE TABLE agent_events (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, work_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, detail_json TEXT NOT NULL, created_at TIMESTAMP NOT NULL)",
+			"CREATE TABLE agent_log_chunks (run_id TEXT NOT NULL, sequence BIGINT NOT NULL, stream TEXT NOT NULL, text TEXT NOT NULL, created_at TIMESTAMP NOT NULL, PRIMARY KEY (run_id, sequence))",
+			"CREATE TABLE agent_questions (id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL, created_at TIMESTAMP NOT NULL)",
+			"CREATE TABLE agent_answers (id TEXT PRIMARY KEY, question_id TEXT NOT NULL UNIQUE, resume_run_id TEXT NOT NULL, text TEXT NOT NULL, created_at TIMESTAMP NOT NULL)",
+			"CREATE TABLE agent_acceptances (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, run_id TEXT NOT NULL, source_base TEXT NOT NULL, agent_base TEXT NOT NULL, agent_tip TEXT NOT NULL, integration_branch TEXT NOT NULL, integration_worktree TEXT NOT NULL, result_revision TEXT NOT NULL, status TEXT NOT NULL, validation_json TEXT NOT NULL, failure_reason TEXT NOT NULL, created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)",
+			"CREATE TABLE agent_queue_state (id TEXT PRIMARY KEY CHECK (id = 'default'), status TEXT NOT NULL CHECK (status IN ('frozen', 'accepting', 'draining')), reason TEXT NOT NULL, updated_at TIMESTAMP NOT NULL)",
+			"CREATE TABLE agent_provider_state (provider TEXT PRIMARY KEY, backoff_reason TEXT NOT NULL, last_run_id TEXT NOT NULL, backoff_until TIMESTAMP NOT NULL, last_started_at TIMESTAMP NOT NULL, window_started_at TIMESTAMP NOT NULL, window_admissions INTEGER NOT NULL, updated_at TIMESTAMP NOT NULL)",
+			"CREATE UNIQUE INDEX agent_runs_work_number_attempt_idx ON agent_runs(work_id, run_number, attempt)",
+			"CREATE INDEX agent_runs_work_idx ON agent_runs(work_id, queued_at)",
+			"CREATE INDEX agent_runs_status_idx ON agent_runs(status, provider, model, queued_at)",
+			"CREATE INDEX agent_events_run_idx ON agent_events(run_id, created_at, id)",
+			"CREATE INDEX agent_acceptances_work_idx ON agent_acceptances(work_id, updated_at)",
+		},
+	},
 }
 
 type workspaceDatabase struct {

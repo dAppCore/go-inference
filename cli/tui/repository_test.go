@@ -255,6 +255,30 @@ func TestDuckRepository_Ugly(t *testing.T) {
 	}
 }
 
+func TestDuckRepository_AgentConnection_Good(t *testing.T) {
+	if result := newDuckAgentStore(nil); result.OK {
+		t.Fatal("newDuckAgentStore accepted nil repository")
+	}
+	repository := openTestDuckRepository(t)
+	provider, ok := repository.(workspaceConnectionProvider)
+	if !ok || provider.workspaceConnection() == nil {
+		t.Fatalf("workspace repository connection provider = %#v, want open SQL connection", provider)
+	}
+	withoutConnection := struct{ workspaceRepository }{workspaceRepository: repository}
+	if result := newDuckAgentStore(withoutConnection); result.OK {
+		t.Fatal("newDuckAgentStore accepted repository without connection capability")
+	}
+	if result := repository.Close(); !result.OK {
+		t.Fatalf("close repository: %v", result.Value)
+	}
+	if provider.workspaceConnection() != nil {
+		t.Fatal("closed workspace repository still exposes SQL connection")
+	}
+	if result := newDuckAgentStore(repository); result.OK {
+		t.Fatal("newDuckAgentStore accepted closed repository")
+	}
+}
+
 func TestDuckRepository_SearchAndArchive_Good(t *testing.T) {
 	repository := openTestDuckRepository(t)
 	defer closeTestDuckRepository(t, repository)
