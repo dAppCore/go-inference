@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+
+	core "dappco.re/go"
 )
 
 func TestWorkPanel_AgentSnapshotKeepsLocalEventsAndOrderedLogs(t *testing.T) {
@@ -74,6 +76,87 @@ func TestWorkPanel_AgentStatusRenderingMatrix(t *testing.T) {
 		if !strings.Contains(view, strings.ToUpper(status)) {
 			t.Fatalf("status %s was not rendered:\n%s", status, view)
 		}
+	}
+}
+
+func TestWorkPanel_AgentLogsUseSequenceBoundAndRemainWorkIsolated(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	at := time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
+	opened := newWorkPanel(repository, newUnavailableAgentProvider(defaultAgentUnavailableReason), sequenceIDs("work-a", "work-b"), func() time.Time { return at })
+	if !opened.OK {
+		t.Fatalf("newWorkPanel: %v", opened.Value)
+	}
+	panel := opened.Value.(*workPanel)
+	first := panel.CreateWork("First", "first timeline", "/src/first").Value.(workItemRecord)
+	second := panel.CreateWork("Second", "second timeline", "/src/second").Value.(workItemRecord)
+	for index := 0; index < 3; index++ {
+		if result := repository.SaveEvent(eventRecord{
+			ID: core.Sprintf("local-%d", index), SessionID: workEventSessionID(first), WorkItemID: first.ID,
+			Kind: "local.note", Status: "recorded", Title: core.Sprintf("local note %d", index),
+			PayloadJSON: "{}", CreatedAt: at.Add(time.Duration(index) * time.Second),
+		}); !result.OK {
+			t.Fatalf("SaveEvent local %d: %v", index, result.Value)
+		}
+	}
+	events := make([]agentEventSnapshot, 0, 206)
+	for sequence := int64(1); sequence <= 205; sequence++ {
+		createdAt := at.Add(time.Duration(500-sequence) * time.Second)
+		stream := "stdout"
+		if sequence%2 == 0 {
+			stream = "stderr"
+		}
+		events = append(events, agentEventSnapshot{
+			ExternalID: core.Sprintf("chunk-%03d", sequence), WorkID: first.ID, RunID: "run-a",
+			Sequence: sequence, Stream: stream, Kind: "log." + stream,
+			Detail: core.Sprintf("chunk %03d", sequence), CreatedAt: createdAt,
+		})
+	}
+	events = append(events, agentEventSnapshot{
+		ExternalID: "work-b-only", WorkID: second.ID, RunID: "run-b", Sequence: 1,
+		Stream: "stdout", Kind: "log.stdout", Detail: "second-work-only", CreatedAt: at,
+	})
+	if result := panel.ApplyAgentSnapshot(agentSnapshot{
+		Work: []agentWorkSnapshot{
+			{ExternalID: first.ID, NativeRunID: "run-a", Status: "running"},
+			{ExternalID: second.ID, NativeRunID: "run-b", Status: "running"},
+		},
+		Events: events,
+	}); !result.OK {
+		t.Fatalf("ApplyAgentSnapshot: %v", result.Value)
+	}
+	merged := panel.Events(first.ID)
+	live := make([]eventRecord, 0, maxRenderedAgentEvents)
+	local := make([]eventRecord, 0, 3)
+	for _, event := range merged {
+		if event.Status == "live" {
+			live = append(live, event)
+		} else {
+			local = append(local, event)
+		}
+	}
+	if len(live) != maxRenderedAgentEvents || len(local) != 3 {
+		t.Fatalf("bounded timeline = %d live / %d local, want %d / 3", len(live), len(local), maxRenderedAgentEvents)
+	}
+	for index, event := range live {
+		want := core.Sprintf("chunk %03d", index+6)
+		if event.Detail != want {
+			t.Fatalf("live[%d] = %q, want %q", index, event.Detail, want)
+		}
+	}
+	if events := panel.Events(second.ID); len(events) != 1 || events[0].Detail != "second-work-only" {
+		t.Fatalf("second timeline = %#v", events)
+	}
+	panel.selectWork(first.ID)
+	firstView := panel.View(120, 24, newUIStyles(midnightTheme()))
+	panel.selectWork(second.ID)
+	secondView := panel.View(120, 24, newUIStyles(midnightTheme()))
+	if strings.Contains(firstView, "second-work-only") || strings.Contains(secondView, "chunk 205") || !strings.Contains(secondView, "second-work-only") {
+		t.Fatalf("switched timelines leaked:\nFIRST\n%s\nSECOND\n%s", firstView, secondView)
+	}
+	stored := repository.Events(workEventSessionID(first)).Value.([]eventRecord)
+	if len(stored) != 3 {
+		t.Fatalf("provider logs copied into local events: %#v", stored)
 	}
 }
 

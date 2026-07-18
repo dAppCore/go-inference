@@ -105,6 +105,34 @@ func TestAgentAnswerAndAcceptanceOverlays_RequireExplicitConfirmation(t *testing
 	}
 }
 
+func TestAgentOverlay_ChangeReviewViewportScrollsWithoutDroppingContent(t *testing.T) {
+	lines := make([]string, 80)
+	for index := range lines {
+		lines[index] = core.Sprintf("review line %03d", index+1)
+	}
+	overlay := newChangeAcceptanceOverlay(agentReview{
+		Feature: agentFeatureChangesReview, Title: "Review agent changes",
+		Body: core.Join("\n", lines...), AcceptanceAllowed: true,
+	})
+	overlay.View(48, 12, newUIStyles(midnightTheme()))
+	if got := overlay.viewport.TotalLineCount(); got != len(lines) {
+		t.Fatalf("viewport line count = %d, want %d", got, len(lines))
+	}
+	lineOffset := overlay.viewport.YOffset
+	overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if overlay.viewport.YOffset <= lineOffset {
+		t.Fatalf("line down offset = %d, want > %d", overlay.viewport.YOffset, lineOffset)
+	}
+	pageOffset := overlay.viewport.YOffset
+	overlay.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if overlay.viewport.YOffset <= pageOffset {
+		t.Fatalf("page down offset = %d, want > %d", overlay.viewport.YOffset, pageOffset)
+	}
+	if got := overlay.viewport.TotalLineCount(); got != len(lines) {
+		t.Fatalf("scrolled viewport line count = %d, want %d", got, len(lines))
+	}
+}
+
 type launchReviewProvider struct {
 	caps           []agentCapability
 	reviews        []agentReview

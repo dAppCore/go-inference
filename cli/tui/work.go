@@ -63,6 +63,14 @@ type workPanel struct {
 	action      int
 }
 
+type agentEventOrder struct {
+	at       time.Time
+	class    uint8
+	runID    string
+	sequence int64
+	id       string
+}
+
 func newWorkPanel(
 	repository workspaceRepository,
 	provider agentProvider,
@@ -526,12 +534,12 @@ func (panel *workPanel) mergeAgentEvents(events []agentEventSnapshot) {
 	}
 	panel.agentEvents = make(map[string][]agentEventSnapshot, len(byExternal))
 	ordered := append([]agentEventSnapshot(nil), events...)
-	sort.SliceStable(ordered, func(left, right int) bool {
-		if ordered[left].CreatedAt.Equal(ordered[right].CreatedAt) {
-			return ordered[left].ExternalID < ordered[right].ExternalID
+	for index := range ordered {
+		if ordered[index].CreatedAt.IsZero() {
+			ordered[index].CreatedAt = panel.now().UTC()
 		}
-		return ordered[left].CreatedAt.Before(ordered[right].CreatedAt)
-	})
+	}
+	sortAgentEvents(ordered)
 	for _, snapshot := range ordered {
 		if localID := byExternal[snapshot.WorkID]; localID != "" {
 			panel.agentEvents[localID] = append(panel.agentEvents[localID], snapshot)
@@ -550,13 +558,20 @@ func (panel *workPanel) refreshEvents() core.Result {
 		if !ok {
 			return core.Fail(core.E("tui.workPanel.refreshEvents", "invalid event list result", nil))
 		}
-		filtered := make([]eventRecord, 0, len(events))
+		filtered := make([]eventRecord, 0, len(events)+maxRenderedAgentEvents)
+		ordering := make(map[string]agentEventOrder, maxRenderedAgentEvents)
 		for _, event := range events {
 			if event.WorkItemID == item.ID {
 				filtered = append(filtered, event)
 			}
 		}
-		for _, live := range panel.agentEvents[item.ID] {
+		liveEvents := append([]agentEventSnapshot(nil), panel.agentEvents[item.ID]...)
+		sortAgentEvents(liveEvents)
+		if len(liveEvents) > maxRenderedAgentEvents {
+			liveEvents = liveEvents[len(liveEvents)-maxRenderedAgentEvents:]
+		}
+		anchors := agentLogAnchors(liveEvents)
+		for _, live := range liveEvents {
 			createdAt := live.CreatedAt.UTC()
 			if createdAt.IsZero() {
 				createdAt = panel.now().UTC()
@@ -581,35 +596,72 @@ func (panel *workPanel) refreshEvents() core.Result {
 			} else {
 				id = "agent-event:" + id
 			}
+			ordering[id] = agentEventOrdering(live, anchors)
 			filtered = append(filtered, eventRecord{ID: id, SessionID: workEventSessionID(item), WorkItemID: item.ID, Kind: kind, Status: "live", Title: title, Detail: live.Detail, PayloadJSON: core.JSONMarshalString(live), CreatedAt: createdAt})
 		}
-		if len(filtered) > maxRenderedAgentEvents {
-			local := make([]eventRecord, 0, len(filtered))
-			live := make([]eventRecord, 0, maxRenderedAgentEvents)
-			for _, event := range filtered {
-				if event.Status == "live" {
-					live = append(live, event)
-				} else {
-					local = append(local, event)
-				}
-			}
-			if len(live) > maxRenderedAgentEvents {
-				live = live[len(live)-maxRenderedAgentEvents:]
-			}
-			filtered = append(local, live...)
-		}
 		sort.SliceStable(filtered, func(left, right int) bool {
-			if core.HasPrefix(filtered[left].ID, "agent-log:") && core.HasPrefix(filtered[right].ID, "agent-log:") {
-				return filtered[left].ID < filtered[right].ID
+			leftOrder, exists := ordering[filtered[left].ID]
+			if !exists {
+				leftOrder = agentEventOrder{at: filtered[left].CreatedAt.UTC(), class: 1, id: filtered[left].ID}
 			}
-			if filtered[left].CreatedAt.Equal(filtered[right].CreatedAt) {
-				return filtered[left].ID < filtered[right].ID
+			rightOrder, exists := ordering[filtered[right].ID]
+			if !exists {
+				rightOrder = agentEventOrder{at: filtered[right].CreatedAt.UTC(), class: 1, id: filtered[right].ID}
 			}
-			return filtered[left].CreatedAt.Before(filtered[right].CreatedAt)
+			return lessAgentEventOrder(leftOrder, rightOrder)
 		})
 		panel.events[item.ID] = filtered
 	}
 	return core.Ok(nil)
+}
+
+func sortAgentEvents(events []agentEventSnapshot) {
+	anchors := agentLogAnchors(events)
+	sort.SliceStable(events, func(left, right int) bool {
+		return lessAgentEventOrder(agentEventOrdering(events[left], anchors), agentEventOrdering(events[right], anchors))
+	})
+}
+
+func agentLogAnchors(events []agentEventSnapshot) map[string]time.Time {
+	anchors := make(map[string]time.Time)
+	for _, event := range events {
+		if event.Sequence <= 0 {
+			continue
+		}
+		at := event.CreatedAt.UTC()
+		previous, exists := anchors[event.RunID]
+		if !exists || at.Before(previous) {
+			anchors[event.RunID] = at
+		}
+	}
+	return anchors
+}
+
+func agentEventOrdering(event agentEventSnapshot, anchors map[string]time.Time) agentEventOrder {
+	order := agentEventOrder{at: event.CreatedAt.UTC(), class: 1, id: event.ExternalID}
+	if event.Sequence > 0 {
+		order.at = anchors[event.RunID]
+		order.class = 0
+		order.runID = event.RunID
+		order.sequence = event.Sequence
+	}
+	return order
+}
+
+func lessAgentEventOrder(left, right agentEventOrder) bool {
+	if !left.at.Equal(right.at) {
+		return left.at.Before(right.at)
+	}
+	if left.class != right.class {
+		return left.class < right.class
+	}
+	if left.runID != right.runID {
+		return left.runID < right.runID
+	}
+	if left.sequence != right.sequence {
+		return left.sequence < right.sequence
+	}
+	return left.id < right.id
 }
 
 func (panel *workPanel) syncList() {

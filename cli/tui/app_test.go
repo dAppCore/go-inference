@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1407,6 +1408,450 @@ func TestApp_AgentAnswerStoresExactResumeIdentity(t *testing.T) {
 	}
 }
 
+func TestApp_WorkspaceReadyCorrelatesSnapshotAndArmsOneRefresh(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	at := time.Date(2026, time.July, 18, 13, 0, 0, 0, time.UTC)
+	if result := resources.Repository.SaveWorkItem(testWorkRecord("work-1", "Existing work", workStatusActive, at)); !result.OK {
+		t.Fatalf("SaveWorkItem: %v", result.Value)
+	}
+	provider := &correctiveAgentProvider{
+		snapshot: func(context.Context, int) core.Result {
+			return core.Ok(agentSnapshot{Work: []agentWorkSnapshot{{
+				ExternalID: "work-1", NativeRunID: "run-existing", Status: "running",
+			}}})
+		},
+	}
+	resources.Agent = provider
+	a := newWorkspaceApp("", 0, 64, nil)
+	a.runtimeDetector, a.knowledgeScan = nil, nil
+	a.activePanel = panelChat
+
+	model, command := a.Update(workspaceReadyMsg{resources: resources})
+	a = model.(app)
+	if !a.agentSnapshotInFlight || a.agentSnapshotCurrent != 1 || provider.SnapshotCalls() != 0 {
+		t.Fatalf("workspace-ready snapshot correlation = inFlight %v current %d calls %d", a.agentSnapshotInFlight, a.agentSnapshotCurrent, provider.SnapshotCalls())
+	}
+	message := command()
+	batch, ok := message.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("workspace-ready command = %T, want tea.BatchMsg", message)
+	}
+	var refresh tea.Cmd
+	for _, child := range batch {
+		if child == nil {
+			continue
+		}
+		model, next := a.Update(child())
+		a = model.(app)
+		if next != nil {
+			refresh = next
+		}
+	}
+	items := a.work.Items()
+	if provider.SnapshotCalls() != 1 || len(items) != 1 || items[0].Status != "running" || a.work.AgentState(items[0]).NativeRunID != "run-existing" {
+		t.Fatalf("startup snapshot = calls %d items %#v state %#v", provider.SnapshotCalls(), items, a.work.AgentState(items[0]))
+	}
+	if a.activePanel != panelChat || refresh == nil || !a.agentRefreshArmed || a.armAgentRefresh() != nil {
+		t.Fatalf("startup refresh = panel %d command %v armed %v", a.activePanel, refresh != nil, a.agentRefreshArmed)
+	}
+	if result := a.shutdown(); !result.OK {
+		t.Fatalf("shutdown: %s", result.Error())
+	}
+}
+
+func TestApp_ManualAgentRefreshCoalescesAndRejectsStaleSnapshots(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	provider := &correctiveAgentProvider{snapshot: func(ctx context.Context, call int) core.Result {
+		if call == 1 {
+			started <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return core.Fail(core.E("test.snapshot", "cancelled", ctx.Err()))
+			}
+			return core.Ok(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-old", Status: "running"}}})
+		}
+		return core.Ok(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-new", Status: "completed"}}})
+	}}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("local")
+	if result := a.work.CreateWork("Local", "refresh it", "/src/local"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.palette.Invoke(commandRefreshWork, &a); !result.OK {
+		t.Fatalf("first Refresh Work: %v", result.Value)
+	}
+	first := a.takeAgentCommand()
+	if first == nil || provider.SnapshotCalls() != 0 {
+		t.Fatalf("manual refresh called Snapshot synchronously: command %v calls %d", first != nil, provider.SnapshotCalls())
+	}
+	message := make(chan tea.Msg, 1)
+	go func() { message <- first() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first snapshot did not start")
+	}
+	if result := a.palette.Invoke(commandRefreshWork, &a); !result.OK {
+		t.Fatalf("coalesced Refresh Work: %v", result.Value)
+	}
+	if !a.agentSnapshotPending || a.takeAgentCommand() != nil || provider.SnapshotCalls() != 1 {
+		t.Fatalf("coalesced refresh = pending %v calls %d", a.agentSnapshotPending, provider.SnapshotCalls())
+	}
+	close(release)
+	model, second := a.Update(<-message)
+	a = model.(app)
+	if second == nil || a.agentSnapshotCurrent != 2 || a.work.Items()[0].Status != "running" {
+		t.Fatalf("first completion = second %v current %d items %#v", second != nil, a.agentSnapshotCurrent, a.work.Items())
+	}
+	model, _ = a.Update(agentSnapshotMsg{requestID: 1, result: core.Ok(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-stale", Status: "failed"}}})})
+	a = model.(app)
+	if state := a.work.AgentState(a.work.Items()[0]); state.NativeRunID != "run-old" || a.work.Items()[0].Status != "running" {
+		t.Fatalf("stale snapshot replaced state: %#v / %#v", state, a.work.Items())
+	}
+	model, _ = a.Update(second())
+	a = model.(app)
+	if state := a.work.AgentState(a.work.Items()[0]); provider.SnapshotCalls() != 2 || state.NativeRunID != "run-new" || a.work.Items()[0].Status != "completed" {
+		t.Fatalf("newest snapshot = calls %d state %#v items %#v", provider.SnapshotCalls(), state, a.work.Items())
+	}
+	model, _ = a.Update(agentSnapshotMsg{requestID: 1, result: core.Ok(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-stale-after-new", Status: "failed"}}})})
+	a = model.(app)
+	if state := a.work.AgentState(a.work.Items()[0]); state.NativeRunID != "run-new" || a.work.Items()[0].Status != "completed" {
+		t.Fatalf("stale snapshot replaced newest applied state: %#v / %#v", state, a.work.Items())
+	}
+}
+
+func TestApp_AgentSnapshotFailurePreservesViewAndRefreshesLiveWork(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &correctiveAgentProvider{}
+	provider.snapshot = func(_ context.Context, call int) core.Result {
+		if call == 1 {
+			return core.Fail(core.E("test.snapshot", "provider temporarily unavailable", nil))
+		}
+		return core.Ok(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-1", Status: "completed"}}})
+	}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("local")
+	if result := a.work.CreateWork("Local", "keep last good", "/src/local"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.work.ApplyAgentSnapshot(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-1", Status: "running"}}}); !result.OK {
+		t.Fatalf("seed snapshot: %v", result.Value)
+	}
+	command := a.requestAgentSnapshot()
+	model, refresh := a.Update(command())
+	a = model.(app)
+	if refresh == nil || !a.agentRefreshArmed || a.work.Items()[0].Status != "running" || !strings.Contains(a.errText, "temporarily unavailable") {
+		t.Fatalf("failed snapshot = refresh %v armed %v items %#v error %q", refresh != nil, a.agentRefreshArmed, a.work.Items(), a.errText)
+	}
+	model, command = a.Update(agentRefreshMsg{})
+	a = model.(app)
+	if command == nil {
+		t.Fatal("armed refresh did not issue a new snapshot request")
+	}
+	model, _ = a.Update(command())
+	a = model.(app)
+	if provider.SnapshotCalls() != 2 || a.work.Items()[0].Status != "completed" {
+		t.Fatalf("refreshed snapshot = calls %d items %#v", provider.SnapshotCalls(), a.work.Items())
+	}
+}
+
+func TestApp_AgentRefreshTimerStopsWithLifecycle(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	provider := &correctiveAgentProvider{}
+	a := newApp("", 0, 64)
+	if result := a.attachWork(repository, provider); !result.OK {
+		t.Fatalf("attachWork: %v", result.Value)
+	}
+	a.work.ids = sequenceIDs("local")
+	if result := a.work.CreateWork("Local", "stop refresh", "/src/local"); !result.OK {
+		t.Fatalf("CreateWork: %v", result.Value)
+	}
+	if result := a.work.ApplyAgentSnapshot(agentSnapshot{Work: []agentWorkSnapshot{{ExternalID: "local", NativeRunID: "run-1", Status: "running"}}}); !result.OK {
+		t.Fatalf("seed snapshot: %v", result.Value)
+	}
+	command := a.armAgentRefresh()
+	if command == nil {
+		t.Fatal("live work did not arm a stoppable refresh timer")
+	}
+	message := make(chan tea.Msg, 1)
+	go func() { message <- command() }()
+	time.Sleep(10 * time.Millisecond)
+	started := time.Now()
+	a.lifecycle.stop()
+	select {
+	case got := <-message:
+		if _, ok := got.(lifecycleStoppedMsg); !ok {
+			t.Fatalf("cancelled timer message = %T, want lifecycleStoppedMsg", got)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("lifecycle cancellation did not stop the refresh timer promptly")
+	}
+	a.lifecycle.wait()
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond || provider.SnapshotCalls() != 0 {
+		t.Fatalf("stopped lifecycle = elapsed %s snapshots %d", elapsed, provider.SnapshotCalls())
+	}
+}
+
+func TestApp_AgentResumeUsesNativeResumeAndInterruptedRetry(t *testing.T) {
+	t.Run("waiting", func(t *testing.T) {
+		engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities()}
+		a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+		if result := a.work.updateWork("waiting", "work-1", func(record *workItemRecord) { record.Status = "waiting" }); !result.OK {
+			t.Fatalf("set waiting: %v", result.Value)
+		}
+		a.work.agentWork["work-1"] = agentWorkSnapshot{NativeRunID: "run-parent", AnswerID: "answer-exact", Agent: "codex", Runtime: "gpt-5"}
+		if result := a.queueAgentAction(agentFeatureResume); !result.OK {
+			t.Fatalf("Resume: %v", result.Value)
+		}
+		driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+		want := work.ResumeRequest{
+			Work:        nativeWorkItem(agentWorkRequest{ID: "work-1", ExternalID: "local:work-1", Title: "Ship", Task: "Implement the slice", Repository: "/src/project"}, "work-1", ""),
+			ParentRunID: "run-parent", AnswerID: "answer-exact", Provider: "codex", Model: "gpt-5",
+		}
+		if core.JSONMarshalString(engine.resumeRequest) != core.JSONMarshalString(want) || engine.retryParent != "" {
+			t.Fatalf("native waiting Resume = %#v retry parent %q, want %#v", engine.resumeRequest, engine.retryParent, want)
+		}
+	})
+
+	t.Run("interrupted", func(t *testing.T) {
+		engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities()}
+		a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+		if result := a.work.updateWork("interrupted", "work-1", func(record *workItemRecord) { record.Status = "interrupted" }); !result.OK {
+			t.Fatalf("set interrupted: %v", result.Value)
+		}
+		a.work.agentWork["work-1"] = agentWorkSnapshot{NativeRunID: "run-interrupted"}
+		if result := a.queueAgentAction(agentFeatureResume); !result.OK {
+			t.Fatalf("Resume interrupted: %v", result.Value)
+		}
+		driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+		if engine.retryParent != "run-interrupted" || engine.resumeRequest.ParentRunID != "" || engine.retryItem.ID != "work-1" {
+			t.Fatalf("interrupted Resume = retry item %#v parent %q resume %#v", engine.retryItem, engine.retryParent, engine.resumeRequest)
+		}
+	})
+}
+
+func TestApp_AgentReviewPreparedSnapshotAndRejectPreserveLocalWork(t *testing.T) {
+	review := correctiveChangeReview(true)
+	engine := &fixtureNativeAgentEngine{
+		capabilities: nativeFixtureCapabilities(), changeReview: review,
+		snapshot: work.Snapshot{
+			Runs:        []work.Run{{ID: review.RunID, WorkID: review.WorkID, Status: work.RunCompleted}},
+			Acceptances: []work.Acceptance{{ID: "review-prepared", WorkID: review.WorkID, RunID: review.RunID, Status: "prepared", ValidationJSON: core.JSONMarshalString(review)}},
+		},
+	}
+	a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+	if result := a.work.updateWork("completed", review.WorkID, func(record *workItemRecord) { record.Status = "completed" }); !result.OK {
+		t.Fatalf("set completed: %v", result.Value)
+	}
+	a.work.agentWork[review.WorkID] = agentWorkSnapshot{NativeRunID: review.RunID, Status: "completed"}
+	localEvent := eventRecord{ID: "local-review-note", SessionID: workEventSessionID(a.work.Items()[0]), WorkItemID: review.WorkID, Kind: "local.note", Status: "recorded", Title: "keep me", PayloadJSON: "{}", CreatedAt: time.Now().UTC()}
+	if result := a.work.repository.SaveEvent(localEvent); !result.OK {
+		t.Fatalf("SaveEvent: %v", result.Value)
+	}
+	if result := a.work.RefreshLocal(); !result.OK {
+		t.Fatalf("RefreshLocal: %v", result.Value)
+	}
+	if result := a.queueAgentAction(agentFeatureChangesReview); !result.OK {
+		t.Fatalf("Review Changes: %v", result.Value)
+	}
+	model, snapshotCommand := a.Update(a.takeAgentCommand()())
+	a = model.(app)
+	if snapshotCommand == nil || a.activeOverlay != overlayChangeReview || engine.reviewChangesRunID != review.RunID || core.JSONMarshalString(a.agentReview.Payload) != core.JSONMarshalString(review) {
+		t.Fatalf("fresh review = snapshot %v overlay %d run %q payload %#v", snapshotCommand != nil, a.activeOverlay, engine.reviewChangesRunID, a.agentReview.Payload)
+	}
+	model, _ = a.Update(snapshotCommand())
+	a = model.(app)
+	state := a.work.AgentState(a.work.Items()[0])
+	if state.ReviewID != "review-prepared" || state.ReviewStatus != "prepared" || core.JSONMarshalString(state.Review.Payload) != core.JSONMarshalString(review) {
+		t.Fatalf("durable prepared review state = %#v", state)
+	}
+	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	a = model.(app)
+	if command := a.palette.byID[agentCommandID(agentFeatureReject)]; !command.Available {
+		t.Fatalf("Reject unavailable after review escape: %#v", command)
+	}
+	if result := a.palette.Invoke(agentCommandID(agentFeatureReject), &a); !result.OK {
+		t.Fatalf("Reject invoke: %v", result.Value)
+	}
+	driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+	if engine.rejectRunID != review.RunID {
+		t.Fatalf("Reject native run = %q, want %q", engine.rejectRunID, review.RunID)
+	}
+	storedItems := a.work.repository.ListWorkItems(false).Value.([]workItemRecord)
+	storedEvents := a.work.repository.Events(workEventSessionID(storedItems[0])).Value.([]eventRecord)
+	if len(storedItems) != 1 || storedItems[0].ID != review.WorkID || storedItems[0].Title != "Ship" || len(storedEvents) != 1 || storedEvents[0].ID != localEvent.ID {
+		t.Fatalf("Reject mutated local state: items %#v events %#v", storedItems, storedEvents)
+	}
+}
+
+func TestApp_AgentPreparedAcceptRequiresReviewAndFinalConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		validated       bool
+		acknowledgement bool
+	}{
+		{name: "validated", validated: true},
+		{name: "no validation", acknowledgement: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			review := correctiveChangeReview(test.validated)
+			engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities()}
+			a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+			a.work.agentWork[review.WorkID] = agentWorkSnapshot{
+				NativeRunID: review.RunID, ReviewID: "review-prepared", ReviewStatus: "prepared",
+				Review: mapChangeReview(review, true),
+			}
+			a.refreshAgentPalette()
+			if result := a.palette.Invoke(agentCommandID(agentFeatureAccept), &a); !result.OK {
+				t.Fatalf("Accept invoke: %v", result.Value)
+			}
+			if a.activeOverlay != overlayChangeReview || engine.acceptRequest.Confirmed {
+				t.Fatalf("prepared Accept = overlay %d request %#v", a.activeOverlay, engine.acceptRequest)
+			}
+			if test.acknowledgement {
+				model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				a = model.(app)
+				if command != nil || a.changeOverlay.final || engine.acceptRequest.Confirmed {
+					t.Fatalf("unacknowledged enter = command %v final %v accept %#v", command != nil, a.changeOverlay.final, engine.acceptRequest)
+				}
+				model, _ = a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+				a = model.(app)
+				if !a.changeOverlay.acknowledged {
+					t.Fatal("a did not acknowledge missing validation")
+				}
+			}
+			model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			a = model.(app)
+			if command != nil || !a.changeOverlay.final || engine.acceptRequest.Confirmed {
+				t.Fatalf("review confirmation = command %v final %v accept %#v", command != nil, a.changeOverlay.final, engine.acceptRequest)
+			}
+			model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			a = model.(app)
+			if command == nil || engine.acceptRequest.Confirmed {
+				t.Fatalf("final confirmation scheduling = command %v accept %#v", command != nil, engine.acceptRequest)
+			}
+			driveCorrectiveCommand(t, &a, command)
+			want := workspace.AcceptRequest{Review: review, Confirmed: true}
+			if core.JSONMarshalString(engine.acceptRequest) != core.JSONMarshalString(want) {
+				t.Fatalf("Accept request = %#v, want %#v", engine.acceptRequest, want)
+			}
+		})
+	}
+}
+
+func TestApp_AgentBlockedReviewStaysScrollableAndRejectable(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		review workspace.ChangeReview
+	}{
+		{name: "conflict", review: func() workspace.ChangeReview {
+			review := correctiveChangeReview(true)
+			review.Conflicts = []string{"a.go content conflict"}
+			return review
+		}()},
+		{name: "failed validation", review: func() workspace.ChangeReview {
+			review := correctiveChangeReview(true)
+			review.Validation[0].Passed = false
+			review.Validation[0].ExitCode = 1
+			review.Validation[0].Output = "FAIL package"
+			return review
+		}()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lines := make([]string, 80)
+			for index := range lines {
+				lines[index] = core.Sprintf("diff line %03d", index)
+			}
+			test.review.Diff = core.Join("\n", lines...)
+			engine := &fixtureNativeAgentEngine{
+				capabilities: nativeFixtureCapabilities(), changeReview: test.review,
+				snapshot: work.Snapshot{
+					Runs:        []work.Run{{ID: test.review.RunID, WorkID: test.review.WorkID, Status: work.RunCompleted}},
+					Acceptances: []work.Acceptance{{ID: "review-blocked", WorkID: test.review.WorkID, RunID: test.review.RunID, Status: "prepared", ValidationJSON: core.JSONMarshalString(test.review)}},
+				},
+			}
+			a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+			if result := a.work.updateWork("completed", test.review.WorkID, func(record *workItemRecord) { record.Status = "completed" }); !result.OK {
+				t.Fatalf("set completed: %v", result.Value)
+			}
+			a.work.agentWork[test.review.WorkID] = agentWorkSnapshot{NativeRunID: test.review.RunID, Status: "completed"}
+			if result := a.queueAgentAction(agentFeatureChangesReview); !result.OK {
+				t.Fatalf("Review Changes: %v", result.Value)
+			}
+			model, snapshotCommand := a.Update(a.takeAgentCommand()())
+			a = model.(app)
+			model, _ = a.Update(snapshotCommand())
+			a = model.(app)
+			a.changeOverlay.View(48, 12, a.styles)
+			model, _ = a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+			a = model.(app)
+			if a.changeOverlay.viewport.YOffset == 0 || a.changeOverlay.viewport.TotalLineCount() < len(lines) {
+				t.Fatalf("blocked review viewport = offset %d lines %d", a.changeOverlay.viewport.YOffset, a.changeOverlay.viewport.TotalLineCount())
+			}
+			model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			a = model.(app)
+			if command != nil || a.activeOverlay != overlayChangeReview || strings.Contains(core.JSONMarshalString(engine.calls), "accept") || !strings.Contains(a.errText, "prevent acceptance") {
+				t.Fatalf("blocked Accept = command %v overlay %d calls %#v error %q", command != nil, a.activeOverlay, engine.calls, a.errText)
+			}
+			model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			a = model.(app)
+			if result := a.palette.Invoke(agentCommandID(agentFeatureReject), &a); !result.OK {
+				t.Fatalf("Reject blocked review: %v", result.Value)
+			}
+			driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+			if engine.rejectRunID != test.review.RunID || strings.Contains(core.JSONMarshalString(engine.calls), "accept") {
+				t.Fatalf("blocked review mutation = reject %q calls %#v", engine.rejectRunID, engine.calls)
+			}
+		})
+	}
+}
+
+func TestApp_AgentQueueStateGatesAndExecutesNativeControls(t *testing.T) {
+	engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities()}
+	a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+	a.work.queueStatus = "frozen"
+	a.refreshAgentPalette()
+	if result := a.palette.Invoke(agentCommandID(agentFeatureQueueStart), &a); !result.OK {
+		t.Fatalf("Start frozen queue: %v", result.Value)
+	}
+	driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+	if countAgentCall(engine.calls, "queue.start") != 1 {
+		t.Fatalf("queue start calls = %#v", engine.calls)
+	}
+	a.work.queueStatus = "accepting"
+	a.refreshAgentPalette()
+	if result := a.palette.Invoke(agentCommandID(agentFeatureQueueStop), &a); !result.OK {
+		t.Fatalf("Stop accepting queue: %v", result.Value)
+	}
+	driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+	if countAgentCall(engine.calls, "queue.stop") != 1 {
+		t.Fatalf("queue stop calls = %#v", engine.calls)
+	}
+	a.work.queueStatus = "draining"
+	a.refreshAgentPalette()
+	for _, feature := range []agentFeature{agentFeatureQueueStart, agentFeatureQueueStop} {
+		before := len(engine.calls)
+		if result := a.palette.Invoke(agentCommandID(feature), &a); result.OK {
+			t.Fatalf("%s admitted while draining", feature)
+		}
+		if len(engine.calls) != before {
+			t.Fatalf("%s mutated provider while draining: %#v", feature, engine.calls)
+		}
+	}
+}
+
 func TestApp_AgentReviewEscapeAbortsTransaction(t *testing.T) {
 	for _, overlay := range []overlayKind{overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview} {
 		t.Run(core.Sprintf("overlay-%d", overlay), func(t *testing.T) {
@@ -1778,4 +2223,118 @@ func driveAppGeneration(t *testing.T, target *app, sessionID string, command tea
 		}
 	}
 	t.Fatalf("session %s generation did not complete", sessionID)
+}
+
+type correctiveAgentProvider struct {
+	mu        sync.Mutex
+	caps      []agentCapability
+	snapshot  func(context.Context, int) core.Result
+	review    func(context.Context, agentReviewRequest) core.Result
+	run       func(context.Context, agentRequest) core.Result
+	snapshots int
+	reviews   int
+	runs      int
+	closes    int
+}
+
+func (provider *correctiveAgentProvider) Capabilities() []agentCapability {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.caps != nil {
+		return append([]agentCapability(nil), provider.caps...)
+	}
+	capabilities := agentFeatureCatalog("")
+	for index := range capabilities {
+		capabilities[index].Available = true
+	}
+	return capabilities
+}
+
+func (provider *correctiveAgentProvider) Snapshot(ctx context.Context) core.Result {
+	provider.mu.Lock()
+	provider.snapshots++
+	call := provider.snapshots
+	snapshot := provider.snapshot
+	provider.mu.Unlock()
+	if snapshot == nil {
+		return core.Ok(agentSnapshot{})
+	}
+	return snapshot(ctx, call)
+}
+
+func (provider *correctiveAgentProvider) Review(ctx context.Context, request agentReviewRequest) core.Result {
+	provider.mu.Lock()
+	provider.reviews++
+	review := provider.review
+	provider.mu.Unlock()
+	if review == nil {
+		return core.Ok(agentReview{})
+	}
+	return review(ctx, request)
+}
+
+func (provider *correctiveAgentProvider) Run(ctx context.Context, request agentRequest) core.Result {
+	provider.mu.Lock()
+	provider.runs++
+	run := provider.run
+	provider.mu.Unlock()
+	if run == nil {
+		return core.Ok(agentActionReceipt{Feature: request.Feature, WorkID: request.WorkID, RunID: request.RunID})
+	}
+	return run(ctx, request)
+}
+
+func (provider *correctiveAgentProvider) Close() core.Result {
+	provider.mu.Lock()
+	provider.closes++
+	provider.mu.Unlock()
+	return core.Ok(nil)
+}
+
+func (provider *correctiveAgentProvider) SnapshotCalls() int {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return provider.snapshots
+}
+
+func (provider *correctiveAgentProvider) CallCounts() (int, int, int, int) {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return provider.snapshots, provider.reviews, provider.runs, provider.closes
+}
+
+func correctiveChangeReview(validated bool) workspace.ChangeReview {
+	review := workspace.ChangeReview{
+		WorkID: "work-1", RunID: "run-reviewed", SourceBranch: "main", SourceRevision: "source-123",
+		AgentBase: "source-123", AgentTip: "agent-456", IntegrationBranch: "lem/integration/run-reviewed",
+		IntegrationPath: "/private/reviews/run-reviewed", ResultRevision: "result-789",
+		Diff: "diff --git a/main.go b/main.go\n+reviewed change", CommitLog: "agent-456 implement reviewed change",
+	}
+	if validated {
+		review.Validation = []workspace.ValidationResult{{
+			Command: workspace.Command{Dir: "/src/project", Executable: "go", Args: []string{"test", "./..."}},
+			Output:  "ok all packages", Receipt: "validation-receipt", Passed: true,
+		}}
+	}
+	return review
+}
+
+func driveCorrectiveCommand(t *testing.T, target *app, command tea.Cmd) tea.Cmd {
+	t.Helper()
+	if command == nil {
+		t.Fatal("expected lifecycle-owned command")
+	}
+	model, next := target.Update(command())
+	*target = model.(app)
+	return next
+}
+
+func countAgentCall(calls []string, want string) int {
+	count := 0
+	for _, call := range calls {
+		if call == want {
+			count++
+		}
+	}
+	return count
 }

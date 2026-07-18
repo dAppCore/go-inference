@@ -180,7 +180,19 @@ func newChangeAcceptanceOverlay(review agentReview) *changeAcceptanceOverlay {
 }
 
 func (overlay *changeAcceptanceOverlay) Update(message tea.KeyMsg) bool {
-	if overlay == nil || message.String() != "enter" {
+	if overlay == nil {
+		return false
+	}
+	if message.String() == "a" {
+		if overlay.review.NeedsAcknowledgement {
+			overlay.acknowledged = true
+		}
+		return false
+	}
+	if message.String() != "enter" {
+		var command tea.Cmd
+		overlay.viewport, command = overlay.viewport.Update(message)
+		_ = command
 		return false
 	}
 	if !overlay.review.AcceptanceAllowed {

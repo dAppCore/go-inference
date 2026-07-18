@@ -36,6 +36,34 @@ func TestCommandPalette_Good(t *testing.T) {
 	}
 }
 
+func TestAgentCommandPalette_LifecycleActionMatrix(t *testing.T) {
+	capabilities := []agentCapability{
+		{Feature: agentFeatureCancel, Available: true},
+		{Feature: agentFeatureChangesReview, Available: true},
+	}
+	statuses := []string{"queued", "preparing", "running", "completed", "waiting", "cancelling", "cancelled", "failed", "interrupted", "accepted", "rejected"}
+	for _, status := range statuses {
+		t.Run(status, func(t *testing.T) {
+			selected := workItemRecord{ID: "work-1", Status: status}
+			state := agentWorkSnapshot{NativeRunID: "run-1"}
+			commands := agentWorkspaceCommandsForContext(capabilities, &selected, state)
+			available := make(map[agentFeature]bool, len(commands))
+			for _, command := range commands {
+				for _, feature := range []agentFeature{agentFeatureCancel, agentFeatureChangesReview} {
+					if command.ID == agentCommandID(feature) {
+						available[feature] = command.Available
+					}
+				}
+			}
+			wantCancel := status == "queued" || status == "running"
+			wantReview := status == "completed"
+			if available[agentFeatureCancel] != wantCancel || available[agentFeatureChangesReview] != wantReview {
+				t.Fatalf("status %q availability = cancel %v review %v, want %v/%v", status, available[agentFeatureCancel], available[agentFeatureChangesReview], wantCancel, wantReview)
+			}
+		})
+	}
+}
+
 func TestCommandPalette_Bad(t *testing.T) {
 	palette := newCommandPalette(newUIStyles(midnightTheme()))
 	a := newApp("", 0, 64)

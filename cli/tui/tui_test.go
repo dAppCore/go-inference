@@ -5,8 +5,10 @@ package tui
 import (
 	"bytes"
 	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -89,6 +91,68 @@ func TestAgentBootstrap_CheckModeDoesNotConstructNormalAgent(t *testing.T) {
 	})
 	if code != 0 || normalCalls != 0 || checkCalls != 1 {
 		t.Fatalf("check composition = code %d normal %d check %d stderr %q", code, normalCalls, checkCalls, stderr.String())
+	}
+}
+
+func TestRunWithWorkspace_CheckIsReadOnlyAndClosesResources(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	databasePath := resources.Paths.Database
+	gitRoot := t.TempDir()
+	gitDir := core.PathJoin(gitRoot, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatalf("create Git sentinel: %v", err)
+	}
+	headPath := core.PathJoin(gitDir, "HEAD")
+	const head = "ref: refs/heads/check-sentinel\n"
+	if err := os.WriteFile(headPath, []byte(head), 0o644); err != nil {
+		t.Fatalf("write Git sentinel: %v", err)
+	}
+	sentinel := testWorkRecord("check-work", "Check sentinel", "queued", time.Date(2026, time.July, 18, 14, 0, 0, 0, time.UTC))
+	sentinel.Task, sentinel.Repo = "must not be admitted", gitRoot
+	if result := resources.Repository.SaveWorkItem(sentinel); !result.OK {
+		t.Fatalf("SaveWorkItem: %v", result.Value)
+	}
+	spy := &correctiveAgentProvider{}
+	resources.Agent = spy
+	normalCalls, checkCalls := 0, 0
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := runWithWorkspace(context.Background(), []string{"--check"}, &stdout, &stderr, workspaceLoaders{
+		Normal: func() core.Result {
+			normalCalls++
+			return core.Fail(core.E("test.normal", "normal/native composition boundary ran", nil))
+		},
+		Check: func() core.Result {
+			checkCalls++
+			return core.Ok(resources)
+		},
+	})
+
+	snapshots, reviews, runs, closes := spy.CallCounts()
+	if code != 0 || normalCalls != 0 || checkCalls != 1 || snapshots != 0 || reviews != 0 || runs != 0 || closes != 1 {
+		t.Fatalf("check boundary = code %d normal %d check %d snapshot/review/run/close %d/%d/%d/%d stderr %q", code, normalCalls, checkCalls, snapshots, reviews, runs, closes, stderr.String())
+	}
+	if resources.Repository != nil || resources.State != nil || resources.Agent != nil {
+		t.Fatalf("check resources remained open: repository=%v state=%v agent=%v", resources.Repository != nil, resources.State != nil, resources.Agent != nil)
+	}
+	gotHead, err := os.ReadFile(headPath)
+	if err != nil || string(gotHead) != head {
+		t.Fatalf("Git sentinel changed: head %q error %v", gotHead, err)
+	}
+	reopenedResult := openDuckRepository(databasePath)
+	if !reopenedResult.OK {
+		t.Fatalf("reopen repository: %s", reopenedResult.Error())
+	}
+	reopened := reopenedResult.Value.(workspaceRepository)
+	defer reopened.Close()
+	itemsResult := reopened.ListWorkItems(false)
+	if !itemsResult.OK {
+		t.Fatalf("ListWorkItems: %s", itemsResult.Error())
+	}
+	items := itemsResult.Value.([]workItemRecord)
+	if len(items) != 1 || core.JSONMarshalString(items[0]) != core.JSONMarshalString(sentinel) {
+		t.Fatalf("check mutated repository or admitted queue work: %#v", items)
 	}
 }
 

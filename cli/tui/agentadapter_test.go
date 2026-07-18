@@ -95,6 +95,62 @@ func TestAgentAdapter_SnapshotProjectWithoutRunDoesNotCreateWork(t *testing.T) {
 	}
 }
 
+func TestAgentAdapter_SnapshotReviewUsesFreshReviewPresentation(t *testing.T) {
+	review := workspace.ChangeReview{
+		WorkID: "work-1", RunID: "run-1", SourceBranch: "main", SourceRevision: "source-123",
+		AgentBase: "source-123", AgentTip: "agent-456", IntegrationBranch: "lem/integration/run-1",
+		IntegrationPath: "/private/reviews/run-1", ResultRevision: "result-789",
+		CommitLog: "agent-456 implement reviewed change", Diff: "diff --git a/a.go b/a.go\n+reviewed",
+		Validation: []workspace.ValidationResult{{
+			Command:  workspace.Command{Dir: "/src/project", Executable: "go", Args: []string{"test", "./..."}},
+			ExitCode: 0, Output: "ok all packages", Receipt: "receipt-sha256", Passed: true,
+		}},
+		Conflicts: []string{},
+	}
+	engine := &fixtureNativeAgentEngine{
+		changeReview: review,
+		snapshot: work.Snapshot{
+			Runs: []work.Run{{ID: review.RunID, WorkID: review.WorkID, Status: work.RunCompleted}},
+			Acceptances: []work.Acceptance{{
+				ID: "review-1", WorkID: review.WorkID, RunID: review.RunID,
+				Status: "prepared", ValidationJSON: core.JSONMarshalString(review),
+			}},
+		},
+	}
+	adapter := requireAgentAdapter(t, engine)
+	freshResult := adapter.Review(context.Background(), agentReviewRequest{Feature: agentFeatureChangesReview, WorkID: review.RunID})
+	snapshotResult := adapter.Snapshot(context.Background())
+	if !freshResult.OK || !snapshotResult.OK {
+		t.Fatalf("fresh/snapshot review = %#v / %#v", freshResult, snapshotResult)
+	}
+	fresh := freshResult.Value.(agentReview)
+	decoded := snapshotResult.Value.(agentSnapshot).Work[0].Review
+	if decoded.Body != fresh.Body || decoded.Warning != fresh.Warning || core.JSONMarshalString(decoded.Payload) != core.JSONMarshalString(review) {
+		t.Fatalf("snapshot review differs from fresh review:\nfresh=%#v\ndecoded=%#v", fresh, decoded)
+	}
+	for _, want := range []string{
+		"Source branch: main", "Source revision: source-123", "Agent base: source-123",
+		"Agent tip: agent-456", "Result revision: result-789", "agent-456 implement reviewed change",
+		"+reviewed", "PASSED", "go test ./...", "receipt-sha256", "ok all packages", "Conflicts:\nnone",
+	} {
+		if !strings.Contains(decoded.Body, want) {
+			t.Fatalf("snapshot review missing %q:\n%s", want, decoded.Body)
+		}
+	}
+
+	noValidation := review
+	noValidation.Validation = nil
+	engine.changeReview = noValidation
+	engine.snapshot.Acceptances[0].ValidationJSON = core.JSONMarshalString(noValidation)
+	freshResult = adapter.Review(context.Background(), agentReviewRequest{Feature: agentFeatureChangesReview, WorkID: review.RunID})
+	snapshotResult = adapter.Snapshot(context.Background())
+	fresh = freshResult.Value.(agentReview)
+	decoded = snapshotResult.Value.(agentSnapshot).Work[0].Review
+	if decoded.Body != fresh.Body || decoded.Warning != fresh.Warning || !decoded.NeedsAcknowledgement || !strings.Contains(decoded.Body, "No validation command configured") {
+		t.Fatalf("no-validation snapshot review = %#v, fresh %#v", decoded, fresh)
+	}
+}
+
 func TestAgentAdapter_ProjectAndDispatchReview_Good(t *testing.T) {
 	projectReview := orchestrator.ProjectReview{
 		Work:           work.Item{ID: "work-1", Title: "Ship it", Task: "Implement the slice", Repository: "/src/project"},

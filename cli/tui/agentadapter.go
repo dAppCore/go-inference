@@ -4,7 +4,6 @@ package tui
 
 import (
 	"context"
-	"sort"
 	"sync"
 
 	core "dappco.re/go"
@@ -232,12 +231,7 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 			}
 		}
 	}
-	sort.SliceStable(mapped.Events, func(left, right int) bool {
-		if mapped.Events[left].CreatedAt.Equal(mapped.Events[right].CreatedAt) {
-			return mapped.Events[left].ExternalID < mapped.Events[right].ExternalID
-		}
-		return mapped.Events[left].CreatedAt.Before(mapped.Events[right].CreatedAt)
-	})
+	sortAgentEvents(mapped.Events)
 	return mapped
 }
 
