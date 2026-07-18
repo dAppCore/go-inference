@@ -52,9 +52,9 @@ type LayerSpec struct {
 	Attention     AttentionType
 	Mixer         MixerKind // the sequence-mixer family (default MixerAttention); a config maps a recurrence layer to MixerGatedDelta
 	DisableRotary bool      // skip the architecture's RoPE declaration for an explicit NoPE layer
-	KVShareFrom   int  // index of the layer whose KV cache this layer reads (== own index if it owns its cache)
-	CacheIndex    int  // cache slot for an owner; -1 if this layer shares another's cache
-	MoE           bool // sparse-expert MLP instead of dense (derivation: a later slice)
+	KVShareFrom   int       // index of the layer whose KV cache this layer reads (== own index if it owns its cache)
+	CacheIndex    int       // cache slot for an owner; -1 if this layer shares another's cache
+	MoE           bool      // sparse-expert MLP instead of dense (derivation: a later slice)
 	// HeadDim / KVHeads are this layer's RESOLVED attention geometry. Some archs use a
 	// LARGER head_dim on full_attention layers than on sliding (e.g. sliding head_dim
 	// 256, full global_head_dim 512), and may carry a different KV head count on full
@@ -235,6 +235,13 @@ func DeriveLayers(layerTypes []string, numKVShared int) []LayerSpec {
 	latestByType := map[AttentionType]int{}
 	nextCache := 0
 	for i := range n {
+		if layerTypes[i] == "linear_attention" {
+			// A gated-delta recurrence layer (Qwen3.5 hybrid): a named MixerGatedDelta with NO KV cache
+			// (it threads a recurrent state, not attention) — CacheIndex -1, owns nothing. gemma never
+			// declares "linear_attention", so its layers are byte-identical (#18).
+			specs[i] = LayerSpec{Mixer: MixerGatedDelta, KVShareFrom: i, CacheIndex: -1}
+			continue
+		}
 		at := GlobalAttention
 		if layerTypes[i] == "sliding_attention" {
 			at = SlidingAttention
