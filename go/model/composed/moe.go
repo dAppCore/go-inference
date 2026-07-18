@@ -68,6 +68,36 @@ type MoEMLP struct {
 	TopK         int
 	NormTopKProb bool // renormalise the top-k router weights over the selection (reference default true)
 	Gating       model.MoEGating
+
+	// GateBatchedQ/UpBatchedQ/DownBatchedQ are the WHOLE switch_mlp.{gate,up,down}_proj tensors kept as
+	// one packed [numExperts, …] quant weight each (every routed expert concatenated) — the batched form
+	// the engine's single-dispatch routed-MoE kernel (MoEExpertsDevice) consumes, collapsing the topK×3
+	// per-projection GPU submits per layer into ONE device call. MoEBits/MoEGroupSize are that pack's
+	// affine geometry, shared by gate/up/down. Populated by the loader only for the mlx batched
+	// (switch_mlp) layout; a per-expert checkpoint leaves them nil. Empty (GateBatchedQ nil) OR no bound
+	// MoEExpertsDevice ⇒ the device batched path is unavailable and forward runs the per-expert host loop
+	// over Experts (which always carries the same experts, sliced out — the fallback).
+	GateBatchedQ, UpBatchedQ, DownBatchedQ *model.QuantWeight
+	MoEBits, MoEGroupSize                  int
+}
+
+// ownBatchedQuant deep-copies the batched routed-expert quant tensors (GateBatchedQ/UpBatchedQ/DownBatchedQ)
+// to owned heap buffers, so they outlive the input checkpoint tensors — the owned-copy contract of the
+// non-zero-copy loader (LoadComposed unmaps the checkpoint right after the build, which would leave a
+// zero-copy VIEW dangling). The zero-copy loader (LoadComposedDir) keeps the views and retains the mapping
+// instead. No-op when the batched form is absent (a per-expert or dense checkpoint).
+func (m *MoEMLP) ownBatchedQuant() {
+	own := func(qw *model.QuantWeight) {
+		if qw == nil {
+			return
+		}
+		qw.Packed = append([]byte(nil), qw.Packed...)
+		qw.Scales = append([]byte(nil), qw.Scales...)
+		qw.Biases = append([]byte(nil), qw.Biases...)
+	}
+	own(m.GateBatchedQ)
+	own(m.UpBatchedQ)
+	own(m.DownBatchedQ)
 }
 
 // swigluExpertInto runs one SwiGLU expert over a single token xt [D], writing the [D] result
@@ -184,15 +214,37 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 		xt := x[t*D : (t+1)*D]
 		sel, denom := m.routeInto(xt, D, probs, idx)
 		ot := out[t*D : (t+1)*D]
-		for _, e := range sel {
-			w := probs[e] / denom
-			if m.Experts[e].packed() {
-				swigluExpertQuantInto(xt, m.Experts[e], D, eo)
-			} else {
-				swigluExpertInto(xt, m.Experts[e], D, hbuf, eo)
+		// Batched device path: the whole routed MoE — select the topK experts, compute each expert's
+		// SwiGLU, and combine by the router weights — in ONE device dispatch, collapsing the topK×3
+		// per-projection submits this layer would otherwise fire. Engaged only when the loader populated
+		// the batched packed-expert tensors AND a backend bound MoEExpertsDevice; the kernel applies the
+		// combine weights itself, so its [D] result adds straight into ot. A device error falls back to
+		// the per-expert host loop for THIS token (never crashes). The shared expert always stays on the
+		// host path below — it is not routed through the kernel.
+		routed := false
+		if m.GateBatchedQ != nil && MoEExpertsDevice != nil {
+			weights := make([]float64, len(sel))
+			for k := range sel {
+				weights[k] = probs[sel[k]] / denom
 			}
-			for d := range D {
-				ot[d] += float32(w * float64(eo[d]))
+			if combined, err := MoEExpertsDevice(xt, sel, weights, m.GateBatchedQ, m.UpBatchedQ, m.DownBatchedQ, len(m.Experts), len(sel), D, moeExpertFF(&m.Experts[0], D)); err == nil {
+				for d := range D {
+					ot[d] += combined[d]
+				}
+				routed = true
+			}
+		}
+		if !routed {
+			for _, e := range sel {
+				w := probs[e] / denom
+				if m.Experts[e].packed() {
+					swigluExpertQuantInto(xt, m.Experts[e], D, eo)
+				} else {
+					swigluExpertInto(xt, m.Experts[e], D, hbuf, eo)
+				}
+				for d := range D {
+					ot[d] += float32(w * float64(eo[d]))
+				}
 			}
 		}
 		if m.Shared != nil {

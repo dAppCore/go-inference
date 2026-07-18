@@ -492,6 +492,18 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 		if err != nil {
 			return nil, core.E("composed.LoadComposed", core.Sprintf("layer %d ffn", i), err)
 		}
+		// The batched routed-MoE quant tensors are zero-copy VIEWS into the switch_mlp tensors (buildMoE
+		// bypasses the proj closure that tracks aliasing for the dense projections). On the mmap
+		// (LoadComposedDir) path the model must retain the mapping — anyAlias drives RetainMmap; on the
+		// owned-copy path (LoadComposed unmaps the checkpoint after the build) they are copied out so no
+		// view dangles. Mirrors proj/tensorAsQuant's zeroCopy handling for the dense weights.
+		if moe, isMoE := ffn.(*MoEMLP); isMoE && moe.GateBatchedQ != nil {
+			if zeroCopy {
+				anyAlias = true
+			} else {
+				moe.ownBatchedQuant()
+			}
+		}
 
 		var mixer Mixer
 		if kinds[i] == "full_attention" || kinds[i] == "sliding_attention" {
@@ -770,6 +782,34 @@ func sliceBatchedExpertQuant(get func(string) (safetensors.Tensor, bool), base s
 	return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: packedCols * 32 / inDim, GroupSize: inDim / groups, OutDim: outDim, InDim: inDim}, nil
 }
 
+// batchedExpertQuant wraps the WHOLE mlx switch_mlp batched tensor for one projection as a single packed
+// model.QuantWeight — <base>.weight [numExperts, outDim, inDim·bits/32] (U32) with its [numExperts, outDim,
+// inDim/groupSize] bf16 <base>.scales/.biases siblings, every expert concatenated — the batched form the
+// engine's single-dispatch routed-MoE kernel (composed.MoEExpertsDevice) consumes. bits/groupSize are read
+// off the packed/scales widths against inDim (D for gate/up, FF for down), exactly as sliceBatchedExpertQuant
+// derives them per expert. Packed/Scales/Biases ZERO-COPY the (mmap'd) checkpoint tensors — the loader owns
+// the retention decision (LoadComposedDir keeps the mapping via anyAlias; the owned-copy path deep-copies via
+// MoEMLP.ownBatchedQuant). OutDim/InDim are one expert's logical dims; Packed holds numExperts of them.
+func batchedExpertQuant(get func(string) (safetensors.Tensor, bool), base string, inDim int) (*model.QuantWeight, error) {
+	wT, ok := get(base + ".weight")
+	sT, sOK := get(base + ".scales")
+	bT, bOK := get(base + ".biases")
+	if !ok || !sOK || !bOK {
+		return nil, core.NewError("composed.batchedExpertQuant: " + base + " missing .weight/.scales/.biases")
+	}
+	if len(wT.Shape) != 3 || len(sT.Shape) != 3 || wT.Shape[0] == 0 {
+		return nil, core.NewError("composed.batchedExpertQuant: " + base + " is not a [numExperts, outDim, packed] quant tensor")
+	}
+	outDim, packedCols, groups := wT.Shape[1], wT.Shape[2], sT.Shape[2]
+	if packedCols*32%inDim != 0 || groups == 0 || inDim%groups != 0 {
+		return nil, core.NewError(core.Sprintf("composed.batchedExpertQuant: %s geometry (packed %d, groups %d, inDim %d)", base, packedCols, groups, inDim))
+	}
+	return &model.QuantWeight{
+		Packed: wT.Data, Scales: sT.Data, Biases: bT.Data,
+		Bits: packedCols * 32 / inDim, GroupSize: inDim / groups, OutDim: outDim, InDim: inDim,
+	}, nil
+}
+
 // buildFFN builds a layer's feed-forward: a MoE (qwen3_6_moe) when expert weights are present, else a
 // dense SwiGLU MLP. sp is the "…mlp." prefix. Experts arrive either per-expert (experts.N.gate_proj — a
 // pre-split checkpoint) or batched (switch_mlp.gate_proj [numExperts,…] — the mlx-lm quantised layout).
@@ -824,6 +864,8 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 		return MoEExpert{Gate: g, Up: u, Down: d, GateQ: gQ, UpQ: uQ, DownQ: dQ}, nil
 	}
 	var experts []MoEExpert
+	var gateBatchedQ, upBatchedQ, downBatchedQ *model.QuantWeight
+	var moeBits, moeGroupSize int
 	if gT, ok := get(sp + "switch_mlp.gate_proj.weight"); ok {
 		// mlx batched layout: switch_mlp.{gate,up,down}_proj are single [numExperts, outDim, packed]
 		// tensors — slice each expert's own 2-D quant weight out (gate/up: FF×D, down: D×FF).
@@ -843,6 +885,20 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 			}
 			experts = append(experts, MoEExpert{GateQ: gQ, UpQ: uQ, DownQ: dQ})
 		}
+		// ALSO keep the WHOLE switch_mlp tensors as three batched quant weights (zero-copy views) — the
+		// form the single-dispatch routed-MoE kernel consumes, collapsing this layer's topK×3 per-expert
+		// submits into one device call. The per-expert slices above stay the host fallback. loadComposed
+		// owns the retention decision for these views (anyAlias on a zero-copy load, else ownBatchedQuant).
+		if gateBatchedQ, err = batchedExpertQuant(get, sp+"switch_mlp.gate_proj", D); err != nil {
+			return nil, err
+		}
+		if upBatchedQ, err = batchedExpertQuant(get, sp+"switch_mlp.up_proj", D); err != nil {
+			return nil, err
+		}
+		if downBatchedQ, err = batchedExpertQuant(get, sp+"switch_mlp.down_proj", ff); err != nil {
+			return nil, err
+		}
+		moeBits, moeGroupSize = gateBatchedQ.Bits, gateBatchedQ.GroupSize
 	} else {
 		for e := 0; ; e++ {
 			ep := sp + core.Sprintf("experts.%d.", e)
@@ -919,5 +975,6 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func
 	if arch != nil && arch.MoEGating != "" {
 		gating = arch.MoEGating
 	}
-	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: normTopK, Gating: gating}, nil
+	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: normTopK, Gating: gating,
+		GateBatchedQ: gateBatchedQ, UpBatchedQ: upBatchedQ, DownBatchedQ: downBatchedQ, MoEBits: moeBits, MoEGroupSize: moeGroupSize}, nil
 }

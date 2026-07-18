@@ -162,6 +162,11 @@ var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
 // (never widens the whole weight), but not fast.
 var ProjQuantMatMulInto func(out, x []float32, packed, scales, biases []byte, M, K, N, groupSize, bits int) ([]float32, error)
 
+// MoEExpertsDevice runs the whole routed MoE — the topK experts in `sel`, combined by `weights` — through
+// the engine's batched packed-expert kernel in ONE dispatch, returning the combined [dModel] output. gate/up/down
+// are the BATCHED [numExperts,…] quant weights. nil ⇒ no device backend; the caller runs the per-expert host loop.
+var MoEExpertsDevice func(xt []float32, sel []int, weights []float64, gate, up, down *model.QuantWeight, numExperts, topK, dModel, dFF int) ([]float32, error)
+
 // matNTQuant computes out[M,N] = x[M,K] @ dequant(qw)ᵀ for a packed projection weight, preferring the
 // device quant seam and falling back to the host dequant-row path — a device failure (missing kernel, no
 // Metal device) is deterministic for the rest of the process either way, mirroring matNTInto. qw's

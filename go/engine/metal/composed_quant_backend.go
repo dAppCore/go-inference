@@ -8,6 +8,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
@@ -35,6 +36,38 @@ func init() {
 	// #8-B slice 1: the packed-weight FFN-tail fold — residual + norm + SwiGLU-over-codes +
 	// residual in ONE command buffer where the bypass paid three quant-seam round trips.
 	composed.ResidualNormMLPQuantDevice = ResidualNormMLPQuantDevice
+	// The batched routed-MoE kernel: the whole top-K MoE (select + SwiGLU + weighted combine) in ONE
+	// dispatch, where the composed host loop fired topK×3 per-projection quant-seam submits per layer.
+	composed.MoEExpertsDevice = MoEExpertsQuantDevice
+}
+
+// MoEExpertsQuantDevice binds composed.MoEExpertsDevice to the metallib's batched packed-expert MoE kernel
+// (MoEExpertsQuant): the whole routed MoE — select the topK experts, run each expert's SwiGLU over the
+// quantised gate/up/down, and combine by the router weights — in ONE device dispatch, where the composed
+// host loop pays three quant-seam round trips per routed expert. It marshals the composed lane's f32/host
+// types to the kernel's bf16/native ones: xt→bf16 bytes, sel→int32, the combine weights→bf16 bytes, each
+// batched *model.QuantWeight→the native QuantWeight, then decodes the returned dModel bf16 back to f32.
+// gate/up/down share the pack's (bits, groupSize), read off gate. A kernel error propagates so the caller
+// falls back to the per-expert host loop for that token.
+func MoEExpertsQuantDevice(xt []float32, sel []int, weights []float64, gate, up, down *model.QuantWeight, numExperts, topK, dModel, dFF int) ([]float32, error) {
+	xb := f32sToBF16Bytes(xt)
+	idx := make([]int32, len(sel))
+	for k, e := range sel {
+		idx[k] = int32(e)
+	}
+	wb := make([]byte, len(weights)*bf16Size)
+	for k, w := range weights {
+		r := f32ToBF16(float32(w))
+		wb[2*k], wb[2*k+1] = byte(r), byte(r>>8)
+	}
+	qw := func(w *model.QuantWeight) QuantWeight {
+		return QuantWeight{Packed: w.Packed, Scales: w.Scales, Biases: w.Biases, GroupSize: w.GroupSize, Bits: w.Bits}
+	}
+	ob, err := MoEExpertsQuant(xb, idx, wb, qw(gate), qw(up), qw(down), numExperts, topK, dModel, dFF, gate.GroupSize, gate.Bits)
+	if err != nil {
+		return nil, err
+	}
+	return bf16ToF32Slice(ob), nil
 }
 
 // MatMulQuantF32NTInto computes out[M,N] = x[M,K] @ dequant(w)ᵀ for an MLX affine-packed weight with f32
