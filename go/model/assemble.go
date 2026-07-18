@@ -133,26 +133,37 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		L := &m.Layers[i]
 		L.AttnNorm = norm(p + names.AttnNorm)
 		L.PostAttnNorm = norm(p + names.PostAttnNorm)
-		L.QNorm = norm(p + names.QNorm)
-		L.KNorm = norm(p + names.KNorm)
 		L.LayerScalar = norm(p + names.LayerScalar)
-		L.Q = lin(p+names.Q, d)
-		if spec.OwnsCache() { // KV-shared layers carry no own k/v; v is also absent on K==V layers (lin → nil)
-			L.K = lin(p+names.K, d)
-			L.V = lin(p+names.V, d)
+		if spec.Mixer == MixerGatedDelta {
+			// A gated-delta (linear-attention recurrence) layer carries no q/k/v/o — its projections +
+			// conv + recurrence load through assembleGatedDelta. This is the named-kind branch the
+			// composed lane forked an entire parallel engine to avoid (#18); gemma4 never takes it.
+			gd, cfg, gerr := assembleGatedDelta(t, p+"linear_attn.", d, kind)
+			if gerr != nil {
+				return nil, gerr
+			}
+			L.GatedDelta, L.GatedDeltaCfg = gd, cfg
+		} else {
+			L.QNorm = norm(p + names.QNorm)
+			L.KNorm = norm(p + names.KNorm)
+			L.Q = lin(p+names.Q, d)
+			if spec.OwnsCache() { // KV-shared layers carry no own k/v; v is also absent on K==V layers (lin → nil)
+				L.K = lin(p+names.K, d)
+				L.V = lin(p+names.V, d)
+			}
+			// Declare the per-layer K==V op selection from the checkpoint: a layer with no value weight
+			// (a K==V layer, or a KV-shared layer that attends the owner's cache) has its value produced
+			// by the KEY projection. Resolving it here, once, is the DECLARES discipline — backends read
+			// this per-layer selection instead of re-inferring "V rides the k-proj" from v_proj absence.
+			m.Arch.Layer[i].AttentionKEqV = L.V == nil
+			// Declare the norm-op selections the same way (#57 slice 3): resolved once from
+			// checkpoint weight presence, bound by backends instead of re-probed per buffer.
+			m.Arch.Layer[i].AttentionQNorm = len(L.QNorm) > 0
+			m.Arch.Layer[i].AttentionKNorm = len(L.KNorm) > 0
+			L.O = lin(p+names.O, qDim)
 		}
-		// Declare the per-layer K==V op selection from the checkpoint: a layer with no value weight
-		// (a K==V layer, or a KV-shared layer that attends the owner's cache) has its value produced
-		// by the KEY projection. Resolving it here, once, is the DECLARES discipline — backends read
-		// this per-layer selection instead of re-inferring "V rides the k-proj" from v_proj absence.
-		m.Arch.Layer[i].AttentionKEqV = L.V == nil
-		// Declare the norm-op selections the same way (#57 slice 3): resolved once from
-		// checkpoint weight presence, bound by backends instead of re-probed per buffer.
-		m.Arch.Layer[i].AttentionQNorm = len(L.QNorm) > 0
-		m.Arch.Layer[i].AttentionKNorm = len(L.KNorm) > 0
 		m.Arch.Layer[i].PostAttnNorm = len(L.PostAttnNorm) > 0
 		m.Arch.Layer[i].LayerScalar = len(L.LayerScalar) > 0
-		L.O = lin(p+names.O, qDim)
 
 		if spec.MoE {
 			L.MoE = assembleMoE(t, p, arch, names.MoE, lin, norm, kind)

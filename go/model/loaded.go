@@ -22,6 +22,12 @@ type LoadedLayer struct {
 	QNorm, KNorm           []byte // self_attn.q_norm / k_norm (nil without QK-norm)
 	LayerScalar            []byte // per-layer output scalar [1] (nil when absent)
 	Q, K, V, O             *Linear
+	// GatedDelta is a MixerGatedDelta layer's linear-attention recurrence weights (non-nil ⇒ this layer
+	// is a gated-delta mixer, Q/K/V/O then unused — the mixer analogue of MoE replacing dense Gate/Up/
+	// Down). GatedDeltaCfg carries its resolved geometry. Built by assembleGatedDelta when the layer's
+	// LayerSpec.Mixer == MixerGatedDelta; nil for a standard attention layer (gemma4, llama, …).
+	GatedDelta    *GatedDeltaWeights
+	GatedDeltaCfg GatedDeltaConfig
 
 	MLPNorm, PostFFNorm []byte // pre/post feedforward norms (dense MLP)
 	Gate, Up, Down      *Linear
