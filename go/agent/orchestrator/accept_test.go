@@ -15,6 +15,19 @@ import (
 	coreio "dappco.re/go/io"
 )
 
+type acceptanceSequenceIDs struct {
+	values []string
+}
+
+func (ids *acceptanceSequenceIDs) New() string {
+	if len(ids.values) == 0 {
+		return "acceptance-fallback-id"
+	}
+	value := ids.values[0]
+	ids.values = ids.values[1:]
+	return value
+}
+
 func orchestratorCompletedAcceptanceRun(t *testing.T, fixture *orchestratorFixture) (work.Project, work.Run) {
 	t.Helper()
 	_, project, _ := fixture.registerRepository()
@@ -84,12 +97,110 @@ func TestAccept_Orchestrator_ReviewChanges_Bad(t *testing.T) {
 	core.AssertFalse(t, orchestrator.ReviewChanges(context.Background(), "run").OK)
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), "missing").OK)
+	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	fixture.store.overrideRun("not a run")
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.store.clearRunOverride()
+	stored := fixture.store.runs[run.ID]
+	stored.Status = work.RunFailed
+	fixture.store.runs[run.ID] = stored
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.store.runs[run.ID] = run
+	stored = fixture.store.runs[run.ID]
+	stored.ProjectID = "missing-project"
+	fixture.store.runs[run.ID] = stored
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.store.runs[run.ID] = run
+	fixture.store.overrideProjectID("not a project")
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.store.clearProjectIDOverride()
+	fixture.clock.Set(time.Time{})
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.clock.Set(fixture.at)
+	originalIDs := fixture.orchestrator.ids
+	fixture.orchestrator.ids = &acceptanceSequenceIDs{values: []string{""}}
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.orchestrator.ids = &acceptanceSequenceIDs{values: []string{"receipt-id", ""}}
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.orchestrator.ids = originalIDs
+	fixture.store.failNext(func(commit Commit) bool { return commit.Acceptance != nil })
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
 }
 
 func TestAccept_Orchestrator_ReviewChanges_Ugly(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(nil, "run").OK)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(cancelled, "run").OK)
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), " ").OK)
+	core.AssertTrue(t, fixture.orchestrator.Close().OK)
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), "run").OK)
+}
+
+func TestAcceptOrchestratorReviewChangesPersistsConflictForLatestReject(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	project, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	core.AssertTrue(t, core.WriteFile(core.PathJoin(run.Worktree, "README.md"), []byte("agent conflict\n"), 0o600).OK)
+	captureResult := fixture.manager.CaptureRun(context.Background(), workspace.RunWorkspace{
+		Project: project, RunID: run.ID, Path: run.Worktree, Branch: run.Branch, BaseRevision: run.SourceRevision,
+		DurableRevision: run.DurableRevision,
+	})
+	core.AssertTrue(t, captureResult.OK, captureResult.Error())
+	capture := captureResult.Value.(workspace.Capture)
+	run.DurableRevision = capture.DurableRevision
+	run.ExecutionRevision = capture.Revision
+	fixture.store.runs[run.ID] = run
+	core.AssertTrue(t, core.WriteFile(core.PathJoin(project.RepositoryRoot, "README.md"), []byte("source conflict\n"), 0o600).OK)
+	orchestratorRunGit(t, project.RepositoryRoot, "add", "README.md")
+	orchestratorRunGit(t, project.RepositoryRoot, "commit", "-m", "source conflict")
+
+	reviewResult := fixture.orchestrator.ReviewChanges(context.Background(), run.ID)
+	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+	review := reviewResult.Value.(workspace.ChangeReview)
+	core.AssertTrue(t, len(review.Conflicts) > 0)
+	canonical := core.JSONMarshalString(review)
+	last := fixture.store.commits[len(fixture.store.commits)-1]
+	core.AssertTrue(t, last.Run == nil && last.Acceptance != nil && last.Event != nil)
+	core.AssertEqual(t, "conflicted", last.Acceptance.Status)
+	core.AssertEqual(t, canonical, last.Acceptance.ValidationJSON)
+	core.AssertEqual(t, "changes_reviewed", last.Event.Kind)
+	core.AssertEqual(t, canonical, last.Event.DetailJSON)
+	core.AssertEqual(t, work.RunCompleted, fixture.store.runs[run.ID].Status)
+	rejected := fixture.orchestrator.Reject(context.Background(), run.ID)
+	core.AssertTrue(t, rejected.OK, rejected.Error())
+	core.AssertEqual(t, canonical, rejected.Value.(work.Acceptance).ValidationJSON)
+}
+
+func TestAcceptOrchestratorReviewChangesPersistsValidationFailureForLatestReject(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	queueResult := queue.NewController(queue.Policy{
+		Version: 1, Dispatch: queue.DispatchConfig{DefaultAgent: "fake", GlobalConcurrency: 1, TimeoutMinutes: 60,
+			Validation: []queue.Command{{Command: "git", Args: []string{"rev-parse", "--verify", "refs/heads/missing"}}}},
+		Concurrency: map[string]queue.ConcurrencyLimit{"fake": {Total: 1}}, Rates: map[string]queue.RateConfig{}, Providers: map[string]queue.NativeConfig{},
+	}, fixture.store.queue, nil)
+	core.AssertTrue(t, queueResult.OK, queueResult.Error())
+	fixture.orchestrator.queue = queueResult.Value.(*queue.Controller)
+	firstResult := fixture.orchestrator.ReviewChanges(context.Background(), run.ID)
+	core.AssertTrue(t, firstResult.OK, firstResult.Error())
+	firstJSON := core.JSONMarshalString(firstResult.Value.(workspace.ChangeReview))
+	secondResult := fixture.orchestrator.ReviewChanges(context.Background(), run.ID)
+	core.AssertTrue(t, secondResult.OK, secondResult.Error())
+	second := secondResult.Value.(workspace.ChangeReview)
+	core.AssertFalse(t, second.Validation[0].Passed)
+	canonical := core.JSONMarshalString(second)
+	core.AssertTrue(t, canonical != firstJSON)
+	last := fixture.store.commits[len(fixture.store.commits)-1]
+	core.AssertTrue(t, last.Run == nil && last.Acceptance != nil && last.Event != nil)
+	core.AssertEqual(t, "validation_failed", last.Acceptance.Status)
+	core.AssertEqual(t, canonical, last.Acceptance.ValidationJSON)
+	core.AssertEqual(t, "changes_reviewed", last.Event.Kind)
+	core.AssertEqual(t, canonical, last.Event.DetailJSON)
+	core.AssertEqual(t, work.RunCompleted, fixture.store.runs[run.ID].Status)
+	rejected := fixture.orchestrator.Reject(context.Background(), run.ID)
+	core.AssertTrue(t, rejected.OK, rejected.Error())
+	core.AssertEqual(t, canonical, rejected.Value.(work.Acceptance).ValidationJSON)
 }
 
 func TestAccept_Orchestrator_Accept_Good(t *testing.T) {
@@ -116,6 +227,53 @@ func TestAccept_Orchestrator_Accept_Bad(t *testing.T) {
 	review := fixture.orchestrator.ReviewChanges(context.Background(), run.ID).Value.(workspace.ChangeReview)
 	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review}).OK)
 	core.AssertEqual(t, work.RunCompleted, fixture.store.runs[run.ID].Status)
+	fixture.store.overrideRun("not a run")
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.clearRunOverride()
+	wrongWork := review
+	wrongWork.WorkID = "other-work"
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: wrongWork, Confirmed: true}).OK)
+	stored := fixture.store.runs[run.ID]
+	stored.Status = work.RunFailed
+	fixture.store.runs[run.ID] = stored
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.runs[run.ID] = run
+	fixture.store.setSnapshotFailure(true)
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.setSnapshotFailure(false)
+	fixture.store.overrideSnapshot("not a snapshot")
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.clearSnapshotOverride()
+	fixture.store.mu.Lock()
+	savedJSON := fixture.store.acceptances[len(fixture.store.acceptances)-1].ValidationJSON
+	fixture.store.acceptances[len(fixture.store.acceptances)-1].ValidationJSON = "{"
+	fixture.store.mu.Unlock()
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.mu.Lock()
+	fixture.store.acceptances[len(fixture.store.acceptances)-1].ValidationJSON = savedJSON
+	fixture.store.mu.Unlock()
+	stored = fixture.store.runs[run.ID]
+	stored.SourceRevision = "changed-base"
+	fixture.store.runs[run.ID] = stored
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.runs[run.ID] = run
+	stored = fixture.store.runs[run.ID]
+	stored.ProjectID = "missing-project"
+	fixture.store.runs[run.ID] = stored
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.runs[run.ID] = run
+	fixture.store.overrideProjectID("not a project")
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.store.clearProjectIDOverride()
+	fixture.clock.Set(time.Time{})
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.clock.Set(fixture.at)
+	originalIDs := fixture.orchestrator.ids
+	fixture.orchestrator.ids = &acceptanceSequenceIDs{values: []string{""}}
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.orchestrator.ids = &acceptanceSequenceIDs{values: []string{"receipt-id", ""}}
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true}).OK)
+	fixture.orchestrator.ids = originalIDs
 }
 
 func TestAccept_Orchestrator_Accept_Ugly(t *testing.T) {
@@ -123,6 +281,33 @@ func TestAccept_Orchestrator_Accept_Ugly(t *testing.T) {
 	core.AssertFalse(t, orchestrator.Accept(context.Background(), workspace.AcceptRequest{}).OK)
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.Accept(nil, workspace.AcceptRequest{Confirmed: true}).OK)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	core.AssertFalse(t, fixture.orchestrator.Accept(cancelled, workspace.AcceptRequest{Confirmed: true}).OK)
+	core.AssertTrue(t, fixture.orchestrator.Close().OK)
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Confirmed: true}).OK)
+}
+
+func TestAcceptOrchestratorAcceptRequiresExistingIdempotentReceipt(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	run.Status = work.RunAccepted
+	run.AcceptedRevision = run.DurableRevision
+	fixture.store.runs[run.ID] = run
+	result := fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{
+		Review: workspace.ChangeReview{WorkID: run.WorkID, RunID: run.ID}, Confirmed: true,
+	})
+	core.AssertFalse(t, result.OK)
+	fixture.store.setSnapshotFailure(true)
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{
+		Review: workspace.ChangeReview{WorkID: run.WorkID, RunID: run.ID}, Confirmed: true,
+	}).OK)
+	fixture.store.setSnapshotFailure(false)
+	fixture.store.overrideSnapshot("not a snapshot")
+	core.AssertFalse(t, fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{
+		Review: workspace.ChangeReview{WorkID: run.WorkID, RunID: run.ID}, Confirmed: true,
+	}).OK)
+	fixture.store.clearSnapshotOverride()
 }
 
 func TestAcceptStoreFailureRestoresSourceAndCompletedRun(t *testing.T) {
@@ -294,10 +479,49 @@ func TestAccept_Orchestrator_Reject_Bad(t *testing.T) {
 	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
 	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
 	core.AssertEqual(t, work.RunCompleted, fixture.store.runs[run.ID].Status)
+	fixture.store.overrideRun("not a run")
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.store.clearRunOverride()
+	stored := fixture.store.runs[run.ID]
+	stored.Status = work.RunFailed
+	fixture.store.runs[run.ID] = stored
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.store.runs[run.ID] = run
+	core.AssertTrue(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	fixture.store.setSnapshotFailure(true)
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.store.setSnapshotFailure(false)
+	fixture.store.overrideSnapshot("not a snapshot")
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.store.clearSnapshotOverride()
+	fixture.store.mu.Lock()
+	savedJSON := fixture.store.acceptances[len(fixture.store.acceptances)-1].ValidationJSON
+	fixture.store.acceptances[len(fixture.store.acceptances)-1].ValidationJSON = "{"
+	fixture.store.mu.Unlock()
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.store.mu.Lock()
+	fixture.store.acceptances[len(fixture.store.acceptances)-1].ValidationJSON = savedJSON
+	fixture.store.mu.Unlock()
+	fixture.clock.Set(time.Time{})
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.clock.Set(fixture.at)
+	originalIDs := fixture.orchestrator.ids
+	fixture.orchestrator.ids = &acceptanceSequenceIDs{values: []string{""}}
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.orchestrator.ids = &acceptanceSequenceIDs{values: []string{"receipt-id", ""}}
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
+	fixture.orchestrator.ids = originalIDs
+	fixture.store.failNext(func(commit Commit) bool { return commit.Acceptance != nil && commit.Acceptance.Status == "rejected" })
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), run.ID).OK)
 }
 
 func TestAccept_Orchestrator_Reject_Ugly(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.Reject(nil, "run").OK)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	core.AssertFalse(t, fixture.orchestrator.Reject(cancelled, "run").OK)
 	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), " ").OK)
+	core.AssertTrue(t, fixture.orchestrator.Close().OK)
+	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), "run").OK)
 }
