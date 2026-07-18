@@ -74,3 +74,9 @@ func ExampleController_Restore() {
 	core.Println(result.OK)
 	// Output: true
 }
+
+func ExampleController_Validation() {
+	controller := exampleQueueController(work.QueueFrozen)
+	core.Println(len(controller.Validation()))
+	// Output: 0
+}

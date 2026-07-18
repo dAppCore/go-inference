@@ -427,3 +427,23 @@ func TestController_Controller_Restore_Ugly(t *testing.T) {
 	core.AssertFalse(t, result.OK)
 	core.AssertContains(t, result.Error(), "duplicated")
 }
+
+func TestController_Controller_Validation_Good(t *testing.T) {
+	controller := mustQueueController(t, controllerTestPolicy(), work.QueueState{ID: "default", Status: work.QueueAccepting}, nil)
+	commands := controller.Validation()
+	core.AssertEqual(t, []Command{{Command: "go", Args: []string{"test", "./..."}}}, commands)
+	commands[0].Command = "changed"
+	commands[0].Args[0] = "changed"
+	core.AssertEqual(t, "go", controller.Validation()[0].Command)
+	core.AssertEqual(t, "test", controller.Validation()[0].Args[0])
+}
+
+func TestController_Controller_Validation_Bad(t *testing.T) {
+	var controller *Controller
+	core.AssertEqual(t, []Command(nil), controller.Validation())
+}
+
+func TestController_Controller_Validation_Ugly(t *testing.T) {
+	controller := exampleQueueController(work.QueueFrozen)
+	core.AssertEqual(t, 0, len(controller.Validation()))
+}

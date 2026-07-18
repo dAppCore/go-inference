@@ -302,6 +302,20 @@ func (controller *Controller) Restore(state work.QueueState, providers []work.Pr
 	return core.Ok(nil)
 }
 
+// Validation returns a detached copy of the configured validation argument vectors.
+func (controller *Controller) Validation() []Command {
+	if controller == nil {
+		return nil
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	commands := make([]Command, len(controller.policy.Dispatch.Validation))
+	for index, command := range controller.policy.Dispatch.Validation {
+		commands[index] = Command{Command: command.Command, Args: append([]string(nil), command.Args...)}
+	}
+	return commands
+}
+
 func validQueueStatus(status work.QueueStatus) bool {
 	return status == work.QueueFrozen || status == work.QueueAccepting || status == work.QueueDraining
 }

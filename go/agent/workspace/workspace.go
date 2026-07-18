@@ -89,6 +89,7 @@ type Manager struct {
 	mu      sync.Mutex
 	leases  map[string]RunWorkspace
 	durable map[string]bool
+	reviews map[string]reviewState
 }
 
 // NewManager validates the internal workspace boundary and its dependencies.
@@ -113,6 +114,7 @@ func NewManager(options ManagerOptions) core.Result {
 		now:     options.Now,
 		leases:  make(map[string]RunWorkspace),
 		durable: make(map[string]bool),
+		reviews: make(map[string]reviewState),
 	})
 }
 

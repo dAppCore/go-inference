@@ -146,9 +146,9 @@ func (orchestrator *Orchestrator) Capabilities() []work.Capability {
 		{Name: "answer", Available: !closed, Reason: reason},
 		{Name: "retry", Available: !closed, Reason: reason},
 		{Name: "resume", Available: !closed, Reason: reason},
-	}
-	for _, name := range []string{"changes.review", "accept", "reject"} {
-		capabilities = append(capabilities, work.Capability{Name: name, Reason: "feature is not available in this runtime slice"})
+		{Name: "changes.review", Available: !closed, Reason: reason},
+		{Name: "accept", Available: !closed, Reason: reason},
+		{Name: "reject", Available: !closed, Reason: reason},
 	}
 	return capabilities
 }
