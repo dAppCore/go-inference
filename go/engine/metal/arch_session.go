@@ -937,6 +937,8 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		state.moeQuant = moeQuant
 		state.moeScratchOwnable = true      // long-lived session: own the MoE scratch, decode wait-free
 		state.bindGatedDeltaQuant(g.Layers) // MixerGatedDelta recurrence weights (#18); no-op for an all-attention model
+		state.attnOutputGate = arch.AttnOutputGate
+		state.bindGatedAttnQuant(g.Layers) // gated full-attention layers (Qwen3.5 attn_output_gate); no-op unless the Arch declares it
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return

@@ -224,19 +224,21 @@ func (lb *archLayerBufs) cacheKVContents() {
 // stepToken per token; the caches in lb persist across calls within that pool, which is
 // what turns the O(N²) re-decode into O(1)/token incremental decode.
 type archDecodeState struct {
-	specs        []model.LayerSpec
-	lb           []archLayerBufs
-	lbKVReady    bool               // ensureLBKVCaches ran (session builds defer the linear KV allocation)
-	gatedDelta   []*gatedDeltaLayer // MixerGatedDelta layers' recurrence weights + state (nil for attention layers) — #18
-	moeWeights   []*MoELayerWeights
-	pagedKV      []*devicePagedKVCache
-	asc          attnScratch
-	msc          mlpScratch
-	coreScratch  *archDecodeCoreScratch
-	hBuf, xA, xB metal.MTLBuffer
-	denseBatch   denseBatchScratch
-	offBuf       metal.MTLBuffer
-	offPtr       *int32
+	specs          []model.LayerSpec
+	lb             []archLayerBufs
+	lbKVReady      bool               // ensureLBKVCaches ran (session builds defer the linear KV allocation)
+	gatedDelta     []*gatedDeltaLayer // MixerGatedDelta layers' recurrence weights + state (nil for attention layers) — #18
+	gatedAttn      []*gatedAttnLayer  // gated full-attention layers' weights + host KV (Qwen3.5 attn_output_gate); nil for a plain-attention/gemma session — #18
+	attnOutputGate bool               // the Arch declares attn_output_gate → attention layers gate their output on the host path
+	moeWeights     []*MoELayerWeights
+	pagedKV        []*devicePagedKVCache
+	asc            attnScratch
+	msc            mlpScratch
+	coreScratch    *archDecodeCoreScratch
+	hBuf, xA, xB   metal.MTLBuffer
+	denseBatch     denseBatchScratch
+	offBuf         metal.MTLBuffer
+	offPtr         *int32
 	// offRing rotates the position buffer across step encodes. offBuf holds
 	// ONE int32 the kernels read at EXECUTION time (RoPE position, KV append
 	// row); the submit-ahead chained decode keeps a committed-not-waited link
@@ -1541,6 +1543,21 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			if err := s.encGatedDeltaHalf(li, in); err != nil {
+				return nil, err
+			}
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
+		} else if s.gatedAttn != nil && s.gatedAttn[li] != nil {
+			// Gated full-attention (Qwen3.5 attn_output_gate) — host path, correctness-first, same
+			// flush/resume shape as the gated-delta mixer. The device attention path can't split the
+			// [q ; gate] q_proj, so a gated attention layer decodes here; a plain attention layer (gemma4,
+			// dense qwen) keeps the device path below, byte-identical (#18).
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			if err := s.encGatedAttnHalf(li, pos, s.nHeads, lkv, lhd, rotDim, rbase, slideW, in); err != nil {
 				return nil, err
 			}
 			cb = commandBufferFast(queue)
