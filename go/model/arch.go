@@ -181,6 +181,7 @@ type Arch struct {
 	SlidingWindow                                            int
 	PerLayerInputVocab, PerLayerInputHidden                  int             // per-layer-input aux embedding (0 = absent)
 	AttentionKEqV                                            bool            // K == V (shared projection)
+	AttnOutputGate                                           bool            // Qwen3.5 attn_output_gate: full-attention layers emit [q ; gate] from q_proj and sigmoid-gate the attention output before o_proj; other arches leave it false
 	ValueNorm                                                bool            // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
 	ParallelResidual                                         bool            // attention and MLP consume the same normalised input, then both outputs join the residual
 	ALiBi                                                    bool            // attention uses linear position bias instead of rotary embeddings
