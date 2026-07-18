@@ -51,6 +51,16 @@ type nativeProviderDetection struct {
 	Warnings  []string
 }
 
+type agentAvailability struct {
+	mu          sync.RWMutex
+	unavailable map[agentFeature]string
+}
+
+type observedGitService struct {
+	gitserver.Service
+	availability *agentAvailability
+}
+
 type agentBootstrapFactories struct {
 	LoadPolicy          func(coreio.Medium, string) core.Result
 	OpenWorkspaceMedium func(string) core.Result
@@ -69,6 +79,13 @@ type agentBootstrapFactories struct {
 }
 
 func openWorkspace(root string, openers workspaceOpeners) core.Result {
+	return openWorkspaceContext(context.Background(), root, openers)
+}
+
+func openWorkspaceContext(ctx context.Context, root string, openers workspaceOpeners) core.Result {
+	if ctx == nil {
+		return core.Fail(core.E("tui.openWorkspace", "workspace context is required", nil))
+	}
 	opened := openAppFilesAt(root)
 	if !opened.OK {
 		return core.Fail(core.E("tui.openWorkspace", "open application files", resultError(opened)))
@@ -77,10 +94,17 @@ func openWorkspace(root string, openers workspaceOpeners) core.Result {
 	if !ok {
 		return core.Fail(core.E("tui.openWorkspace", "invalid application files result", nil))
 	}
-	return openWorkspaceWith(files, openers)
+	return openWorkspaceWithContext(ctx, files, openers)
 }
 
 func openWorkspaceWith(files appFiles, openers workspaceOpeners) core.Result {
+	return openWorkspaceWithContext(context.Background(), files, openers)
+}
+
+func openWorkspaceWithContext(ctx context.Context, files appFiles, openers workspaceOpeners) core.Result {
+	if ctx == nil {
+		return core.Fail(core.E("tui.openWorkspaceWith", "workspace context is required", nil))
+	}
 	if files.Medium == nil {
 		return core.Fail(core.E("tui.openWorkspaceWith", "application file medium is required", nil))
 	}
@@ -147,7 +171,7 @@ func openWorkspaceWith(files appFiles, openers workspaceOpeners) core.Result {
 		warnings = append(warnings, core.Concat("preferences: ", warning.Error()))
 	}
 
-	agentResult := openers.Agent(context.Background(), files, repository)
+	agentResult := openers.Agent(ctx, files, repository)
 	agent := agentProvider(nil)
 	if !agentResult.OK {
 		reason := workspaceOpenError(agentResult, defaultAgentUnavailableReason)
@@ -278,6 +302,19 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 	if !ok || store == nil {
 		return core.Fail(core.E("tui.composeNativeAgent", "agent store constructor returned an invalid store", nil))
 	}
+	snapshotResult := store.Snapshot("")
+	if !snapshotResult.OK {
+		return agentCompositionFailure("load durable queue state", snapshotResult, nil, nil)
+	}
+	durable, ok := snapshotResult.Value.(work.Snapshot)
+	if !ok {
+		return agentCompositionFailure(
+			"load durable queue state",
+			core.Fail(core.E("tui.composeNativeAgent", "invalid durable snapshot", nil)),
+			nil,
+			nil,
+		)
+	}
 
 	if gitResult := factories.GitAvailable(); !gitResult.OK {
 		return agentCompositionFailure("detect Git", gitResult, nil, nil)
@@ -298,6 +335,8 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 	if !ok || server == nil {
 		return core.Fail(core.E("tui.composeNativeAgent", "private Git constructor returned an invalid service", nil))
 	}
+	availability := &agentAvailability{unavailable: make(map[agentFeature]string)}
+	server = &observedGitService{Service: server, availability: availability}
 
 	workspacesResult := factories.NewWorkspaces(workspace.ManagerOptions{
 		Root: input.Files.Paths.Workspaces, Files: workspaceMedium, Git: workspace.ProcessRunner{}, Server: server,
@@ -336,10 +375,7 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 		return agentCompositionFailure("detect native providers", core.Fail(core.E("tui.composeNativeAgent", "provider detection returned an invalid result", nil)), server, nil)
 	}
 
-	at := factories.Now()
-	queueResult := factories.NewQueue(policy, work.QueueState{
-		ID: "default", Status: work.QueueFrozen, Reason: "agent queue is frozen until explicitly started", UpdatedAt: at,
-	}, nil)
+	queueResult := factories.NewQueue(policy, durable.Queue, durable.Providers)
 	if !queueResult.OK {
 		return agentCompositionFailure("construct queue controller", queueResult, server, nil)
 	}
@@ -368,7 +404,7 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 	if !ok || engine == nil {
 		return agentCompositionFailure("construct native orchestrator", core.Fail(core.E("tui.composeNativeAgent", "orchestrator constructor returned an invalid engine", nil)), server, launcher)
 	}
-	adapterResult := newAgentAdapter(engine)
+	adapterResult := newAgentAdapterWithAvailability(engine, availability)
 	if !adapterResult.OK {
 		if closed := engine.Close(); !closed.OK {
 			return core.Fail(core.E("tui.composeNativeAgent", adapterResult.Error(), resultError(closed)))
@@ -376,6 +412,49 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 		return adapterResult
 	}
 	return core.Ok(agentBootstrapResult{Provider: adapterResult.Value.(agentProvider), Warnings: detection.Warnings})
+}
+
+func (availability *agentAvailability) reason(feature agentFeature) string {
+	if availability == nil {
+		return ""
+	}
+	availability.mu.RLock()
+	defer availability.mu.RUnlock()
+	return availability.unavailable[feature]
+}
+
+func (availability *agentAvailability) recordGit(result core.Result) {
+	if availability == nil {
+		return
+	}
+	reason := ""
+	if !result.OK {
+		reason = result.Error()
+	}
+	availability.mu.Lock()
+	defer availability.mu.Unlock()
+	for _, feature := range []agentFeature{
+		agentFeatureDispatch, agentFeatureRetry, agentFeatureResume,
+		agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject,
+	} {
+		if reason == "" {
+			delete(availability.unavailable, feature)
+			continue
+		}
+		availability.unavailable[feature] = reason
+	}
+}
+
+func (service *observedGitService) Start(ctx context.Context) core.Result {
+	result := service.Service.Start(ctx)
+	service.availability.recordGit(result)
+	return result
+}
+
+func (service *observedGitService) EnsureRepository(ctx context.Context, name string) core.Result {
+	result := service.Service.EnsureRepository(ctx, name)
+	service.availability.recordGit(result)
+	return result
 }
 
 func (factories agentBootstrapFactories) withDefaults() agentBootstrapFactories {
@@ -523,7 +602,7 @@ func newOwnedNativeLauncher() core.Result {
 	if started := service.OnStartup(context.Background()); !started.OK {
 		return core.Fail(core.E("tui.newOwnedNativeLauncher", "start process service", resultError(started)))
 	}
-	launcherResult := orchestrator.NewNativeLauncher(service, []string{"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TERM"})
+	launcherResult := orchestrator.NewNativeLauncher(service, nativeAgentEssentialEnvironment())
 	if !launcherResult.OK {
 		shutdown := service.OnShutdown(context.Background())
 		if !shutdown.OK {
@@ -539,6 +618,10 @@ func newOwnedNativeLauncher() core.Result {
 		return core.Fail(core.E("tui.newOwnedNativeLauncher", "native launcher constructor returned an invalid launcher", nil))
 	}
 	return core.Ok(orchestrator.Launcher(&ownedNativeLauncher{launcher: launcher, service: service, result: core.Ok(nil)}))
+}
+
+func nativeAgentEssentialEnvironment() []string {
+	return []string{"PATH", "HOME", "USER", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SHELL"}
 }
 
 func (launcher *ownedNativeLauncher) DetectEnvironment(keys []string) core.Result {

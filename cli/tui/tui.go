@@ -16,8 +16,8 @@ import (
 // starting Bubble Tea and closes every workspace resource before returning.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return runWithWorkspace(ctx, args, stdout, stderr, workspaceLoaders{
-		Normal: loadDefaultWorkspace,
-		Check:  loadDefaultCheckWorkspace,
+		Normal: func() core.Result { return loadDefaultWorkspaceContext(ctx) },
+		Check:  func() core.Result { return loadDefaultCheckWorkspaceContext(ctx) },
 	})
 }
 
@@ -27,6 +27,10 @@ type workspaceLoaders struct {
 }
 
 func loadDefaultWorkspace() core.Result {
+	return loadDefaultWorkspaceContext(context.Background())
+}
+
+func loadDefaultWorkspaceContext(ctx context.Context) core.Result {
 	pathsResult := defaultAppPaths()
 	if !pathsResult.OK {
 		return pathsResult
@@ -35,10 +39,14 @@ func loadDefaultWorkspace() core.Result {
 	if !ok {
 		return core.Fail(core.E("tui.loadDefaultWorkspace", "invalid application paths result", nil))
 	}
-	return openWorkspace(paths.Root, workspaceOpeners{Agent: openNativeWorkspaceAgent})
+	return openWorkspaceContext(ctx, paths.Root, workspaceOpeners{Agent: openNativeWorkspaceAgent})
 }
 
 func loadDefaultCheckWorkspace() core.Result {
+	return loadDefaultCheckWorkspaceContext(context.Background())
+}
+
+func loadDefaultCheckWorkspaceContext(ctx context.Context) core.Result {
 	pathsResult := defaultAppPaths()
 	if !pathsResult.OK {
 		return pathsResult
@@ -47,7 +55,7 @@ func loadDefaultCheckWorkspace() core.Result {
 	if !ok {
 		return core.Fail(core.E("tui.loadDefaultCheckWorkspace", "invalid application paths result", nil))
 	}
-	return openWorkspace(paths.Root, workspaceOpeners{Agent: openReadOnlyWorkspaceAgent})
+	return openWorkspaceContext(ctx, paths.Root, workspaceOpeners{Agent: openReadOnlyWorkspaceAgent})
 }
 
 func runWithWorkspace(

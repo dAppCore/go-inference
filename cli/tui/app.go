@@ -1500,10 +1500,10 @@ func (a *app) shutdown() core.Result {
 		a.lifecycle = newAppLifecycle(nil)
 	}
 	a.lifecycle.once.Do(func() {
-		result := core.Ok(nil)
+		failures := make([]string, 0)
 		record := func(candidate core.Result) {
-			if !candidate.OK && result.OK {
-				result = candidate
+			if !candidate.OK {
+				failures = append(failures, candidate.Error())
 			}
 		}
 		a.lifecycle.stop()
@@ -1527,7 +1527,11 @@ func (a *app) shutdown() core.Result {
 		if a.resources != nil {
 			record(a.resources.Close())
 		}
-		a.lifecycle.result = result
+		if len(failures) > 0 {
+			a.lifecycle.result = core.Fail(core.E("tui.app.shutdown", core.Join("; ", failures...), nil))
+			return
+		}
+		a.lifecycle.result = core.Ok(nil)
 	})
 	return a.lifecycle.result
 }

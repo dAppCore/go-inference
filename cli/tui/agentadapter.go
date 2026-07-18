@@ -36,9 +36,10 @@ type nativeAgentEngine interface {
 }
 
 type nativeAgentAdapter struct {
-	engine      nativeAgentEngine
-	closeOnce   sync.Once
-	closeResult core.Result
+	engine       nativeAgentEngine
+	availability *agentAvailability
+	closeOnce    sync.Once
+	closeResult  core.Result
 }
 
 type agentProjectRegistration struct {
@@ -48,10 +49,14 @@ type agentProjectRegistration struct {
 }
 
 func newAgentAdapter(engine nativeAgentEngine) core.Result {
+	return newAgentAdapterWithAvailability(engine, nil)
+}
+
+func newAgentAdapterWithAvailability(engine nativeAgentEngine, availability *agentAvailability) core.Result {
 	if engine == nil {
 		return core.Fail(core.E("tui.newAgentAdapter", "native agent engine is required", nil))
 	}
-	return core.Ok(agentProvider(&nativeAgentAdapter{engine: engine, closeResult: core.Ok(nil)}))
+	return core.Ok(agentProvider(&nativeAgentAdapter{engine: engine, availability: availability, closeResult: core.Ok(nil)}))
 }
 
 func (adapter *nativeAgentAdapter) Capabilities() []agentCapability {
@@ -73,6 +78,10 @@ func (adapter *nativeAgentAdapter) Capabilities() []agentCapability {
 			catalog[index].Reason = core.Trim(capability.Reason)
 			if !catalog[index].Available && catalog[index].Reason == "" {
 				catalog[index].Reason = "native agent engine reports this capability unavailable"
+			}
+			if reason := adapter.availability.reason(feature); reason != "" {
+				catalog[index].Available = false
+				catalog[index].Reason = reason
 			}
 			continue
 		}
@@ -431,7 +440,6 @@ func (adapter *nativeAgentAdapter) Close() core.Result {
 	adapter.closeOnce.Do(func() {
 		if adapter.engine != nil {
 			adapter.closeResult = adapter.engine.Close()
-			adapter.engine = nil
 		}
 	})
 	return adapter.closeResult

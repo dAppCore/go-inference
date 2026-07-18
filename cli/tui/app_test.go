@@ -592,6 +592,67 @@ func TestAppQuit_Ugly(t *testing.T) {
 	}
 }
 
+func TestAppShutdownPreservesAllCloseErrors_Ugly(t *testing.T) {
+	order := make([]string, 0, 4)
+	files := testWorkspaceFiles(t)
+	opened := openWorkspaceWith(files, workspaceOpeners{
+		Repository: func(path string) core.Result {
+			result := openDuckRepository(path)
+			if !result.OK {
+				return result
+			}
+			return core.Ok(workspaceRepository(&trackingWorkspaceRepository{
+				workspaceRepository: result.Value.(workspaceRepository), closeOrder: &order,
+				closeFailure: "repository close failed",
+			}))
+		},
+		State: func(paths appPaths) core.Result {
+			result := openReactiveState(paths)
+			if !result.OK {
+				return result
+			}
+			return core.Ok(reactiveState(&trackingReactiveState{
+				reactiveState: result.Value.(reactiveState), closeOrder: &order,
+				closeFailure: "state close failed",
+			}))
+		},
+	})
+	if !opened.OK {
+		t.Fatalf("open tracked workspace: %s", opened.Error())
+	}
+	resources := opened.Value.(*workspaceResources)
+	resources.Agent = &orderedAgentProvider{order: &order, closeFailure: "agent close failed"}
+	a := newApp("", 0, 64)
+	if result := a.connectWorkspace(resources); !result.OK {
+		t.Fatalf("connect workspace: %s", result.Error())
+	}
+	model := &orderedFakeTextModel{
+		fakeTextModel: newFakeTextModel(map[string][]string{}), order: &order,
+		closeFailure: "model close failed",
+	}
+	updated, _ := a.Update(loadedMsg{model: model, name: "ordered-failure"})
+	a = updated.(app)
+
+	result := a.shutdown()
+	if result.OK {
+		t.Fatal("shutdown with four close failures succeeded")
+	}
+	want := core.E(
+		"tui.app.shutdown",
+		"test.agent.Close: agent close failed; test.model.Close: model close failed; tui.workspaceResources.Close: test.state.Close: state close failed; test.repository.Close: repository close failed",
+		nil,
+	).Error()
+	if result.Error() != want {
+		t.Fatalf("shutdown error = %q, want %q", result.Error(), want)
+	}
+	if got := strings.Join(order, ","); got != "agent,model,state,repository" {
+		t.Fatalf("shutdown close order = %q", got)
+	}
+	if model.closes.Load() != 1 {
+		t.Fatalf("underlying model Close calls = %d, want 1", model.closes.Load())
+	}
+}
+
 func TestAppQuitPersistsPartialGeneration_Ugly(t *testing.T) {
 	files := testWorkspaceFiles(t)
 	opened := openWorkspaceWith(files, workspaceOpeners{})
@@ -694,7 +755,8 @@ func TestAppInterruptedSessionIsVisible_Ugly(t *testing.T) {
 }
 
 type orderedAgentProvider struct {
-	order *[]string
+	order        *[]string
+	closeFailure string
 }
 
 type failingWorkspaceRepository struct {
@@ -739,17 +801,28 @@ func (*orderedAgentProvider) Run(context.Context, agentRequest) core.Result {
 
 func (provider *orderedAgentProvider) Close() core.Result {
 	*provider.order = append(*provider.order, "agent")
+	if provider.closeFailure != "" {
+		return core.Fail(core.E("test.agent.Close", provider.closeFailure, nil))
+	}
 	return core.Ok(nil)
 }
 
 type orderedFakeTextModel struct {
 	*fakeTextModel
-	order *[]string
+	order        *[]string
+	closeFailure string
 }
 
 func (model *orderedFakeTextModel) Close() core.Result {
 	*model.order = append(*model.order, "model")
-	return model.fakeTextModel.Close()
+	result := model.fakeTextModel.Close()
+	if !result.OK {
+		return result
+	}
+	if model.closeFailure != "" {
+		return core.Fail(core.E("test.model.Close", model.closeFailure, nil))
+	}
+	return core.Ok(nil)
 }
 
 // TestAppUpdateTransitions drives the pure state machine without a terminal:

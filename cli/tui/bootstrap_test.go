@@ -134,6 +134,89 @@ func TestAgentBootstrap_ValidPolicy_Good(t *testing.T) {
 	}
 }
 
+func TestAgentBootstrap_LauncherEnvironmentAllowlist_Good(t *testing.T) {
+	want := []string{"PATH", "HOME", "USER", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "SHELL"}
+	got := nativeAgentEssentialEnvironment()
+	if core.JSONMarshalString(got) != core.JSONMarshalString(want) {
+		t.Fatalf("launcher environment allowlist = %#v, want %#v", got, want)
+	}
+	for _, key := range got {
+		if key == "TERM" {
+			t.Fatal("launcher environment allowlist includes TERM")
+		}
+	}
+}
+
+func TestAgentBootstrap_DurableQueueState_Good(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	at := time.Date(2026, time.July, 18, 10, 30, 0, 0, time.UTC)
+	durable := work.Snapshot{
+		Queue: work.QueueState{ID: "default", Status: work.QueueDraining, Reason: "recovering active work", UpdatedAt: at},
+		Providers: []work.ProviderState{{
+			Provider: "codex", BackoffReason: "quota", LastRunID: "run-9",
+			BackoffUntil: at.Add(45 * time.Minute), LastStartedAt: at.Add(-time.Minute),
+			WindowStartedAt: at.Add(-3 * time.Hour), WindowAdmissions: 17, UpdatedAt: at,
+		}},
+	}
+	engine := &fixtureNativeAgentEngine{}
+	server := &fixtureGitServer{}
+	factories := fixtureAgentBootstrapFactories(t, repository, engine, server)
+	baseStore := newDuckAgentStore(repository).Value.(orchestrator.Store)
+	factories.NewStore = func(workspaceRepository) core.Result {
+		return core.Ok(orchestrator.Store(&fixtureSnapshotStore{Store: baseStore, result: core.Ok(durable)}))
+	}
+	var gotQueue work.QueueState
+	var gotProviders []work.ProviderState
+	factories.NewQueue = func(_ queue.Policy, initial work.QueueState, providers []work.ProviderState) core.Result {
+		gotQueue = initial
+		gotProviders = append([]work.ProviderState(nil), providers...)
+		return core.Ok(&queue.Controller{})
+	}
+
+	result := composeNativeAgent(context.Background(), agentBootstrapInput{Files: files, Repository: repository}, factories)
+	if !result.OK {
+		t.Fatalf("composeNativeAgent: %s", result.Error())
+	}
+	defer result.Value.(agentBootstrapResult).Provider.Close()
+	if core.JSONMarshalString(gotQueue) != core.JSONMarshalString(durable.Queue) || core.JSONMarshalString(gotProviders) != core.JSONMarshalString(durable.Providers) {
+		t.Fatalf("NewQueue state = queue %#v providers %#v, want queue %#v providers %#v", gotQueue, gotProviders, durable.Queue, durable.Providers)
+	}
+}
+
+func TestAgentBootstrap_DurableSnapshotFailure_Bad(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	for _, test := range []struct {
+		name   string
+		result core.Result
+		want   string
+	}{
+		{name: "read failure", result: core.Fail(core.E("test.snapshot", "durable queue offline", nil)), want: "durable queue offline"},
+		{name: "type failure", result: core.Ok("not a snapshot"), want: "invalid durable snapshot"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := &fixtureGitServer{}
+			launcher := &fixtureAgentLauncher{}
+			factories := fixtureAgentBootstrapFactories(t, repository, &fixtureNativeAgentEngine{}, server)
+			baseStore := newDuckAgentStore(repository).Value.(orchestrator.Store)
+			factories.NewStore = func(workspaceRepository) core.Result {
+				return core.Ok(orchestrator.Store(&fixtureSnapshotStore{Store: baseStore, result: test.result}))
+			}
+			factories.NewLauncher = func() core.Result { return core.Ok(orchestrator.Launcher(launcher)) }
+			result := composeNativeAgent(context.Background(), agentBootstrapInput{Files: files, Repository: repository}, factories)
+			if result.OK || !strings.Contains(result.Error(), "load durable queue state") || !strings.Contains(result.Error(), test.want) {
+				t.Fatalf("snapshot failure = %#v, want %q", result, test.want)
+			}
+			if server.startCalls != 0 || server.closeCalls != 0 || launcher.closeCalls != 0 {
+				t.Fatalf("snapshot failure constructed later resources: server start=%d close=%d launcher close=%d", server.startCalls, server.closeCalls, launcher.closeCalls)
+			}
+		})
+	}
+}
+
 func TestAgentBootstrap_MalformedPolicy_Bad(t *testing.T) {
 	files := testWorkspaceFiles(t)
 	if err := files.Medium.Write(files.Paths.Agents, "version: 99\ndispatch:\n  global_concurrency: 1\n"); err != nil {
@@ -153,9 +236,28 @@ func TestAgentBootstrap_OwnerContention_Bad(t *testing.T) {
 	files := testWorkspaceFiles(t)
 	repository := openTestDuckRepository(t)
 	defer closeTestDuckRepository(t, repository)
-	exact := "private Git owner lock is held by live PID 4242"
-	openers := workspaceOpeners{Agent: func(context.Context, appFiles, workspaceRepository) core.Result {
-		return core.Fail(core.E("test.gitserver", exact, nil))
+	startFailure := core.Fail(core.E("test.gitserver", "private Git owner lock is held by live PID 4242", nil))
+	exact := startFailure.Error()
+	server := &fixtureGitServer{startResult: startFailure}
+	projectReview := orchestrator.ProjectReview{
+		Work:           work.Item{ID: "work-owner", Title: "Owner contention", Task: "review lazily", Repository: "/src/owner"},
+		Source:         workspace.SourceReview{Path: "/src/owner", Root: "/src/owner", Branch: "main", Revision: "abc", IncludedHash: "hash"},
+		RepositoryName: "work-owner",
+	}
+	engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities(), projectReview: projectReview}
+	factories := fixtureAgentBootstrapFactories(t, repository, engine, server)
+	factories.NewOrchestrator = func(options orchestrator.Options) core.Result {
+		engine.registerProject = func(ctx context.Context, _ orchestrator.ProjectReview, _ bool) core.Result {
+			registered := options.GitServer.EnsureRepository(ctx, projectReview.RepositoryName)
+			if !registered.OK {
+				return registered
+			}
+			return core.Ok(engine.registeredProject)
+		}
+		return core.Ok(nativeAgentEngine(engine))
+	}
+	openers := workspaceOpeners{Agent: func(ctx context.Context, files appFiles, repository workspaceRepository) core.Result {
+		return composeNativeAgent(ctx, agentBootstrapInput{Files: files, Repository: repository}, factories)
 	}}
 
 	result := openWorkspaceWith(files, openers)
@@ -164,10 +266,38 @@ func TestAgentBootstrap_OwnerContention_Bad(t *testing.T) {
 	}
 	resources := result.Value.(*workspaceResources)
 	defer resources.Close()
-	assertWorkspaceWarning(t, resources.Warnings, exact)
+	if server.startCalls != 0 {
+		t.Fatalf("composition started lazy Git service %d times", server.startCalls)
+	}
+	if snapshot := resources.Agent.Snapshot(context.Background()); !snapshot.OK {
+		t.Fatalf("Snapshot: %s", snapshot.Error())
+	}
+	if server.startCalls != 0 {
+		t.Fatalf("snapshot started lazy Git service %d times", server.startCalls)
+	}
+	reviewResult := resources.Agent.Review(context.Background(), agentReviewRequest{
+		Feature: agentFeatureDispatch, WorkID: projectReview.Work.ID,
+		Work: agentWorkRequest{ID: projectReview.Work.ID, Title: projectReview.Work.Title, Task: projectReview.Work.Task, Repository: projectReview.Work.Repository},
+	})
+	if !reviewResult.OK || server.startCalls != 0 {
+		t.Fatalf("project Review = %#v, start calls=%d", reviewResult, server.startCalls)
+	}
+	action := resources.Agent.Run(context.Background(), agentRequest{Feature: agentFeatureDispatch, Review: reviewResult.Value.(agentReview), Confirmed: true})
+	if action.OK || action.Error() != exact || server.startCalls != 1 {
+		t.Fatalf("owner action = %#v, start calls=%d, want exact %q", action, server.startCalls, exact)
+	}
+	available := make(map[agentFeature]agentCapability)
 	for _, capability := range resources.Agent.Capabilities() {
-		if capability.Available || !strings.Contains(capability.Reason, exact) {
-			t.Fatalf("degraded capability = %#v", capability)
+		available[capability.Feature] = capability
+	}
+	for _, feature := range []agentFeature{agentFeatureDispatch, agentFeatureRetry, agentFeatureResume, agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject} {
+		if capability := available[feature]; capability.Available || capability.Reason != exact {
+			t.Fatalf("Git-dependent capability %q = %#v", feature, capability)
+		}
+	}
+	for _, feature := range []agentFeature{agentFeatureCancel, agentFeatureAnswer, agentFeatureQueueStart, agentFeatureQueueStop} {
+		if capability := available[feature]; !capability.Available {
+			t.Fatalf("unrelated capability %q degraded: %#v", feature, capability)
 		}
 	}
 }
@@ -292,6 +422,31 @@ func TestOpenWorkspace_Bad(t *testing.T) {
 	}
 }
 
+func TestOpenWorkspace_Context_Good(t *testing.T) {
+	type contextKey string
+	const key contextKey = "agent-bootstrap"
+	ctx := context.WithValue(context.Background(), key, "caller-context")
+	files := testWorkspaceFiles(t)
+	seen := ""
+	result := openWorkspaceWithContext(ctx, files, workspaceOpeners{
+		Agent: func(agentContext context.Context, workspaceFiles appFiles, repository workspaceRepository) core.Result {
+			factories := fixtureAgentBootstrapFactories(t, repository, &fixtureNativeAgentEngine{}, &fixtureGitServer{})
+			factories.DetectProviders = func(providerContext context.Context, registry *provider.Registry) core.Result {
+				seen, _ = providerContext.Value(key).(string)
+				return detectNativeProviders(providerContext, registry)
+			}
+			return composeNativeAgent(agentContext, agentBootstrapInput{Files: workspaceFiles, Repository: repository}, factories)
+		},
+	})
+	if !result.OK {
+		t.Fatalf("openWorkspaceWithContext: %s", result.Error())
+	}
+	defer result.Value.(*workspaceResources).Close()
+	if seen != "caller-context" {
+		t.Fatalf("provider detection context value = %q, want caller-context", seen)
+	}
+}
+
 func TestOpenWorkspace_Ugly(t *testing.T) {
 	t.Run("state degrades", func(t *testing.T) {
 		files := testWorkspaceFiles(t)
@@ -341,22 +496,38 @@ func TestOpenWorkspace_Ugly(t *testing.T) {
 
 type trackingWorkspaceRepository struct {
 	workspaceRepository
-	closeOrder *[]string
+	closeOrder   *[]string
+	closeFailure string
 }
 
 func (repository *trackingWorkspaceRepository) Close() core.Result {
 	*repository.closeOrder = append(*repository.closeOrder, "repository")
-	return repository.workspaceRepository.Close()
+	result := repository.workspaceRepository.Close()
+	if !result.OK {
+		return result
+	}
+	if repository.closeFailure != "" {
+		return core.Fail(core.E("test.repository.Close", repository.closeFailure, nil))
+	}
+	return core.Ok(nil)
 }
 
 type trackingReactiveState struct {
 	reactiveState
-	closeOrder *[]string
+	closeOrder   *[]string
+	closeFailure string
 }
 
 func (state *trackingReactiveState) Close() core.Result {
 	*state.closeOrder = append(*state.closeOrder, "state")
-	return state.reactiveState.Close()
+	result := state.reactiveState.Close()
+	if !result.OK {
+		return result
+	}
+	if state.closeFailure != "" {
+		return core.Fail(core.E("test.state.Close", state.closeFailure, nil))
+	}
+	return core.Ok(nil)
 }
 
 func testWorkspaceFiles(t *testing.T) appFiles {
@@ -409,16 +580,23 @@ func fixtureAgentBootstrapFactories(t *testing.T, repository workspaceRepository
 }
 
 type fixtureGitServer struct {
-	startCalls int
-	closeCalls int
+	startCalls  int
+	closeCalls  int
+	startResult core.Result
 }
 
 func (server *fixtureGitServer) Start(context.Context) core.Result {
 	server.startCalls++
+	if server.startResult.OK || server.startResult.Value != nil {
+		return server.startResult
+	}
 	return core.Ok(gitserver.Health{Running: true, Address: "127.0.0.1:0"})
 }
 
-func (*fixtureGitServer) EnsureRepository(context.Context, string) core.Result {
+func (server *fixtureGitServer) EnsureRepository(ctx context.Context, _ string) core.Result {
+	if started := server.Start(ctx); !started.OK {
+		return started
+	}
 	return core.Ok(gitserver.Repository{Name: "fixture", CloneURL: "ssh://127.0.0.1/fixture"})
 }
 
@@ -430,6 +608,13 @@ func (server *fixtureGitServer) Close() core.Result {
 	server.closeCalls++
 	return core.Ok(nil)
 }
+
+type fixtureSnapshotStore struct {
+	orchestrator.Store
+	result core.Result
+}
+
+func (store *fixtureSnapshotStore) Snapshot(string) core.Result { return store.result }
 
 type fixtureNativeProvider struct {
 	name      string

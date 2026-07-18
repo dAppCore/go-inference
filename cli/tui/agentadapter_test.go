@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,10 +125,23 @@ func TestAgentAdapter_ProjectAndDispatchReview_Good(t *testing.T) {
 	if engine.registerConfirmed != true || engine.registerCalls != 1 || engine.reviewDispatchCalls != 1 {
 		t.Fatalf("project/dispatch calls = register %d confirmed %v, review %d", engine.registerCalls, engine.registerConfirmed, engine.reviewDispatchCalls)
 	}
+	if core.JSONMarshalString(engine.reviewedProject) != core.JSONMarshalString(projectReview.Work) {
+		t.Fatalf("ReviewProject item = %#v, want %#v", engine.reviewedProject, projectReview.Work)
+	}
+	if core.JSONMarshalString(engine.registeredReview) != core.JSONMarshalString(projectReview) || !engine.registerConfirmed {
+		t.Fatalf("RegisterProject args = review %#v confirmed %v, want %#v true", engine.registeredReview, engine.registerConfirmed, projectReview)
+	}
+	wantDispatchRequest := work.DispatchRequest{Work: projectReview.Work, Provider: "codex", Model: "gpt-5", ConfirmedSourceRevision: dispatchReview.Project.SourceRevision}
+	if core.JSONMarshalString(engine.reviewedDispatch) != core.JSONMarshalString(wantDispatchRequest) {
+		t.Fatalf("ReviewDispatch request = %#v, want %#v", engine.reviewedDispatch, wantDispatchRequest)
+	}
 
 	dispatched := adapter.Run(context.Background(), agentRequest{Feature: agentFeatureDispatch, Review: launch, Confirmed: true})
 	if !dispatched.OK || engine.dispatchCalls != 1 {
 		t.Fatalf("dispatch = %#v, calls=%d", dispatched, engine.dispatchCalls)
+	}
+	if core.JSONMarshalString(engine.dispatchedReview) != core.JSONMarshalString(dispatchReview) {
+		t.Fatalf("Dispatch review = %#v, want %#v", engine.dispatchedReview, dispatchReview)
 	}
 }
 
@@ -170,6 +184,23 @@ func TestAgentAdapter_Actions_Good(t *testing.T) {
 	if core.JSONMarshalString(engine.calls) != core.JSONMarshalString(wantCalls) {
 		t.Fatalf("mapped action order = %#v, want %#v", engine.calls, wantCalls)
 	}
+	if engine.cancelRunID != "run-1" || engine.answerRunID != "run-1" || engine.answerText != "Use target A" {
+		t.Fatalf("cancel/answer args = %q / %q %q", engine.cancelRunID, engine.answerRunID, engine.answerText)
+	}
+	if core.JSONMarshalString(engine.retryItem) != core.JSONMarshalString(nativeWorkItem(workRequest, workRequest.ID, "")) || engine.retryParent != "run-1" {
+		t.Fatalf("Retry args = item %#v parent %q", engine.retryItem, engine.retryParent)
+	}
+	wantResume := work.ResumeRequest{Work: nativeWorkItem(workRequest, workRequest.ID, ""), ParentRunID: "run-1", AnswerID: "answer-1", Provider: "codex", Model: "gpt-5"}
+	if core.JSONMarshalString(engine.resumeRequest) != core.JSONMarshalString(wantResume) {
+		t.Fatalf("Resume request = %#v, want %#v", engine.resumeRequest, wantResume)
+	}
+	if engine.reviewChangesRunID != "run-1" || engine.rejectRunID != "run-1" {
+		t.Fatalf("review/reject run IDs = %q / %q", engine.reviewChangesRunID, engine.rejectRunID)
+	}
+	wantAccept := workspace.AcceptRequest{Review: changeReview, Confirmed: true}
+	if core.JSONMarshalString(engine.acceptRequest) != core.JSONMarshalString(wantAccept) {
+		t.Fatalf("Accept request = %#v, want %#v", engine.acceptRequest, wantAccept)
+	}
 }
 
 func TestAgentAdapter_Close_Ugly(t *testing.T) {
@@ -181,6 +212,39 @@ func TestAgentAdapter_Close_Ugly(t *testing.T) {
 	if result := adapter.Close(); !result.OK {
 		t.Fatalf("second Close: %s", result.Error())
 	}
+	if engine.closeCalls != 1 {
+		t.Fatalf("engine Close calls = %d, want 1", engine.closeCalls)
+	}
+}
+
+func TestAgentAdapter_CloseConcurrentCapabilities_Ugly(t *testing.T) {
+	engine := &fixtureNativeAgentEngine{capabilities: nativeFixtureCapabilities()}
+	adapter := requireAgentAdapter(t, engine)
+	var workers sync.WaitGroup
+	start := make(chan struct{})
+	for index := 0; index < 32; index++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for iteration := 0; iteration < 200; iteration++ {
+				if len(adapter.Capabilities()) == 0 {
+					t.Error("Capabilities returned an empty catalog")
+					return
+				}
+			}
+		}()
+	}
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		<-start
+		if result := adapter.Close(); !result.OK {
+			t.Errorf("Close: %s", result.Error())
+		}
+	}()
+	close(start)
+	workers.Wait()
 	if engine.closeCalls != 1 {
 		t.Fatalf("engine Close calls = %d, want 1", engine.closeCalls)
 	}
@@ -203,6 +267,20 @@ type fixtureNativeAgentEngine struct {
 	dispatchReview      orchestrator.DispatchReview
 	changeReview        workspace.ChangeReview
 	snapshotWorkID      string
+	reviewedProject     work.Item
+	registeredReview    orchestrator.ProjectReview
+	registerProject     func(context.Context, orchestrator.ProjectReview, bool) core.Result
+	reviewedDispatch    work.DispatchRequest
+	dispatchedReview    orchestrator.DispatchReview
+	cancelRunID         string
+	answerRunID         string
+	answerText          string
+	retryItem           work.Item
+	retryParent         string
+	resumeRequest       work.ResumeRequest
+	reviewChangesRunID  string
+	acceptRequest       workspace.AcceptRequest
+	rejectRunID         string
 	calls               []string
 	registerCalls       int
 	registerConfirmed   bool
@@ -220,43 +298,56 @@ func (engine *fixtureNativeAgentEngine) Snapshot(_ context.Context, workID strin
 	return core.Ok(engine.snapshot)
 }
 
-func (engine *fixtureNativeAgentEngine) ReviewProject(context.Context, work.Item) core.Result {
+func (engine *fixtureNativeAgentEngine) ReviewProject(_ context.Context, item work.Item) core.Result {
+	engine.reviewedProject = item
 	return core.Ok(engine.projectReview)
 }
 
-func (engine *fixtureNativeAgentEngine) RegisterProject(_ context.Context, _ orchestrator.ProjectReview, confirmed bool) core.Result {
+func (engine *fixtureNativeAgentEngine) RegisterProject(ctx context.Context, review orchestrator.ProjectReview, confirmed bool) core.Result {
 	engine.registerCalls++
 	engine.registerConfirmed = confirmed
+	engine.registeredReview = review
+	if engine.registerProject != nil {
+		return engine.registerProject(ctx, review, confirmed)
+	}
 	return core.Ok(engine.registeredProject)
 }
 
-func (engine *fixtureNativeAgentEngine) ReviewDispatch(context.Context, work.DispatchRequest) core.Result {
+func (engine *fixtureNativeAgentEngine) ReviewDispatch(_ context.Context, request work.DispatchRequest) core.Result {
 	engine.reviewDispatchCalls++
+	engine.reviewedDispatch = request
 	return core.Ok(engine.dispatchReview)
 }
 
-func (engine *fixtureNativeAgentEngine) Dispatch(context.Context, orchestrator.DispatchReview) core.Result {
+func (engine *fixtureNativeAgentEngine) Dispatch(_ context.Context, review orchestrator.DispatchReview) core.Result {
 	engine.dispatchCalls++
+	engine.dispatchedReview = review
 	return core.Ok(work.Run{ID: "run-1", WorkID: "work-1", Status: work.RunQueued})
 }
 
-func (engine *fixtureNativeAgentEngine) Cancel(context.Context, string) core.Result {
+func (engine *fixtureNativeAgentEngine) Cancel(_ context.Context, runID string) core.Result {
 	engine.calls = append(engine.calls, "cancel")
+	engine.cancelRunID = runID
 	return core.Ok(work.Run{ID: "run-1", WorkID: "work-1", Status: work.RunCancelled})
 }
 
-func (engine *fixtureNativeAgentEngine) Answer(context.Context, string, string) core.Result {
+func (engine *fixtureNativeAgentEngine) Answer(_ context.Context, runID, text string) core.Result {
 	engine.calls = append(engine.calls, "answer")
+	engine.answerRunID = runID
+	engine.answerText = text
 	return core.Ok(work.Answer{ID: "answer-1", ResumeRunID: "run-2"})
 }
 
-func (engine *fixtureNativeAgentEngine) Retry(context.Context, work.Item, string) core.Result {
+func (engine *fixtureNativeAgentEngine) Retry(_ context.Context, item work.Item, parentRunID string) core.Result {
 	engine.calls = append(engine.calls, "retry")
+	engine.retryItem = item
+	engine.retryParent = parentRunID
 	return core.Ok(work.Run{ID: "run-2", WorkID: "work-1", Status: work.RunQueued})
 }
 
-func (engine *fixtureNativeAgentEngine) Resume(context.Context, work.ResumeRequest) core.Result {
+func (engine *fixtureNativeAgentEngine) Resume(_ context.Context, request work.ResumeRequest) core.Result {
 	engine.calls = append(engine.calls, "resume")
+	engine.resumeRequest = request
 	return core.Ok(work.Run{ID: "run-3", WorkID: "work-1", Status: work.RunQueued})
 }
 
@@ -270,22 +361,35 @@ func (engine *fixtureNativeAgentEngine) StopQueue(context.Context) core.Result {
 	return core.Ok(work.QueueState{ID: "default", Status: work.QueueFrozen})
 }
 
-func (engine *fixtureNativeAgentEngine) ReviewChanges(context.Context, string) core.Result {
+func (engine *fixtureNativeAgentEngine) ReviewChanges(_ context.Context, runID string) core.Result {
 	engine.calls = append(engine.calls, "changes.review")
+	engine.reviewChangesRunID = runID
 	return core.Ok(engine.changeReview)
 }
 
-func (engine *fixtureNativeAgentEngine) Accept(context.Context, workspace.AcceptRequest) core.Result {
+func (engine *fixtureNativeAgentEngine) Accept(_ context.Context, request workspace.AcceptRequest) core.Result {
 	engine.calls = append(engine.calls, "accept")
+	engine.acceptRequest = request
 	return core.Ok(work.Acceptance{ID: "accept-1", WorkID: "work-1", RunID: "run-1", Status: "accepted"})
 }
 
-func (engine *fixtureNativeAgentEngine) Reject(context.Context, string) core.Result {
+func (engine *fixtureNativeAgentEngine) Reject(_ context.Context, runID string) core.Result {
 	engine.calls = append(engine.calls, "reject")
+	engine.rejectRunID = runID
 	return core.Ok(work.Acceptance{ID: "reject-1", WorkID: "work-1", RunID: "run-1", Status: "rejected"})
 }
 
 func (engine *fixtureNativeAgentEngine) Close() core.Result {
 	engine.closeCalls++
 	return core.Ok(nil)
+}
+
+func nativeFixtureCapabilities() []work.Capability {
+	return []work.Capability{
+		{Name: "dispatch", Available: true}, {Name: "cancel", Available: true},
+		{Name: "answer", Available: true}, {Name: "retry", Available: true},
+		{Name: "resume", Available: true}, {Name: "queue.start", Available: true},
+		{Name: "queue.stop", Available: true}, {Name: "changes.review", Available: true},
+		{Name: "accept", Available: true}, {Name: "reject", Available: true},
+	}
 }
