@@ -115,7 +115,7 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to fetch durable agent branch", fetchedAgent.Err()))
 	}
 	verifiedTip := manager.gitOutput(ctx, manager.root, nil, "--git-dir", project.ClonePath, "rev-parse", core.Concat(agentReference, "^{commit}"))
-	if !verifiedTip.OK || core.Trim(verifiedTip.Value.(string)) != run.DurableRevision {
+	if !verifiedTip.OK || core.Trim(verifiedTip.String()) != run.DurableRevision {
 		return core.Fail(core.NewError("agent workspace durable branch differs from the completed run receipt"))
 	}
 	if ancestor := manager.gitOutput(ctx, manager.root, nil, "--git-dir", project.ClonePath, "merge-base", "--is-ancestor", run.SourceRevision, run.DurableRevision); !ancestor.OK {
@@ -126,7 +126,7 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	if !reviewIDResult.OK {
 		return reviewIDResult
 	}
-	reviewID := reviewIDResult.Value.(string)
+	reviewID := reviewIDResult.String()
 	runIDResult := pathSegment("run ID", run.ID)
 	if !runIDResult.OK {
 		return runIDResult
@@ -136,12 +136,12 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	if !integrationPathResult.OK {
 		return integrationPathResult
 	}
-	integrationPath := integrationPathResult.Value.(string)
+	integrationPath := integrationPathResult.String()
 	integrationRelativeResult := manager.internalRelative(integrationPath)
 	if !integrationRelativeResult.OK {
 		return integrationRelativeResult
 	}
-	if ensureErr := manager.files.EnsureDir(core.PathDir(integrationRelativeResult.Value.(string))); ensureErr != nil {
+	if ensureErr := manager.files.EnsureDir(core.PathDir(integrationRelativeResult.String())); ensureErr != nil {
 		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to create integration directory", ensureErr))
 	}
 	sourceReference := core.Concat("refs/lem/source/", reviewID)
@@ -155,14 +155,14 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	registeredReview := provisionalReview{
 		projectID: project.ID, workID: run.WorkID, runID: run.ID, runNumber: run.Number, reviewID: reviewID,
 		branch: integrationBranch, path: integrationPath, clone: project.ClonePath,
-		relative: integrationRelativeResult.Value.(string),
+		relative: integrationRelativeResult.String(),
 	}
 	ownership := recoveryOwnership{
 		receipt: RecoveryReceipt{
 			Kind: "review", ProjectID: project.ID, WorkID: run.WorkID, RunID: run.ID, ReviewID: reviewID,
 			RunNumber: run.Number, Branch: integrationBranch, Worktree: integrationPath,
 		},
-		clone: project.ClonePath, relative: integrationRelativeResult.Value.(string), removeBranch: true,
+		clone: project.ClonePath, relative: integrationRelativeResult.String(), removeBranch: true,
 	}
 	manager.reviews[integrationPath] = registeredReview
 	manager.registerRecovery(ownership)
@@ -198,7 +198,7 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	if !commitLog.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to read agent commit range", commitLog.Err()))
 	}
-	review.CommitLog = core.Trim(commitLog.Value.(string))
+	review.CommitLog = core.Trim(commitLog.String())
 
 	if source.Revision == run.SourceRevision {
 		integrated := manager.gitOutput(ctx, integrationPath, nil, "merge", "--ff-only", run.DurableRevision)
@@ -211,14 +211,14 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 		if !commitsResult.OK {
 			return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to enumerate exact agent range", commitsResult.Err()))
 		}
-		commits := core.Fields(commitsResult.Value.(string))
+		commits := core.Fields(commitsResult.String())
 		if len(commits) > 0 {
 			arguments := append([]string{"cherry-pick"}, commits...)
 			integrated := manager.gitOutput(ctx, integrationPath, nil, arguments...)
 			if !integrated.OK {
 				conflicts := manager.gitOutput(ctx, integrationPath, nil, "diff", "--name-only", "--diff-filter=U")
 				if conflicts.OK {
-					review.Conflicts = core.Fields(conflicts.Value.(string))
+					review.Conflicts = core.Fields(conflicts.String())
 				}
 				if len(review.Conflicts) == 0 {
 					return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to replay exact agent range", integrated.Err()))
@@ -233,12 +233,12 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	if !resultRevision.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to inspect integration result", resultRevision.Err()))
 	}
-	review.ResultRevision = core.Trim(resultRevision.Value.(string))
+	review.ResultRevision = core.Trim(resultRevision.String())
 	diff := manager.gitOutput(ctx, integrationPath, nil, "diff", "--binary", source.Revision, review.ResultRevision)
 	if !diff.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to render integration diff", diff.Err()))
 	}
-	review.Diff = diff.Value.(string)
+	review.Diff = diff.String()
 	review.Validation = runValidation(ctx, integrationPath, validation)
 	manager.clearRecoveryPath(integrationPath)
 	provisional = false
@@ -371,7 +371,7 @@ func (manager *Manager) validateReviewProject(project work.Project) core.Result 
 		return core.Fail(core.NewError("agent workspace change review project identity is incomplete"))
 	}
 	expectedClone := manager.internalPath(project.ID, "repo.git")
-	if !expectedClone.OK || expectedClone.Value.(string) != project.ClonePath {
+	if !expectedClone.OK || expectedClone.String() != project.ClonePath {
 		return core.Fail(core.NewError("agent workspace change review cached clone is outside the internal root"))
 	}
 	return core.Ok(project)
@@ -411,23 +411,23 @@ func (manager *Manager) verifyChangeReview(ctx context.Context, project work.Pro
 		return core.Fail(core.NewError("agent workspace acceptance project branch differs from review"))
 	}
 	integrationPathResult := manager.internalAbsolute(review.IntegrationPath)
-	if !integrationPathResult.OK || integrationPathResult.Value.(string) != review.IntegrationPath {
+	if !integrationPathResult.OK || integrationPathResult.String() != review.IntegrationPath {
 		return core.Fail(core.NewError("agent workspace acceptance integration path is outside the internal root"))
 	}
 	commonResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if !commonResult.OK {
 		return core.Fail(core.E("workspace.Manager.Apply", "failed to resolve integration repository", commonResult.Err()))
 	}
-	clonePath := core.Trim(commonResult.Value.(string))
+	clonePath := core.Trim(commonResult.String())
 	cloneResult := manager.internalAbsolute(clonePath)
-	if !cloneResult.OK || cloneResult.Value.(string) != project.ClonePath || clonePath != project.ClonePath || core.PathBase(clonePath) != "repo.git" {
+	if !cloneResult.OK || cloneResult.String() != project.ClonePath || clonePath != project.ClonePath || core.PathBase(clonePath) != "repo.git" {
 		return core.Fail(core.NewError("agent workspace acceptance cached clone is outside the internal root"))
 	}
 	branchResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "symbolic-ref", "--short", "HEAD")
 	headResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "rev-parse", "HEAD")
 	statusResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "status", "--porcelain=v1", "--untracked-files=all")
-	if !branchResult.OK || !headResult.OK || !statusResult.OK || core.Trim(branchResult.Value.(string)) != review.IntegrationBranch ||
-		core.Trim(headResult.Value.(string)) != review.ResultRevision || core.Trim(statusResult.Value.(string)) != "" {
+	if !branchResult.OK || !headResult.OK || !statusResult.OK || core.Trim(branchResult.String()) != review.IntegrationBranch ||
+		core.Trim(headResult.String()) != review.ResultRevision || core.Trim(statusResult.String()) != "" {
 		return core.Fail(core.NewError("agent workspace acceptance integration Git facts changed"))
 	}
 	agentAncestor := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "merge-base", "--is-ancestor", review.AgentBase, review.AgentTip)
@@ -438,7 +438,7 @@ func (manager *Manager) verifyChangeReview(ctx context.Context, project work.Pro
 	commitLog := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath,
 		"log", "--reverse", "--format=%H%x09%s", core.Concat(review.AgentBase, "..", review.AgentTip))
 	diff := manager.gitOutput(ctx, review.IntegrationPath, nil, "diff", "--binary", review.SourceRevision, review.ResultRevision)
-	if !commitLog.OK || !diff.OK || core.Trim(commitLog.Value.(string)) != review.CommitLog || diff.Value.(string) != review.Diff {
+	if !commitLog.OK || !diff.OK || core.Trim(commitLog.String()) != review.CommitLog || diff.String() != review.Diff {
 		return core.Fail(core.NewError("agent workspace acceptance commit or diff receipt changed"))
 	}
 	return core.Ok(reviewState{review: cloneChangeReview(review), sourcePath: project.RepositoryRoot, clonePath: clonePath})

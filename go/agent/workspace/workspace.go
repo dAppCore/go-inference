@@ -143,7 +143,7 @@ func NewManager(options ManagerOptions) core.Result {
 	if !rootResult.OK {
 		return core.Fail(core.E("workspace.NewManager", "invalid internal workspace root", rootResult.Err()))
 	}
-	root := rootResult.Value.(string)
+	root := rootResult.String()
 	if ensureErr := options.Files.EnsureDir(""); ensureErr != nil {
 		return core.Fail(core.E("workspace.NewManager", "failed to open internal workspace medium", ensureErr))
 	}
@@ -321,12 +321,12 @@ func (manager *Manager) resolveRecovery(receipt RecoveryReceipt) core.Result {
 			return workspaceRunID
 		}
 		expectedBranch := runBranch(receipt.WorkID, receipt.RunNumber)
-		if !expectedBranch.OK || receipt.Branch != expectedBranch.Value.(string) {
+		if !expectedBranch.OK || receipt.Branch != expectedBranch.String() {
 			return core.Fail(core.NewError("agent workspace run recovery branch differs from its identity"))
 		}
 		expectedPath = manager.internalPath(receipt.ProjectID, "runs", receipt.WorkspaceRunID, "worktree")
 	}
-	if !expectedPath.OK || expectedPath.Value.(string) != receipt.Worktree {
+	if !expectedPath.OK || expectedPath.String() != receipt.Worktree {
 		return core.Fail(core.NewError("agent workspace recovery worktree differs from its identity"))
 	}
 	cloneResult := manager.internalPath(receipt.ProjectID, "repo.git")
@@ -335,7 +335,7 @@ func (manager *Manager) resolveRecovery(receipt RecoveryReceipt) core.Result {
 		return core.Fail(core.NewError("agent workspace recovery paths are outside the internal root"))
 	}
 	return core.Ok(recoveryOwnership{
-		receipt: receipt, clone: cloneResult.Value.(string), relative: relativeResult.Value.(string), removeBranch: true,
+		receipt: receipt, clone: cloneResult.String(), relative: relativeResult.String(), removeBranch: true,
 	})
 }
 
@@ -370,7 +370,7 @@ func (manager *Manager) Register(ctx context.Context, request RegisterRequest) c
 	if !projectIDResult.OK {
 		return projectIDResult
 	}
-	projectID := projectIDResult.Value.(string)
+	projectID := projectIDResult.String()
 	repositoryName := core.Trim(request.RepositoryName)
 	if repositoryName == "" {
 		return core.Fail(core.NewError("agent workspace repository name is required"))
@@ -451,11 +451,11 @@ func (manager *Manager) Register(ctx context.Context, request RegisterRequest) c
 	if !clonePathResult.OK {
 		return clonePathResult
 	}
-	clonePath := clonePathResult.Value.(string)
+	clonePath := clonePathResult.String()
 	cloneRelative := core.PathJoin(projectID, "repo.git")
 	if manager.files.Exists(cloneRelative) {
 		bare := manager.gitOutput(ctx, manager.root, environment, "--git-dir", clonePath, "rev-parse", "--is-bare-repository")
-		if !bare.OK || core.Trim(bare.Value.(string)) != "true" {
+		if !bare.OK || core.Trim(bare.String()) != "true" {
 			return core.Fail(core.NewError("agent workspace cached repository is not a valid bare Git repository"))
 		}
 	} else {
@@ -475,7 +475,7 @@ func (manager *Manager) Register(ctx context.Context, request RegisterRequest) c
 		return configured
 	}
 	verified := manager.gitOutput(ctx, manager.root, environment, "--git-dir", clonePath, "rev-parse", core.Concat(review.Revision, "^{commit}"))
-	if !verified.OK || core.Trim(verified.Value.(string)) != review.Revision {
+	if !verified.OK || core.Trim(verified.String()) != review.Revision {
 		return core.Fail(core.NewError("agent workspace cached clone does not contain the reviewed source revision"))
 	}
 	at := manager.now()
@@ -526,7 +526,7 @@ func (manager *Manager) PrepareRun(ctx context.Context, project work.Project, ru
 	if !relativeResult.OK {
 		return relativeResult
 	}
-	worktreeRelative := relativeResult.Value.(string)
+	worktreeRelative := relativeResult.String()
 	if manager.files.Exists(worktreeRelative) {
 		return core.Fail(core.Errorf("agent workspace run path already exists: %s", prepared.Path))
 	}
@@ -583,7 +583,7 @@ func (manager *Manager) PrepareRun(ctx context.Context, project work.Project, ru
 		}
 		return core.Fail(core.E("workspace.Manager.PrepareRun", "failed to inspect prepared worktree", base.Err()))
 	}
-	prepared.BaseRevision = core.Trim(base.Value.(string))
+	prepared.BaseRevision = core.Trim(base.String())
 	if prepared.BaseRevision != project.SourceRevision {
 		cleanup := manager.cleanupRecovery(ownership)
 		if !cleanup.OK {
@@ -633,7 +633,7 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 	if !status.OK {
 		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Retained: true, Summary: core.Concat("status failed: ", status.Error())})
 	}
-	changed := core.Trim(status.Value.(string)) != ""
+	changed := core.Trim(status.String()) != ""
 	if changed {
 		staged := manager.gitOutput(captureContext, workspace.Path, nil, "add", "--all")
 		if !staged.OK {
@@ -651,7 +651,7 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 	if !revisionResult.OK {
 		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Changed: changed, Retained: true, Summary: core.Concat("capture revision failed: ", revisionResult.Error())})
 	}
-	revision := core.Trim(revisionResult.Value.(string))
+	revision := core.Trim(revisionResult.String())
 	lease := core.Concat("--force-with-lease=refs/heads/", workspace.Branch, ":", workspace.DurableRevision)
 	pushed := manager.gitOutput(captureContext, workspace.Path, environment,
 		"push", lease, repository.CloneURL,
@@ -720,17 +720,17 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 	if !relativeResult.OK {
 		return relativeResult
 	}
-	worktreeRelative := relativeResult.Value.(string)
+	worktreeRelative := relativeResult.String()
 	if manager.files.Exists(worktreeRelative) {
 		branch := manager.gitOutput(ctx, reconstructed.Path, nil, "symbolic-ref", "--short", "HEAD")
-		if !branch.OK || core.Trim(branch.Value.(string)) != reconstructed.Branch {
+		if !branch.OK || core.Trim(branch.String()) != reconstructed.Branch {
 			return core.Fail(core.Errorf("agent workspace retained checkout is not on expected branch %s", reconstructed.Branch))
 		}
 		revision := manager.gitOutput(ctx, reconstructed.Path, nil, "rev-parse", "HEAD")
 		if !revision.OK {
 			return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to inspect retained checkout", revision.Err()))
 		}
-		reconstructed.BaseRevision = core.Trim(revision.Value.(string))
+		reconstructed.BaseRevision = core.Trim(revision.String())
 		if tracked := manager.recoverRunTracking(ctx, project, reconstructed.Branch, reconstructed.DurableRevision); !tracked.OK {
 			return tracked
 		}
@@ -743,7 +743,7 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 	if !worktrees.OK {
 		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to inspect cached worktrees", worktrees.Err()))
 	}
-	if attachedPath := attachedBranchPath(worktrees.Value.(string), reconstructed.Branch); attachedPath != "" {
+	if attachedPath := attachedBranchPath(worktrees.String(), reconstructed.Branch); attachedPath != "" {
 		return core.Fail(core.Errorf("agent workspace branch %s is already attached to retained checkout %s", reconstructed.Branch, attachedPath))
 	}
 
@@ -801,7 +801,7 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 		}
 		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to inspect reconstructed worktree", revision.Err()))
 	}
-	reconstructed.BaseRevision = core.Trim(revision.Value.(string))
+	reconstructed.BaseRevision = core.Trim(revision.String())
 	manager.leases[reconstructed.RunID] = reconstructed
 	manager.clearRecoveryPath(reconstructed.Path)
 	return core.Ok(reconstructed)
@@ -825,7 +825,7 @@ func (manager *Manager) refreshRunTracking(ctx context.Context, project work.Pro
 	if !tracked.OK {
 		return core.Fail(core.E("workspace.Manager.refreshRunTracking", "failed to inspect local tracking reference", tracked.Err()))
 	}
-	if core.Trim(tracked.Value.(string)) != revision {
+	if core.Trim(tracked.String()) != revision {
 		return core.Fail(core.NewError("agent workspace local tracking reference differs from pushed run revision"))
 	}
 	return core.Ok(nil)
@@ -839,7 +839,7 @@ func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Pro
 	if !trackedResult.OK {
 		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to inspect local tracking reference", trackedResult.Err()))
 	}
-	trackedRevision := core.Trim(trackedResult.Value.(string))
+	trackedRevision := core.Trim(trackedResult.String())
 	repositoryResult := manager.server.EnsureRepository(ctx, project.RepositoryName)
 	if !repositoryResult.OK {
 		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to resolve private repository", repositoryResult.Err()))
@@ -860,7 +860,7 @@ func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Pro
 		return core.Fail(core.E("workspace.Manager.recoverRunTracking", "failed to inspect durable run branch", remoteResult.Err()))
 	}
 	remoteRevision := ""
-	remoteFields := core.Fields(remoteResult.Value.(string))
+	remoteFields := core.Fields(remoteResult.String())
 	if len(remoteFields) != 0 {
 		if len(remoteFields) != 2 || remoteFields[1] != remoteBranch {
 			return core.Fail(core.NewError("agent workspace private branch inspection returned an unexpected result"))
@@ -883,7 +883,7 @@ func (manager *Manager) recoverRunTracking(ctx context.Context, project work.Pro
 		verified := manager.gitOutput(ctx, manager.root, nil,
 			"--git-dir", project.ClonePath, "for-each-ref", "--format=%(objectname)", remoteReference,
 		)
-		if !verified.OK || core.Trim(verified.Value.(string)) != "" {
+		if !verified.OK || core.Trim(verified.String()) != "" {
 			return core.Fail(core.NewError("agent workspace local tracking reference differs from confirmed remote absence"))
 		}
 		return core.Ok(nil)
@@ -917,7 +917,7 @@ func (manager *Manager) ReleaseRun(ctx context.Context, workspace RunWorkspace) 
 		return core.Fail(core.NewError("agent workspace worktree is not durably pushed and must be retained"))
 	}
 	status := manager.gitOutput(ctx, workspace.Path, nil, "status", "--porcelain=v1")
-	if !status.OK || core.Trim(status.Value.(string)) != "" {
+	if !status.OK || core.Trim(status.String()) != "" {
 		return core.Fail(core.NewError("agent workspace worktree changed after capture and must be retained"))
 	}
 	removed := manager.gitOutput(ctx, manager.root, nil,
@@ -930,7 +930,7 @@ func (manager *Manager) ReleaseRun(ctx context.Context, workspace RunWorkspace) 
 	if !relativeResult.OK {
 		return relativeResult
 	}
-	if _, statErr := manager.files.Stat(relativeResult.Value.(string)); statErr == nil {
+	if _, statErr := manager.files.Stat(relativeResult.String()); statErr == nil {
 		return core.Fail(core.NewError("agent workspace removed worktree path is still present"))
 	} else if !core.Is(statErr, core.ErrNotExist) {
 		return core.Fail(core.E("workspace.Manager.ReleaseRun", "failed to verify removed worktree path", statErr))
@@ -949,12 +949,12 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 	if !pathResult.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "invalid source directory", pathResult.Err()))
 	}
-	selectedPath := pathResult.Value.(string)
+	selectedPath := pathResult.String()
 	rootResult := manager.probeRepositoryRoot(ctx, selectedPath)
 	if !rootResult.OK {
 		return rootResult
 	}
-	root := rootResult.Value.(string)
+	root := rootResult.String()
 	if root == "" {
 		includedResult := manager.adHocIncluded(ctx, selectedPath)
 		if !includedResult.OK {
@@ -974,7 +974,7 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 			Git:            false,
 			Clean:          true,
 			Included:       included,
-			IncludedHash:   hashResult.Value.(string),
+			IncludedHash:   hashResult.String(),
 			identityName:   identityName,
 			identityEmail:  identityEmail,
 		})
@@ -983,12 +983,12 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 	if !rootCanonical.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "Git returned an invalid repository root", rootCanonical.Err()))
 	}
-	root = rootCanonical.Value.(string)
+	root = rootCanonical.String()
 	branchResult := manager.gitOutput(ctx, root, nil, "symbolic-ref", "--short", "HEAD")
 	branch := ""
 	detached := !branchResult.OK
 	if branchResult.OK {
-		branch = core.Trim(branchResult.Value.(string))
+		branch = core.Trim(branchResult.String())
 	}
 	revisionResult := manager.gitOutput(ctx, root, nil, "rev-parse", "HEAD")
 	if !revisionResult.OK {
@@ -1002,7 +1002,7 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 	if !includedResult.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "failed to list source files", includedResult.Err()))
 	}
-	included := parseNULList(includedResult.Value.(string))
+	included := parseNULList(includedResult.String())
 	hashResult := includedHash(root, included)
 	if !hashResult.OK {
 		return hashResult
@@ -1017,13 +1017,13 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 		Root:           root,
 		Branch:         branch,
 		ProposedBranch: proposedBranch,
-		Revision:       core.Trim(revisionResult.Value.(string)),
+		Revision:       core.Trim(revisionResult.String()),
 		CommitIdentity: core.Concat(identityName, " <", identityEmail, ">"),
 		Git:            true,
-		Clean:          core.Trim(statusResult.Value.(string)) == "",
+		Clean:          core.Trim(statusResult.String()) == "",
 		Detached:       detached,
 		Included:       included,
-		IncludedHash:   hashResult.Value.(string),
+		IncludedHash:   hashResult.String(),
 		identityName:   identityName,
 		identityEmail:  identityEmail,
 	})
@@ -1034,7 +1034,7 @@ func (manager *Manager) probeRepositoryRoot(ctx context.Context, selectedPath st
 	if !ok {
 		root := manager.gitOutput(ctx, selectedPath, nil, "rev-parse", "--show-toplevel")
 		if root.OK {
-			return core.Ok(core.Trim(root.Value.(string)))
+			return core.Ok(core.Trim(root.String()))
 		}
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "Git runner cannot classify repository-root failure safely", root.Err()))
 	}
@@ -1061,7 +1061,7 @@ func (manager *Manager) probeRepositoryRoot(ctx context.Context, selectedPath st
 		return markerResult
 	}
 	definiteNotRepository := outcome.ExitCode == 128 && core.Contains(core.Lower(outcome.Output), "not a git repository")
-	if markerResult.Value.(bool) || !definiteNotRepository {
+	if markerResult.Bool() || !definiteNotRepository {
 		reason := "Git repository-root lookup failed ambiguously"
 		if outcome.Failure != nil {
 			reason = core.Concat(reason, ": ", outcome.Failure.Error())
@@ -1094,7 +1094,7 @@ func (manager *Manager) adHocIncluded(ctx context.Context, sourceRoot string) co
 	if !reviewIDResult.OK {
 		return reviewIDResult
 	}
-	reviewRelative := core.PathJoin(".reviews", core.Concat(reviewIDResult.Value.(string), ".git"))
+	reviewRelative := core.PathJoin(".reviews", core.Concat(reviewIDResult.String(), ".git"))
 	if manager.files.Exists(reviewRelative) {
 		if deleteErr := manager.files.DeleteAll(reviewRelative); deleteErr != nil {
 			return core.Fail(core.E("workspace.Manager.ReviewSource", "failed to clean stale review index", deleteErr))
@@ -1103,11 +1103,11 @@ func (manager *Manager) adHocIncluded(ctx context.Context, sourceRoot string) co
 	if ensureErr := manager.files.EnsureDir(".reviews"); ensureErr != nil {
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "failed to create review index directory", ensureErr))
 	}
-	reviewPathResult := manager.internalPath(".reviews", core.Concat(reviewIDResult.Value.(string), ".git"))
+	reviewPathResult := manager.internalPath(".reviews", core.Concat(reviewIDResult.String(), ".git"))
 	if !reviewPathResult.OK {
 		return reviewPathResult
 	}
-	reviewPath := reviewPathResult.Value.(string)
+	reviewPath := reviewPathResult.String()
 	initialized := manager.gitOutput(ctx, manager.root, nil, "init", "--bare", "--quiet", reviewPath)
 	if !initialized.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "failed to create temporary review index", initialized.Err()))
@@ -1126,7 +1126,7 @@ func (manager *Manager) adHocIncluded(ctx context.Context, sourceRoot string) co
 	if deleteErr != nil {
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "failed to remove temporary review index", deleteErr))
 	}
-	return core.Ok(parseNULList(listed.Value.(string)))
+	return core.Ok(parseNULList(listed.String()))
 }
 
 func (manager *Manager) initializeAdHoc(ctx context.Context, review SourceReview, projectID string) core.Result {
@@ -1173,7 +1173,7 @@ func (manager *Manager) configureCloneIdentity(ctx context.Context, clonePath, n
 func (manager *Manager) ensureCommitIdentity(ctx context.Context, directory string) core.Result {
 	name := manager.gitOutput(ctx, directory, nil, "config", "--get", "user.name")
 	email := manager.gitOutput(ctx, directory, nil, "config", "--get", "user.email")
-	if name.OK && email.OK && core.Trim(name.Value.(string)) != "" && core.Trim(email.Value.(string)) != "" {
+	if name.OK && email.OK && core.Trim(name.String()) != "" && core.Trim(email.String()) != "" {
 		return core.Ok(nil)
 	}
 	configuredName := manager.gitOutput(ctx, directory, nil, "config", "--local", "user.name", lemIdentityName)
@@ -1187,8 +1187,8 @@ func (manager *Manager) commitIdentity(ctx context.Context, directory string) (s
 	nameResult := manager.gitOutput(ctx, directory, nil, "config", "--get", "user.name")
 	emailResult := manager.gitOutput(ctx, directory, nil, "config", "--get", "user.email")
 	if nameResult.OK && emailResult.OK {
-		name := core.Trim(nameResult.Value.(string))
-		email := core.Trim(emailResult.Value.(string))
+		name := core.Trim(nameResult.String())
+		email := core.Trim(emailResult.String())
 		if name != "" && email != "" {
 			return name, email
 		}
@@ -1215,7 +1215,7 @@ func (manager *Manager) validateRun(project work.Project, run work.Run, reconstr
 	if !expectedCloneResult.OK {
 		return expectedCloneResult
 	}
-	if project.ClonePath != expectedCloneResult.Value.(string) {
+	if project.ClonePath != expectedCloneResult.String() {
 		return core.Fail(core.NewError("agent workspace cached clone is outside the configured internal root"))
 	}
 	durableRevision := core.Trim(run.DurableRevision)
@@ -1226,7 +1226,7 @@ func (manager *Manager) validateRun(project work.Project, run work.Run, reconstr
 	if !branchResult.OK {
 		return branchResult
 	}
-	branch := branchResult.Value.(string)
+	branch := branchResult.String()
 	if reconstruct && core.Trim(run.Branch) != "" {
 		branch = core.Trim(run.Branch)
 		if !core.HasPrefix(branch, "lem/work/") || core.Contains(branch, "..") || core.Contains(branch, " ") {
@@ -1239,13 +1239,13 @@ func (manager *Manager) validateRun(project work.Project, run work.Run, reconstr
 	if !pathResult.OK {
 		return pathResult
 	}
-	path := pathResult.Value.(string)
+	path := pathResult.String()
 	if reconstruct && core.Trim(run.Worktree) != "" {
 		pathResult = manager.internalAbsolute(run.Worktree)
 		if !pathResult.OK {
 			return pathResult
 		}
-		path = pathResult.Value.(string)
+		path = pathResult.String()
 	} else if core.Trim(run.Worktree) != "" && run.Worktree != path {
 		return core.Fail(core.NewError("agent workspace run path differs from its deterministic internal path"))
 	}
@@ -1286,7 +1286,7 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 	if !initialWorktrees.OK {
 		return core.Fail(core.E("workspace.cleanupFailedWorktree", core.Concat("recovery worktree ", worktreePath, ": worktree inspect: ", initialWorktrees.Error()), nil))
 	}
-	attachedBranch, attached := worktreeBranchAtPath(initialWorktrees.Value.(string), worktreePath)
+	attachedBranch, attached := worktreeBranchAtPath(initialWorktrees.String(), worktreePath)
 	if attached && core.Trim(branch) != "" && attachedBranch != branch {
 		return core.Fail(core.E("workspace.cleanupFailedWorktree", core.Concat("recovery worktree ", worktreePath, ": attached branch differs from retained ownership"), nil))
 	}
@@ -1306,7 +1306,7 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 		listed := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "branch", "--list", branch)
 		if !listed.OK {
 			failures = append(failures, core.Concat("branch inspect: ", listed.Error()))
-		} else if core.Trim(listed.Value.(string)) != "" {
+		} else if core.Trim(listed.String()) != "" {
 			deleted := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "branch", "--delete", "--force", branch)
 			if !deleted.OK {
 				failures = append(failures, core.Concat("branch remove: ", deleted.Error()))
@@ -1318,7 +1318,7 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 	if !worktrees.OK {
 		verified = false
 		failures = append(failures, core.Concat("worktree verify: ", worktrees.Error()))
-	} else if _, retained := worktreeBranchAtPath(worktrees.Value.(string), worktreePath); retained {
+	} else if _, retained := worktreeBranchAtPath(worktrees.String(), worktreePath); retained {
 		verified = false
 		failures = append(failures, "worktree verify: retained Git worktree metadata")
 	}
@@ -1327,7 +1327,7 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 		if !listed.OK {
 			verified = false
 			failures = append(failures, core.Concat("branch verify: ", listed.Error()))
-		} else if core.Trim(listed.Value.(string)) != "" {
+		} else if core.Trim(listed.String()) != "" {
 			verified = false
 			failures = append(failures, "branch verify: generated branch remains")
 		}
@@ -1381,7 +1381,7 @@ func (manager *Manager) runWorkspaceOwnerID(projectID, worktreePath string) stri
 	if !relative.OK {
 		return ""
 	}
-	parts := core.Split(core.PathToSlash(relative.Value.(string)), "/")
+	parts := core.Split(core.PathToSlash(relative.String()), "/")
 	if len(parts) != 4 || parts[0] != projectID || parts[1] != "runs" || parts[3] != "worktree" {
 		return ""
 	}
@@ -1426,12 +1426,12 @@ func (manager *Manager) internalAbsolute(path string) core.Result {
 	if !absResult.OK {
 		return core.Fail(core.E("workspace.internalAbsolute", "failed to normalize internal path", absResult.Err()))
 	}
-	abs := absResult.Value.(string)
+	abs := absResult.String()
 	relativeResult := core.PathRel(manager.root, abs)
 	if !relativeResult.OK {
 		return core.Fail(core.E("workspace.internalAbsolute", "failed to compare internal path", relativeResult.Err()))
 	}
-	relative := relativeResult.Value.(string)
+	relative := relativeResult.String()
 	if relative == ".." || core.HasPrefix(relative, "../") || core.HasPrefix(relative, `..\`) || core.PathIsAbs(relative) {
 		return core.Fail(core.NewError("agent workspace path escapes the configured internal root"))
 	}
@@ -1443,11 +1443,11 @@ func (manager *Manager) internalRelative(path string) core.Result {
 	if !absResult.OK {
 		return absResult
 	}
-	relativeResult := core.PathRel(manager.root, absResult.Value.(string))
+	relativeResult := core.PathRel(manager.root, absResult.String())
 	if !relativeResult.OK {
 		return relativeResult
 	}
-	return core.Ok(relativeResult.Value.(string))
+	return core.Ok(relativeResult.String())
 }
 
 func canonicalDirectory(configured string) core.Result {
@@ -1459,11 +1459,11 @@ func canonicalDirectory(configured string) core.Result {
 	if !absResult.OK {
 		return core.Fail(core.E("workspace.canonicalDirectory", "failed to resolve absolute path", absResult.Err()))
 	}
-	evaluated := core.PathEvalSymlinks(absResult.Value.(string))
+	evaluated := core.PathEvalSymlinks(absResult.String())
 	if !evaluated.OK {
 		return core.Fail(core.E("workspace.canonicalDirectory", "failed to resolve directory symlinks", evaluated.Err()))
 	}
-	path := evaluated.Value.(string)
+	path := evaluated.String()
 	stat := core.Stat(path)
 	if !stat.OK {
 		return core.Fail(core.E("workspace.canonicalDirectory", "failed to inspect directory", stat.Err()))

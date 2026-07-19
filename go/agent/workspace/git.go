@@ -44,7 +44,7 @@ func (runner ProcessRunner) RunDetailed(ctx context.Context, command Command) co
 	if runner.run != nil {
 		result := runner.Run(ctx, command)
 		if result.OK {
-			return core.Ok(CommandOutcome{Output: result.Value.(string), ExitCode: 0})
+			return core.Ok(CommandOutcome{Output: result.String(), ExitCode: 0})
 		}
 		return core.Ok(CommandOutcome{ExitCode: -1, Failure: result.Err()})
 	}
