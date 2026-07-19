@@ -5,15 +5,19 @@
 // than dying with go-mlx's cmd/. cmd/lem tune is thin flag-parsing over
 // RunTune.
 //
-// go-mlx's tune loads a speculative TARGET+DRAFT pair (mlx.LoadSpeculativePair),
-// measures plain AR decode against each MTP draft block on the real model, and
-// persists the winner as a tuning profile serve auto-applies. go-inference does
-// NOT yet expose a speculative-pair loader on any registered engine — the
-// dappco.re/go/inference/generate package documents the same gap ("this engine
-// exposes no speculative path"). So RunTune reproduces the full tune flag
-// surface and its drafter detection + profile-dir plumbing, but reports the
-// sweep honestly as blocked on that engine seam rather than faking a
-// measurement. When a speculative loader lands, the sweep lights up here.
+// go-mlx's tune loaded a speculative TARGET+DRAFT pair (mlx.LoadSpeculativePair),
+// measured decode tok/s against each MTP draft block on the real model, and
+// persisted the winner as a tuning profile serve auto-applies. go-inference now
+// exposes that pair loader as inference.SpeculativePairBackend — a capability a
+// registered engine backend declares (the metal engine implements it in
+// engine/metal/inference_register.go by delegating to its existing
+// assistant-pair / composed-pair loading machinery). RunTune discovers the
+// capability by type assertion on the default registered backend, exactly as
+// inference.LoadModel discovers a plain-load backend (resolveSpeculativePairBackend
+// below) — no concrete engine import here, so the package stays engine-neutral.
+// A build with no such backend registered (or one whose registered backend has
+// not implemented the capability) reports the gap honestly and writes no
+// profile, rather than faking a measurement.
 //
 //	tune.RunTune(ctx, tune.Config{ModelPath: dir, Depths: "4,5,6", Out: os.Stdout, Log: os.Stderr})
 package tune
@@ -22,6 +26,7 @@ import (
 	"context"
 	"io"
 	"slices"
+	"time"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -43,12 +48,19 @@ type Config struct {
 	Log io.Writer // notices
 }
 
-// RunTune resolves the drafter for the target and reports the tune plan. The
-// MTP block sweep itself is blocked on a speculative-pair engine seam not yet in
-// go-inference (see the package doc); RunTune validates inputs, detects the
-// drafter, and reports honestly rather than persisting a faked profile.
+// RunTune resolves the drafter for the target and, when the registered engine
+// backend exposes inference.SpeculativePairBackend, sweeps each requested MTP
+// draft block on the real speculative pair: loading the pair, decoding
+// cfg.Prompt greedily up to cfg.MaxTokens, and scoring the run
+// (inference.ScoreTuningMeasurements) for cfg.Workload. The highest-scoring
+// block is persisted as a tuning profile serve auto-applies
+// (serving.WriteTunedDraftBlockProfile). With no such backend registered, it
+// validates inputs, detects the drafter, and reports the gap honestly rather
+// than persisting a faked profile.
 func RunTune(ctx context.Context, cfg Config) error {
-	_ = ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if core.Trim(cfg.ModelPath) == "" {
 		return core.NewError("tune: --model is required")
 	}
@@ -77,8 +89,46 @@ func RunTune(ctx context.Context, cfg Config) error {
 	core.Print(cfg.Out, "tune: target %s", cfg.ModelPath)
 	core.Print(cfg.Out, "tune: drafter %s (%s)", detection.DraftPath, detection.Note)
 	core.Print(cfg.Out, "tune: workload %s  ·  blocks %v  ·  profile-dir %s", workload, blocks, dir)
-	core.Print(cfg.Out, "tune: the MTP draft-block sweep needs a speculative-pair loader; no registered go-inference engine exposes one yet, so no measurement was run and no profile was written")
-	core.Print(cfg.Out, "tune: serve still auto-applies any profile already present in %s (--no-auto-profile opts out)", dir)
+
+	if detection.IsDFlash() {
+		// A DFlash block-diffusion drafter has no MTP verify-depth knob — its
+		// block size is fixed by the checkpoint, not something a caller
+		// chooses — so sweeping cfg.Depths against it would just reload the
+		// same drafter N times and measure noise. Report the same honest
+		// notice generate/serve give a DFlash drafter and stand down.
+		core.Print(cfg.Out, "tune: %s", serving.DFlashDraftNotice(detection))
+		core.Print(cfg.Out, "tune: the MTP draft-block sweep does not apply to a DFlash drafter — nothing to tune")
+		return nil
+	}
+
+	backend, ok := resolveSpeculativePairBackend()
+	if !ok {
+		core.Print(cfg.Out, "tune: no registered go-inference engine backend exposes a speculative-pair loader (inference.SpeculativePairBackend) — no measurement was run and no profile was written")
+		return nil
+	}
+
+	maxTokens := cfg.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = 256
+	}
+	results := sweepDraftBlocks(ctx, backend, cfg.ModelPath, detection.DraftPath, cfg.Prompt, maxTokens, blocks, workload)
+	for _, r := range results {
+		if r.err != nil {
+			core.Print(cfg.Log, "tune: block %d failed: %v", r.block, r.err)
+			continue
+		}
+		core.Print(cfg.Out, "tune: block %d — %.1f decode tok/s (score %.2f)", r.block, r.measurements.DecodeTokensPerSec, r.score.Score)
+	}
+	best, ok := bestBlockMeasurement(results)
+	if !ok {
+		return core.E("tune", core.Sprintf("every swept draft block failed to load or measure for %s", cfg.ModelPath), nil)
+	}
+
+	path, werr := serving.WriteTunedDraftBlockProfile(dir, cfg.ModelPath, "", workload, best.block, best.measurements, best.score, time.Now().Unix())
+	if werr != nil {
+		return core.E("tune", "write tuning profile", werr)
+	}
+	core.Print(cfg.Out, "tune: winner block %d (%.1f decode tok/s) — wrote %s", best.block, best.measurements.DecodeTokensPerSec, path)
 	return nil
 }
 
@@ -130,4 +180,112 @@ func parseDraftBlocks(value string) ([]int, error) {
 // serve reads profiles (serving keeps its own unexported copy of this default).
 func standardTuningProfileDir() string {
 	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "tuning")
+}
+
+// resolveSpeculativePairBackend finds the registered engine backend that can
+// load a target+drafter pair as one speculative TextModel: the
+// inference.SpeculativePairBackend capability, discovered by type assertion on
+// the preference-order default backend (metal -> rocm -> llama_cpp) — the same
+// resolution inference.LoadModel uses for a plain load. A package var (not a
+// plain func) so tests can inject a fake backend without touching the
+// process-global inference registry — see the var-swap tests in tune_test.go,
+// the same injection shape cli/engine_metal.go uses for speculativeLoader. No
+// registered backend at all, or a registered backend that does not implement
+// the capability, both report ok=false so RunTune can name the gap honestly
+// instead of faking a measurement.
+var resolveSpeculativePairBackend = defaultResolveSpeculativePairBackend
+
+func defaultResolveSpeculativePairBackend() (inference.SpeculativePairBackend, bool) {
+	result := inference.Default()
+	if !result.OK {
+		return nil, false
+	}
+	b, ok := result.Value.(inference.Backend)
+	if !ok || b == nil {
+		return nil, false
+	}
+	spl, ok := b.(inference.SpeculativePairBackend)
+	return spl, ok
+}
+
+// blockMeasurement is one swept draft block's outcome. err set means the pair
+// failed to load or generate for this block — recorded and skipped rather than
+// aborting the whole sweep (a wide block is more likely to exhaust memory than
+// a narrow one, and that alone should not fail blocks that DID measure).
+type blockMeasurement struct {
+	block        int
+	measurements inference.TuningMeasurements
+	score        inference.TuningScore
+	err          error
+}
+
+// sweepDraftBlocks loads the target+drafter pair once per block through
+// backend, decodes prompt greedily up to maxTokens on each load, and scores
+// the run for workload. ctx cancellation stops any remaining blocks (each
+// already-measured result is kept, recorded with ctx's error).
+func sweepDraftBlocks(ctx context.Context, backend inference.SpeculativePairBackend, modelPath, draftPath, prompt string, maxTokens int, blocks []int, workload inference.TuningWorkload) []blockMeasurement {
+	results := make([]blockMeasurement, 0, len(blocks))
+	for _, block := range blocks {
+		if err := ctx.Err(); err != nil {
+			results = append(results, blockMeasurement{block: block, err: err})
+			continue
+		}
+		measurements, err := measureDraftBlock(ctx, backend, modelPath, draftPath, prompt, maxTokens, block)
+		m := blockMeasurement{block: block, measurements: measurements, err: err}
+		if err == nil {
+			m.score = inference.ScoreTuningMeasurements(workload, measurements)
+		}
+		results = append(results, m)
+	}
+	return results
+}
+
+// measureDraftBlock loads target+drafter at block through backend, decodes
+// prompt greedily to maxTokens, and reads the engine's own GenerateMetrics back
+// as the neutral TuningMeasurements the sweep scores. The pair is closed before
+// returning regardless of outcome — a wide block's resident weights must not
+// accumulate across the sweep.
+func measureDraftBlock(ctx context.Context, backend inference.SpeculativePairBackend, modelPath, draftPath, prompt string, maxTokens, block int) (inference.TuningMeasurements, error) {
+	tm, err := backend.LoadSpeculativePair(modelPath, draftPath, block)
+	if err != nil {
+		return inference.TuningMeasurements{}, core.E("tune.measureDraftBlock", core.Sprintf("load speculative pair (block %d)", block), err)
+	}
+	defer tm.Close()
+	// Greedy (temperature 0): the pair's verify-exact lane at temp 0 is
+	// byte-identical to plain decode, so this is the "plain AR decode" reference
+	// go-mlx's tune measured, run once per block rather than as a separate
+	// unpaired baseline load.
+	for range tm.Generate(ctx, prompt, inference.WithMaxTokens(maxTokens), inference.WithTemperature(0)) {
+		// drain — the measurement is Metrics() after the run, not the text
+	}
+	if r := tm.Err(); !r.OK {
+		return inference.TuningMeasurements{}, core.E("tune.measureDraftBlock", core.Sprintf("generate (block %d)", block), r.Value.(error))
+	}
+	metrics := tm.Metrics()
+	return inference.TuningMeasurements{
+		PromptTokens:        metrics.PromptTokens,
+		GeneratedTokens:     metrics.GeneratedTokens,
+		PrefillTokensPerSec: metrics.PrefillTokensPerSec,
+		DecodeTokensPerSec:  metrics.DecodeTokensPerSec,
+		TotalMilliseconds:   float64(metrics.TotalDuration.Milliseconds()),
+		PeakMemoryBytes:     metrics.PeakMemoryBytes,
+		ActiveMemoryBytes:   metrics.ActiveMemoryBytes,
+	}, nil
+}
+
+// bestBlockMeasurement picks the highest-scoring successful measurement among
+// results. ok is false when every block failed (or results is empty).
+func bestBlockMeasurement(results []blockMeasurement) (blockMeasurement, bool) {
+	var best blockMeasurement
+	found := false
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		if !found || r.score.Score > best.score.Score {
+			best = r
+			found = true
+		}
+	}
+	return best, found
 }

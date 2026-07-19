@@ -15,9 +15,11 @@ import (
 // runTuneCommand parses the tune flags and hands them to tune.RunTune. Thin:
 // flag parsing + one library call + exit mapping. The tune business logic
 // (drafter detection, block sweep, profile persistence) lives in
-// dappco.re/go/inference/tune — the MTP block sweep itself is blocked on a
-// speculative-pair engine seam go-inference does not yet expose (RunTune reports
-// that honestly rather than faking a measurement).
+// dappco.re/go/inference/train/tune — the MTP block sweep runs when the
+// registered engine backend exposes inference.SpeculativePairBackend (the
+// metal engine does, by delegating to its existing pair-loading machinery);
+// a build with no such backend registered reports that honestly rather than
+// faking a measurement.
 func runTuneCommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(cliCommandName("tune"), flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -33,11 +35,11 @@ func runTuneCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s tune --model <path> [flags]\n", name))
 		core.WriteString(stderr, "\n")
-		core.WriteString(stderr, "Measure plain AR decode against each MTP draft block on the real model,\n")
-		core.WriteString(stderr, "then persist the winner as a tuning profile serve auto-applies. The block\n")
-		core.WriteString(stderr, "sweep needs a speculative-pair loader no registered go-inference engine\n")
-		core.WriteString(stderr, "exposes yet, so tune currently detects the drafter and reports the plan\n")
-		core.WriteString(stderr, "without measuring (it lights up when the engine seam lands).\n")
+		core.WriteString(stderr, "Measure decode tok/s against each MTP draft block on the real speculative\n")
+		core.WriteString(stderr, "pair, then persist the winner as a tuning profile serve auto-applies. The\n")
+		core.WriteString(stderr, "sweep needs a registered engine backend exposing a speculative-pair loader\n")
+		core.WriteString(stderr, "(the metal engine does); without one, tune detects the drafter and reports\n")
+		core.WriteString(stderr, "the plan without measuring.\n")
 		core.WriteString(stderr, "\n")
 		core.WriteString(stderr, "Flags:\n")
 		printFlagBlock(stderr, fs)

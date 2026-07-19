@@ -8,9 +8,32 @@ import (
 	"math"
 	"testing"
 
+	"dappco.re/go/inference"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
 )
+
+// TestMetalBackend_LoadSpeculativePair_Good pins the compile-time contract:
+// metalBackend satisfies inference.SpeculativePairBackend, so a caller can
+// reach it through inference.Get("metal") + a type assertion without importing
+// this package (train/tune's discovery seam).
+func TestMetalBackend_LoadSpeculativePair_Good(t *testing.T) {
+	var b inference.Backend = metalBackend{}
+	if _, ok := b.(inference.SpeculativePairBackend); !ok {
+		t.Fatal("metalBackend must implement inference.SpeculativePairBackend")
+	}
+}
+
+// TestMetalBackend_LoadSpeculativePair_Bad pins the delegation: calling the
+// method over two empty directories (no config.json — no GPU/metallib touched)
+// reaches LoadSpeculativePair and returns ITS error rather than swallowing it
+// or panicking.
+func TestMetalBackend_LoadSpeculativePair_Bad(t *testing.T) {
+	_, err := metalBackend{}.LoadSpeculativePair(t.TempDir(), t.TempDir(), 5)
+	if err == nil {
+		t.Fatal("LoadSpeculativePair over empty directories must fail, not silently succeed")
+	}
+}
 
 // bridgeBF16 writes v as the two bf16 bytes the composed seam carries (small
 // integers are exact, so the fake round-trips ids losslessly).

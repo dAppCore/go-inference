@@ -29,9 +29,16 @@ func init() { inference.Register(metalBackend{}) }
 // stable "metal" selector; Available reports whether the Metal device + kernels
 // initialise (ensureInit); LoadModel loads a checkpoint directory as an
 // inference.TextModel through the reactive native loader + tokenizer.
+// metalBackend additionally implements inference.SpeculativePairBackend
+// (below), so the MTP pair-loading this engine already has (assistant-pair +
+// composed-pair) is discoverable on the registered backend, not just injected
+// by the composition root.
 type metalBackend struct{}
 
-var _ inference.Backend = metalBackend{}
+var (
+	_ inference.Backend                = metalBackend{}
+	_ inference.SpeculativePairBackend = metalBackend{}
+)
 
 // Name is the registration/selection identifier.
 func (metalBackend) Name() string { return "metal" }
@@ -97,6 +104,19 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 		}
 		return core.Fail(core.E("native.metalBackend.LoadModel", "loader returned an unservable token model (neither a NativeTokenModel nor a composed hybrid)", nil))
 	}
+}
+
+// LoadSpeculativePair implements inference.SpeculativePairBackend: it loads
+// targetPath + draftPath as one speculative-decode inference.TextModel by
+// delegating straight to LoadSpeculativePair — this engine's own pair-loading
+// entry point (assistant-pair MTP + the composed/hybrid arm), already proven
+// by serve's MTP lane (serve wires the free function directly as its
+// serving.SpeculativeLoader). This method is the seam that makes the SAME
+// capability DISCOVERABLE on the registered "metal" backend, so an
+// engine-neutral caller (train/tune's MTP block sweep) can find it via
+// inference.Get/Default + a type assertion instead of importing this package.
+func (metalBackend) LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...inference.LoadOption) (inference.TextModel, error) {
+	return LoadSpeculativePair(targetPath, draftPath, draftBlock, opts...)
 }
 
 // composedTextModel adapts a loaded composed hybrid (a host-f32 model.SessionModel — Qwen 3.6's

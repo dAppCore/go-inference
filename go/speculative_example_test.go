@@ -25,3 +25,25 @@ func ExampleSpeculativeMetricsProvider() {
 	}
 	// Output: accepted 9 of 12 (75%)
 }
+
+// exampleSpeculativePairBackend implements ONLY SpeculativePairBackend — a
+// registered inference.Backend (the metal engine's metalBackend) satisfies it
+// alongside Backend itself, but the probe below only needs this one method.
+type exampleSpeculativePairBackend struct{}
+
+func (exampleSpeculativePairBackend) LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...inference.LoadOption) (inference.TextModel, error) {
+	return nil, nil // a real engine returns a loaded speculative TextModel
+}
+
+// SpeculativePairBackend is probed off a REGISTERED BACKEND, one step earlier
+// than inference.SpeculativeMetricsProvider (a capability of an already-LOADED
+// model): loading the pair is the operation being asked for, so there is no
+// model yet to probe.
+func ExampleSpeculativePairBackend() {
+	var b any = exampleSpeculativePairBackend{}
+	if spl, ok := b.(inference.SpeculativePairBackend); ok {
+		_, err := spl.LoadSpeculativePair("/models/target", "/models/draft", 5)
+		fmt.Println(err == nil)
+	}
+	// Output: true
+}
