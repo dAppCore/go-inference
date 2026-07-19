@@ -20,7 +20,9 @@ import (
 // (input RMSNorm → q/k/v proj → per-head QK-norm + partial rotary → causal softmax over a host KV cache →
 // σ-gate → o_proj → residual) runs on the HOST, ported from model/composed's continueFromQKV. Only the
 // full_attention layers of a checkpoint that DECLARES attn_output_gate take this path; a plain (ungated)
-// attention layer keeps the device encAttnHalfKV, so gemma4 is byte-identical. Device fusion is a later slice.
+// attention layer keeps the device encAttnHalfKV, so gemma4 is byte-identical. This host path is now the
+// FALLBACK — the fused device lanes (arch_qwen_fused.go) are the default for servable geometries; this
+// file remains the correctness reference (LTHN_QWEN_FUSED=0).
 
 // gatedAttnLayer is one gated full-attention layer's host-accessible weights + KV state. Geometry
 // (heads/kv/head_dim/rotary/theta/window) is passed per call from the decode loop's per-layer resolution,

@@ -54,7 +54,7 @@ type LayerSpec struct {
 	DisableRotary bool      // skip the architecture's RoPE declaration for an explicit NoPE layer
 	KVShareFrom   int       // index of the layer whose KV cache this layer reads (== own index if it owns its cache)
 	CacheIndex    int       // cache slot for an owner; -1 if this layer shares another's cache
-	MoE           bool      // sparse-expert MLP instead of dense (derivation: a later slice)
+	MoE           bool      // sparse-expert MLP instead of dense (derived from the checkpoint's expert tensors — #18)
 	// HeadDim / KVHeads are this layer's RESOLVED attention geometry. Some archs use a
 	// LARGER head_dim on full_attention layers than on sliding (e.g. sliding head_dim
 	// 256, full global_head_dim 512), and may carry a different KV head count on full

@@ -20,8 +20,9 @@ import (
 // the recurrence runs on the HOST through model/attn (the proven GatedDeltaForwardScratchF32), the state
 // (conv ring + delta) threads on the layer struct, and the pre-norm residual is applied exactly as
 // encAttnHalfKV does for attention (h = in + maybe_postNorm(mixer(RMSNorm(in)))). The attention layers
-// keep their device path untouched, so gemma4 is byte-identical. Device fusion of this recurrence is a
-// later slice.
+// keep their device path untouched, so gemma4 is byte-identical. This host path is now the FALLBACK —
+// the fused device lanes (arch_qwen_fused.go: whole-layer seams + the whole-token chain walk) are the
+// default for servable geometries; this file remains the correctness reference (LTHN_QWEN_FUSED=0).
 
 // gatedDeltaLayer is one MixerGatedDelta layer's weights + geometry + recurrent state for arch decode.
 type gatedDeltaLayer struct {
