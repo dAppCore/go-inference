@@ -85,9 +85,11 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 10: Docs + plan completion
 
-- [ ] `cli/tui/README.md` + `docs/cmd-lem.md` sections; design doc kept in sync with anything learned.
-- [ ] Coverage receipt for `go/dataset` (≥95%) + CLI additions measured and recorded honestly (below-bar numbers recorded, not hidden).
-- [ ] Plan boxes ticked to delivered reality; completion commit.
+- [x] `cli/tui/README.md` + `docs/cmd-lem.md` sections; design doc kept in sync with anything learned (raw-SQL store note → design Storage section; go-orm gaps tracked as #45).
+- [x] Coverage receipt for `go/dataset` (≥95%) + CLI additions measured and recorded honestly (below-bar numbers recorded, not hidden).
+- [x] Plan boxes ticked to delivered reality; completion commit.
+
+**Coverage receipts (2026-07-19, `go test -count=1 -coverprofile`):** `go/dataset` **96.7%** over 176 tests — clears the 95% bar. `cli/tui` **73.1%** over 360 tests — below the bar and recorded as such; this is the whole-package figure (the pre-existing four-panel TUI included), not a datapanel-only number, and the panel landed with state-machine, action-wiring, bulk-confirm, and render-snapshot tests per Task 8. Verb + store + tap additions ride the `cli` suite: 705 tests, 0 failed.
 
 ## Execution order
 

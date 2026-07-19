@@ -36,6 +36,8 @@ Two-module split, the proven `orchestrator.Store` shape from the CoreAgent port:
 
 Rationale: dataset bulk (10⁵–10⁶ rows of text) has a different lifecycle from orchestration state — backed up, copied between boxes, potentially handed to another machine whole; a bloated or damaged dataset file must never take the agent/TUI state down with it. The alternative (one shared `lem.duckdb`, the CoreAgent design's choice for orchestration state) is rejected for bulk data on those grounds. Same medium-backed path contract as everything else under `~/.lem/`; only the DuckDB adapter receives the resolved filename.
 
+*Implementation note (learned at Task 5):* the store speaks raw SQL through the DuckDB driver rather than go-orm — go-orm's DuckDB lane drops `WhereNull` predicates and declares-but-doesn't-wire subqueries/aliases (tracked as #45, core-family). The store's behaviour is pinned by the shared conformance table driven over both it and the root fake, so the ORM can be adopted later without contract drift.
+
 ## Domain model
 
 All rows carry `created_at`; nothing is ever hard-deleted from normal actions — archive by flag + timestamp (the house rule). Lookup-heavy JSON payloads live in DuckDB JSON columns; load-bearing fields are real columns.

@@ -33,6 +33,7 @@ providers, mutate private/source Git, or admit or change native queue work.
 | **Work** | Durable Work CRUD, native provider dispatch, queue controls, ordered process output, blocked questions, retry/resume, and reviewed acceptance through the connected `go/agent/*` engine. Future actions remain visible with an exact unavailable reason. |
 | **Models** | Asynchronous discovery from the Hugging Face cache and `LEM_MODELS_DIR`, fuzzy filtering, explicit loading, and loaded-model detail. A swap is refused while any chat job is active and drains the HTTP listener before replacing an idle model. |
 | **Service** | Start or stop the API over the exact serial model lane used by Chat; inspect address, model, request count, client URLs, and listener errors. Stopping the service never closes the model. |
+| **Data** | Review surface for the `lem data` training-data loop (`~/.lem/datasets.duckdb`): item list with dataset/status/kind/source/score filters, side-by-side detail (rendered content, score breakdown, lineage, welfare flags), and the review actions — approve, reject, quarantine-clear (note required), edit-as-derived (original archived), tag — each with an uppercase bulk form across the current filter behind a count confirmation. Every action has a mirrored palette entry; unavailable states render honestly. |
 
 Settings, sampling modes, built-in tools, local knowledge, runtime detection,
 and agent capability detail live in the contextual inspector instead of
@@ -73,6 +74,13 @@ scrolling preserves the reading position and shows a `new output` marker;
 | `Home` / `End` | Chat | Top / resume live transcript follow |
 | `PgUp` / `PgDn`, `Ctrl+U` / `Ctrl+D`, mouse wheel | Chat | Scroll transcript |
 | `/` | Models or Work | Filter the focused list |
+| `a` / `r` | Data | Approve / reject the selected item |
+| `c` | Data | Clear the selected item's quarantine (note required) |
+| `e` | Data | Edit as a derived item (the original is archived, lineage kept) |
+| `t` | Data | Tag the selected item |
+| `A` / `R` / `C` / `T` | Data | The same action in bulk across the current filter, behind a count confirmation |
+| `s` | Data | Toggle sort (date / score) |
+| `f` | Data | Edit the dataset/status/kind/source/score filter |
 | `Ctrl+K`, then `New Work` / `Edit Work` | Work | Create or edit title, task, and repository; `Ctrl+S` saves the editor |
 | `Ctrl+O`, arrows, `Enter` | Work | Select and invoke an available native action in the inspector |
 | `Enter` | Models | Load the selected model when all jobs are idle |
