@@ -879,11 +879,11 @@ git commit -m "feat(tui): operate and accept agent work"
 - Modify if implementation differs after review: `docs/superpowers/specs/2026-07-18-coreagent-native-execution-design.md`
 - Modify: `docs/superpowers/plans/2026-07-18-coreagent-native-execution.md` checkbox state only
 
-- [ ] Document Work creation, Git enablement, launch review, provider discovery, `~/.lem/agents.yaml`, queue controls, DuckDB tables, Soft Serve ownership, cancellation/shutdown, answer/resume, review, validation, acceptance/rejection, recovery, and explicit native host access.
-- [ ] Run fake-provider end-to-end receipts for all three adapters: create clean repo, dispatch, stream output, commit, complete, review, validate, accept, and verify source HEAD/content.
-- [ ] Run interruption receipts: long-running process with child, close orchestrator, verify both PIDs exit, run becomes interrupted, logs flush, branch pushes or worktree is retained, reopen, and Resume succeeds.
-- [ ] Run conflict/validation receipts and prove source status/HEAD/content remain unchanged.
-- [ ] Run all fresh gates:
+- [x] Document Work creation, Git enablement, launch review, provider discovery, `~/.lem/agents.yaml`, queue controls, DuckDB tables, Soft Serve ownership, cancellation/shutdown, answer/resume, review, validation, acceptance/rejection, recovery, and explicit native host access.
+- [x] Run fake-provider end-to-end receipts for all three adapters: create clean repo, dispatch, stream output, commit, complete, review, validate, accept, and verify source HEAD/content.
+- [x] Run interruption receipts: long-running process with child, close orchestrator, verify both PIDs exit, run becomes interrupted, logs flush, branch pushes or worktree is retained, reopen, and Resume succeeds.
+- [x] Run conflict/validation receipts and prove source status/HEAD/content remain unchanged.
+- [x] Run all fresh gates:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
