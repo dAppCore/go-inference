@@ -37,8 +37,14 @@ import (
 type RealTrainLayerF32 struct {
 	AttnNormW []float32 // [DModel] pre-attention RMSNorm
 	WQ        []float32 // [Heads·HeadDim, DModel]
-	WK, WV    []float32 // [KVHeads·HeadDim, DModel]
-	WO        []float32 // [DModel, Heads·HeadDim]
+	// WK/WV are the key/value projections. A NIL WV declares the gemma4 K==V layer
+	// (LayerSpec.AttentionKEqV): the value is the KEY projection's RAW output (pre-QK-norm,
+	// pre-rope — the decode's copy-before-k-norms), and the layer carries no v_proj target.
+	WK, WV []float32 // [KVHeads·HeadDim, DModel]
+	WO     []float32 // [DModel, Heads·HeadDim]
+	// ValueNorm applies gemma4's NO-SCALE per-head RMSNorm to V after the projection
+	// (Arch.ValueNorm — metal's RMSNormNoScale, a ones weight through the rows kernel).
+	ValueNorm bool
 	// QNormW/KNormW are gemma4's per-head query/key RMSNorm weights ([HeadDim], shared across
 	// heads), applied between the projection and rope (encAttnHalfKV's QK-norm station). nil =
 	// the layer carries no QK-norm (LayerSpec.AttentionQNorm/AttentionKNorm false).
@@ -96,8 +102,11 @@ func (L *RealTrainLayerF32) validate() error {
 	if len(L.AttnNormW) != L.DModel || len(L.MLPNormW) != L.DModel {
 		return core.NewError("native.RealTrainLayerF32: norm weights must be [DModel]")
 	}
-	if len(L.WQ) != qDim*L.DModel || len(L.WK) != kvDim*L.DModel || len(L.WV) != kvDim*L.DModel || len(L.WO) != L.DModel*qDim {
+	if len(L.WQ) != qDim*L.DModel || len(L.WK) != kvDim*L.DModel || len(L.WO) != L.DModel*qDim {
 		return core.NewError("native.RealTrainLayerF32: attention projection weight size mismatch")
+	}
+	if L.WV != nil && len(L.WV) != kvDim*L.DModel { // nil WV = the K==V layer (no v_proj)
+		return core.NewError("native.RealTrainLayerF32: WV must be [KVHeads·HeadDim, DModel] (or nil for a K==V layer)")
 	}
 	if len(L.WGate) != L.DFF*L.DModel || len(L.WUp) != L.DFF*L.DModel || len(L.WDown) != L.DModel*L.DFF {
 		return core.NewError("native.RealTrainLayerF32: MLP projection weight size mismatch")
@@ -120,7 +129,12 @@ func (L *RealTrainLayerF32) projDims(target string) (out, in int, err error) {
 	switch target {
 	case ProjQ:
 		return L.Heads * L.HeadDim, L.DModel, nil
-	case ProjK, ProjV:
+	case ProjV:
+		if L.WV == nil {
+			return 0, 0, core.NewError("native.RealTrainLayerF32: this layer shares K==V (no v_proj) — target " + ProjK + " trains both paths")
+		}
+		return L.KVHeads * L.HeadDim, L.DModel, nil
+	case ProjK:
 		return L.KVHeads * L.HeadDim, L.DModel, nil
 	case ProjO:
 		return L.DModel, L.Heads * L.HeadDim, nil
@@ -261,6 +275,15 @@ func realRopeBackwardF32(dy []float32, pos, nHeads, headDim, pairHalf int, invFr
 	return dx
 }
 
+// onesF32 returns a ones vector of length n — the no-scale RMSNorm's implicit weight.
+func onesF32(n int) []float32 {
+	w := make([]float32, n)
+	for i := range w {
+		w[i] = 1
+	}
+	return w
+}
+
 // attnLow returns the first attendable position for row i under the layer's window:
 // global (Window ≤ 0) attends [0, i]; a sliding layer attends the last Window positions
 // [max(0, i−Window+1), i] — the ring-cache live window (decode_step.go: n = min(pos+1, slideW)).
@@ -314,7 +337,8 @@ type realLayerTape struct {
 	normed         []float32 // [T,DModel] pre-attn rms output
 	q0, k0         []float32 // raw projections [T,qDim] / [T,kvDim]
 	qn, kn         []float32 // post-QK-norm, pre-rope (alias q0/k0 when the layer has no QK-norm)
-	qr, kr, v      []float32 // rope'd q/k and v (post value-processing when those features land)
+	v0             []float32 // raw value rows (own projection, or the k0 copy on a K==V layer)
+	qr, kr, v      []float32 // rope'd q/k and the post-value-norm v (v aliases v0 when unnormed)
 	probs          [][]float32 // per query head [T,T]
 	o              []float32 // attention output [T,qDim]
 	attnBranch     []float32 // the branch added to the residual (post post-attn-norm when present)
@@ -347,7 +371,19 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 	tp.normed = rmsNormForwardF32(h, L.AttnNormW, T, D, L.Eps)
 	tp.q0 = hostLinearF32(tp.normed, wQ, T, D, qDim)
 	tp.k0 = hostLinearF32(tp.normed, wK, T, D, kvDim)
-	tp.v = hostLinearF32(tp.normed, wV, T, D, kvDim)
+	if wV != nil {
+		tp.v0 = hostLinearF32(tp.normed, wV, T, D, kvDim)
+	} else {
+		// K==V: the value is the KEY projection's RAW output, copied BEFORE the k norms/rope
+		// (decode_step.go's copy-before-k-norms) — under a k_proj LoRA both paths see the
+		// effective weight, so dWK will accumulate the K and V contributions.
+		tp.v0 = append([]float32(nil), tp.k0...)
+	}
+	tp.v = tp.v0
+	if L.ValueNorm {
+		// gemma4 value-norm: NO-SCALE per-head RMSNorm — a ones weight through the plain rms.
+		tp.v = rmsNormForwardF32(tp.v0, onesF32(d), T*L.KVHeads, d, L.Eps)
+	}
 	tp.qn, tp.kn = tp.q0, tp.k0
 	if len(L.QNormW) > 0 {
 		// per-head RMSNorm with the shared [HeadDim] weight: the head-major layout makes every
@@ -551,13 +587,35 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 			return nil, err
 		}
 	}
+	// value path: the SDPA's dV lands on the POST-value-norm rows; the no-scale norm backward
+	// (ones weight) maps it onto the raw value rows, which belong to the v_proj — or, on a K==V
+	// layer, to the RAW key projection (the pre-norm copy), where it JOINS dK0 so the shared
+	// weight's gradient accumulates both paths.
+	dV0 := dV
+	if L.ValueNorm {
+		dV0, _, err = RMSNormBackwardF32(dV, tp.v0, onesF32(d), T*L.KVHeads, d, L.Eps)
+		if err != nil {
+			return nil, err
+		}
+	}
 	dNormedQ, dWQ := hostLinearBackwardF32(dQ0, tp.normed, wQ, T, D, qDim)
+	g.dWQ = dWQ
+	var dNormedV []float32
+	if wV != nil {
+		dNormedV, g.dWV = hostLinearBackwardF32(dV0, tp.normed, wV, T, D, kvDim)
+	} else {
+		for i := range dK0 {
+			dK0[i] += dV0[i] // K==V: the value gradient joins the raw key-projection gradient
+		}
+	}
 	dNormedK, dWK := hostLinearBackwardF32(dK0, tp.normed, wK, T, D, kvDim)
-	dNormedV, dWV := hostLinearBackwardF32(dV, tp.normed, wV, T, D, kvDim)
-	g.dWQ, g.dWK, g.dWV = dWQ, dWK, dWV
+	g.dWK = dWK
 	dNormed := make([]float32, T*D)
 	for i := range dNormed {
-		dNormed[i] = dNormedQ[i] + dNormedK[i] + dNormedV[i]
+		dNormed[i] = dNormedQ[i] + dNormedK[i]
+		if dNormedV != nil {
+			dNormed[i] += dNormedV[i]
+		}
 	}
 	dHNorm, _, err := RMSNormBackwardF32(dNormed, h, L.AttnNormW, T, D, L.Eps)
 	if err != nil {

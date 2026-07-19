@@ -175,6 +175,58 @@ func TestRealLayerProjLoRABackwardF32_SandwichNorms(t *testing.T) {
 	})
 }
 
+// TestRealLayerProjLoRABackwardF32_ValueNorm is the rung-4a FD gate: gemma4's NO-SCALE per-head
+// RMSNorm on V (Arch.ValueNorm — applied on every gemma4 attention layer) enters the chain between
+// the value projection and the SDPA; all seven targets must ride its Jacobian.
+func TestRealLayerProjLoRABackwardF32_ValueNorm(t *testing.T) {
+	for _, target := range realLayerTargets {
+		t.Run(target, func(t *testing.T) {
+			L := tinyRealLayer()
+			L.ValueNorm = true
+			realLayerFDCheck(t, L, target)
+		})
+	}
+}
+
+// TestRealLayerProjLoRABackwardF32_KEqV is the rung-4b FD gate: the gemma4 K==V layer (nil WV —
+// V rides the KEY projection's RAW output, copied before the k norms/rope, value-normed after).
+// The k_proj target's dW must accumulate BOTH paths (through K's norm+rope+scores AND through V);
+// the v_proj target is refused (the layer has no v_proj). QK-norms ride along so the copy point
+// (pre-norm) is what the FD differentiates, not an approximation of it.
+func TestRealLayerProjLoRABackwardF32_KEqV(t *testing.T) {
+	mk := func() *RealTrainLayerF32 {
+		L := tinyRealLayer()
+		L.WV = nil
+		L.ValueNorm = true
+		near1 := func(salt, n int) []float32 {
+			w := syntheticFloat32(n, salt)
+			for i := range w {
+				w[i] = 1 + 0.3*w[i]
+			}
+			return w
+		}
+		L.QNormW, L.KNormW = near1(41, L.HeadDim), near1(43, L.HeadDim)
+		return L
+	}
+	for _, target := range []string{ProjQ, ProjK, ProjO, ProjGate, ProjUp, ProjDown} {
+		t.Run(target, func(t *testing.T) {
+			realLayerFDCheck(t, mk(), target)
+		})
+	}
+	t.Run("v_proj-refused", func(t *testing.T) {
+		L := mk()
+		dout := make([]float32, L.T*L.DModel)
+		h := make([]float32, L.T*L.DModel)
+		_, _, _, err := RealLayerProjLoRABackwardF32(dout, h, L, ProjV, make([]float32, L.DModel), make([]float32, L.KVHeads*L.HeadDim), 1, 1)
+		if err == nil {
+			t.Fatal("a v_proj target on a K==V layer must be refused")
+		}
+		if !strings.Contains(err.Error(), "K==V") || !strings.Contains(err.Error(), ProjK) {
+			t.Fatalf("the K==V refusal must explain the layer shape and point at %s; got: %s", ProjK, err.Error())
+		}
+	})
+}
+
 // TestRealLayerProjLoRABackwardF32_Bad: an unknown target, a nil layer, a wrong-shaped upstream
 // gradient, and a broken geometry are refused before any work.
 func TestRealLayerProjLoRABackwardF32_Bad(t *testing.T) {
