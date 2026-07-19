@@ -18,8 +18,13 @@ const (
 
 // appPaths keeps host-only database paths separate from medium-relative files.
 type appPaths struct {
-	Root       string
-	Database   string
+	Root     string
+	Database string
+	// Datasets is the host-only path to datasets.duckdb — a separate
+	// file from Database (lem.duckdb), per the dataset loop design's
+	// bulk/lifecycle/blast-radius decision. Only the DuckDB adapter
+	// (newDuckDatasetStore) receives this resolved filename.
+	Datasets   string
 	State      string
 	Config     string
 	Agents     string
@@ -56,6 +61,7 @@ func appPathsAt(root string) core.Result {
 	return core.Ok(appPaths{
 		Root:       root,
 		Database:   core.Path(root, "lem.duckdb"),
+		Datasets:   core.Path(root, "datasets.duckdb"),
 		State:      core.Path(root, "state.db"),
 		Config:     appConfigPath,
 		Agents:     appAgentsPath,

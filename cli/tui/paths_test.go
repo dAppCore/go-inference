@@ -24,6 +24,7 @@ func TestAppPaths_Good(t *testing.T) {
 	want := appPaths{
 		Root:       root,
 		Database:   core.Path(root, "lem.duckdb"),
+		Datasets:   core.Path(root, "datasets.duckdb"),
 		State:      core.Path(root, "state.db"),
 		Config:     "config.yaml",
 		Agents:     "agents.yaml",
