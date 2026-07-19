@@ -170,14 +170,7 @@ func decodeImageDataURL(url string) ([]byte, error) {
 	if !decoded.OK {
 		return nil, core.E("openai.ChatMessage", "image base64 payload is invalid", decoded.Err())
 	}
-	bytes, ok := decoded.Value.([]byte)
-	if !ok {
-		text, textOK := decoded.Value.(string)
-		if !textOK {
-			return nil, core.E("openai.ChatMessage", "image base64 decode returned an unexpected type", nil)
-		}
-		bytes = []byte(text)
-	}
+	bytes := decoded.Bytes()
 	if len(bytes) == 0 {
 		return nil, core.E("openai.ChatMessage", "image payload is empty", nil)
 	}
@@ -194,14 +187,7 @@ func decodeAudioBase64(payload string) ([]byte, error) {
 	if !decoded.OK {
 		return nil, core.E("openai.ChatMessage", "audio base64 payload is invalid", decoded.Err())
 	}
-	bytes, ok := decoded.Value.([]byte)
-	if !ok {
-		text, textOK := decoded.Value.(string)
-		if !textOK {
-			return nil, core.E("openai.ChatMessage", "audio base64 decode returned an unexpected type", nil)
-		}
-		bytes = []byte(text)
-	}
+	bytes := decoded.Bytes()
 	if len(bytes) == 0 {
 		return nil, core.E("openai.ChatMessage", "audio payload is empty", nil)
 	}
