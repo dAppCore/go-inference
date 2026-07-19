@@ -98,6 +98,24 @@ func TestRunServeCommand_AdminTokenFailClosed(t *testing.T) {
 	}
 }
 
+// TestRunServeCommand_CaptureDatasetNotFound proves --capture fails the boot
+// closed — before any listener binds — when the named dataset does not
+// exist, with an actionable message pointing at `lem data create`. This
+// never reaches serving.RunServe (mirrors
+// TestRunServeCommand_AdminTokenFailClosed's boundary: no test in this file
+// boots a real server), so it is safe to run without a model.
+func TestRunServeCommand_CaptureDatasetNotFound(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var stdout, stderr bytes.Buffer
+	code := runServeCommand(context.Background(), []string{"--capture", "no-such-dataset"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (fail-closed); stderr=%s", code, stderr.String())
+	}
+	if !core.Contains(stderr.String(), "lem data create") {
+		t.Errorf("stderr = %q, want a pointer at `lem data create`", stderr.String())
+	}
+}
+
 // readToken reads the trimmed admin token from path, failing the test on error.
 func readToken(t *testing.T, path string) string {
 	t.Helper()
