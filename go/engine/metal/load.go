@@ -15,9 +15,10 @@ import (
 )
 
 // isQwen35FactoryType reports whether a model_type is a Qwen 3.6 hybrid id carrying the DUAL route (a
-// Composed hook AND Parse+Weights, registered by model/arch/Qwen/qwen35) — the set LTHN_QWEN_FACTORY
-// diverts off the composed loader onto model.Assemble + arch_session (#18). Kept in sync with qwen35's
-// ArchSpec.ModelTypes; any other composed arch (mixtral, qwen3_next, …) is untouched by the lever.
+// Composed hook AND Parse+Weights, registered by model/arch/Qwen/qwen35) — the set that DEFAULTS to
+// the factory route (model.Assemble + arch_session, #18); LTHN_QWEN_COMPOSED=1 reverts it to the
+// composed loader. Kept in sync with qwen35's ArchSpec.ModelTypes; any other composed arch (mixtral,
+// qwen3_next, …) is untouched by the lever.
 func isQwen35FactoryType(mt string) bool {
 	switch mt {
 	case "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text":
@@ -156,11 +157,15 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		// serve-ready TokenModel. A future qwenX checkpoint therefore loads with ZERO edits
 		// here — it is a new model-package init(), not an engine change. ok=false means the
 		// model_type is a plain transformer (no composed arch registered for it): fall through.
-		// LTHN_QWEN_FACTORY opts the Qwen 3.6 hybrid onto the factory route (model.Assemble + arch_session —
-		// the #18 unification) instead of the composed loader: skip LoadComposedDir so the qwen3_5* ids fall
-		// through to loadRegistered/model.Load below. Unset (the default) keeps composed, so gemma and every
-		// non-diverted arch are byte-identical. The A/B lever while the factory decode lands.
-		if os.Getenv("LTHN_QWEN_FACTORY") == "" || !isQwen35FactoryType(mt) {
+		// The Qwen 3.5 hybrid (qwen3_5/qwen3_5_moe + text aliases) DEFAULTS to the factory route
+		// (model.Assemble + arch_session with the fused whole-token chain decode — #18; faster than
+		// the composed lane on both hybrids: 0.8B 217 vs 195 tok/s, 35B 30 vs 19). The factory
+		// serves the TEXT stack only — a vision-towered qwen checkpoint (35B ships one) answers
+		// image turns with the clean 400 refusal; LTHN_QWEN_COMPOSED=1 is the escape hatch back to
+		// the composed loader (vision-capable serving + the A/B / revert-safety lever). Every other
+		// composed arch (qwen3_6/qwen3_next/mixtral/…) is untouched.
+		qwenFactory := isQwen35FactoryType(mt) && os.Getenv("LTHN_QWEN_COMPOSED") != "1"
+		if !qwenFactory {
 			if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
 				return nil, cerr
 			} else if ok {

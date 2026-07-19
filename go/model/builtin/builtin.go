@@ -29,7 +29,7 @@ import (
 	_ "dappco.re/go/inference/model/arch/LGAI-EXAONE/exaone4"     // EXAONE 4 dense text
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"              // qwen2 / qwen2.5 dense text
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen3"              // qwen3
-	_ "dappco.re/go/inference/model/arch/Qwen/qwen35"             // qwen3_5 / qwen3_5_moe hybrid (factory route + composed-delegate default; LTHN_QWEN_FACTORY)
+	_ "dappco.re/go/inference/model/arch/Qwen/qwen35"             // qwen3_5 / qwen3_5_moe hybrid (factory route DEFAULT + composed delegate; LTHN_QWEN_COMPOSED reverts)
 	_ "dappco.re/go/inference/model/arch/Qwen/qwenmoe"            // qwen2_moe / qwen3_moe sparse transformers
 	_ "dappco.re/go/inference/model/arch/allenai/olmo"            // OLMo / OLMo 2
 	_ "dappco.re/go/inference/model/arch/allenai/olmoe"           // AllenAI OLMoE sparse transformer

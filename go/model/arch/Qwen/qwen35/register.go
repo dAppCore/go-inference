@@ -14,7 +14,7 @@ import (
 // arch_session — the #18 unification target) AND a Composed hook that delegates to model/composed (the
 // current default + the A/B reference while the factory decode lands). model.LoadComposedDir sees the
 // Composed hook and keeps serving through composed by default; the engine opts INTO the factory route with
-// LTHN_QWEN_FACTORY (engine/metal/load.go), so the default path is unchanged until the factory decode is
+// the factory route by DEFAULT (engine/metal/load.go; LTHN_QWEN_COMPOSED=1 reverts), landed once the factory decode was
 // validated against composed.
 //
 // This registration REPLACES composed's own (composed/register.go no longer lists the qwen3_5* ids).
