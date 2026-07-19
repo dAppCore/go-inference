@@ -9,14 +9,15 @@
 // in weights.go), and implements gpt_oss's two arch-specific engine primitives — the clamped-sigmoid SwiGLU
 // expert activation (engine/metal MoEExpertsQuantClampedSiLU) and YaRN-corrected rope frequencies (yarn.go).
 //
-// Config.Arch STILL refuses — but now only for a precisely named, LOOKED-UP (not guessed) reason: every real
-// gpt_oss checkpoint carries per-layer attention sinks (self_attn.sinks, a learned per-head softmax-
-// denominator bias — see the eager_attention_forward reference cited in config_test.go) and additive biases
-// on self_attn.o_proj / mlp.router / mlp.experts.{gate,up,down}_proj (attention_bias=true reaches beyond
-// q/k/v), neither of which engine/metal's quantised decode path consumes yet (Q/K/V bias DOES already flow
-// through the existing BQ/BK/BV mechanism — see weights.go). Landing either is real SDPA/MoE-kernel surgery
-// this pass did not attempt without a GPU to verify it on. Recognised + configured + geometry-verified +
-// weight-mapped + the two requested engine primitives landed; full serving remains the named follow-up.
+// Config.Arch resolves fully — the three engine gaps the original registration refused over are all
+// consumed (tracker #37): attention sinks bind the sdpa_vector has_sinks(25) lane (WeightNames.Sinks
+// → LoadedLayer.Sinks → the engine's sinks-routed attention halves), the additive biases beyond
+// BQ/BK/BV all land (o_proj via the projector BO seam; the router bias before top-k and the
+// per-expert gate/up/down biases via encGptOssMoEHalf + MoEExpertsQuantClampedSiLU), and the YaRN
+// attention_factor folds into AttnScale as mscale²/√headDim (exact for gpt_oss's full-rotary heads —
+// see buildArch's derivation with both lineage sources). The serving lane is the linear-KV
+// sequential arch session (paged KV and the batched attention fold decline sinks layers — named
+// perf follow-ups); the live generation gate is live_generate_test.go.
 //
 // See model/quant/jang/jang.go for the separate GGUF quant-scheme name mapping already registered for
 // "gpt_oss" (a quant concern, not this arch registration).
@@ -169,6 +170,34 @@ func (c *Config) buildArch() (model.Arch, error) {
 		return model.Arch{}, err
 	}
 
+	// YaRN attention_factor (mscale), folded into the SDPA softmax scale as mscale²/√headDim. The
+	// application point, verified against BOTH lineage references fetched 2026-07-19 (not recalled):
+	//
+	//	transformers modeling_gpt_oss.py, GptOssRotaryEmbedding.forward:
+	//	  "cos = emb.cos() * self.attention_scaling; sin = emb.sin() * self.attention_scaling"
+	//	  with attention_scaling = _compute_yarn_parameters' attention_factor default
+	//	  0.1·ln(factor)+1 (the config sets neither attention_factor nor mscale), and
+	//	  "self.scaling = self.head_dim**-0.5" as the SDPA scale.
+	//	mlx-lm rope_utils.py, YarnRoPE.__call__ (the checkpoint's own lineage):
+	//	  "x[..., : self.dims] = self.mscale * x[..., : self.dims]" before mx.fast.rope, with
+	//	  mscale = yarn_get_mscale(scale, 1)/yarn_get_mscale(scale, 0) = 0.1·ln(scale)+1 — the
+	//	  same factor applied to the pre-rope input instead of cos/sin (rotation is linear, so
+	//	  the two are identical).
+	//
+	// Either way BOTH q and k emerge scaled by mscale, so the attention LOGITS carry mscale² — and
+	// because gpt_oss is FULL-rotary (rotaryDim == headDim, no un-roped tail), folding mscale² into
+	// the SDPA scale is algebraically EXACT, not an approximation: score = scale·(q·k) with
+	// scale = mscale²/√headDim reproduces (mscale·q_rot)·(mscale·k_rot)/√headDim termwise. The
+	// attention sinks stay OUTSIDE the fold, exactly as in the references: the kernel's scale
+	// multiplies q only, and the sink seeds the softmax raw (see engine/metal sdpa_sinks.go).
+	// A non-YaRN config keeps mscale = 1 (yarnAttentionFactor's factor<=1 guard) — the plain
+	// 1/√headDim, byte-identical to every other arch's scale resolution.
+	mscale := float64(1)
+	if c.RopeScaling.RopeType == "yarn" {
+		mscale = float64(yarnAttentionFactor(c.RopeScaling.Factor))
+	}
+	attnScale := float32(mscale * mscale / math.Sqrt(float64(headDim)))
+
 	// DeriveLayers maps "sliding_attention"/"full_attention" straight to MixerAttention (gemma3 proves this
 	// vocabulary already; gpt_oss has no "linear_attention" layers, so every layer owns its own KV cache —
 	// numKVShared 0). MoE is unconditional: gpt_oss has no dense FFN layer at all.
@@ -182,7 +211,7 @@ func (c *Config) buildArch() (model.Arch, error) {
 		Hidden: c.HiddenSize, Heads: c.NumAttentionHeads, KVHeads: kvHeads,
 		HeadDim: headDim, GlobalHeadDim: headDim, GlobalKVHeads: kvHeads,
 		FF: c.IntermediateSize, Vocab: c.VocabSize, Eps: eps,
-		AttnScale: float32(1 / math.Sqrt(float64(headDim))), EmbedScale: 1,
+		AttnScale: attnScale, EmbedScale: 1,
 		RopeBase: ropeBase, RopeLocalBase: ropeBase, RopeScale: 1,
 		RotaryDim: rotaryDim, RotaryDimLocal: rotaryDim,
 		RopeFreqs: freqs,
@@ -206,30 +235,13 @@ func (c *Config) buildArch() (model.Arch, error) {
 }
 
 // Arch resolves the FULL neutral geometry (buildArch — attention dims, MoE dims, the sliding/full
-// schedule, YaRN-corrected rope) and, once that succeeds, still refuses: this pass wired the parse, the
-// weight-name mapping (weights.go), and gpt_oss's two requested engine primitives (the clamped-SwiGLU MoE
-// activation and the YaRN frequency table — both in this package/engine/metal, byte-gated), but THREE
-// checkpoint-real primitives remain unconsumed by engine/metal — attention sinks, the o_proj/router/expert
-// additive biases, and the YaRN attention_factor/mscale cos-sin postscale (arch.RopeScale multiplies the
-// rope ANGLE pre-cos/sin — see rope_freqs.go's lthn_qknorm_rope_bf16.metal "theta = scale·offset·inv_freq"
-// — not cos/sin post-hoc, so reusing it for mscale would be confidently WRONG, not merely absent). A config
-// that fails buildArch's structural validation surfaces THAT error instead — the boundary below is reached
-// only once the geometry is genuinely sound. See config.go's package doc for the full boundary and the
-// commit history for the formula sources.
+// schedule, YaRN-corrected rope, the mscale²-folded attention scale, the clamped-SwiGLU declaration)
+// and returns it: the three engine gaps the former refusal named are all consumed now — attention
+// sinks (engine/metal's sdpa_vector has_sinks lane, loaded via WeightNames.Sinks), the o_proj/
+// router/per-expert additive biases (the projector BO seam + encGptOssMoEHalf's router-bias-before-
+// top-k + MoEExpertsQuantClampedSiLU's bias adds), and the YaRN attention_factor (folded into
+// AttnScale as mscale²/√headDim — see buildArch's derivation and sources). A structurally invalid
+// config still surfaces buildArch's precise error.
 func (c *Config) Arch() (model.Arch, error) {
-	a, err := c.buildArch()
-	if err != nil {
-		return model.Arch{}, err
-	}
-	mscale := yarnAttentionFactor(c.RopeScaling.Factor)
-	return model.Arch{}, core.NewError(core.Sprintf(
-		"gptoss.Config.Arch: gpt_oss geometry resolves cleanly (%d layers alternating sliding/full attention, "+
-			"%d local experts / %d per token, hidden %d, vocab %d) and the weight-name map + the clamped-SwiGLU "+
-			"activation + YaRN rope table are wired — but engine/metal's SDPA has no consumer for the per-head "+
-			"self_attn.sinks softmax bias every layer carries, and its quantised decode path has no consumer for "+
-			"the additive biases on o_proj/router/expert projections (attention_bias=true reaches beyond q/k/v, "+
-			"which already flow through the existing BQ/BK/BV mechanism), and the YaRN attention_factor postscale "+
-			"(~%.4f for this config's factor=%.1f) has no cos/sin-postscale hook either; recognised + configured "+
-			"+ geometry-verified + weight-mapped + activation/rope landed, full serving remains a named follow-up",
-		len(a.Layer), a.Experts, a.TopK, a.Hidden, a.Vocab, mscale, c.RopeScaling.Factor))
+	return c.buildArch()
 }

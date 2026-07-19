@@ -192,4 +192,9 @@ func TestNonYaRNArch_RopeFreqs_Unchanged(t *testing.T) {
 	if a.RopeBase != 1_000_000 || a.RopeScale != 1 {
 		t.Fatalf("qwen35 Arch.RopeBase/RopeScale = %v/%v, want 1000000/1 (unchanged by gptoss's YaRN work)", a.RopeBase, a.RopeScale)
 	}
+	// the attention-scale regression half (#37 rung 3): the mscale² fold lives entirely inside
+	// gptoss.buildArch, so qwen35's declared plain 1/√headDim must be untouched.
+	if want := float32(1 / math.Sqrt(2)); a.AttnScale != want {
+		t.Fatalf("qwen35 Arch.AttnScale = %v, want the plain 1/√headDim = %v (unchanged by gptoss's attention_factor fold)", a.AttnScale, want)
+	}
 }
