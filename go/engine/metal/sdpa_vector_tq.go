@@ -466,15 +466,21 @@ func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []fl
 	out := make([]byte, nHeads*headDim*bf16Size)
 	var encErr error
 	withAutoreleasePool(func() {
+		var owned []metal.MTLBuffer // released on exit — this driver allocates per call (test/probe path)
+		defer func() { releaseDeviceBuffers(owned...) }()
+		alloc := func(buf metal.MTLBuffer) metal.MTLBuffer {
+			if buf == nil {
+				encErr = core.NewError("native.TurboQuantSDPADevice: buffer allocation failed")
+				return nil
+			}
+			owned = append(owned, buf)
+			return buf
+		}
 		upload := func(b []byte) metal.MTLBuffer {
 			if encErr != nil || len(b) == 0 {
 				return nil
 			}
-			buf := device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&b[0]), uint(len(b)), metal.MTLResourceStorageModeShared)
-			if buf == nil {
-				encErr = core.NewError("native.TurboQuantSDPADevice: buffer allocation failed")
-			}
-			return buf
+			return alloc(device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&b[0]), uint(len(b)), metal.MTLResourceStorageModeShared))
 		}
 		qBuf := upload(q)
 		kBuf := upload(kCodes)
@@ -484,12 +490,15 @@ func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []fl
 		if encErr != nil {
 			return
 		}
-		qRot := device.NewBufferWithLengthOptions(uint(len(q)), metal.MTLResourceStorageModeShared)
-		oRot := device.NewBufferWithLengthOptions(uint(len(out)), metal.MTLResourceStorageModeShared)
-		outBuf := device.NewBufferWithLengthOptions(uint(len(out)), metal.MTLResourceStorageModeShared)
+		qRot := alloc(device.NewBufferWithLengthOptions(uint(len(q)), metal.MTLResourceStorageModeShared))
+		oRot := alloc(device.NewBufferWithLengthOptions(uint(len(out)), metal.MTLResourceStorageModeShared))
+		outBuf := alloc(device.NewBufferWithLengthOptions(uint(len(out)), metal.MTLResourceStorageModeShared))
 		pi := tqKVPiBuffer(headDim)
 		kCent := tqKVCentroidsBuffer(headDim, kBits)
 		vCent := tqKVCentroidsBuffer(headDim, vBits)
+		if encErr != nil {
+			return
+		}
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
@@ -506,12 +515,14 @@ func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []fl
 				encErr = p2err
 			}
 			if encErr == nil {
-				partials := device.NewBufferWithLengthOptions(uint(nHeads*int(blocks)*headDim*4), metal.MTLResourceStorageModeShared)
-				sums := device.NewBufferWithLengthOptions(uint(nHeads*int(blocks)*4), metal.MTLResourceStorageModeShared)
-				maxs := device.NewBufferWithLengthOptions(uint(nHeads*int(blocks)*4), metal.MTLResourceStorageModeShared)
-				emitSDPAVector2Pass1TQ(sink, pso1, qRot, kBuf, vBuf, partials, sums, maxs, kgBuf, vgBuf, kCent, vCent, nil,
-					nHeads, nKVHeads, n, int(blocks), int64(kBytesPerHead), int64(nKVHeads*kBytesPerHead), int64(vBytesPerHead), int64(nKVHeads*vBytesPerHead), scale)
-				emitSDPA2Pass2At(sink, pso2, partials, sums, maxs, oRot, 0, 1, nHeads, int(blocks))
+				partials := alloc(device.NewBufferWithLengthOptions(uint(nHeads*int(blocks)*headDim*4), metal.MTLResourceStorageModeShared))
+				sums := alloc(device.NewBufferWithLengthOptions(uint(nHeads*int(blocks)*4), metal.MTLResourceStorageModeShared))
+				maxs := alloc(device.NewBufferWithLengthOptions(uint(nHeads*int(blocks)*4), metal.MTLResourceStorageModeShared))
+				if encErr == nil {
+					emitSDPAVector2Pass1TQ(sink, pso1, qRot, kBuf, vBuf, partials, sums, maxs, kgBuf, vgBuf, kCent, vCent, nil,
+						nHeads, nKVHeads, n, int(blocks), int64(kBytesPerHead), int64(nKVHeads*kBytesPerHead), int64(vBytesPerHead), int64(nKVHeads*vBytesPerHead), scale)
+					emitSDPA2Pass2At(sink, pso2, partials, sums, maxs, oRot, 0, 1, nHeads, int(blocks))
+				}
 			}
 		} else {
 			pso, serr := sdpaVectorTQPipeline(headDim, kBits, vBits)
