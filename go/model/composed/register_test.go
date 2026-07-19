@@ -16,8 +16,9 @@ import (
 // with a Composed hook — the reactive loader can resolve each to the composed loader, and engine/metal's
 // former hardcoded fallback switch (which named this exact id set) needs no equivalent any more.
 func TestComposedArchRegistered(t *testing.T) {
+	// qwen3_5/qwen3_5_moe (+ text aliases) register in model/arch/Qwen/qwen35 now (the #18 dual
+	// route) — composed's own init() carries the ids qwen35 does not own.
 	for _, mt := range []string{
-		"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
 		"qwen3_6", "qwen3_6_moe", "qwen3_next",
 		"composed", "hybrid",
 	} {
@@ -80,9 +81,9 @@ func TestComposedMTPRefusal(t *testing.T) {
 // Composed hook builds a serve-ready TokenModel from a synthetic hybrid checkpoint, and the two bookends +
 // the decode seam drive it (Embed → DecodeForward → Head → vocab logits). No engine/metal switch.
 func TestComposedArchRoundTrip(t *testing.T) {
-	spec, ok := model.LookupArch("qwen3_5")
+	spec, ok := model.LookupArch("qwen3_6")
 	if !ok || spec.Composed == nil {
-		t.Fatal("qwen3_5 composed arch not registered")
+		t.Fatal("qwen3_6 composed arch not registered")
 	}
 	ts, cfg := mkHybridCheckpoint()
 	tm, err := spec.Composed(ts, cfg)
@@ -117,7 +118,7 @@ func TestComposedArchRoundTrip(t *testing.T) {
 func TestLoadComposedDirRoundTrip(t *testing.T) {
 	ts, _ := mkHybridCheckpoint()
 	dir := t.TempDir()
-	cfg := `{"model_type":"qwen3_5","hidden_size":8,"num_hidden_layers":4,"intermediate_size":16,` +
+	cfg := `{"model_type":"qwen3_6","hidden_size":8,"num_hidden_layers":4,"intermediate_size":16,` +
 		`"num_attention_heads":4,"num_key_value_heads":2,"head_dim":8,"vocab_size":32,"rms_norm_eps":1e-5,` +
 		`"rope_theta":1000000,"partial_rotary_factor":0.5,"full_attention_interval":2}`
 	if err := coreio.Local.Write(core.PathJoin(dir, "config.json"), cfg); err != nil {
@@ -155,8 +156,8 @@ func TestLoadComposedDirRoundTrip(t *testing.T) {
 func TestLoadComposedDir_RoutingContract(t *testing.T) {
 	// Every registered composed arch is reachable through the registry — this is the coverage the engine
 	// switch used to hardcode. qwen3_5 additionally has the full dir round-trip above.
+	// (qwen3_5* are qwen35-owned — asserted there; composed keeps the rest.)
 	for _, mt := range []string{
-		"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
 		"qwen3_6", "qwen3_6_moe", "qwen3_next",
 		"composed", "hybrid",
 	} {

@@ -27,6 +27,22 @@ func isQwen35FactoryType(mt string) bool {
 	return false
 }
 
+// qwenFactoryQuantServable reports whether a qwen3_5 checkpoint's declared quantisation is a width
+// the factory's device paths serve. The affine qmv kernels have no sub-2-bit instantiation, so a
+// 1-bit pack (Bonsai) keeps the composed route. An absent/unparseable quantization block (bf16) is
+// servable.
+func qwenFactoryQuantServable(cfg []byte) bool {
+	var q struct {
+		Quantization struct {
+			Bits int `json:"bits"`
+		} `json:"quantization"`
+	}
+	if r := core.JSONUnmarshal(cfg, &q); !r.OK {
+		return true
+	}
+	return q.Quantization.Bits == 0 || q.Quantization.Bits >= 2
+}
+
 // load.go is the native backend's directory loader: it delegates to the engine's reactive loader
 // (model.Load) — read config.json, probe model_type, react to the registered ArchSpec (parse → infer →
 // derive → assemble) — then turns the neutral model.LoadedModel into the native decode structs. The
@@ -162,9 +178,11 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		// the composed lane on both hybrids: 0.8B 217 vs 195 tok/s, 35B 30 vs 19). The factory
 		// serves the TEXT stack only — a vision-towered qwen checkpoint (35B ships one) answers
 		// image turns with the clean 400 refusal; LTHN_QWEN_COMPOSED=1 is the escape hatch back to
-		// the composed loader (vision-capable serving + the A/B / revert-safety lever). Every other
-		// composed arch (qwen3_6/qwen3_next/mixtral/…) is untouched.
-		qwenFactory := isQwen35FactoryType(mt) && os.Getenv("LTHN_QWEN_COMPOSED") != "1"
+		// the composed loader (vision-capable serving + the A/B / revert-safety lever). A sub-2-bit
+		// pack (Bonsai 1-bit) stays composed too: the factory's qmv kernels have no 1-bit width
+		// (#24's open half). Every other composed arch (qwen3_6/qwen3_next/mixtral/…) is untouched.
+		qwenFactory := isQwen35FactoryType(mt) && os.Getenv("LTHN_QWEN_COMPOSED") != "1" &&
+			qwenFactoryQuantServable(cfg)
 		if !qwenFactory {
 			if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
 				return nil, cerr

@@ -102,6 +102,20 @@ func qwenChainMoE(moe *MoEQuantLayerWeights, D int) *composed.MoEMLP {
 	}
 }
 
+// gatedDeltaQuantServable mirrors gatedDeltaQuantLayerRun's projection geometry gate at BIND time:
+// every packed projection must be a width the affine qmv emitters serve (quantGeometryOK — Bonsai's
+// 1-bit packs are not). A mid-walk geometry error would leave earlier layers' recurrent state
+// advanced; failing eligibility here keeps such checkpoints on the host halves instead.
+func gatedDeltaQuantServable(w *model.GatedDeltaWeights, cfg model.GatedDeltaConfig, d int) bool {
+	if w == nil {
+		return false
+	}
+	convDim, vDim := cfg.ConvDim(), cfg.VDim()
+	return quantGeometryOK(w.InProjQKVQ, convDim, d) && quantGeometryOK(w.InProjZQ, vDim, d) &&
+		quantGeometryOK(w.InProjAQ, cfg.ValueHeads, d) && quantGeometryOK(w.InProjBQ, cfg.ValueHeads, d) &&
+		quantGeometryOK(w.OutProjQ, d, vDim)
+}
+
 // bindQwenFusedDense captures the fused-lane weight views on the two Qwen holder kinds after the
 // host-path binds have run. Dense-FFN layers latch fusedDense (the whole-layer seams carry the SiLU
 // tail); qwen MoE layers latch fusedMoE with the chain's MoEMLP view (the chain MoE tail owns the
@@ -120,6 +134,9 @@ func (s *archDecodeState) bindQwenFusedDense(layers []QuantizedLayerWeights) {
 			}
 			preFF := bf16VecToF32(L.MoE.PreFFNormW)
 			if gd := s.layerGatedDelta(i); gd != nil {
+				if !gatedDeltaQuantServable(gd.w, gd.cfg, s.dModel) {
+					continue
+				}
 				gd.inNorm = bf16VecToF32(L.AttnNormW)
 				gd.ffNorm = preFF
 				gd.moe = mm
@@ -138,7 +155,9 @@ func (s *archDecodeState) bindQwenFusedDense(layers []QuantizedLayerWeights) {
 			mk := archQuantToModel(ga.k, lkv*lhd, s.dModel)
 			mv := archQuantToModel(ga.v, lkv*lhd, s.dModel)
 			mo := archQuantToModel(ga.o, s.dModel, s.nHeads*lhd)
-			if mq == nil || mk == nil || mv == nil || mo == nil {
+			if mq == nil || mk == nil || mv == nil || mo == nil ||
+				!quantGeometryOK(mq, 2*s.nHeads*lhd, s.dModel) || !quantGeometryOK(mk, lkv*lhd, s.dModel) ||
+				!quantGeometryOK(mv, lkv*lhd, s.dModel) || !quantGeometryOK(mo, s.dModel, s.nHeads*lhd) {
 				continue
 			}
 			ga.inNorm = bf16VecToF32(L.AttnNormW)
@@ -158,10 +177,14 @@ func (s *archDecodeState) bindQwenFusedDense(layers []QuantizedLayerWeights) {
 		gate := archQuantToModel(L.Gate, ff, s.dModel)
 		up := archQuantToModel(L.Up, ff, s.dModel)
 		down := archQuantToModel(L.Down, s.dModel, ff)
-		if gate == nil || up == nil || down == nil || ff <= 0 {
+		if gate == nil || up == nil || down == nil || ff <= 0 ||
+			!quantGeometryOK(gate, ff, s.dModel) || !quantGeometryOK(up, ff, s.dModel) || !quantGeometryOK(down, s.dModel, ff) {
 			continue
 		}
 		if gd := s.layerGatedDelta(i); gd != nil {
+			if !gatedDeltaQuantServable(gd.w, gd.cfg, s.dModel) {
+				continue
+			}
 			gd.inNorm = bf16VecToF32(L.AttnNormW)
 			gd.ffNorm = bf16VecToF32(L.MLPNormW)
 			gd.ffGate, gd.ffUp, gd.ffDown, gd.dff = gate, up, down, ff
@@ -180,7 +203,9 @@ func (s *archDecodeState) bindQwenFusedDense(layers []QuantizedLayerWeights) {
 		mk := archQuantToModel(ga.k, lkv*lhd, s.dModel)
 		mv := archQuantToModel(ga.v, lkv*lhd, s.dModel)
 		mo := archQuantToModel(ga.o, s.dModel, s.nHeads*lhd)
-		if mq == nil || mk == nil || mv == nil || mo == nil {
+		if mq == nil || mk == nil || mv == nil || mo == nil ||
+			!quantGeometryOK(mq, 2*s.nHeads*lhd, s.dModel) || !quantGeometryOK(mk, lkv*lhd, s.dModel) ||
+			!quantGeometryOK(mv, lkv*lhd, s.dModel) || !quantGeometryOK(mo, s.dModel, s.nHeads*lhd) {
 			continue
 		}
 		ga.inNorm = bf16VecToF32(L.AttnNormW)

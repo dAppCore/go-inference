@@ -35,6 +35,7 @@ func TestComposedLongPromptPrefillAB(t *testing.T) {
 	if dir == "" {
 		dir = composedPrefillABDefaultDir
 	}
+	t.Setenv("LTHN_QWEN_COMPOSED", "1") // this test pins the COMPOSED lane; qwen3_5 defaults to the factory route (#18)
 	if _, err := os.Stat(dir); err != nil {
 		t.Skipf("composed A/B checkpoint absent (%s)", dir)
 	}
