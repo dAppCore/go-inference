@@ -297,6 +297,169 @@ func TestRealLayerProjLoRABackwardF32_PLE(t *testing.T) {
 	})
 }
 
+// TestRealRopeForwardF32_Good pins the reference rope against the PROVEN host rope
+// (ropeForwardF32, the train_backward.go convention the engine's rope kernel was gated against) on
+// the configurations where the two must coincide — full rotary and standard partial rotary (pairs
+// (j, j+rotDim/2), base-derived spectrum) — and pins the proportional GLOBAL pairing (pairs
+// (j, j+headDim/2), spectrum zero-padded past rotDim/2 — rope_freqs.go proportionalRopePeriods)
+// against a hand-derived rotation. Host-pure; the rotation the FD gates then differentiate.
+func TestRealRopeForwardF32_Good(t *testing.T) {
+	const heads, d = 2, 8
+	x := scaleSlice(syntheticFloat32(heads*d, 5), 0.7)
+	for _, pos := range []int{0, 1, 5} {
+		// full rotary: pairHalf = d/2, full base-derived spectrum.
+		got := realRopeForwardF32(x, pos, heads, d, d/2, realRopeInvFreqs(d, 10000), 1)
+		want := ropeForwardF32(x, pos, heads, d, d, 10000)
+		assertFloat32Near(t, "full-rotary rope", got, want, 1e-6)
+
+		// standard partial rotary (the sliding-layer form): rotate the first rotDim dims,
+		// pairs (j, j+rotDim/2) — pairHalf = rotDim/2, spectrum over rotDim.
+		const rotDim = 4
+		got = realRopeForwardF32(x, pos, heads, d, rotDim/2, realRopeInvFreqs(rotDim, 10000), 1)
+		want = ropeForwardF32(x, pos, heads, d, rotDim, 10000)
+		assertFloat32Near(t, "partial-rotary rope", got, want, 1e-6)
+	}
+
+	// proportional pairing (the gemma4 global form): pairs (j, j+d/2) over the WHOLE head with
+	// only the first rotDim/2 pairs rotated — inv-freq base^(−2j/headDim), the exponent over the
+	// FULL head dim (proportionalRopePeriods). Hand-derive pair (0, d/2) at pos 1.
+	const rotDim = 4
+	inv := make([]float32, rotDim/2)
+	for j := range inv {
+		inv[j] = float32(math.Pow(32, -2*float64(j)/float64(d)))
+	}
+	got := realRopeForwardF32(x, 1, heads, d, d/2, inv, 1)
+	for h := range heads {
+		off := h * d
+		// rotated pairs: (0, 4) and (1, 5); dims 2, 3, 6, 7 pass through untouched.
+		for _, j := range []int{2, 3, 6, 7} {
+			if got[off+j] != x[off+j] {
+				t.Fatalf("proportional rope: unrotated dim %d must pass through (head %d)", j, h)
+			}
+		}
+		ang := 1.0 * math.Pow(32, 0) // pair 0: inv-freq 32^0 = 1
+		c, s := float32(math.Cos(ang)), float32(math.Sin(ang))
+		wantA := x[off]*c - x[off+d/2]*s
+		wantB := x[off]*s + x[off+d/2]*c
+		if math.Abs(float64(got[off]-wantA)) > 1e-6 || math.Abs(float64(got[off+d/2]-wantB)) > 1e-6 {
+			t.Fatalf("proportional rope pair (0,%d) head %d: got (%v,%v) want (%v,%v)", d/2, h, got[off], got[off+d/2], wantA, wantB)
+		}
+	}
+
+	// rope position scale: angle = scale·pos·invFreq — scale 0.5 at pos 2 equals scale 1 at pos 1.
+	gotScaled := realRopeForwardF32(x, 2, heads, d, d/2, realRopeInvFreqs(d, 10000), 0.5)
+	want := realRopeForwardF32(x, 1, heads, d, d/2, realRopeInvFreqs(d, 10000), 1)
+	assertFloat32Near(t, "rope position scale", gotScaled, want, 1e-6)
+}
+
+// TestRealLayerProjLoRABackwardF32_RopeVariants is the rung-6a FD gate: the rotation is orthogonal
+// and its backward is the inverse rotation — PROVEN per variant rather than assumed. Each rope
+// shape the engine serves (standard partial — the sliding-layer form; proportional full-head
+// pairing — the gemma4 global form; a non-unit position scale) gets its own FD run over the
+// attention-side targets.
+func TestRealLayerProjLoRABackwardF32_RopeVariants(t *testing.T) {
+	variants := []struct {
+		name string
+		mut  func(L *RealTrainLayerF32)
+	}{
+		{"partial-standard", func(L *RealTrainLayerF32) {
+			// rotate the first 2 of 4 dims: pairHalf 1, spectrum over rotDim 2.
+			L.RopePairHalf = 1
+			L.RopeInvFreq = realRopeInvFreqs(2, 10000)
+		}},
+		{"proportional-global", func(L *RealTrainLayerF32) {
+			// pairs (j, j+d/2) over the whole head, only pair 0 rotated (rotDim/2 = 1 of 2),
+			// exponent over the FULL head dim — the proportionalRopePeriods shape.
+			L.RopePairHalf = L.HeadDim / 2
+			inv := make([]float32, 1)
+			inv[0] = 1 // base^0
+			L.RopeInvFreq = inv
+		}},
+		{"rope-scale", func(L *RealTrainLayerF32) {
+			L.RopeScale = 0.25
+		}},
+	}
+	for _, v := range variants {
+		for _, target := range []string{ProjQ, ProjK, ProjV, ProjO} {
+			t.Run(v.name+"/"+target, func(t *testing.T) {
+				L := tinyRealLayer()
+				v.mut(L)
+				realLayerFDCheck(t, L, target)
+			})
+		}
+	}
+}
+
+// TestRealLayerProjLoRABackwardF32_SlidingWindow is the rung-6b FD gate: a sliding layer attends
+// only the last Window positions (row i sees [max(0, i−Window+1), i] — the ring cache's live
+// window, hostArchQuantReference's first = len−window). The mask changes which probabilities exist
+// at all, so every target's gradient is FD-checked under a window that genuinely bites (T=4,
+// Window=2), and a forward pin proves the mask semantics against a hand-built global/window pair.
+func TestRealLayerProjLoRABackwardF32_SlidingWindow(t *testing.T) {
+	for _, target := range realLayerTargets {
+		t.Run(target, func(t *testing.T) {
+			L := tinyRealLayer()
+			L.T = 4
+			L.Window = 2
+			realLayerFDCheck(t, L, target)
+		})
+	}
+	// mask-semantics pin: with Window=2, row 2 must IGNORE position 0 — its probabilities over
+	// {1,2} renormalise, so the row differs from the global layer's; row 1 (window not yet full)
+	// must MATCH the global layer's row exactly.
+	t.Run("window-semantics", func(t *testing.T) {
+		L := tinyRealLayer()
+		L.T = 3
+		g := hostSDPAProbsF32(scaleSlice(syntheticFloat32(L.T*L.HeadDim, 5), 0.5), scaleSlice(syntheticFloat32(L.T*L.HeadDim, 6), 0.5), L)
+		L.Window = 2
+		w := hostSDPAProbsF32(scaleSlice(syntheticFloat32(L.T*L.HeadDim, 5), 0.5), scaleSlice(syntheticFloat32(L.T*L.HeadDim, 6), 0.5), L)
+		T := L.T
+		if w[2*T+0] != 0 {
+			t.Fatalf("window 2: row 2 must not attend position 0 (got P=%v)", w[2*T+0])
+		}
+		for j := range T {
+			if g[1*T+j] != w[1*T+j] {
+				t.Fatalf("window 2: row 1 (window not yet full) must equal the global row: j=%d %v vs %v", j, g[1*T+j], w[1*T+j])
+			}
+		}
+		if g[2*T+1] == w[2*T+1] {
+			t.Fatal("window 2: row 2 must renormalise over {1,2} and differ from the global row")
+		}
+	})
+}
+
+// TestRealLayerProjLoRABackwardF32_LayerScalar is the rung-6c FD gate: gemma4's per-layer output
+// scalar multiplies the layer's final hidden AFTER the PLE gate (the arch executor's op order);
+// the backward scales the incoming gradient before everything else. FD-checked with a non-trivial
+// scalar; a forward pin proves the placement.
+func TestRealLayerProjLoRABackwardF32_LayerScalar(t *testing.T) {
+	for _, target := range realLayerTargets {
+		t.Run(target, func(t *testing.T) {
+			L := tinyRealLayer()
+			L.LayerScalar = 0.75
+			realLayerFDCheck(t, L, target)
+		})
+	}
+	t.Run("scalar-placement", func(t *testing.T) {
+		L := tinyRealLayer()
+		h := scaleSlice(syntheticFloat32(L.T*L.DModel, 21), 0.5)
+		y1, err := RealLayerForwardF32(h, L)
+		if err != nil {
+			t.Fatalf("forward: %v", err)
+		}
+		L.LayerScalar = 0.75
+		y2, err := RealLayerForwardF32(h, L)
+		if err != nil {
+			t.Fatalf("scaled forward: %v", err)
+		}
+		for i := range y1 {
+			if math.Abs(float64(y2[i]-0.75*y1[i])) > 1e-6 {
+				t.Fatalf("layer scalar must multiply the FINAL hidden: y2[%d]=%v want %v", i, y2[i], 0.75*y1[i])
+			}
+		}
+	})
+}
+
 // TestRealLayerProjLoRABackwardF32_Bad: an unknown target, a nil layer, a wrong-shaped upstream
 // gradient, and a broken geometry are refused before any work.
 func TestRealLayerProjLoRABackwardF32_Bad(t *testing.T) {

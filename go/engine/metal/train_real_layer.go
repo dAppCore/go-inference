@@ -76,6 +76,11 @@ type RealTrainLayerF32 struct {
 	PLEInput     []float32 // [T, PLIDim]
 	PLIDim       int
 
+	// LayerScalar is gemma4's per-layer output scalar (DecodeLayerWeights.LayerScalarW, applied
+	// by the arch executor AFTER the PLE gate): the layer's final hidden is multiplied by it
+	// before the next layer. 0 = absent (multiply by nothing — the executor skips the op).
+	LayerScalar float32
+
 	T, DModel, DFF          int // rows (tokens), hidden, feed-forward width
 	Heads, KVHeads, HeadDim int // GQA head geometry (Heads % KVHeads == 0)
 
@@ -495,6 +500,15 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 			tp.out[i] = tp.h2[i] + pleBranch[i]
 		}
 	}
+
+	// per-layer output scalar (after the PLE gate — the arch executor's op order).
+	if L.LayerScalar != 0 {
+		scaled := make([]float32, T*D)
+		for i := range scaled {
+			scaled[i] = tp.out[i] * L.LayerScalar
+		}
+		tp.out = scaled
+	}
 	return tp, nil
 }
 
@@ -525,9 +539,19 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 	qDim, kvDim := L.Heads*d, L.KVHeads*d
 	g := &realLayerGrads{}
 
-	// PLE gate backward first (the gate is the layer's LAST station): out = h2 + rms(proj(mult)),
-	// so dH2 = dout + the gate-branch VJP. The PLE weights and the per-layer input are FROZEN —
-	// only the flow back to h2 matters (dPli is discarded: the input is a constant of the layer).
+	// layer scalar backward first (it is the OUTERMOST op): out = scalar·y ⇒ dY = scalar·dout.
+	if L.LayerScalar != 0 {
+		scaled := make([]float32, len(dout))
+		for i := range scaled {
+			scaled[i] = dout[i] * L.LayerScalar
+		}
+		dout = scaled
+	}
+
+	// PLE gate backward (the gate is the layer's last station before the scalar): out = h2 +
+	// rms(proj(mult)), so dH2 = dout + the gate-branch VJP. The PLE weights and the per-layer
+	// input are FROZEN — only the flow back to h2 matters (dPli is discarded: the input is a
+	// constant of the layer).
 	dH2 := dout
 	if L.hasPLE() {
 		dPleProj, _, perr := RMSNormBackwardF32(dout, tp.pleProj, L.PLEPostNormW, T, D, L.Eps)
