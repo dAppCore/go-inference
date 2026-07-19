@@ -111,8 +111,8 @@ func BenchmarkAssistantPairGenerateSampledLowAcceptFallback(b *testing.B) {
 		if len(got.Tokens) != maxNew {
 			b.Fatalf("tokens = %d, want %d", len(got.Tokens), maxNew)
 		}
-		if got.DraftCalls != 1 || got.TargetVerifyCalls != 1 {
-			b.Fatalf("draft/verify calls = %d/%d, want one full block before target-cache fallback", got.DraftCalls, got.TargetVerifyCalls)
+		if got.DraftCalls != nativeAssistantLowAcceptPatience || got.TargetVerifyCalls != nativeAssistantLowAcceptPatience {
+			b.Fatalf("draft/verify calls = %d/%d, want %d weak blocks before target-cache fallback", got.DraftCalls, got.TargetVerifyCalls, nativeAssistantLowAcceptPatience)
 		}
 	}
 }

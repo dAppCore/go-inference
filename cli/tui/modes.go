@@ -3,8 +3,7 @@
 package tui
 
 import (
-	"strings"
-
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -42,16 +41,16 @@ func (m modeState) move(delta int) modeState {
 	return m
 }
 
-func (m modeState) view(width int) string {
-	var b strings.Builder
-	b.WriteString(styleTitle.Render("modes") + "\n\n")
+func (m modeState) view(width int, styles uiStyles) string {
+	var b core.Builder
+	b.WriteString(styles.title.Render("modes") + "\n\n")
 	for i, md := range modes {
-		cursor, name := "  ", styleAnswer.Render(md.name)
+		cursor, name := "  ", styles.answer.Render(md.name)
 		if i == m.selected {
-			cursor, name = styleAccent.Render("› "), styleAccent.Render(md.name)
+			cursor, name = styles.accent.Render("› "), styles.accent.Render(md.name)
 		}
-		b.WriteString(cursor + name + "\n    " + styleThought.Render(md.hint) + "\n\n")
+		b.WriteString(cursor + name + "\n    " + styles.thought.Render(md.hint) + "\n\n")
 	}
-	b.WriteString(styleStatus.Render("↑/↓ select — applies to every following turn"))
+	b.WriteString(styles.status.Render("↑/↓ select — applies to every following turn"))
 	return b.String()
 }

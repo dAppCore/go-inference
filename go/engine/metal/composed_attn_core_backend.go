@@ -265,9 +265,9 @@ func AttnCoreDeviceRun(qRaw, k, v, qNormW, kNormW, cacheK, cacheV, out []float32
 // gatedDeltaDeviceState: [capRows, KVH, HD] f32 K and V buffers with cap-doubling growth, primed
 // from the host state once and exported only for snapshots/clones.
 type attnKVDeviceState struct {
-	kBuf, vBuf        *pinnedNoCopyBytes
-	n, capRows        int
-	KVH, HD           int
+	kBuf, vBuf *pinnedNoCopyBytes
+	n, capRows int
+	KVH, HD    int
 }
 
 func (h *attnKVDeviceState) rowBytes() int { return h.KVH * h.HD * 4 }

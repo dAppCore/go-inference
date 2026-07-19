@@ -1,0 +1,707 @@
+// SPDX-License-Identifier: EUPL-1.2
+
+package tui
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference/agent/orchestrator"
+	"dappco.re/go/inference/agent/work"
+	"dappco.re/go/inference/agent/workspace"
+)
+
+// nativeAgentEngine is the reusable orchestration surface consumed at the
+// single private adapter boundary. Bubble Tea code only sees the private
+// request, review, snapshot, and receipt values declared in agentcap.go.
+type nativeAgentEngine interface {
+	Capabilities() []work.Capability
+	Snapshot(context.Context, string) core.Result
+	ReviewProject(context.Context, work.Item) core.Result
+	RegisterProject(context.Context, orchestrator.ProjectReview, bool) core.Result
+	ReviewDispatch(context.Context, work.DispatchRequest) core.Result
+	Dispatch(context.Context, orchestrator.DispatchReview) core.Result
+	Cancel(context.Context, string) core.Result
+	Answer(context.Context, string, string) core.Result
+	Retry(context.Context, work.Item, string) core.Result
+	Resume(context.Context, work.ResumeRequest) core.Result
+	StartQueue(context.Context) core.Result
+	StopQueue(context.Context) core.Result
+	ReviewChanges(context.Context, string) core.Result
+	Accept(context.Context, workspace.AcceptRequest) core.Result
+	Reject(context.Context, string) core.Result
+	Close() core.Result
+}
+
+// nativeChildReviewEngine is optional so the standalone CLI keeps compiling
+// against an older published inference contract while preferring the current
+// fail-closed review/confirm surface when it is available.
+type nativeChildReviewEngine interface {
+	ReviewRetry(context.Context, work.Item, string) core.Result
+	ConfirmRetry(context.Context, any) core.Result
+	ReviewResume(context.Context, work.ResumeRequest) core.Result
+	ConfirmResume(context.Context, any) core.Result
+}
+
+type nativeRecoveryEngine interface {
+	AbandonRecovery(context.Context, string, string) core.Result
+}
+
+type agentChildReviewProjection struct {
+	Action       string
+	RunID        string
+	Provider     string
+	Model        string
+	WorktreePath string
+	Branch       string
+	Warning      string
+	Project      struct{ RepositoryName string }
+	Source       struct{ Path, Branch, Revision string }
+	Detection    struct{ Provider, Executable, Version string }
+	Command      struct{ Receipt string }
+	Queue        struct {
+		Allowed bool
+		Reason  string
+	}
+}
+
+type agentChildReviewPayload struct {
+	Action agentFeature
+	Value  any
+}
+
+type nativeAgentAdapter struct {
+	engine        nativeAgentEngine
+	availability  *agentAvailability
+	closeMu       sync.Mutex
+	closeComplete bool
+	closeResult   core.Result
+}
+
+type agentProjectRegistration struct {
+	Review   orchestrator.ProjectReview
+	Provider string
+	Model    string
+}
+
+func newAgentAdapter(engine nativeAgentEngine) core.Result {
+	return newAgentAdapterWithAvailability(engine, nil)
+}
+
+func newAgentAdapterWithAvailability(engine nativeAgentEngine, availability *agentAvailability) core.Result {
+	if engine == nil {
+		return core.Fail(core.E("tui.newAgentAdapter", "native agent engine is required", nil))
+	}
+	return core.Ok(agentProvider(&nativeAgentAdapter{engine: engine, availability: availability, closeResult: core.Ok(nil)}))
+}
+
+func (adapter *nativeAgentAdapter) Capabilities() []agentCapability {
+	if adapter == nil || adapter.engine == nil {
+		return newUnavailableAgentProvider("native agent engine is unavailable").Capabilities()
+	}
+	reported := make(map[agentFeature]work.Capability)
+	for _, capability := range adapter.engine.Capabilities() {
+		feature := agentFeature(core.Trim(capability.Name))
+		if isNativeAgentFeature(feature) {
+			reported[feature] = capability
+		}
+	}
+	catalog := agentFeatureCatalog("")
+	for index := range catalog {
+		feature := catalog[index].Feature
+		if capability, ok := reported[feature]; ok {
+			catalog[index].Available = capability.Available
+			catalog[index].Reason = core.Trim(capability.Reason)
+			if feature == agentFeatureRecoveryAbandon {
+				if _, supported := adapter.engine.(nativeRecoveryEngine); !supported {
+					catalog[index].Available = false
+					catalog[index].Reason = "native agent engine does not support retained recovery cleanup"
+				}
+			}
+			if !catalog[index].Available && catalog[index].Reason == "" {
+				catalog[index].Reason = "native agent engine reports this capability unavailable"
+			}
+			if reason := adapter.availability.reason(feature); reason != "" {
+				catalog[index].Available = false
+				catalog[index].Reason = reason
+			}
+			continue
+		}
+		if isNativeAgentFeature(feature) {
+			catalog[index].Reason = "native agent engine does not report this capability"
+			continue
+		}
+		catalog[index].Reason = futureAgentFeatureReason(feature)
+	}
+	return catalog
+}
+
+func isNativeAgentFeature(feature agentFeature) bool {
+	switch feature {
+	case agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry,
+		agentFeatureResume, agentFeatureQueueStart, agentFeatureQueueStop,
+		agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject, agentFeatureRecoveryAbandon:
+		return true
+	default:
+		return false
+	}
+}
+
+func futureAgentFeatureReason(feature agentFeature) string {
+	reasons := map[agentFeature]string{
+		agentFeatureSetup:         "project setup is performed through reviewed dispatch registration",
+		agentFeatureProvider:      "provider policy is configured in agents.yaml",
+		agentFeatureTemplate:      "agent templates are not part of the native execution slice",
+		agentFeaturePlan:          "agent planning is not part of the native execution slice",
+		agentFeatureSession:       "agent sessions are not part of the native execution slice",
+		agentFeatureHandoff:       "agent handoff is not part of the native execution slice",
+		agentFeatureScan:          "agent scanning is not part of the native execution slice",
+		agentFeatureAudit:         "agent audit is not part of the native execution slice",
+		agentFeaturePipeline:      "agent pipelines are not part of the native execution slice",
+		agentFeatureMonitor:       "agent monitoring is not part of the native execution slice",
+		agentFeatureHarvest:       "agent harvesting is not part of the native execution slice",
+		agentFeatureBrainRecall:   "Brain recall is not connected to the native execution slice",
+		agentFeatureBrainRemember: "Brain memory is not connected to the native execution slice",
+		agentFeatureMessage:       "agent messaging is not part of the native execution slice",
+		agentFeatureFleet:         "agent fleet controls are not part of the native execution slice",
+		agentFeatureForge:         "Forge controls are not part of the native execution slice",
+		agentFeatureRemote:        "remote agents are not part of the native execution slice",
+		agentFeatureQA:            "standalone QA is represented by reviewed validation commands",
+		agentFeatureReview:        "generic review is represented by Review Changes",
+		agentFeaturePRCreate:      "pull-request creation is not part of the native execution slice",
+		agentFeaturePRMerge:       "pull-request merging is not part of the native execution slice",
+	}
+	if reason := reasons[feature]; reason != "" {
+		return reason
+	}
+	return "capability is not part of the native execution slice"
+}
+
+func (adapter *nativeAgentAdapter) Snapshot(ctx context.Context) core.Result {
+	if adapter == nil || adapter.engine == nil {
+		return core.Fail(core.E("tui.agentAdapter.Snapshot", "native agent engine is unavailable", nil))
+	}
+	result := adapter.engine.Snapshot(ctx, "")
+	if !result.OK {
+		return result
+	}
+	snapshot, ok := result.Value.(work.Snapshot)
+	if !ok {
+		return core.Fail(core.E("tui.agentAdapter.Snapshot", core.Sprintf("native agent snapshot has type %T", result.Value), nil))
+	}
+	return core.Ok(mapAgentSnapshot(snapshot))
+}
+
+func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
+	mapped := agentSnapshot{
+		Work:   make([]agentWorkSnapshot, 0, len(snapshot.Projects)+len(snapshot.Runs)),
+		Events: make([]agentEventSnapshot, 0, len(snapshot.Events)+len(snapshot.Logs)+len(snapshot.Questions)),
+	}
+	mapped.QueueStatus, mapped.QueueReason = string(snapshot.Queue.Status), snapshot.Queue.Reason
+	workIndex := make(map[string]int)
+	projects := make(map[string]work.Project, len(snapshot.Projects))
+	for _, project := range snapshot.Projects {
+		projects[project.ID] = project
+	}
+	runWork := make(map[string]string, len(snapshot.Runs))
+	runs := make(map[string]work.Run, len(snapshot.Runs))
+	for _, run := range snapshot.Runs {
+		runWork[run.ID] = run.WorkID
+		runs[run.ID] = run
+		index, exists := workIndex[run.WorkID]
+		if !exists {
+			index = len(mapped.Work)
+			workIndex[run.WorkID] = index
+			mapped.Work = append(mapped.Work, agentWorkSnapshot{ExternalID: run.WorkID, Title: run.WorkID})
+		}
+		item := &mapped.Work[index]
+		project := projects[run.ProjectID]
+		if item.Repo == "" {
+			item.Repo = project.SourcePath
+		}
+		if item.Branch == "" {
+			item.Branch = project.SourceBranch
+		}
+		if run.Branch != "" {
+			item.Branch = run.Branch
+		}
+		item.Status = string(run.Status)
+		item.NativeRunID = run.ID
+		item.Agent = run.Provider
+		item.Runtime = run.Model
+	}
+	pendingRecoveries := make(map[agentRecoveryReceipt]agentPendingRecovery)
+	pendingRecoveryTimes := make(map[agentRecoveryReceipt]time.Time)
+	recoveryAliases := make(map[string]agentRecoveryReceipt)
+	for _, event := range snapshot.Events {
+		workID := event.WorkID
+		if workID == "" {
+			workID = runWork[event.RunID]
+		}
+		if event.Kind == "answered" {
+			var projection agentAnswerProjection
+			decoded := core.JSONUnmarshalString(event.DetailJSON, &projection)
+			if index, exists := workIndex[workID]; decoded.OK && exists && mapped.Work[index].NativeRunID == event.RunID &&
+				projection.AnswerID != "" && projection.QuestionID != "" && projection.ResumeRunID != "" {
+				mapped.Work[index].AnswerID = projection.AnswerID
+				mapped.Work[index].ResumeRunID = projection.ResumeRunID
+			}
+		}
+		if recovery, available := mapRetainedAgentRecovery(event, runs); available {
+			recoveryAliases[recovery.EventID] = recovery.Receipt
+			createdAt, exists := pendingRecoveryTimes[recovery.Receipt]
+			canonical := pendingRecoveries[recovery.Receipt]
+			if !exists || event.CreatedAt.Before(createdAt) || event.CreatedAt.Equal(createdAt) && recovery.EventID < canonical.EventID {
+				pendingRecoveries[recovery.Receipt] = recovery
+				pendingRecoveryTimes[recovery.Receipt] = event.CreatedAt
+			}
+		}
+		mapped.Events = append(mapped.Events, agentEventSnapshot{
+			ExternalID: event.ID, WorkID: workID, RunID: event.RunID, Kind: event.Kind,
+			Title: event.Title, Detail: event.Detail, CreatedAt: event.CreatedAt,
+		})
+	}
+	for _, event := range snapshot.Events {
+		outcome, succeeded, available := mapAgentRecoveryOutcome(event)
+		if !available {
+			continue
+		}
+		receipt, exists := recoveryAliases[outcome.RecoveryEventID]
+		if !exists || receipt != outcome.Receipt || event.RunID != outcome.Receipt.RunID || event.WorkID != outcome.Receipt.WorkID {
+			continue
+		}
+		if succeeded && (event.Detail != receipt.Worktree || outcome.Error != "") {
+			continue
+		}
+		if succeeded {
+			delete(pendingRecoveries, receipt)
+		}
+	}
+	orderedRecoveries := make([]agentPendingRecovery, 0, len(pendingRecoveries))
+	for _, recovery := range pendingRecoveries {
+		orderedRecoveries = append(orderedRecoveries, recovery)
+	}
+	core.SliceSortFunc(orderedRecoveries, func(left, right agentPendingRecovery) bool {
+		return left.EventID < right.EventID
+	})
+	for _, recovery := range orderedRecoveries {
+		if index, exists := workIndex[recovery.Receipt.WorkID]; exists {
+			mapped.Work[index].RecoveryCount++
+			if mapped.Work[index].Recovery.EventID == "" {
+				mapped.Work[index].Recovery = recovery
+			}
+		}
+	}
+	for _, log := range snapshot.Logs {
+		mapped.Events = append(mapped.Events, agentEventSnapshot{
+			ExternalID: core.Sprintf("log:%s:%d", log.RunID, log.Sequence),
+			WorkID:     runWork[log.RunID], RunID: log.RunID, Sequence: log.Sequence, Stream: log.Stream,
+			Kind:      core.Concat("log.", core.Lower(core.Trim(log.Stream))),
+			Title:     core.Concat(core.Upper(core.Trim(log.Stream)), " output"),
+			Detail:    log.Text,
+			CreatedAt: log.CreatedAt,
+		})
+	}
+	for _, question := range snapshot.Questions {
+		workID := runWork[question.RunID]
+		mapped.Events = append(mapped.Events, agentEventSnapshot{
+			ExternalID: question.ID, WorkID: workID, RunID: question.RunID, Kind: "question",
+			Title: "Agent question", Detail: question.Text, CreatedAt: question.CreatedAt,
+		})
+		index, exists := workIndex[workID]
+		if !exists || mapped.Work[index].NativeRunID != question.RunID {
+			continue
+		}
+		mapped.Work[index].Question = question.Text
+		mapped.Work[index].QuestionID = question.ID
+	}
+	for _, acceptance := range snapshot.Acceptances {
+		if index, exists := workIndex[acceptance.WorkID]; exists && mapped.Work[index].NativeRunID == acceptance.RunID {
+			mapped.Work[index].ReviewID, mapped.Work[index].ReviewStatus = acceptance.ID, acceptance.Status
+			var review workspace.ChangeReview
+			if decoded := core.JSONUnmarshalString(acceptance.ValidationJSON, &review); decoded.OK {
+				allowed := len(review.Conflicts) == 0
+				for _, validation := range review.Validation {
+					if !validation.Passed {
+						allowed = false
+					}
+				}
+				mapped.Work[index].Review = mapChangeReview(review, allowed)
+			}
+		}
+	}
+	sortAgentEvents(mapped.Events)
+	return mapped
+}
+
+func mapRetainedAgentRecovery(event work.Event, runs map[string]work.Run) (agentPendingRecovery, bool) {
+	if event.Kind != "workspace_cleanup_retained" && event.Kind != "review_cleanup_retained" {
+		return agentPendingRecovery{}, false
+	}
+	var receipt agentRecoveryReceipt
+	decoded := core.JSONUnmarshalString(event.DetailJSON, &receipt)
+	if !decoded.OK || core.Trim(event.ID) == "" || receipt.RunID != event.RunID || receipt.WorkID != event.WorkID ||
+		core.Trim(receipt.ProjectID) == "" || core.Trim(receipt.Branch) == "" || core.Trim(receipt.Worktree) == "" {
+		return agentPendingRecovery{}, false
+	}
+	run, exists := runs[receipt.RunID]
+	if !exists || run.WorkID != receipt.WorkID || run.ProjectID != receipt.ProjectID || run.Number != receipt.RunNumber {
+		return agentPendingRecovery{}, false
+	}
+	if receipt.Kind == "run" {
+		if event.Kind != "workspace_cleanup_retained" || receipt.ReviewID != "" || core.Trim(receipt.WorkspaceRunID) == "" {
+			return agentPendingRecovery{}, false
+		}
+	} else if receipt.Kind == "review" {
+		if event.Kind != "review_cleanup_retained" || core.Trim(receipt.ReviewID) == "" || receipt.WorkspaceRunID != "" {
+			return agentPendingRecovery{}, false
+		}
+	} else {
+		return agentPendingRecovery{}, false
+	}
+	return agentPendingRecovery{EventID: event.ID, Receipt: receipt}, true
+}
+
+func mapAgentRecoveryOutcome(event work.Event) (agentRecoveryOutcome, bool, bool) {
+	succeeded := event.Kind == "cleanup_recovery_succeeded"
+	if !succeeded && event.Kind != "cleanup_recovery_failed" {
+		return agentRecoveryOutcome{}, false, false
+	}
+	var outcome agentRecoveryOutcome
+	decoded := core.JSONUnmarshalString(event.DetailJSON, &outcome)
+	if !decoded.OK || core.Trim(outcome.RecoveryEventID) == "" {
+		return agentRecoveryOutcome{}, false, false
+	}
+	return outcome, succeeded, true
+}
+
+func mapChangeReview(review workspace.ChangeReview, allowed bool) agentReview {
+	warning := "Accept applies the reviewed result to the source only after explicit final confirmation."
+	if len(review.Conflicts) > 0 {
+		warning = "Integration conflicts must be resolved by a later reviewed attempt; the source remains unchanged."
+	} else if !allowed {
+		warning = "At least one validation failed; the source remains unchanged until a later reviewed attempt passes."
+	} else if len(review.Validation) == 0 {
+		warning = "No validation command is configured; acceptance requires explicit acknowledgement."
+	}
+	return agentReview{Feature: agentFeatureChangesReview, Title: "Review agent changes", Body: renderAgentChangeReview(review), Warning: warning, ConfirmRequired: true, NeedsAcknowledgement: len(review.Validation) == 0, AcceptanceAllowed: allowed, Payload: review}
+}
+
+func firstAgentText(values ...string) string {
+	if value := firstNonEmptyAgentText(values...); value != "" {
+		return value
+	}
+	return "Agent work"
+}
+
+func firstNonEmptyAgentText(values ...string) string {
+	for _, value := range values {
+		if value = core.Trim(value); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func (adapter *nativeAgentAdapter) Review(ctx context.Context, request agentReviewRequest) core.Result {
+	if adapter == nil || adapter.engine == nil {
+		return core.Fail(core.E("tui.agentAdapter.Review", "native agent engine is unavailable", nil))
+	}
+	switch request.Feature {
+	case agentFeatureDispatch:
+		item := nativeWorkItem(request.Work, request.WorkID, request.Input)
+		reviewResult := adapter.engine.ReviewProject(ctx, item)
+		if !reviewResult.OK {
+			return reviewResult
+		}
+		review, ok := reviewResult.Value.(orchestrator.ProjectReview)
+		if !ok {
+			return core.Fail(core.E("tui.agentAdapter.Review", core.Sprintf("project review has type %T", reviewResult.Value), nil))
+		}
+		warning := "Registering starts the private Git service and seeds an internal repository."
+		if review.RequiresGitEnable {
+			warning = "This directory is not a Git repository. Enabling Git requires a separate explicit confirmation before private registration."
+		}
+		return core.Ok(agentReview{
+			Feature: agentFeatureDispatch, Title: "Review project registration",
+			Body: core.Sprintf("Source: %s\nBranch: %s\nRevision: %s\nPrivate repository: %s\nIncluded files: %d",
+				review.Source.Path, review.Source.Branch, review.Source.Revision, review.RepositoryName, len(review.Source.Included)),
+			Warning: warning, ConfirmRequired: true, GitConfirmRequired: review.RequiresGitEnable,
+			Payload: agentProjectRegistration{Review: review, Provider: request.Provider, Model: request.Model},
+		})
+	case agentFeatureChangesReview:
+		reviewResult := adapter.engine.ReviewChanges(ctx, request.WorkID)
+		if !reviewResult.OK {
+			return reviewResult
+		}
+		review, ok := reviewResult.Value.(workspace.ChangeReview)
+		if !ok {
+			return core.Fail(core.E("tui.agentAdapter.Review", core.Sprintf("change review has type %T", reviewResult.Value), nil))
+		}
+		allowed := len(review.Conflicts) == 0
+		for _, validation := range review.Validation {
+			if !validation.Passed {
+				allowed = false
+			}
+		}
+		return core.Ok(mapChangeReview(review, allowed))
+	case agentFeatureRetry, agentFeatureResume:
+		children, ok := adapter.engine.(nativeChildReviewEngine)
+		if !ok {
+			return core.Fail(core.E("tui.agentAdapter.Review", "native agent engine does not support reviewed child launches", nil))
+		}
+		var reviewed core.Result
+		item := nativeWorkItem(request.Work, request.Work.ID, "")
+		action := agentFeatureResume
+		if request.Feature == agentFeatureRetry || core.Trim(request.Input) == "" {
+			action = agentFeatureRetry
+			reviewed = children.ReviewRetry(ctx, item, request.WorkID)
+		} else {
+			reviewed = children.ReviewResume(ctx, work.ResumeRequest{
+				Work: item, ParentRunID: request.WorkID, AnswerID: request.Input,
+				Provider: request.Provider, Model: request.Model,
+			})
+		}
+		if !reviewed.OK {
+			return reviewed
+		}
+		return mapChildLaunchReview(request.Feature, action, reviewed.Value)
+	case agentFeatureRecoveryAbandon:
+		recovery := request.Recovery
+		if recovery.EventID == "" || recovery.Receipt.RunID == "" || recovery.Receipt.WorkID != request.WorkID {
+			return core.Fail(core.E("tui.agentAdapter.Review", "retained recovery receipt is incomplete", nil))
+		}
+		return core.Ok(agentReview{
+			Feature: agentFeatureRecoveryAbandon, Title: "Abandon retained recovery",
+			Body: core.Sprintf("Recovery event: %s\nRun: %s (#%d)\nWorkspace owner: %s\nKind: %s\nBranch: %s\nWorktree: %s",
+				recovery.EventID, recovery.Receipt.RunID, recovery.Receipt.RunNumber, recovery.Receipt.WorkspaceRunID,
+				recovery.Receipt.Kind, recovery.Receipt.Branch, recovery.Receipt.Worktree),
+			Warning:         "Confirmation retries verified cleanup of only this retained internal worktree and generated branch.",
+			ConfirmRequired: true, Payload: recovery,
+		})
+	default:
+		return core.Fail(core.E("tui.agentAdapter.Review", core.Concat("agent feature does not support review: ", string(request.Feature)), nil))
+	}
+}
+
+func renderAgentChangeReview(review workspace.ChangeReview) string {
+	builder := core.NewBuilder()
+	builder.WriteString(core.Sprintf("Source branch: %s\nSource revision: %s\nAgent base: %s\nAgent tip: %s\nResult revision: %s\nIntegration: %s\n\nCommits:\n%s\n\nDiff:\n%s\n\nValidation:\n", review.SourceBranch, review.SourceRevision, review.AgentBase, review.AgentTip, review.ResultRevision, review.IntegrationPath, review.CommitLog, review.Diff))
+	if len(review.Validation) == 0 {
+		builder.WriteString("No validation command configured\n")
+	}
+	for _, validation := range review.Validation {
+		status := "FAILED"
+		if validation.Passed {
+			status = "PASSED"
+		}
+		builder.WriteString(core.Sprintf("%s  %s %s  receipt: %s\n%s\n", status, validation.Command.Executable, core.Join(" ", validation.Command.Args...), validation.Receipt, validation.Output))
+	}
+	builder.WriteString("Conflicts:\n")
+	if len(review.Conflicts) == 0 {
+		builder.WriteString("none\n")
+	}
+	for _, conflict := range review.Conflicts {
+		builder.WriteString(conflict + "\n")
+	}
+	return builder.String()
+}
+
+func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest) core.Result {
+	if adapter == nil || adapter.engine == nil {
+		return core.Fail(core.E("tui.agentAdapter.Run", "native agent engine is unavailable", nil))
+	}
+	var result core.Result
+	runID := firstNonEmptyAgentText(request.RunID, request.WorkID)
+	switch request.Feature {
+	case agentFeatureDispatch:
+		return adapter.runDispatch(ctx, request)
+	case agentFeatureCancel:
+		result = adapter.engine.Cancel(ctx, runID)
+	case agentFeatureAnswer:
+		result = adapter.engine.Answer(ctx, runID, request.Input)
+	case agentFeatureRetry:
+		children, ok := adapter.engine.(nativeChildReviewEngine)
+		payload, payloadOK := request.Review.Payload.(agentChildReviewPayload)
+		if !ok || !payloadOK || payload.Action != agentFeatureRetry || !request.Confirmed || request.Review.Feature != agentFeatureRetry || payload.Value == nil {
+			return core.Fail(core.E("tui.agentAdapter.Run", "retry requires an explicitly confirmed child launch review", nil))
+		}
+		result = children.ConfirmRetry(ctx, payload.Value)
+	case agentFeatureResume:
+		children, ok := adapter.engine.(nativeChildReviewEngine)
+		payload, payloadOK := request.Review.Payload.(agentChildReviewPayload)
+		if !ok || !payloadOK || !request.Confirmed || request.Review.Feature != agentFeatureResume || payload.Value == nil {
+			return core.Fail(core.E("tui.agentAdapter.Run", "resume requires an explicitly confirmed child launch review", nil))
+		}
+		if payload.Action == agentFeatureRetry {
+			result = children.ConfirmRetry(ctx, payload.Value)
+		} else if payload.Action == agentFeatureResume {
+			result = children.ConfirmResume(ctx, payload.Value)
+		} else {
+			return core.Fail(core.E("tui.agentAdapter.Run", "resume child review has an invalid continuation action", nil))
+		}
+	case agentFeatureQueueStart:
+		result = adapter.engine.StartQueue(ctx)
+	case agentFeatureQueueStop:
+		result = adapter.engine.StopQueue(ctx)
+	case agentFeatureAccept:
+		review, ok := request.Review.Payload.(workspace.ChangeReview)
+		if !ok || request.Review.Feature != agentFeatureChangesReview {
+			return core.Fail(core.E("tui.agentAdapter.Run", "accept requires a reviewed change receipt", nil))
+		}
+		result = adapter.engine.Accept(ctx, workspace.AcceptRequest{Review: review, Confirmed: request.Confirmed})
+	case agentFeatureReject:
+		result = adapter.engine.Reject(ctx, runID)
+	case agentFeatureRecoveryAbandon:
+		recoveryEngine, supported := adapter.engine.(nativeRecoveryEngine)
+		recovery, payloadOK := request.Review.Payload.(agentPendingRecovery)
+		if !supported || !payloadOK || !request.Confirmed || request.Review.Feature != agentFeatureRecoveryAbandon ||
+			recovery != request.Recovery || recovery.EventID == "" || recovery.Receipt.RunID != runID {
+			return core.Fail(core.E("tui.agentAdapter.Run", "retained recovery cleanup requires an explicitly confirmed current receipt", nil))
+		}
+		result = recoveryEngine.AbandonRecovery(ctx, recovery.Receipt.RunID, recovery.EventID)
+	default:
+		return core.Fail(core.E("tui.agentAdapter.Run", core.Concat("unsupported native agent action: ", string(request.Feature)), nil))
+	}
+	return privateAgentReceipt(request, result)
+}
+
+func mapChildLaunchReview(feature, action agentFeature, payload any) core.Result {
+	var review agentChildReviewProjection
+	decoded := core.JSONUnmarshalString(core.JSONMarshalString(payload), &review)
+	if !decoded.OK || review.Action != string(action) || review.RunID == "" || review.Command.Receipt == "" {
+		return core.Fail(core.E("tui.mapChildLaunchReview", "native child review is incomplete", decoded.Err()))
+	}
+	queueStatus := "ready for admission"
+	if reason := core.Trim(review.Queue.Reason); reason != "" {
+		queueStatus = reason
+	}
+	title := "Review native retry launch"
+	if feature == agentFeatureResume {
+		title = "Review native resume launch"
+	}
+	return core.Ok(agentReview{
+		Feature: feature, Title: title,
+		Body: core.Sprintf("Provider: %s\nModel: %s\nCommand: %s\nSource: %s\nBranch: %s\nRevision: %s\nPrivate repository: %s\nWorktree: %s\nQueue: %s\nParent branch: %s\nChild run: %s",
+			review.Provider, review.Model, review.Command.Receipt, review.Source.Path, review.Source.Branch,
+			review.Source.Revision, review.Project.RepositoryName, review.WorktreePath, queueStatus,
+			review.Branch, review.RunID),
+		Warning: review.Warning, ConfirmRequired: true, Payload: agentChildReviewPayload{Action: action, Value: payload},
+	})
+}
+
+func (adapter *nativeAgentAdapter) runDispatch(ctx context.Context, request agentRequest) core.Result {
+	switch payload := request.Review.Payload.(type) {
+	case agentProjectRegistration:
+		if !request.Confirmed {
+			return core.Fail(core.E("tui.agentAdapter.Run", "project registration requires explicit confirmation", nil))
+		}
+		if payload.Review.RequiresGitEnable != request.EnableGit {
+			if payload.Review.RequiresGitEnable {
+				return core.Fail(core.E("tui.agentAdapter.Run", "project registration requires separate Git enable confirmation", nil))
+			}
+			return core.Fail(core.E("tui.agentAdapter.Run", "Git enable confirmation is invalid for an existing repository", nil))
+		}
+		registered := adapter.engine.RegisterProject(ctx, payload.Review, true)
+		if !registered.OK {
+			return registered
+		}
+		project, ok := registered.Value.(work.Project)
+		if !ok {
+			return core.Fail(core.E("tui.agentAdapter.Run", core.Sprintf("registered project has type %T", registered.Value), nil))
+		}
+		dispatchResult := adapter.engine.ReviewDispatch(ctx, work.DispatchRequest{
+			Work: payload.Review.Work, Provider: payload.Provider, Model: payload.Model,
+			ConfirmedSourceRevision: project.SourceRevision,
+		})
+		if !dispatchResult.OK {
+			return dispatchResult
+		}
+		dispatch, ok := dispatchResult.Value.(orchestrator.DispatchReview)
+		if !ok {
+			return core.Fail(core.E("tui.agentAdapter.Run", core.Sprintf("dispatch review has type %T", dispatchResult.Value), nil))
+		}
+		return core.Ok(mapDispatchReview(dispatch))
+	case orchestrator.DispatchReview:
+		if !request.Confirmed {
+			return core.Fail(core.E("tui.agentAdapter.Run", "dispatch requires explicit launch confirmation", nil))
+		}
+		return privateAgentReceipt(request, adapter.engine.Dispatch(ctx, payload))
+	default:
+		return core.Fail(core.E("tui.agentAdapter.Run", "dispatch requires a current reviewed receipt", nil))
+	}
+}
+
+func mapDispatchReview(review orchestrator.DispatchReview) agentReview {
+	queueStatus := "ready for admission"
+	if reason := core.Trim(review.Queue.Reason); reason != "" {
+		queueStatus = reason
+	}
+	return agentReview{
+		Feature: agentFeatureDispatch, Title: "Review native agent launch",
+		Body: core.Sprintf("Provider: %s\nModel: %s\nCommand: %s\nSource: %s\nBranch: %s\nRevision: %s\nPrivate repository: %s\nWorktree: %s\nQueue: %s",
+			review.Request.Provider, review.Request.Model, review.Command.Receipt, review.Source.Path,
+			review.Source.Branch, review.Source.Revision, review.Project.RepositoryName, review.WorktreePath, queueStatus),
+		Warning: review.Warning, ConfirmRequired: true, Payload: review,
+	}
+}
+
+func nativeWorkItem(request agentWorkRequest, fallbackID, fallbackInput string) work.Item {
+	id := firstNonEmptyAgentText(request.ID, request.ExternalID, fallbackID)
+	title := firstNonEmptyAgentText(request.Title, id)
+	task := core.Trim(request.Task)
+	repository := firstNonEmptyAgentText(request.Repository, fallbackInput)
+	return work.Item{ID: id, ExternalID: request.ExternalID, Title: title, Task: task, Repository: repository}
+}
+
+func privateAgentReceipt(request agentRequest, result core.Result) core.Result {
+	if !result.OK {
+		return result
+	}
+	receipt := agentActionReceipt{Feature: request.Feature, WorkID: request.WorkID}
+	switch value := result.Value.(type) {
+	case work.Run:
+		receipt.WorkID = value.WorkID
+		receipt.RunID = value.ID
+		receipt.Status = string(value.Status)
+	case work.Answer:
+		receipt.RunID = value.ResumeRunID
+		receipt.Status = "answered"
+		receipt.Detail = value.ID
+	case work.QueueState:
+		receipt.Status = string(value.Status)
+		receipt.Detail = value.Reason
+	case work.Acceptance:
+		receipt.WorkID = value.WorkID
+		receipt.RunID = value.RunID
+		receipt.Status = value.Status
+	case work.Event:
+		receipt.RunID = value.RunID
+		receipt.Status = value.Kind
+		receipt.Detail = value.Detail
+	case nil:
+		receipt.Status = "completed"
+	default:
+		receipt.Status = "completed"
+		receipt.Detail = core.Sprintf("%v", value)
+	}
+	return core.Ok(receipt)
+}
+
+func (adapter *nativeAgentAdapter) Close() core.Result {
+	if adapter == nil {
+		return core.Ok(nil)
+	}
+	adapter.closeMu.Lock()
+	defer adapter.closeMu.Unlock()
+	if adapter.closeComplete {
+		return adapter.closeResult
+	}
+	if adapter.engine != nil {
+		adapter.closeResult = adapter.engine.Close()
+	}
+	adapter.closeComplete = adapter.closeResult.OK
+	return adapter.closeResult
+}

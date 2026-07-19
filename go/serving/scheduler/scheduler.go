@@ -796,6 +796,8 @@ func (m *Model) run(j *job) {
 		} else {
 			m.setErr(core.NewError(r.Error()))
 		}
+	} else {
+		m.clearErr()
 	}
 	m.completed.Add(1)
 	m.emitProbe(j, "complete", queueLatency, 0, false)
@@ -872,6 +874,15 @@ func (m *Model) setErr(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastErr = err
+}
+
+func (m *Model) clearErr() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.lastErr = nil
+	m.mu.Unlock()
 }
 
 func (m *Model) nextRequestID() string {

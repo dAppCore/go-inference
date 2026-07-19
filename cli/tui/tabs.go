@@ -3,73 +3,67 @@
 package tui
 
 import (
-	"strings"
-
 	"github.com/charmbracelet/lipgloss"
+
+	core "dappco.re/go"
 )
 
-// The tab bar follows the bubbletea tabs example: joined bordered boxes with
-// the active tab's bottom border opened into the content pane.
-
-type tabID int
+type panelID uint8
 
 const (
-	tabChat tabID = iota
-	tabModels
-	tabService
-	tabSettings
-	tabTools
-	tabModes
-	tabCount
+	panelChat panelID = iota
+	panelWork
+	panelModels
+	panelService
+	panelCount
 )
 
-var tabNames = [tabCount]string{"Chat", "Models", "Service", "Settings", "Tools", "Modes"}
+var panelNames = [panelCount]string{"Chat", "Work", "Models", "Service"}
+var compactPanelNames = [panelCount]string{"Chat", "Work", "Models", "API"}
 
-func tabBorder(left, middle, right string) lipgloss.Border {
-	b := lipgloss.RoundedBorder()
-	b.BottomLeft, b.Bottom, b.BottomRight = left, middle, right
-	return b
-}
+func (panel panelID) next() panelID { return (panel + 1) % panelCount }
+func (panel panelID) prev() panelID { return (panel + panelCount - 1) % panelCount }
 
-var (
-	inactiveTabBorder = tabBorder("┴", "─", "┴")
-	activeTabBorder   = tabBorder("┘", " ", "└")
-	inactiveTabStyle  = lipgloss.NewStyle().Border(inactiveTabBorder, true).
-				BorderForeground(lipgloss.Color("238")).
-				Foreground(lipgloss.Color("245")).Padding(0, 1)
-	activeTabStyle = inactiveTabStyle.
-			Border(activeTabBorder, true).
-			BorderForeground(lipgloss.Color("109")).
-			Foreground(lipgloss.Color("252")).Bold(true)
-	tabGapStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-)
-
-// renderTabBar draws the header row, padding the gap to width with the open
-// bottom rule so the bar reads as the top of the content frame.
-func renderTabBar(active tabID, width int) string {
-	var rendered []string
-	for i := tabID(0); i < tabCount; i++ {
-		if i == active {
-			rendered = append(rendered, activeTabStyle.Render(tabNames[i]))
+// renderPanelBar draws brand and navigation as one stable header. Compact
+// labels preserve all four destinations without squeezing or clipping.
+func renderPanelBar(active panelID, width int, kind layoutKind, styles uiStyles) string {
+	if width <= 0 {
+		return ""
+	}
+	names := panelNames
+	if kind == layoutNarrow {
+		names = compactPanelNames
+	}
+	items := make([]string, 0, panelCount+1)
+	items = append(items, styles.brand.Render("LEM"))
+	for panel := panelID(0); panel < panelCount; panel++ {
+		label := names[panel]
+		if panel == active {
+			items = append(items, styles.navActive.Render("● "+label))
 		} else {
-			rendered = append(rendered, inactiveTabStyle.Render(tabNames[i]))
+			items = append(items, styles.navInactive.Render("○ "+label))
 		}
 	}
-	row := lipgloss.JoinHorizontal(lipgloss.Bottom, rendered...)
-	if gap := width - lipgloss.Width(row); gap > 0 {
-		rule := strings.Repeat("─", gap)
-		pad := strings.Repeat("\n", max(0, lipgloss.Height(row)-1))
-		row = lipgloss.JoinHorizontal(lipgloss.Bottom, row, tabGapStyle.Render(pad+rule))
-	}
-	return row
+	return fitLine(lipgloss.JoinHorizontal(lipgloss.Center, intersperse(items, "  ")...), width, styles.header)
 }
 
-func (t tabID) next() tabID { return (t + 1) % tabCount }
-func (t tabID) prev() tabID { return (t + tabCount - 1) % tabCount }
-
-func max(a, b int) int {
-	if a > b {
-		return a
+func intersperse(items []string, separator string) []string {
+	if len(items) < 2 {
+		return items
 	}
-	return b
+	result := make([]string, 0, len(items)*2-1)
+	for i, item := range items {
+		if i > 0 {
+			result = append(result, separator)
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+func (panel panelID) String() string {
+	if panel >= panelCount {
+		return "Unknown"
+	}
+	return core.Lower(panelNames[panel])
 }

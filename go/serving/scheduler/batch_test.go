@@ -221,6 +221,79 @@ func TestBatch_Cancel_Active(t *testing.T) {
 	waitStats(t, e.stats, func(s Stats) bool { return s.Cancelled == 1 && s.Active == 0 })
 }
 
+func TestBatch_cancel_BackpressuredActive_Ugly(t *testing.T) {
+	e := newBatchEngine(nil, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 0})
+	defer e.close()
+	produced := make(chan int, 2)
+	src := func(ctx context.Context) stream {
+		return func(yield func(inference.Token) bool) {
+			for index := 0; ; index++ {
+				select {
+				case <-ctx.Done():
+					return
+				case produced <- index:
+				}
+				if !yield(inference.Token{Text: strconv.Itoa(index)}) {
+					return
+				}
+			}
+		}
+	}
+	ch := submitReq(t, e, "backpressured", 1, 0, src)
+	<-produced
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("first token did not arrive")
+	}
+	<-produced // the coordinator is now driving the next undrained token
+
+	cancelled := make(chan struct{})
+	go func() {
+		e.cancel("backpressured")
+		close(cancelled)
+	}()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("cancel blocked behind the request's full output channel")
+	}
+	drainScheduled(t, ch)
+}
+
+func TestBatch_cancel_OtherBackpressuredRequest_Ugly(t *testing.T) {
+	e := newBatchEngine(nil, Config{MaxConcurrent: 1, MaxQueue: 2, StreamBuffer: 0})
+	defer e.close()
+
+	produced := make(chan struct{})
+	submitReq(t, e, "active", 1, 0, func(context.Context) stream {
+		return func(yield func(inference.Token) bool) {
+			close(produced)
+			yield(inference.Token{Text: "blocked"})
+		}
+	})
+	<-produced // the coordinator is entering an undrained delivery for active
+
+	targetContext, targetCancel := context.WithCancel(context.Background())
+	target := &batchReq{id: "target", ctx: targetContext, cancel: targetCancel}
+	e.requests.Store(target.id, target)
+	defer e.requests.Delete(target.id)
+
+	cancelled := make(chan struct{})
+	go func() {
+		e.cancel(target.id)
+		close(cancelled)
+	}()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("cancelling another request blocked behind an undrained active stream")
+	}
+	if targetContext.Err() != context.Canceled {
+		t.Fatalf("target context error = %v, want context.Canceled", targetContext.Err())
+	}
+}
+
 // TestBatch_Cancel_Queued: cancelling a QUEUED request retires it without ever
 // running its source, while the active request occupying the slot streams on.
 func TestBatch_Cancel_Queued(t *testing.T) {

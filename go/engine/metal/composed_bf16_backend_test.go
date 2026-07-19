@@ -37,7 +37,7 @@ func TestMatMulBF16WF32NTInto_Good(t *testing.T) {
 		wf[i] = -0.5 + rng.Float32()
 	}
 	wb := f32sToBF16Bytes(wf) // the checkpoint form; also the values the reference must use
-	for i := range wf {      // reference reads the SAME bf16-rounded values the kernel reads
+	for i := range wf {       // reference reads the SAME bf16-rounded values the kernel reads
 		wf[i] = bf16ToF32(wb[2*i], wb[2*i+1])
 	}
 	for _, M := range []int{1, 4} {
