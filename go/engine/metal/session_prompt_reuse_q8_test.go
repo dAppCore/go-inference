@@ -122,3 +122,66 @@ func TestPrefillTokensCached_Q8Canonical_Good(t *testing.T) {
 		}
 	}
 }
+
+// TestPrefillRetainedTokensBatchedDenseNonCanonicalQ8Engages_Good pins the
+// #54 fix's precondition at the batched-dense gate itself (arch_session.go
+// prefillRetainedTokensBatchedDense): a q8-ICB session that never had
+// SetReuseCanonicalLanding armed — the shape ANY caller gets when it never
+// goes through the resident prompt-reuse lane (engine/prompt_reuse.go),
+// which is what inference.WithDisablePromptReuse now buys a one-shot
+// caller — takes the FAST batched-dense prefill lane above the fold
+// threshold. Before #54, the ONLY way to reach a q8-ICB session was through
+// that lane, which armed canonical landing unconditionally at session
+// creation (#1846) — so this shape (q8 + never-armed) was reachable in code
+// but never actually exercised end to end.
+func TestPrefillRetainedTokensBatchedDenseNonCanonicalQ8Engages_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+
+	sess := newKVQ8ICBFixtureLen(t, 256)
+	if !sess.state.icb.hasKVQ8() {
+		t.Fatal("q8 fixture did not arm the q8 KV store — the gate was never exercised")
+	}
+	if sess.reuseCanonicalLanding {
+		t.Fatal("fixture must default to non-canonical landing (the DisablePromptReuse shape)")
+	}
+	ids := make([]int32, batchedDenseICBMaxRows+8) // above the fold threshold
+	for i := range ids {
+		ids[i] = int32(i % 64)
+	}
+	hidden, ok, err := sess.prefillRetainedTokensBatchedDense(ids, "test")
+	if err != nil {
+		t.Fatalf("prefillRetainedTokensBatchedDense: %v", err)
+	}
+	if !ok {
+		t.Fatal("batched-dense prefill declined on a non-canonical q8-ICB session above the fold threshold — the #54 fast path regressed")
+	}
+	if len(hidden) == 0 {
+		t.Fatal("batched-dense prefill returned no boundary hidden")
+	}
+}
+
+// TestPrefillRetainedTokensBatchedDenseCanonicalQ8Declines_Ugly is the
+// counterpart pinning #1846 staying intact: arming SetReuseCanonicalLanding
+// — what the resident prompt-reuse lane still does for every caller that
+// does NOT set DisablePromptReuse — makes the SAME session decline the
+// batched-dense lane. #54 only skips the resident lane (and so this gate)
+// for callers that opt out of reuse; it does not touch the gate itself.
+func TestPrefillRetainedTokensBatchedDenseCanonicalQ8Declines_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+
+	sess := newKVQ8ICBFixtureLen(t, 256)
+	sess.SetReuseCanonicalLanding(true)
+	ids := make([]int32, batchedDenseICBMaxRows+8)
+	for i := range ids {
+		ids[i] = int32(i % 64)
+	}
+	if _, ok, err := sess.prefillRetainedTokensBatchedDense(ids, "test"); err != nil {
+		t.Fatalf("prefillRetainedTokensBatchedDense: %v", err)
+	} else if ok {
+		t.Fatal("batched-dense prefill engaged on a canonical-landing q8-ICB session — #1846 regressed")
+	}
+}

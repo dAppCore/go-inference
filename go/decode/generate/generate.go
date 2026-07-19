@@ -220,6 +220,17 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 			// the default keeps it off so the decode rate stays clean.
 			inference.WithEnableThinking(&think),
 			inference.WithTemperature(float32(cfg.Temp)),
+			// This path's two Chat calls (the kernel-warm pass below, then the
+			// timed run) never share a prefix — "Chat calls on this path never
+			// reuse KV across runs" is the standing contract the warm-prefix
+			// comment already states. Skip the resident prompt-reuse lane so a
+			// q8-KV-capable model (gemma4 E2B/E4B's default) does not arm
+			// position-invariant per-token landing on account of a reuse that
+			// will never happen — that landing taxes EVERY prefilled token at
+			// per-token (host-synced) speed regardless of prompt length (#54:
+			// 12k-token native prefill measured at 158 tok/s / 77.8s TTFT on an
+			// idle box, independent of length — not a long-context knee).
+			inference.WithDisablePromptReuse(),
 		}
 		// -trace turns on the engine's per-token phase timing. The engine folds the
 		// aggregate GPU-busy / host-serial split into inference.GenerateMetrics
