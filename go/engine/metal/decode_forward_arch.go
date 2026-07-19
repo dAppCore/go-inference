@@ -6,6 +6,7 @@ package native
 
 import (
 	"math"
+	"os"
 	"runtime"
 	"unsafe"
 
@@ -174,9 +175,9 @@ func encAttnHalfSharedInputAt(
 // unbound for MoE layers (MoEBlockBF16 owns that FFN).
 type archLayerBufs struct {
 	anw, mnw                 bufView
-	postAttnNorm, postFFNorm bufView // gemma4 post-attn/post-FF norms (nil buf = skip)
-	qNorm, kNorm             bufView // gemma4 per-head QK-norm (nil buf = skip)
-	sinks                    bufView // gpt_oss attention sinks (bf16 [nHeads] logits; nil buf = plain softmax)
+	postAttnNorm, postFFNorm bufView         // gemma4 post-attn/post-FF norms (nil buf = skip)
+	qNorm, kNorm             bufView         // gemma4 per-head QK-norm (nil buf = skip)
+	sinks                    bufView         // gpt_oss attention sinks (bf16 [nHeads] logits; nil buf = plain softmax)
 	layerScalar              metal.MTLBuffer // gemma4 per-layer output scalar, broadcast to dModel (synthesised, nil = skip)
 	kCache, vCache           metal.MTLBuffer
 	kCachePtr, vCachePtr     *byte
@@ -785,6 +786,113 @@ func (s *archDecodeState) resetDevicePagedAttentionScratch() {
 	}
 }
 
+// kvSyncDeltaDisabled restores the O(position) full-snapshot sync/reload at the
+// batched-verify seam (LTHN_KV_SYNC_DELTA=0) — the repro anchor for the #372
+// delta paths. The full paths also remain the in-code fallback for any layer
+// geometry the delta helpers decline.
+var kvSyncDeltaDisabled = os.Getenv("LTHN_KV_SYNC_DELTA") == "0"
+
+// syncLinearKVDeltaLayer copies ONLY the paged rows the linear twin is missing
+// — [watermark, position) — instead of snapshotting the whole prefix. The MTP
+// verify seam calls sync+reload EVERY round; at 26B geometry the full snapshot
+// cost 5-12ms (sync) + 25-42ms (reload) per round, growing with position — the
+// #372 whale: the pair decoded 50 tok/s against 138 plain WITH 64% acceptance.
+// handled=false defers to the full path (identical behaviour) for any geometry
+// this helper does not model.
+func (s *archDecodeState) syncLinearKVDeltaLayer(li int, cache *devicePagedKVCache, position int) (bool, error) {
+	if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
+		return false, nil // full path raises the canonical missing-cache error
+	}
+	spec := s.specs[li]
+	lkv, lhd := kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim)
+	rowBytes := lkv * lhd * bf16Size
+	if rowBytes <= 0 {
+		return false, nil
+	}
+	cacheBytes := int(bufferLengthFast(s.lb[li].kCache))
+	if cacheBytes%rowBytes != 0 || int(bufferLengthFast(s.lb[li].vCache)) != cacheBytes {
+		return false, nil
+	}
+	lbRows := cacheBytes / rowBytes
+	var from int
+	if cache.ring {
+		if position > cache.offset {
+			return false, nil // rows beyond the pool's high-water: full path semantics
+		}
+		from = max(cache.linearSyncedAbs, position-cache.maxSize, 0)
+	} else {
+		if position > cache.length {
+			return false, nil // full path raises the canonical shorter-than-position error
+		}
+		from = min(cache.linearSynced, position)
+	}
+	if from >= position {
+		return true, nil
+	}
+	if position > lbRows && !cache.ring {
+		return false, nil
+	}
+	s.lb[li].cacheKVContents()
+	if err := cache.syncRowsToLinear(unsafe.Slice(s.lb[li].kCachePtr, cacheBytes), unsafe.Slice(s.lb[li].vCachePtr, cacheBytes), lbRows, from, position); err != nil {
+		return false, err
+	}
+	if cache.ring {
+		cache.linearSyncedAbs = position
+	} else {
+		cache.linearSynced = position
+	}
+	return true, nil
+}
+
+// reloadDevicePagedKVDeltaLayer pushes ONLY the batch's landed rows — [pool
+// high-water, position) — back into the pages, instead of rebuilding every
+// page from row zero. Valid at the batched-verify seam by construction: sync
+// ran at basePos (linear == paged through basePos), the batch landed
+// [basePos, position) into the linear twin, and nothing else touched the pool.
+// handled=false defers to the full rebuild.
+func (s *archDecodeState) reloadDevicePagedKVDeltaLayer(li int, cache *devicePagedKVCache, position int) (bool, error) {
+	if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
+		return false, nil
+	}
+	spec := s.specs[li]
+	lkv, lhd := kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim)
+	rowBytes := lkv * lhd * bf16Size
+	if rowBytes <= 0 {
+		return false, nil
+	}
+	cacheBytes := int(bufferLengthFast(s.lb[li].kCache))
+	if cacheBytes%rowBytes != 0 || int(bufferLengthFast(s.lb[li].vCache)) != cacheBytes {
+		return false, nil
+	}
+	lbRows := cacheBytes / rowBytes
+	from := cache.length
+	if cache.ring {
+		from = cache.offset
+	} else if position > lbRows || (cache.maxSize > 0 && position > cache.maxSize) {
+		return false, nil // full path clamps; keep its semantics
+	}
+	to := position
+	if from > to {
+		return false, nil // pool ahead of the target position: full rebuild truncates
+	}
+	if cache.ring && cache.maxSize > 0 && to-from > cache.maxSize {
+		from = to - cache.maxSize // only the surviving window's rows exist to load
+	}
+	if from < to {
+		s.lb[li].cacheKVContents()
+		if err := cache.loadRowsFromLinear(unsafe.Slice(s.lb[li].kCachePtr, cacheBytes), unsafe.Slice(s.lb[li].vCachePtr, cacheBytes), lbRows, from, to); err != nil {
+			return false, err
+		}
+	}
+	if cache.ring {
+		cache.offset = position // slot() advanced to the last written row; a truncated tail keeps the caller's position
+		cache.linearSyncedAbs = position
+	} else {
+		cache.linearSynced = position
+	}
+	return true, nil
+}
+
 func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if s == nil || !s.hasDevicePagedKV() {
 		return nil
@@ -796,6 +904,13 @@ func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 		cache := s.layerPagedKV(li)
 		if cache == nil || !spec.OwnsCache() {
 			continue
+		}
+		if !kvSyncDeltaDisabled {
+			if handled, err := s.reloadDevicePagedKVDeltaLayer(li, cache, position); err != nil {
+				return err
+			} else if handled {
+				continue
+			}
 		}
 		if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
 			return core.NewError("native.archDecodeState.reloadDevicePagedKVFromLinear: missing linear cache")
@@ -842,6 +957,13 @@ func (s *archDecodeState) syncLinearKVFromDevicePaged(position int) error {
 		if position < cache.length {
 			if err := cache.truncate(position); err != nil {
 				return err
+			}
+		}
+		if !kvSyncDeltaDisabled {
+			if handled, err := s.syncLinearKVDeltaLayer(li, cache, position); err != nil {
+				return err
+			} else if handled {
+				continue
 			}
 		}
 		if cache.ring {
@@ -2296,7 +2418,7 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		p := bf16Projector{
 			wQ: view(w.WQ), wK: wK, wV: wV, wO: view(w.WO),
 			bQ: normView(w.BQ), bK: normView(w.BK), bV: normView(w.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
-			bO:     normView(w.BO),                                     // gpt_oss o_proj bias (zero bufView otherwise)
+			bO:     normView(w.BO), // gpt_oss o_proj bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 		}
 		if layers[li].MoE == nil {
