@@ -57,7 +57,7 @@ func (c Config) HeadDim() int {
 // (BGE, GTE, and E5 checkpoints all report "bert") but the dimensions must be
 // positive and the heads must divide the hidden size evenly.
 //
-//	cfg, err := bert.ParseConfig(core.ReadFile(path).Value.([]byte))
+//	cfg, err := bert.ParseConfig(core.ReadFile(path).Bytes())
 func ParseConfig(data []byte) (Config, error) {
 	var cfg Config
 	if result := core.JSONUnmarshal(data, &cfg); !result.OK {

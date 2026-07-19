@@ -46,7 +46,7 @@ func Load(dir string) (*Model, error) {
 	if !cfgResult.OK {
 		return nil, core.E("bert.Load", "read config.json", cfgResult.Err())
 	}
-	cfg, err := ParseConfig(cfgResult.Value.([]byte))
+	cfg, err := ParseConfig(cfgResult.Bytes())
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func Load(dir string) (*Model, error) {
 	if !vocabResult.OK {
 		return nil, core.E("bert.Load", "read vocab.txt", vocabResult.Err())
 	}
-	tokenizer, err := NewTokenizer(vocabResult.Value.([]byte), lowerCaseFromSnapshot(dir))
+	tokenizer, err := NewTokenizer(vocabResult.Bytes(), lowerCaseFromSnapshot(dir))
 	if err != nil {
 		return nil, err
 	}

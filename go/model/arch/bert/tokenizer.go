@@ -45,7 +45,7 @@ type Tokenizer struct {
 // tokens must be present in the vocab or loading fails — a forward pass cannot
 // frame a sequence without [CLS]/[SEP].
 //
-//	tk, err := bert.NewTokenizer(core.ReadFile(path).Value.([]byte), true)
+//	tk, err := bert.NewTokenizer(core.ReadFile(path).Bytes(), true)
 func NewTokenizer(vocabTxt []byte, doLowerCase bool) (*Tokenizer, error) {
 	lines := core.Split(core.AsString(vocabTxt), "\n")
 	vocab := make(map[string]int32, len(lines))

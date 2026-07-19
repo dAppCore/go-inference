@@ -130,7 +130,7 @@ func lowerCaseFromSnapshot(dir string) bool {
 		var probe struct {
 			DoLowerCase *bool `json:"do_lower_case"`
 		}
-		if r := core.JSONUnmarshal(result.Value.([]byte), &probe); r.OK && probe.DoLowerCase != nil {
+		if r := core.JSONUnmarshal(result.Bytes(), &probe); r.OK && probe.DoLowerCase != nil {
 			return *probe.DoLowerCase
 		}
 	}
@@ -149,7 +149,7 @@ func poolingFromSnapshot(dir string) (Pooling, bool) {
 			CLS  bool `json:"pooling_mode_cls_token"`
 			Mean bool `json:"pooling_mode_mean_tokens"`
 		}
-		if r := core.JSONUnmarshal(result.Value.([]byte), &probe); r.OK {
+		if r := core.JSONUnmarshal(result.Bytes(), &probe); r.OK {
 			switch {
 			case probe.CLS:
 				pooling = PoolingCLS
@@ -172,7 +172,7 @@ func normaliseFromModules(dir string) bool {
 	var modules []struct {
 		Type string `json:"type"`
 	}
-	if r := core.JSONUnmarshal(result.Value.([]byte), &modules); !r.OK {
+	if r := core.JSONUnmarshal(result.Bytes(), &modules); !r.OK {
 		return true
 	}
 	for _, module := range modules {
