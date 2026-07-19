@@ -34,11 +34,7 @@ func LoadWithOptions(path string, opts LoadOptions) (*Snapshot, error) {
 	if !read.OK {
 		return nil, core.E("Load", "read snapshot", read.Err())
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return nil, core.E("Load", "read snapshot returned non-byte data", nil)
-	}
-	return parseKVSnapshotWithOptions(data, opts)
+	return parseKVSnapshotWithOptions(read.Bytes(), opts)
 }
 
 func parseKVSnapshot(data []byte) (*Snapshot, error) {

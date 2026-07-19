@@ -546,10 +546,7 @@ func (service *Service) readDiskRecord(path string) (diskRecord, bool) {
 	if !read.OK {
 		return diskRecord{}, false
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return diskRecord{}, false
-	}
+	data := read.Bytes()
 	var record diskRecord
 	result := core.JSONUnmarshal(data, &record)
 	if !result.OK || record.Version != diskVersion || record.Ref.ID == "" {
@@ -599,7 +596,7 @@ func (service *Service) writeDiskBlockLocked(ctx context.Context, ref inference.
 	if !data.OK {
 		return inference.CacheBlockRef{}, core.E("Service.writeDiskBlock", "marshal disk cache record", resultError(data))
 	}
-	write := core.WriteFile(service.diskBlockPath(ref.ID), data.Value.([]byte), 0o600)
+	write := core.WriteFile(service.diskBlockPath(ref.ID), data.Bytes(), 0o600)
 	if !write.OK {
 		return inference.CacheBlockRef{}, core.E("Service.writeDiskBlock", "write disk cache record", resultError(write))
 	}
@@ -718,9 +715,7 @@ func (service *Service) diskBytesLocked() uint64 {
 		}
 		read := core.ReadFile(path)
 		if read.OK {
-			if data, ok := read.Value.([]byte); ok {
-				total += uint64(len(data))
-			}
+			total += uint64(len(read.Bytes()))
 		}
 	}
 	return total

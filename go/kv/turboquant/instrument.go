@@ -39,10 +39,7 @@ func LoadRealKVRows(path string) (rows [][]float32, d int, ok bool, err error) {
 	if !read.OK {
 		return nil, 0, false, nil
 	}
-	data, valid := read.Value.([]byte)
-	if !valid {
-		return nil, 0, false, core.E("turboquant.LoadRealKVRows", "unexpected core.ReadFile value type", nil)
-	}
+	data := read.Bytes()
 	if len(data) < 4 {
 		return nil, 0, false, core.E("turboquant.LoadRealKVRows", "file shorter than the 4-byte dimension header", nil)
 	}
