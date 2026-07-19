@@ -97,7 +97,7 @@ func ingestContent(store Store, kind ItemKind, content []byte, req IngestRequest
 	if !hashResult.OK {
 		return IngestOutcome{}, hashResult.Err()
 	}
-	hash := hashResult.Value.(string)
+	hash := hashResult.String()
 
 	existingResult := store.Items(ItemFilter{DatasetID: req.DatasetID, ContentHash: hash, IncludeArchived: true})
 	if !existingResult.OK {
@@ -160,7 +160,7 @@ func IngestPair(store Store, prompt, response string, req IngestRequest) core.Re
 	if !content.OK {
 		return core.Fail(core.E("dataset.IngestPair", "marshal pair content", content.Err()))
 	}
-	outcome, err := ingestContent(store, KindPair, content.Value.([]byte), req, newWelfareScreen())
+	outcome, err := ingestContent(store, KindPair, content.Bytes(), req, newWelfareScreen())
 	if err != nil {
 		return core.Fail(core.E("dataset.IngestPair", "ingest pair", err))
 	}
@@ -191,7 +191,7 @@ func (row jsonlRow) normalise() (ItemKind, []byte, time.Time, bool) {
 		if !encoded.OK {
 			return "", nil, time.Time{}, false
 		}
-		return KindMessages, encoded.Value.([]byte), time.Time{}, true
+		return KindMessages, encoded.Bytes(), time.Time{}, true
 	}
 	response := core.Trim(row.Response)
 	if response == "" {
@@ -208,7 +208,7 @@ func (row jsonlRow) normalise() (ItemKind, []byte, time.Time, bool) {
 	if row.At > 0 {
 		createdAt = time.Unix(row.At, 0).UTC()
 	}
-	return KindPair, encoded.Value.([]byte), createdAt, true
+	return KindPair, encoded.Bytes(), createdAt, true
 }
 
 // IngestJSONL reads newline-delimited JSON rows from reader and ingests
@@ -345,7 +345,7 @@ func IngestChatSessions(store Store, datasetID string, sessions []ChatSession) c
 			ModelFingerprint: session.ModelID,
 			CreatedAt:        session.StartedAt,
 		}
-		outcome, err := ingestContent(store, KindMessages, content.Value.([]byte), req, screen)
+		outcome, err := ingestContent(store, KindMessages, content.Bytes(), req, screen)
 		if err != nil {
 			report.Skipped = append(report.Skipped, IngestSkip{Row: row, Reason: err.Error()})
 			continue
