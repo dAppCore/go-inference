@@ -556,6 +556,9 @@ func realLayerTailForward(tp *realLayerTape, L *RealTrainLayerF32, wGate, wUp, w
 // engine layer maths (encAttnHalfKV + encMLPHalfBF16) re-derived in f32/f64 with the layer's frozen
 // weights. The reference forward every FD gate in train_real_layer_test.go differentiates.
 func RealLayerForwardF32(h []float32, L *RealTrainLayerF32) ([]float32, error) {
+	if L == nil { // guard BEFORE the field reads below — validate()'s nil check sits after them
+		return nil, core.NewError("native.RealTrainLayerF32: nil layer")
+	}
 	tp, err := realLayerForwardTape(h, L, L.WQ, L.WK, L.WV, L.WO, L.WGate, L.WUp, L.WDown)
 	if err != nil {
 		return nil, err
