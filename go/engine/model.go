@@ -65,6 +65,15 @@ type TextModel struct {
 	// built from the detected turn markers + thoughtSuppressor — that fallback
 	// is the byte-for-byte compatibility spine.
 	chatTmpl ChatTemplate
+	// chatTmplSet reports whether chatTmpl was actually resolved by NewTextModel — the
+	// precise "is this template real" test chatTemplate() gates on. A checkpoint MAY
+	// legitimately declare a template with an empty Open (e.g. a standalone-recurrent
+	// arch's plain-completion dialect, no bracket markers at all — engine/metal's
+	// plainCompletionChatTemplate), so "Open == ''" cannot double as the "never
+	// resolved" sentinel: that conflated a real declaration with a bare *TextModel{}
+	// test literal that skipped NewTextModel entirely, silently overriding the
+	// declared empty-bracket dialect back to gemma's <start_of_turn> markers.
+	chatTmplSet bool
 
 	// modelStops is the model-derived stop set (EOS + turn-close + template +
 	// declared stops), resolved ONCE in NewTextModel because its inputs are
@@ -192,7 +201,7 @@ func NewTextModel(tm TokenModel, tok TextTokenizer, modelType string, info infer
 			tmpl = declared
 		}
 	}
-	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, declaredSampling: resolveDeclaredSampling(tm), lastErr: core.Ok(nil)}
+	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, chatTmplSet: true, declaredSampling: resolveDeclaredSampling(tm), lastErr: core.Ok(nil)}
 	// The model-derived stop set never changes after construction (its inputs —
 	// tokenizer, template, StopTokenDeclarer — are all fixed now), so resolve it
 	// once here instead of rebuilding the slice and re-scanning the tokenizer on
@@ -203,11 +212,14 @@ func NewTextModel(tm TokenModel, tok TextTokenizer, modelType string, info infer
 }
 
 // chatTemplate is the resolved chat dialect the render/stop paths drive,
-// defaulting a zero-value TextModel (no template resolved) to the legacy gemma
-// dialect — the same fallback turnTokens() applies, so a bare *TextModel
-// literal renders and stops exactly as it always did.
+// defaulting a zero-value TextModel (no template resolved — chatTmplSet is
+// false on a bare *TextModel literal that skipped NewTextModel) to the legacy
+// gemma dialect — the same fallback turnTokens() applies, so a bare *TextModel
+// literal renders and stops exactly as it always did. Gated on chatTmplSet,
+// NOT chatTmpl.Open == "", because a real declared dialect MAY legitimately
+// have an empty Open (see chatTmplSet's doc comment).
 func (m *TextModel) chatTemplate() ChatTemplate {
-	if m == nil || m.chatTmpl.Open == "" {
+	if m == nil || !m.chatTmplSet {
 		return GemmaChatTemplate(TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}, false)
 	}
 	return m.chatTmpl

@@ -63,6 +63,41 @@ func TestTokenModel_MambaTokenModel_Vocab_Ugly(t *testing.T) {
 	}
 }
 
+func TestTokenModel_MambaTokenModel_HiddenSize_Good(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	m := mkModel(cfg, 8, 32, 2)
+	if got := NewTokenModel(m).HiddenSize(); got != 8 {
+		t.Fatalf("HiddenSize = %d, want 8", got)
+	}
+}
+
+// TestTokenModel_MambaTokenModel_HiddenSize_Ugly proves HiddenSize() reads the underlying model LIVE,
+// not a snapshot taken at NewTokenModel time — same live-read contract as Vocab.
+func TestTokenModel_MambaTokenModel_HiddenSize_Ugly(t *testing.T) {
+	m := &MambaModel{D: 8}
+	tm := NewTokenModel(m)
+	m.D = 99
+	if got := tm.HiddenSize(); got != 99 {
+		t.Fatalf("HiddenSize = %d, want 99 (must read live, not snapshot at construction)", got)
+	}
+}
+
+func TestTokenModel_MambaTokenModel_NumLayers_Good(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	m := mkModel(cfg, 8, 32, 5)
+	if got := NewTokenModel(m).NumLayers(); got != 5 {
+		t.Fatalf("NumLayers = %d, want 5", got)
+	}
+}
+
+// TestTokenModel_MambaTokenModel_NumLayers_Bad proves a zero-value model (no layers) reports 0 honestly
+// rather than panicking on a nil Layers slice.
+func TestTokenModel_MambaTokenModel_NumLayers_Bad(t *testing.T) {
+	if got := NewTokenModel(&MambaModel{}).NumLayers(); got != 0 {
+		t.Fatalf("NumLayers = %d, want 0 for a zero-value model", got)
+	}
+}
+
 func TestTokenModel_MambaTokenModel_Embed_Good(t *testing.T) {
 	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
 	m := mkModel(cfg, 8, 32, 1)

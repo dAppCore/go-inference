@@ -105,6 +105,37 @@ func TestModel_ChatMLTemplate_Declared(t *testing.T) {
 	}
 }
 
+// plainTokenModel is a fake engine.TokenModel that DECLARES a dialect with an EMPTY Open marker — no
+// bracket, no role label at all (engine/metal's plainCompletionChatTemplate is exactly this shape for a
+// standalone-recurrent arch, e.g. rwkv7, whose vocabulary carries no bracket-turn markup to frame turns
+// with). It proves NewTextModel/chatTemplate() honour a genuinely empty-bracket DECLARED dialect rather
+// than silently substituting the gemma fallback.
+type plainTokenModel struct {
+	TokenModel
+}
+
+func (plainTokenModel) DeclaredChatTemplate() (ChatTemplate, bool) {
+	return ChatTemplate{Open: "", Close: "", UserRole: "", AssistantRole: "", SystemRole: ""}, true
+}
+
+// TestModel_PlainCompletionTemplate_Declared is the #36 regression: chatTemplate() used to key its "was
+// a template ever resolved" test on chatTmpl.Open == "", indistinguishable from a real declaration whose
+// Open genuinely IS "" — so a checkpoint declaring the plain-completion dialect silently rendered
+// gemma's <start_of_turn>/<end_of_turn> markers instead (live-caught: an RWKV7 checkpoint fed those
+// fabricated, out-of-vocabulary markers degraded into confused, prompt-echoing continuations). The fix
+// gates on the explicit chatTmplSet flag, so an empty-Open declared template is honoured verbatim.
+func TestModel_PlainCompletionTemplate_Declared(t *testing.T) {
+	m := NewTextModel(plainTokenModel{}, nil, "plain-fake", inference.ModelInfo{}, 32)
+	msgs := []inference.Message{{Role: "user", Content: "The capital of France is"}}
+	got := m.FormatChatPrompt(msgs)
+	if strings.Contains(got, "<start_of_turn>") || strings.Contains(got, "<end_of_turn>") {
+		t.Fatalf("empty-Open declared template leaked the gemma fallback markers: %q", got)
+	}
+	if want := "\nThe capital of France is\n\n"; got != want {
+		t.Fatalf("plain-completion render = %q, want %q", got, want)
+	}
+}
+
 // TestModel_ChatMLTemplate_StopTokens proves the stop-set assembly resolves a
 // non-gemma dialect's Close marker and its template-implied stop strings to ids
 // against the model's own tokenizer, deduping the marker that both name.

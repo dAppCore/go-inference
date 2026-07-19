@@ -3,6 +3,7 @@
 package rwkv7
 
 import (
+	_ "embed"
 	"encoding/hex"
 
 	core "dappco.re/go"
@@ -17,7 +18,7 @@ import (
 //
 // The upstream vocab file's middle field is a Python str/bytes repr() (single- or double-quoted, `\xHH`/
 // `\n`/`\t`/`\\`/quote escapes, a `b'...'` prefix for the 486 entries that are not valid standalone UTF-8)
-// — a grammar this port does not hand-parse. testdata/rwkv_vocab_v20230424.hex is a byte-exact
+// — a grammar this port does not hand-parse. data/rwkv_vocab_v20230424.hex is a byte-exact
 // re-serialisation instead: line N (1-based) is token id N's raw bytes, hex-encoded. It was produced ONCE,
 // offline, by a short throwaway Python snippet run by hand against the upstream checkpoint's own
 // rwkv_vocab_v20230424.txt (mirroring the same parse hf_rwkv_tokenizer.RWKV_TOKENIZER.__init__ does,
@@ -25,6 +26,14 @@ import (
 // part of this repo, is never invoked by Go code, and runs over a static trusted local file — no data from
 // an untrusted or runtime source ever reaches it. LoadWorldTokenizerHex below reads only the derived .hex
 // fixture (plain hex-decode, no code execution) and never touches the original .txt or Python at all.
+//
+// The vocab table is a FIXED artefact shared by the whole World-tokenizer family (every released RWKV-7
+// checkpoint — 0.1B/1.5B/2.9B/…), not per-checkpoint data, and a real HF snapshot directory ships only the
+// unparseable rwkv_vocab_v20230424.txt (no tokenizer.json, no derived .hex) — so data/rwkv_vocab_v20230424.hex
+// is embedded straight into the binary (NewWorldTokenizer) rather than expected to live in a checkpoint
+// directory at load time. It lives outside testdata/ deliberately: this file is production data, not a
+// test-only fixture (go:embed would still reach into testdata, but the path would misdescribe what ships
+// in the binary — AX-3, path is documentation).
 
 // trieNode is one node of the byte-trie: 256 possible next-byte children, and id (0 ⇒ "no vocabulary
 // entry ends exactly here") when the byte string ending at this node is itself a complete token.
@@ -33,23 +42,46 @@ type trieNode struct {
 	id       int32
 }
 
+// worldVocabHex is the canonical World-tokenizer vocab table, embedded straight into the binary — see the
+// package doc comment above for its provenance and why this is production data, not a test fixture.
+//
+//go:embed data/rwkv_vocab_v20230424.hex
+var worldVocabHex string
+
 // WorldTokenizer is the RWKV World byte-trie tokenizer: Encode greedily matches the longest vocabulary
 // byte-string at each position (hf_rwkv_tokenizer.TRIE.find_longest); Decode concatenates each id's raw
-// bytes and reads the result as UTF-8 (RWKV_TOKENIZER.decodeBytes).
+// bytes and reads the result as UTF-8 (RWKV_TOKENIZER.decodeBytes). Implements the engine's serve-side
+// TextTokenizer method set BY SHAPE (Encode/Decode/DecodeToken/DecodeOne/TokenID/EOS) without importing
+// the engine package (AX-8: model/arch never imports engine) — see DecodeToken/DecodeOne/TokenID/EOS below.
 type WorldTokenizer struct {
 	root    *trieNode
 	toBytes map[int32][]byte
+	toID    map[string]int32
 }
 
-// LoadWorldTokenizerHex loads the tokenizer from the hex-per-line derived vocab fixture at path (see the
-// package doc comment above for its provenance).
+// NewWorldTokenizer builds the World tokenizer from its embedded canonical vocab — the zero-config
+// constructor: a real checkpoint directory ships only the unparseable rwkv_vocab_v20230424.txt (see the
+// package doc comment), so this never reads the checkpoint directory at all. Every released RWKV-7
+// checkpoint shares this exact vocabulary.
+func NewWorldTokenizer() (*WorldTokenizer, error) {
+	return parseWorldTokenizerHex(worldVocabHex)
+}
+
+// LoadWorldTokenizerHex loads the tokenizer from an on-disk hex-per-line vocab fixture at path — for
+// pointing at an alternate or future vocab revision; NewWorldTokenizer is the production entry point.
 func LoadWorldTokenizerHex(path string) (*WorldTokenizer, error) {
 	text, err := coreio.Local.Read(path)
 	if err != nil {
 		return nil, core.E("rwkv7.LoadWorldTokenizerHex", "read vocab", err)
 	}
+	return parseWorldTokenizerHex(text)
+}
+
+// parseWorldTokenizerHex parses the hex-per-line vocab format (line N, 1-based, is token id N's raw
+// bytes, hex-encoded) shared by NewWorldTokenizer's embedded table and LoadWorldTokenizerHex's on-disk one.
+func parseWorldTokenizerHex(text string) (*WorldTokenizer, error) {
 	lines := core.Split(text, "\n")
-	tok := &WorldTokenizer{root: &trieNode{}, toBytes: make(map[int32][]byte)}
+	tok := &WorldTokenizer{root: &trieNode{}, toBytes: make(map[int32][]byte), toID: make(map[string]int32)}
 	id := int32(0)
 	for _, line := range lines {
 		if line == "" {
@@ -58,12 +90,12 @@ func LoadWorldTokenizerHex(path string) (*WorldTokenizer, error) {
 		id++
 		b, herr := hex.DecodeString(line)
 		if herr != nil {
-			return nil, core.E("rwkv7.LoadWorldTokenizerHex", core.Sprintf("decode line for id %d", id), herr)
+			return nil, core.E("rwkv7.parseWorldTokenizerHex", core.Sprintf("decode line for id %d", id), herr)
 		}
 		tok.add(b, id)
 	}
 	if id == 0 {
-		return nil, core.NewError("rwkv7.LoadWorldTokenizerHex: empty vocab")
+		return nil, core.NewError("rwkv7.parseWorldTokenizerHex: empty vocab")
 	}
 	return tok, nil
 }
@@ -78,6 +110,7 @@ func (t *WorldTokenizer) add(b []byte, id int32) {
 	}
 	n.id = id
 	t.toBytes[id] = append([]byte(nil), b...)
+	t.toID[string(b)] = id
 }
 
 // Encode greedily matches the longest vocabulary byte-string at each position, exactly
@@ -126,3 +159,31 @@ func (t *WorldTokenizer) Decode(ids []int32) string {
 	}
 	return string(buf)
 }
+
+// DecodeToken decodes a single token id to text — the engine's per-token STREAMING decode
+// (engine.TextTokenizer). World is byte-level with no SentencePiece word-boundary marker to preserve, so
+// this is Decode([]int32{id}) directly: id 0 and any out-of-range id decode to "" (matching Decode's skip
+// rule), and a mid-multibyte-UTF-8 token's raw bytes pass through unchanged — valid once concatenated with
+// its neighbours, the same streaming contract the GPT-2 byte-level path (decode/tokenizer.go) already
+// relies on.
+func (t *WorldTokenizer) DecodeToken(id int32) string {
+	if b, ok := t.toBytes[id]; ok {
+		return string(b)
+	}
+	return ""
+}
+
+// DecodeOne mirrors Decode([]int32{id}) — engine.TextTokenizer's label-decode entry. Byte-level World has
+// no boundary space to strip, so it coincides exactly with DecodeToken.
+func (t *WorldTokenizer) DecodeOne(id int32) string { return t.DecodeToken(id) }
+
+// TokenID looks up a token's exact byte string in the vocabulary — the reverse of Decode/DecodeToken
+// (engine.TextTokenizer; e.g. resolving a template's stop string to an id).
+func (t *WorldTokenizer) TokenID(text string) (int32, bool) {
+	id, ok := t.toID[text]
+	return id, ok
+}
+
+// EOS returns the World tokenizer's single reserved terminator id: 0
+// (<|rwkv_tokenizer_end_of_text|>, bos=eos=pad — outside the trie; see the package doc comment above).
+func (t *WorldTokenizer) EOS() int32 { return 0 }

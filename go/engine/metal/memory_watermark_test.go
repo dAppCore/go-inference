@@ -13,7 +13,7 @@ import (
 // Both metal TokenModels carry the MemoryReporter capability (mantis #1843).
 var (
 	_ engine.MemoryReporter = (*NativeTokenModel)(nil)
-	_ engine.MemoryReporter = (*composedTextModel)(nil)
+	_ engine.MemoryReporter = (*sessionTextModel)(nil)
 )
 
 // TestMemoryWatermark_Good drives a real synthetic prefill + decode and pins
