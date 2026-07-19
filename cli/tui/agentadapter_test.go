@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -150,20 +151,28 @@ func TestAgentAdapterSnapshotFoldsCleanupRecoveryOutcomes(t *testing.T) {
 		DetailJSON: core.JSONMarshalString(receipt), CreatedAt: at,
 	}
 	for _, test := range []struct {
-		name      string
-		kind      string
-		wantCount int
-	}{{name: "failed remains pending", kind: "cleanup_recovery_failed", wantCount: 1}, {name: "succeeded resolves pending", kind: "cleanup_recovery_succeeded", wantCount: 0}} {
+		name         string
+		kind         string
+		outcomeError string
+		eventDetail  string
+		wantCount    int
+	}{
+		{name: "failed remains pending", kind: "cleanup_recovery_failed", outcomeError: "worktree remove failed", wantCount: 1},
+		{name: "succeeded resolves pending", kind: "cleanup_recovery_succeeded", wantCount: 0},
+		{name: "success with error fails closed", kind: "cleanup_recovery_succeeded", outcomeError: "cleanup remains retained", wantCount: 1},
+		{name: "success with mismatched detail fails closed", kind: "cleanup_recovery_succeeded", eventDetail: "/different/worktree", wantCount: 1},
+	} {
 		t.Run(test.name, func(t *testing.T) {
-			outcome := agentRecoveryOutcome{RecoveryEventID: retained.ID, Receipt: receipt}
-			if test.kind == "cleanup_recovery_failed" {
-				outcome.Error = "worktree remove failed"
+			outcome := agentRecoveryOutcome{RecoveryEventID: retained.ID, Receipt: receipt, Error: test.outcomeError}
+			eventDetail := test.eventDetail
+			if eventDetail == "" {
+				eventDetail = receipt.Worktree
 			}
 			adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{
 				Runs: []work.Run{{ID: receipt.RunID, WorkID: receipt.WorkID, ProjectID: receipt.ProjectID, Number: receipt.RunNumber, Status: work.RunCompleted}},
 				Events: []work.Event{retained, {
 					ID: "recovery-outcome-2", RunID: receipt.RunID, WorkID: receipt.WorkID,
-					Kind: test.kind, Detail: receipt.Worktree,
+					Kind: test.kind, Detail: eventDetail,
 					DetailJSON: core.JSONMarshalString(outcome), CreatedAt: at.Add(time.Second),
 				}},
 			}})
@@ -917,7 +926,8 @@ func TestAgentAdapterDurableCleanupRecoveryAfterTransientPersistenceFailureReope
 		IDs: restartedManagerIDs.New, Now: func() time.Time { return at.Add(time.Hour) },
 	})
 	core.AssertTrue(t, restartedManagerResult.OK, restartedManagerResult.Error())
-	restartedEngine := newAgentAdapterRecoveryEngine(t, reopenedStore, restartedManagerResult.Value.(*workspace.Manager), restartedServer, at.Add(time.Hour), "restart-")
+	restartedManager := restartedManagerResult.Value.(*workspace.Manager)
+	restartedEngine := newAgentAdapterRecoveryEngine(t, reopenedStore, restartedManager, restartedServer, at.Add(time.Hour), "restart-")
 	adapter := requireAgentAdapter(t, restartedEngine)
 	adapterClosed := false
 	t.Cleanup(func() {
@@ -925,6 +935,20 @@ func TestAgentAdapterDurableCleanupRecoveryAfterTransientPersistenceFailureReope
 			_ = adapter.Close()
 		}
 	})
+	core.AssertEqual(t, 0, agentAdapterManagerRecoveryCount(t, restartedManager, run.ID))
+	restartedManagerIDs.mu.Lock()
+	managerIDCountBeforeGuard := restartedManagerIDs.next
+	restartedManagerIDs.mu.Unlock()
+	guardedReview := restartedEngine.ReviewChanges(context.Background(), run.ID)
+	core.AssertFalse(t, guardedReview.OK)
+	core.AssertContains(t, guardedReview.Error(), "retained review cleanup recovery")
+	core.AssertContains(t, guardedReview.Error(), receipt.Worktree)
+	restartedManagerIDs.mu.Lock()
+	managerIDCountAfterGuard := restartedManagerIDs.next
+	restartedManagerIDs.mu.Unlock()
+	core.AssertEqual(t, managerIDCountBeforeGuard, managerIDCountAfterGuard)
+	core.AssertTrue(t, core.Stat(receipt.Worktree).OK)
+	core.AssertEqual(t, 0, agentAdapterManagerRecoveryCount(t, restartedManager, run.ID))
 
 	reopenedSnapshot := adapter.Snapshot(context.Background())
 	core.AssertTrue(t, reopenedSnapshot.OK, reopenedSnapshot.Error())
@@ -1052,6 +1076,30 @@ type agentAdapterRecoveryIDs struct {
 	mu     sync.Mutex
 	prefix string
 	next   int
+}
+
+func agentAdapterManagerRecoveryCount(t *testing.T, manager *workspace.Manager, runID string) int {
+	t.Helper()
+	method := reflect.ValueOf(manager).MethodByName("Recovery")
+	if !method.IsValid() {
+		t.Fatal("linked workspace Manager does not expose Recovery")
+	}
+	values := method.Call([]reflect.Value{reflect.ValueOf(runID)})
+	if len(values) != 1 {
+		t.Fatalf("workspace Manager Recovery returned %d values", len(values))
+	}
+	result, ok := values[0].Interface().(core.Result)
+	if !ok {
+		t.Fatalf("workspace Manager Recovery returned %T", values[0].Interface())
+	}
+	if !result.OK {
+		t.Fatalf("workspace Manager Recovery failed: %s", result.Error())
+	}
+	recoveries := reflect.ValueOf(result.Value)
+	if !recoveries.IsValid() || recoveries.Kind() != reflect.Slice {
+		t.Fatalf("workspace Manager Recovery value has type %T", result.Value)
+	}
+	return recoveries.Len()
 }
 
 func (ids *agentAdapterRecoveryIDs) New() string {

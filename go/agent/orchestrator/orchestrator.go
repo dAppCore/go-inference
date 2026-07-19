@@ -69,8 +69,10 @@ type pendingCleanupRecovery struct {
 	Run            work.Run
 	Receipt        workspace.RecoveryReceipt
 	Kind           string
+	FailureReason  string
 	UpdateRun      bool
 	ExpectedStatus work.RunStatus
+	TerminalReady  bool
 	Event          work.Event
 	EventReady     bool
 }
@@ -120,24 +122,31 @@ type Orchestrator struct {
 	clock      Clock
 	ids        Identifier
 
-	logBatchBytes  int
-	logBatchDelay  time.Duration
-	attemptTimeout time.Duration
-	cleanupTimeout time.Duration
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wake           chan struct{}
-	workers        sync.WaitGroup
-	closeMu        sync.Mutex
-	closeComplete  bool
-	closeResult    core.Result
-	lifecycle      sync.RWMutex
-	queueMu        sync.Mutex
-	decisionMu     sync.Mutex
+	logBatchBytes       int
+	logBatchDelay       time.Duration
+	attemptTimeout      time.Duration
+	cleanupTimeout      time.Duration
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	wake                chan struct{}
+	workers             sync.WaitGroup
+	closeMu             sync.Mutex
+	closeComplete       bool
+	closeResult         core.Result
+	lifecycle           sync.RWMutex
+	queueMu             sync.Mutex
+	decisionMu          sync.Mutex
+	registrationMu      sync.Mutex
+	registrations       sync.WaitGroup
+	registrationCtx     context.Context
+	registrationCancel  context.CancelFunc
+	registrationClosing bool
+	recoveryMu          sync.Mutex
 
-	mu                       sync.Mutex
-	runs                     map[string]Process
-	pending                  map[string]DispatchReview
+	mu      sync.Mutex
+	runs    map[string]Process
+	pending map[string]DispatchReview
+	// pendingCleanupRecoveries is owned exclusively by recoveryMu.
 	pendingCleanupRecoveries map[string]*pendingCleanupRecovery
 	executions               map[string]*runExecution
 	closed                   bool
@@ -183,12 +192,14 @@ func New(options Options) core.Result {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	registrationCtx, registrationCancel := context.WithCancel(ctx)
 	orchestrator := &Orchestrator{
 		store: options.Store, gitServer: options.GitServer, workspaces: options.Workspaces,
 		providers: options.Providers, queue: options.Queue, launcher: options.Launcher,
 		clock: options.Clock, ids: options.IDs, logBatchBytes: options.LogBatchBytes,
 		logBatchDelay: options.LogBatchDelay, attemptTimeout: options.AttemptTimeout, cleanupTimeout: options.CleanupTimeout,
 		ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1),
+		registrationCtx: registrationCtx, registrationCancel: registrationCancel,
 		runs: make(map[string]Process), pending: make(map[string]DispatchReview),
 		pendingCleanupRecoveries: make(map[string]*pendingCleanupRecovery),
 		executions:               make(map[string]*runExecution), closeResult: core.Ok(nil),
@@ -200,6 +211,29 @@ func New(options Options) core.Result {
 
 func (orchestrator *Orchestrator) cleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), orchestrator.cleanupTimeout)
+}
+
+func (orchestrator *Orchestrator) beginPreparationRegistration() (context.Context, bool) {
+	orchestrator.registrationMu.Lock()
+	defer orchestrator.registrationMu.Unlock()
+	if orchestrator.registrationClosing {
+		return nil, false
+	}
+	orchestrator.registrations.Add(1)
+	return orchestrator.registrationCtx, true
+}
+
+func (orchestrator *Orchestrator) endPreparationRegistration() {
+	orchestrator.registrations.Done()
+}
+
+func (orchestrator *Orchestrator) closePreparationRegistration() {
+	orchestrator.registrationMu.Lock()
+	if !orchestrator.registrationClosing {
+		orchestrator.registrationClosing = true
+		orchestrator.registrationCancel()
+	}
+	orchestrator.registrationMu.Unlock()
 }
 
 // Capabilities reports the reusable native-agent feature catalogue.
@@ -646,8 +680,12 @@ func (orchestrator *Orchestrator) Close() core.Result {
 
 func (orchestrator *Orchestrator) close() core.Result {
 	failures := make([]string, 0, 8)
+	orchestrator.closePreparationRegistration()
 	orchestrator.mu.Lock()
 	orchestrator.closed = true
+	orchestrator.mu.Unlock()
+	orchestrator.registrations.Wait()
+	orchestrator.mu.Lock()
 	processes := make([]Process, 0, len(orchestrator.runs))
 	for _, process := range orchestrator.runs {
 		processes = append(processes, process)

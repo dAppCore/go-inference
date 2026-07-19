@@ -73,6 +73,125 @@ func orchestratorAcceptanceCount(store *orchestratorTestStore, status string) in
 	return count
 }
 
+func orchestratorSeedDurableReviewCleanup(t *testing.T, fixture *orchestratorFixture, run work.Run) (work.Event, workspace.RecoveryReceipt) {
+	t.Helper()
+	receipt := workspace.RecoveryReceipt{
+		Kind: "review", ProjectID: run.ProjectID, WorkID: run.WorkID, RunID: run.ID,
+		RunNumber: run.Number, ReviewID: "retained-review", Branch: "lem/integration/review-run/retained-review",
+		Worktree: core.PathJoin(t.TempDir(), "retained review worktree"),
+	}
+	retained := work.Event{
+		ID: "durable-review-cleanup-retained", RunID: run.ID, WorkID: run.WorkID,
+		Kind: "review_cleanup_retained", Title: "provisional workspace cleanup retained",
+		Detail: receipt.Worktree, DetailJSON: core.JSONMarshalString(receipt), CreatedAt: fixture.at,
+	}
+	committed := fixture.store.Commit(Commit{Event: &retained})
+	core.AssertTrue(t, committed.OK, committed.Error())
+	return retained, receipt
+}
+
+func TestAcceptOrchestratorReviewChangesGuardsDurableCleanupBeforeWorkspaceMutation(t *testing.T) {
+	tests := []struct {
+		name       string
+		seedEvents func(*orchestratorFixture, work.Run, work.Event, workspace.RecoveryReceipt)
+		wantOK     bool
+		wantError  string
+	}{
+		{name: "unresolved exact receipt", wantError: "retained review cleanup recovery"},
+		{
+			name: "invalid durable receipt fails closed", wantError: "durable retained review cleanup recovery is invalid",
+			seedEvents: func(fixture *orchestratorFixture, _ work.Run, retained work.Event, _ workspace.RecoveryReceipt) {
+				fixture.store.mu.Lock()
+				for index := range fixture.store.events {
+					if fixture.store.events[index].ID == retained.ID {
+						fixture.store.events[index].DetailJSON = "{"
+					}
+				}
+				fixture.store.mu.Unlock()
+			},
+		},
+		{
+			name: "failed outcome remains unresolved", wantError: "retained review cleanup recovery",
+			seedEvents: func(fixture *orchestratorFixture, run work.Run, retained work.Event, receipt workspace.RecoveryReceipt) {
+				failed := work.Event{
+					ID: "durable-review-cleanup-failed", RunID: run.ID, WorkID: run.WorkID,
+					Kind: "cleanup_recovery_failed", Title: "cleanup recovery failed", Detail: receipt.Worktree,
+					DetailJSON: core.JSONMarshalString(cleanupRecoveryOutcome{
+						RecoveryEventID: retained.ID, Receipt: receipt, Error: "cleanup remains retained",
+					}), CreatedAt: fixture.at.Add(time.Second),
+				}
+				core.AssertTrue(t, fixture.store.Commit(Commit{Event: &failed}).OK)
+			},
+		},
+		{
+			name: "malformed success fails closed", wantError: "success outcome contains a failure",
+			seedEvents: func(fixture *orchestratorFixture, run work.Run, retained work.Event, receipt workspace.RecoveryReceipt) {
+				succeeded := work.Event{
+					ID: "durable-review-cleanup-malformed-success", RunID: run.ID, WorkID: run.WorkID,
+					Kind: "cleanup_recovery_succeeded", Title: "cleanup recovery succeeded", Detail: receipt.Worktree,
+					DetailJSON: core.JSONMarshalString(cleanupRecoveryOutcome{
+						RecoveryEventID: retained.ID, Receipt: receipt, Error: "not actually clean",
+					}), CreatedAt: fixture.at.Add(time.Second),
+				}
+				core.AssertTrue(t, fixture.store.Commit(Commit{Event: &succeeded}).OK)
+			},
+		},
+		{
+			name: "exact success resolves receipt", wantOK: true,
+			seedEvents: func(fixture *orchestratorFixture, run work.Run, retained work.Event, receipt workspace.RecoveryReceipt) {
+				succeeded := work.Event{
+					ID: "durable-review-cleanup-success", RunID: run.ID, WorkID: run.WorkID,
+					Kind: "cleanup_recovery_succeeded", Title: "cleanup recovery succeeded", Detail: receipt.Worktree,
+					DetailJSON: core.JSONMarshalString(cleanupRecoveryOutcome{
+						RecoveryEventID: retained.ID, Receipt: receipt,
+					}), CreatedAt: fixture.at.Add(time.Second),
+				}
+				core.AssertTrue(t, fixture.store.Commit(Commit{Event: &succeeded}).OK)
+			},
+		},
+		{
+			name: "exact success folds duplicate aliases", wantOK: true,
+			seedEvents: func(fixture *orchestratorFixture, run work.Run, retained work.Event, receipt workspace.RecoveryReceipt) {
+				alias := retained
+				alias.ID = "durable-review-cleanup-retained-alias"
+				alias.CreatedAt = fixture.at.Add(time.Second)
+				core.AssertTrue(t, fixture.store.Commit(Commit{Event: &alias}).OK)
+				succeeded := work.Event{
+					ID: "durable-review-cleanup-alias-success", RunID: run.ID, WorkID: run.WorkID,
+					Kind: "cleanup_recovery_succeeded", Title: "cleanup recovery succeeded", Detail: receipt.Worktree,
+					DetailJSON: core.JSONMarshalString(cleanupRecoveryOutcome{
+						RecoveryEventID: retained.ID, Receipt: receipt,
+					}), CreatedAt: fixture.at.Add(2 * time.Second),
+				}
+				core.AssertTrue(t, fixture.store.Commit(Commit{Event: &succeeded}).OK)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newOrchestratorFixture(t)
+			_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+			retained, receipt := orchestratorSeedDurableReviewCleanup(t, fixture, run)
+			if test.seedEvents != nil {
+				test.seedEvents(fixture, run, retained, receipt)
+			}
+			fixture.ids.mu.Lock()
+			idCountBefore := fixture.ids.number
+			fixture.ids.mu.Unlock()
+			result := fixture.orchestrator.ReviewChanges(context.Background(), run.ID)
+			core.AssertEqual(t, test.wantOK, result.OK)
+			if !test.wantOK {
+				core.AssertContains(t, result.Error(), test.wantError)
+				core.AssertContains(t, result.Error(), receipt.Worktree)
+				fixture.ids.mu.Lock()
+				idCountAfter := fixture.ids.number
+				fixture.ids.mu.Unlock()
+				core.AssertEqual(t, idCountBefore, idCountAfter)
+			}
+		})
+	}
+}
+
 func TestAccept_Orchestrator_ReviewChanges_Good(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
@@ -503,6 +622,90 @@ func TestAcceptOrchestratorReviewCleanupRecoveryDeduplicatesExactReceipt(t *test
 	for _, event := range fixture.store.events {
 		if event.RunID == run.ID && event.Kind == "review_cleanup_retained" {
 			core.AssertEqual(t, firstEventID, event.ID)
+			retained++
+		}
+	}
+	fixture.store.mu.Unlock()
+	core.AssertEqual(t, 1, retained)
+}
+
+func TestAcceptOrchestratorCleanupRecoveryUsesSingleFlusher(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	receipt := workspace.RecoveryReceipt{
+		Kind: "review", ProjectID: run.ProjectID, WorkID: run.WorkID, RunID: run.ID,
+		RunNumber: run.Number, WorkspaceRunID: run.ID, ReviewID: "single-flusher-review",
+		Branch: run.Branch, Worktree: run.Worktree,
+	}
+	firstCommit := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	overlappingCommit := make(chan struct{}, 1)
+	var attemptsMu sync.Mutex
+	attempts := 0
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Event == nil || commit.Event.Kind != "review_cleanup_retained" {
+			return
+		}
+		attemptsMu.Lock()
+		attempts++
+		attempt := attempts
+		attemptsMu.Unlock()
+		if attempt == 1 {
+			close(firstCommit)
+			<-releaseFirst
+			return
+		}
+		select {
+		case overlappingCommit <- struct{}{}:
+		default:
+		}
+	}
+	fixture.ids.mu.Lock()
+	idCountBefore := fixture.ids.number
+	fixture.ids.mu.Unlock()
+	results := make(chan core.Result, 2)
+	go func() {
+		results <- fixture.orchestrator.persistCleanupRecovery(run, receipt, "review_cleanup_retained", false, "")
+	}()
+	select {
+	case <-firstCommit:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first retained cleanup commit did not start")
+	}
+	secondStarted := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		results <- fixture.orchestrator.persistCleanupRecovery(run, receipt, "review_cleanup_retained", false, "")
+	}()
+	<-secondStarted
+	overlapped := false
+	select {
+	case <-overlappingCommit:
+		overlapped = true
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(releaseFirst)
+	first := <-results
+	second := <-results
+	fixture.store.mu.Lock()
+	fixture.store.beforeCommit = nil
+	fixture.store.mu.Unlock()
+	core.AssertFalse(t, overlapped)
+	core.AssertTrue(t, first.OK, first.Error())
+	core.AssertTrue(t, second.OK, second.Error())
+	core.AssertEqual(t, first.Value.(work.Event).ID, second.Value.(work.Event).ID)
+	attemptsMu.Lock()
+	commitAttempts := attempts
+	attemptsMu.Unlock()
+	core.AssertEqual(t, 1, commitAttempts)
+	fixture.ids.mu.Lock()
+	idCountAfter := fixture.ids.number
+	fixture.ids.mu.Unlock()
+	core.AssertEqual(t, idCountBefore+1, idCountAfter)
+	retained := 0
+	fixture.store.mu.Lock()
+	for _, event := range fixture.store.events {
+		if event.RunID == run.ID && event.Kind == "review_cleanup_retained" {
 			retained++
 		}
 	}

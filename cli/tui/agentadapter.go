@@ -272,6 +272,9 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		if !exists || receipt != outcome.Receipt || event.RunID != outcome.Receipt.RunID || event.WorkID != outcome.Receipt.WorkID {
 			continue
 		}
+		if succeeded && (event.Detail != receipt.Worktree || outcome.Error != "") {
+			continue
+		}
 		if succeeded {
 			delete(pendingRecoveries, receipt)
 		}

@@ -176,6 +176,22 @@ func TestCommandPaletteRecoveryAbandonRequiresPendingReceipt(t *testing.T) {
 	}
 }
 
+func TestCommandPaletteReviewChangesDisabledByPendingCleanupRecovery(t *testing.T) {
+	capabilities := []agentCapability{{Feature: agentFeatureChangesReview, Available: true}}
+	selected := workItemRecord{ID: "work-1", Status: workStatusCompleted}
+	for _, state := range []agentWorkSnapshot{
+		{NativeRunID: "run-1", RecoveryCount: 1},
+		{NativeRunID: "run-1", Recovery: agentPendingRecovery{EventID: "retained-cleanup-1"}},
+	} {
+		palette := newCommandPalette(newUIStyles(midnightTheme()))
+		palette.SetAgentContext(capabilities, &selected, state)
+		command := palette.byID[agentCommandID(agentFeatureChangesReview)]
+		if command.Available || !strings.Contains(command.Reason, "retained cleanup recovery") {
+			t.Fatalf("Review Changes with retained cleanup = %#v", command)
+		}
+	}
+}
+
 func TestCommandPalette_AgentNativeRunAndReviewState(t *testing.T) {
 	caps := []agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureChangesReview, Available: true}, {Feature: agentFeatureAccept, Available: true}, {Feature: agentFeatureReject, Available: true}}
 	selected := workItemRecord{ID: "local", Status: "completed"}

@@ -1580,6 +1580,261 @@ func TestRunOrchestratorPreparationCleanupRecoveryFailsClosedUntilCloseRetry(t *
 	core.AssertTrue(t, atomicTerminal)
 }
 
+func TestRunOrchestratorPreparationCleanupRecoveryRegistersBeforeClockFailure(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	worktreePath := core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", run.ID, "worktree")
+	clockFailed := make(chan struct{}, 1)
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		if command.Dir == worktreePath && orchestratorWorkspaceCommandHasArgument(command, "HEAD") {
+			fixture.clock.Set(time.Time{})
+			select {
+			case clockFailed <- struct{}{}:
+			default:
+			}
+			return true
+		}
+		return orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+			(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	select {
+	case <-clockFailed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("preparation did not reach the injected clock failure")
+	}
+	var receipt workspace.RecoveryReceipt
+	deadline := time.Now().Add(5 * time.Second)
+	for receipt.Worktree == "" && time.Now().Before(deadline) {
+		recoveryResult := fixture.manager.Recovery(run.ID)
+		core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+		recoveries := recoveryResult.Value.([]workspace.RecoveryReceipt)
+		if len(recoveries) != 0 {
+			receipt = recoveries[0]
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	core.AssertEqual(t, worktreePath, receipt.Worktree)
+	pendingRegistered := false
+	deadline = time.Now().Add(5 * time.Second)
+	for !pendingRegistered && time.Now().Before(deadline) {
+		fixture.orchestrator.recoveryMu.Lock()
+		pendingRegistered = len(fixture.orchestrator.pendingCleanupRecoveries) == 1
+		fixture.orchestrator.recoveryMu.Unlock()
+		if !pendingRegistered {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	core.AssertTrue(t, pendingRegistered)
+	receiptJSON := core.JSONMarshalString(receipt)
+	fixture.ids.mu.Lock()
+	idCountBeforeClose := fixture.ids.number
+	fixture.ids.mu.Unlock()
+	firstClose := fixture.orchestrator.Close()
+	core.AssertFalse(t, firstClose.OK)
+	core.AssertContains(t, firstClose.Error(), receiptJSON)
+	fixture.ids.mu.Lock()
+	idCountAfterFailedClose := fixture.ids.number
+	fixture.ids.mu.Unlock()
+	core.AssertEqual(t, idCountBeforeClose, idCountAfterFailedClose)
+	stored := fixture.store.Run(run.ID)
+	core.AssertTrue(t, stored.OK, stored.Error())
+	core.AssertEqual(t, work.RunPreparing, stored.Value.(work.Run).Status)
+	fixture.server.mu.Lock()
+	serverClosed := fixture.server.closed
+	fixture.server.mu.Unlock()
+	fixture.launcher.mu.Lock()
+	launcherClosed := fixture.launcher.closed
+	fixture.launcher.mu.Unlock()
+	core.AssertFalse(t, serverClosed)
+	core.AssertFalse(t, launcherClosed)
+
+	fixture.clock.Set(fixture.at)
+	secondClose := fixture.orchestrator.Close()
+	core.AssertTrue(t, secondClose.OK, secondClose.Error())
+	fixture.ids.mu.Lock()
+	idCountAfterRecoveredClose := fixture.ids.number
+	fixture.ids.mu.Unlock()
+	core.AssertEqual(t, idCountBeforeClose+1, idCountAfterRecoveredClose)
+	failed := fixture.store.Run(run.ID)
+	core.AssertTrue(t, failed.OK, failed.Error())
+	core.AssertEqual(t, work.RunFailed, failed.Value.(work.Run).Status)
+	core.AssertEqual(t, receipt.Branch, failed.Value.(work.Run).Branch)
+	core.AssertEqual(t, receipt.Worktree, failed.Value.(work.Run).Worktree)
+	retained := 0
+	atomicTerminal := false
+	fixture.store.mu.Lock()
+	for _, event := range fixture.store.events {
+		if event.RunID == run.ID && event.Kind == "workspace_cleanup_retained" {
+			core.AssertEqual(t, receiptJSON, event.DetailJSON)
+			retained++
+		}
+	}
+	for _, commit := range fixture.store.commits {
+		if commit.Run != nil && commit.Run.ID == run.ID && commit.Run.Status == work.RunFailed &&
+			commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained" {
+			atomicTerminal = true
+		}
+	}
+	fixture.store.mu.Unlock()
+	core.AssertEqual(t, 1, retained)
+	core.AssertTrue(t, atomicTerminal)
+}
+
+func TestRunOrchestratorPreparationCleanupRecoveryCloseWaitsPastInitialFlush(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	preparationResult := fixture.orchestrator.beginQueuedRun(run)
+	core.AssertTrue(t, preparationResult.OK, preparationResult.Error())
+	preparation := preparationResult.Value.(queuedPreparation)
+	worktreePath := core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", run.ID, "worktree")
+	paused, releasePreparation := fixture.git.setPause(func(command workspace.Command) bool {
+		return command.Dir == worktreePath && orchestratorWorkspaceCommandHasArgument(command, "HEAD")
+	})
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		if command.Dir == worktreePath && orchestratorWorkspaceCommandHasArgument(command, "HEAD") {
+			return true
+		}
+		return orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+			(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+	fixture.store.mu.Lock()
+	fixture.store.failCommit = func(commit Commit) bool {
+		return commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained"
+	}
+	fixture.store.mu.Unlock()
+	snapshotReached := make(chan struct{}, 1)
+	releaseSnapshot := make(chan struct{})
+	fixture.store.setBeforeSnapshot(func(workID string) {
+		if workID != "" || !fixture.orchestrator.isClosed() {
+			return
+		}
+		select {
+		case snapshotReached <- struct{}{}:
+			<-releaseSnapshot
+		default:
+		}
+	})
+
+	workerResult := make(chan core.Result, 1)
+	go func() { workerResult <- fixture.orchestrator.startPreparingRun(preparation) }()
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("preparation did not pause after provisional workspace ownership")
+	}
+	closeResult := make(chan core.Result, 1)
+	go func() { closeResult <- fixture.orchestrator.Close() }()
+	deadline := time.Now().Add(5 * time.Second)
+	for !fixture.orchestrator.isClosed() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	core.AssertTrue(t, fixture.orchestrator.isClosed())
+	select {
+	case <-snapshotReached:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(releasePreparation)
+	select {
+	case result := <-workerResult:
+		core.AssertTrue(t, result.OK, result.Error())
+	case <-time.After(5 * time.Second):
+		close(releaseSnapshot)
+		t.Fatal("preparation did not register retained cleanup before Close")
+	}
+	close(releaseSnapshot)
+	var firstClose core.Result
+	select {
+	case firstClose = <-closeResult:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked while waiting for recovery registration")
+	}
+	recoveryResult := fixture.manager.Recovery(run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	recoveries := recoveryResult.Value.([]workspace.RecoveryReceipt)
+	core.AssertEqual(t, 1, len(recoveries))
+	receipt := recoveries[0]
+	receiptJSON := core.JSONMarshalString(receipt)
+	core.AssertFalse(t, firstClose.OK)
+	core.AssertContains(t, firstClose.Error(), receiptJSON)
+	stored := fixture.store.Run(run.ID)
+	core.AssertTrue(t, stored.OK, stored.Error())
+	core.AssertEqual(t, work.RunPreparing, stored.Value.(work.Run).Status)
+	fixture.server.mu.Lock()
+	serverClosed := fixture.server.closed
+	fixture.server.mu.Unlock()
+	fixture.launcher.mu.Lock()
+	launcherClosed := fixture.launcher.closed
+	fixture.launcher.mu.Unlock()
+	core.AssertFalse(t, serverClosed)
+	core.AssertFalse(t, launcherClosed)
+
+	fixture.store.mu.Lock()
+	fixture.store.failCommit = nil
+	fixture.store.mu.Unlock()
+	secondClose := fixture.orchestrator.Close()
+	core.AssertTrue(t, secondClose.OK, secondClose.Error())
+	failed := fixture.store.Run(run.ID)
+	core.AssertTrue(t, failed.OK, failed.Error())
+	core.AssertEqual(t, work.RunFailed, failed.Value.(work.Run).Status)
+	core.AssertEqual(t, receipt.Branch, failed.Value.(work.Run).Branch)
+	core.AssertEqual(t, receipt.Worktree, failed.Value.(work.Run).Worktree)
+}
+
+func TestRunOrchestratorPreparationScheduledAfterCloseCannotAcquireWorkspace(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, _, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	preparationResult := fixture.orchestrator.beginQueuedRun(run)
+	core.AssertTrue(t, preparationResult.OK, preparationResult.Error())
+	preparation := preparationResult.Value.(queuedPreparation)
+	snapshotReached := make(chan struct{}, 1)
+	releaseSnapshot := make(chan struct{})
+	fixture.store.setBeforeSnapshot(func(workID string) {
+		if workID != "" || !fixture.orchestrator.isClosed() {
+			return
+		}
+		select {
+		case snapshotReached <- struct{}{}:
+			<-releaseSnapshot
+		default:
+		}
+	})
+
+	closeResult := make(chan core.Result, 1)
+	go func() { closeResult <- fixture.orchestrator.Close() }()
+	select {
+	case <-snapshotReached:
+	case <-time.After(5 * time.Second):
+		close(releaseSnapshot)
+		t.Fatal("Close did not reach its durable withdrawal after closing registration")
+	}
+	lateResult := make(chan core.Result, 1)
+	go func() { lateResult <- fixture.orchestrator.startPreparingRun(preparation) }()
+	select {
+	case result := <-lateResult:
+		core.AssertTrue(t, result.OK, result.Error())
+	case <-time.After(5 * time.Second):
+		close(releaseSnapshot)
+		t.Fatal("late preparation did not abort before provisional workspace ownership")
+	}
+	close(releaseSnapshot)
+	select {
+	case result := <-closeResult:
+		core.AssertTrue(t, result.OK, result.Error())
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked after rejecting late preparation")
+	}
+	core.AssertEqual(t, 0, fixture.launcher.Count())
+	recoveryResult := fixture.manager.Recovery(run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	core.AssertEqual(t, 0, len(recoveryResult.Value.([]workspace.RecoveryReceipt)))
+}
+
 func TestRun_Orchestrator_StartQueue_Bad(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.StartQueue(nil).OK)

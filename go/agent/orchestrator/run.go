@@ -1011,11 +1011,16 @@ func (orchestrator *Orchestrator) startPreparingRun(preparation queuedPreparatio
 		return core.Ok(true)
 	}
 
+	registrationContext, registered := orchestrator.beginPreparationRegistration()
+	if !registered {
+		return core.Ok(true)
+	}
+	defer orchestrator.endPreparationRegistration()
 	var preparedResult core.Result
 	if run.ParentRunID == "" {
-		preparedResult = orchestrator.workspaces.PrepareRun(orchestrator.ctx, review.Project, run)
+		preparedResult = orchestrator.workspaces.PrepareRun(registrationContext, review.Project, run)
 	} else {
-		preparedResult = orchestrator.workspaces.ReconstructRun(orchestrator.ctx, review.Project, run)
+		preparedResult = orchestrator.workspaces.ReconstructRun(registrationContext, review.Project, run)
 	}
 	if !preparedResult.OK {
 		reason := preparedResult.Error()
@@ -1026,15 +1031,7 @@ func (orchestrator *Orchestrator) startPreparingRun(preparation queuedPreparatio
 			run.Worktree = receipt.Worktree
 			receiptJSON := core.JSONMarshalString(receipt)
 			reason = core.Join("; ", reason, core.Concat("workspace cleanup recovery: ", receiptJSON))
-			atResult := orchestrator.now()
-			if !atResult.OK {
-				return core.Ok(true)
-			}
-			run.Status = work.RunFailed
-			run.FailureReason = reason
-			run.FinishedAt = atResult.Value.(time.Time)
-			run.UpdatedAt = run.FinishedAt
-			orchestrator.persistCleanupRecovery(run, receipt, "workspace_cleanup_retained", true)
+			orchestrator.persistCleanupRecovery(run, receipt, "workspace_cleanup_retained", true, reason)
 			return core.Ok(true)
 		} else if !recoveryResult.OK {
 			reason = core.Join("; ", reason, recoveryResult.Error())
@@ -1125,7 +1122,7 @@ func (orchestrator *Orchestrator) startPreparingRun(preparation queuedPreparatio
 		signal: make(chan struct{}, 1), incoming: make([]rawLine, 0, 32),
 		logs: make([]work.LogChunk, 0, 32), response: make([]string, 0, 64),
 	}
-	started := orchestrator.launcher.Start(orchestrator.ctx, command, execution.enqueue)
+	started := orchestrator.launcher.Start(registrationContext, command, execution.enqueue)
 	if !started.OK {
 		orchestrator.finishWithoutProcess(run, work.RunRunning, prepared, started.Error())
 		return core.Ok(true)
@@ -1656,30 +1653,35 @@ func (orchestrator *Orchestrator) workspaceRecovery(runID, kind string) core.Res
 	return core.Ok(nil)
 }
 
-func (orchestrator *Orchestrator) persistCleanupRecovery(run work.Run, receipt workspace.RecoveryReceipt, kind string, updateRun bool) core.Result {
+func (orchestrator *Orchestrator) persistCleanupRecovery(run work.Run, receipt workspace.RecoveryReceipt, kind string, updateRun bool, failureReason string) core.Result {
 	receiptJSON := core.JSONMarshalString(receipt)
 	key := cleanupRecoveryKey(kind, receiptJSON)
 	expected := run.Status
-	if updateRun && terminalOwnershipStatus(run.Status) {
-		expected = work.RunPreparing
-	}
-	orchestrator.mu.Lock()
+	failureReason = core.Trim(failureReason)
+	orchestrator.recoveryMu.Lock()
 	pending := orchestrator.pendingCleanupRecoveries[key]
 	if pending == nil {
 		pending = &pendingCleanupRecovery{
-			Run: run, Receipt: receipt, Kind: kind, UpdateRun: updateRun, ExpectedStatus: expected,
+			Run: run, Receipt: receipt, Kind: kind, FailureReason: failureReason,
+			UpdateRun: updateRun, ExpectedStatus: expected,
 		}
 		orchestrator.pendingCleanupRecoveries[key] = pending
 	} else if pending.Run.ID != run.ID || pending.Run.WorkID != run.WorkID || pending.Kind != kind ||
-		pending.UpdateRun != updateRun || pending.ExpectedStatus != expected {
-		orchestrator.mu.Unlock()
+		pending.UpdateRun != updateRun || pending.ExpectedStatus != expected || pending.FailureReason != failureReason {
+		orchestrator.recoveryMu.Unlock()
 		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), core.NewError("pending cleanup recovery conflicts with the exact receipt")))
 	}
-	orchestrator.mu.Unlock()
-
-	persisted := orchestrator.flushPendingCleanupRecovery(key, pending)
+	persisted := orchestrator.flushPendingCleanupRecoveryLocked(key, pending)
+	finishRunID := ""
+	if persisted.OK && pending.UpdateRun {
+		finishRunID = pending.Run.ID
+	}
+	orchestrator.recoveryMu.Unlock()
 	if !persisted.OK {
 		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), persisted.Err()))
+	}
+	if finishRunID != "" {
+		orchestrator.finishRunOwnership(finishRunID)
 	}
 	return persisted
 }
@@ -1688,33 +1690,52 @@ func cleanupRecoveryKey(kind, receiptJSON string) string {
 	return core.Concat(kind, "\x00", receiptJSON)
 }
 
-func (orchestrator *Orchestrator) flushPendingCleanupRecovery(key string, pending *pendingCleanupRecovery) core.Result {
-	reconciled := orchestrator.reconcileCleanupRecovery(pending)
+// flushPendingCleanupRecoveryLocked performs one logical retained-recovery
+// transaction while recoveryMu exclusively owns its lazy state and Store I/O.
+func (orchestrator *Orchestrator) flushPendingCleanupRecoveryLocked(key string, pending *pendingCleanupRecovery) core.Result {
+	reconciled := orchestrator.reconcileCleanupRecoveryLocked(pending)
 	if !reconciled.OK {
 		return reconciled
 	}
 	if reconciled.Value != nil {
-		return orchestrator.completePendingCleanupRecovery(key, pending, reconciled.Value.(work.Event))
+		return orchestrator.completePendingCleanupRecoveryLocked(key, pending, reconciled.Value.(work.Event))
 	}
 
-	orchestrator.mu.Lock()
-	if !pending.EventReady {
-		eventResult := orchestrator.newEvent(pending.Run, pending.Kind, "provisional workspace cleanup retained", pending.Receipt.Worktree)
-		if !eventResult.OK {
-			orchestrator.mu.Unlock()
-			return eventResult
+	if pending.UpdateRun && !pending.TerminalReady {
+		atResult := orchestrator.now()
+		if !atResult.OK {
+			return atResult
 		}
-		pending.Event = eventResult.Value.(work.Event)
-		pending.Event.DetailJSON = core.JSONMarshalString(pending.Receipt)
+		pending.Run.Status = work.RunFailed
+		pending.Run.FailureReason = pending.FailureReason
+		pending.Run.FinishedAt = atResult.Value.(time.Time)
+		pending.Run.UpdatedAt = pending.Run.FinishedAt
+		pending.TerminalReady = true
+	}
+
+	if !pending.EventReady {
+		atResult := orchestrator.now()
+		if !atResult.OK {
+			return atResult
+		}
+		idResult := orchestrator.nextID("event")
+		if !idResult.OK {
+			return idResult
+		}
+		pending.Event = work.Event{
+			ID: idResult.Value.(string), RunID: pending.Run.ID, WorkID: pending.Run.WorkID,
+			Kind: pending.Kind, Title: "provisional workspace cleanup retained",
+			Detail: pending.Receipt.Worktree, DetailJSON: core.JSONMarshalString(pending.Receipt),
+			CreatedAt: atResult.Value.(time.Time),
+		}
 		pending.EventReady = true
 	}
 	event := pending.Event
-	orchestrator.mu.Unlock()
+	run := pending.Run
+	expected := pending.ExpectedStatus
 
 	commit := Commit{Event: &event}
 	if pending.UpdateRun {
-		run := pending.Run
-		expected := pending.ExpectedStatus
 		commit.Run = &run
 		commit.ExpectedStatus = &expected
 	}
@@ -1722,20 +1743,20 @@ func (orchestrator *Orchestrator) flushPendingCleanupRecovery(key string, pendin
 	for attempt := 0; attempt < retainedEventAttempts; attempt++ {
 		committed = commitStore(orchestrator.store, commit)
 		if committed.OK {
-			return orchestrator.completePendingCleanupRecovery(key, pending, event)
+			return orchestrator.completePendingCleanupRecoveryLocked(key, pending, event)
 		}
-		reconciled = orchestrator.reconcileCleanupRecovery(pending)
+		reconciled = orchestrator.reconcileCleanupRecoveryLocked(pending)
 		if !reconciled.OK {
 			return reconciled
 		}
 		if reconciled.Value != nil {
-			return orchestrator.completePendingCleanupRecovery(key, pending, reconciled.Value.(work.Event))
+			return orchestrator.completePendingCleanupRecoveryLocked(key, pending, reconciled.Value.(work.Event))
 		}
 	}
 	return committed
 }
 
-func (orchestrator *Orchestrator) reconcileCleanupRecovery(pending *pendingCleanupRecovery) core.Result {
+func (orchestrator *Orchestrator) reconcileCleanupRecoveryLocked(pending *pendingCleanupRecovery) core.Result {
 	snapshotResult := orchestrator.store.Snapshot(pending.Run.WorkID)
 	if !snapshotResult.OK {
 		return snapshotResult
@@ -1792,36 +1813,38 @@ func sameCleanupRecoveryRun(stored, expected work.Run) bool {
 		stored.UpdatedAt.Equal(expected.UpdatedAt)
 }
 
-func (orchestrator *Orchestrator) completePendingCleanupRecovery(key string, pending *pendingCleanupRecovery, event work.Event) core.Result {
-	orchestrator.mu.Lock()
+func (orchestrator *Orchestrator) completePendingCleanupRecoveryLocked(key string, pending *pendingCleanupRecovery, event work.Event) core.Result {
 	if orchestrator.pendingCleanupRecoveries[key] == pending {
 		delete(orchestrator.pendingCleanupRecoveries, key)
-	}
-	orchestrator.mu.Unlock()
-	if pending.UpdateRun {
-		orchestrator.finishRunOwnership(pending.Run.ID)
 	}
 	return core.Ok(event)
 }
 
 func (orchestrator *Orchestrator) flushPendingCleanupRecoveries() core.Result {
-	orchestrator.mu.Lock()
+	orchestrator.recoveryMu.Lock()
 	keys := make([]string, 0, len(orchestrator.pendingCleanupRecoveries))
 	for key := range orchestrator.pendingCleanupRecoveries {
 		keys = append(keys, key)
 	}
-	orchestrator.mu.Unlock()
 	core.SliceSortFunc(keys, func(left, right string) bool { return left < right })
+	finishedRunIDs := make([]string, 0, len(keys))
 	for _, key := range keys {
-		orchestrator.mu.Lock()
 		pending := orchestrator.pendingCleanupRecoveries[key]
-		orchestrator.mu.Unlock()
 		if pending == nil {
 			continue
 		}
-		if persisted := orchestrator.flushPendingCleanupRecovery(key, pending); !persisted.OK {
-			return core.Fail(core.E("orchestrator.flushPendingCleanupRecoveries", core.Concat("cleanup recovery ", core.JSONMarshalString(pending.Receipt)), persisted.Err()))
+		if persisted := orchestrator.flushPendingCleanupRecoveryLocked(key, pending); !persisted.OK {
+			receiptJSON := core.JSONMarshalString(pending.Receipt)
+			orchestrator.recoveryMu.Unlock()
+			return core.Fail(core.E("orchestrator.flushPendingCleanupRecoveries", core.Concat("cleanup recovery ", receiptJSON), persisted.Err()))
 		}
+		if pending.UpdateRun {
+			finishedRunIDs = append(finishedRunIDs, pending.Run.ID)
+		}
+	}
+	orchestrator.recoveryMu.Unlock()
+	for _, runID := range finishedRunIDs {
+		orchestrator.finishRunOwnership(runID)
 	}
 	return core.Ok(nil)
 }

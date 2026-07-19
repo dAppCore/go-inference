@@ -23,16 +23,33 @@ type orchestratorTestGitRunner struct {
 	afterPush func(string)
 	failWhen  func(workspace.Command) bool
 	blockWhen func(workspace.Command) bool
+	pauseWhen func(workspace.Command) bool
 	blocked   chan struct{}
+	paused    chan struct{}
+	release   chan struct{}
 	blockOnce sync.Once
+	pauseOnce sync.Once
 }
 
 func (runner *orchestratorTestGitRunner) Run(ctx context.Context, command workspace.Command) core.Result {
 	runner.mu.Lock()
 	failWhen := runner.failWhen
 	blockWhen := runner.blockWhen
+	pauseWhen := runner.pauseWhen
 	blocked := runner.blocked
+	paused := runner.paused
+	release := runner.release
 	runner.mu.Unlock()
+	if pauseWhen != nil && pauseWhen(command) {
+		runner.pauseOnce.Do(func() {
+			if paused != nil {
+				close(paused)
+			}
+		})
+		if release != nil {
+			<-release
+		}
+	}
 	if failWhen != nil && failWhen(command) {
 		return core.Fail(core.NewError("injected Git failure"))
 	}
@@ -103,6 +120,17 @@ func (runner *orchestratorTestGitRunner) setBlock(predicate func(workspace.Comma
 	return blocked
 }
 
+func (runner *orchestratorTestGitRunner) setPause(predicate func(workspace.Command) bool) (<-chan struct{}, chan<- struct{}) {
+	runner.mu.Lock()
+	runner.pauseWhen = predicate
+	runner.paused = make(chan struct{})
+	runner.release = make(chan struct{})
+	paused := runner.paused
+	release := runner.release
+	runner.mu.Unlock()
+	return paused, release
+}
+
 func orchestratorWorkspaceCommandHasArgument(command workspace.Command, expected string) bool {
 	for _, argument := range command.Args {
 		if argument == expected {
@@ -128,6 +156,7 @@ type orchestratorTestStore struct {
 	recoverFail     bool
 	snapshotFail    bool
 	projectFail     bool
+	beforeSnapshot  func(string)
 	beforeCommit    func(Commit)
 	failCommitOnce  func(Commit) bool
 	failCommit      func(Commit) bool
@@ -173,6 +202,12 @@ func (store *orchestratorTestStore) setSnapshotFailure(fail bool) {
 func (store *orchestratorTestStore) setProjectFailure(fail bool) {
 	store.mu.Lock()
 	store.projectFail = fail
+	store.mu.Unlock()
+}
+
+func (store *orchestratorTestStore) setBeforeSnapshot(before func(string)) {
+	store.mu.Lock()
+	store.beforeSnapshot = before
 	store.mu.Unlock()
 }
 
@@ -458,6 +493,12 @@ func (store *orchestratorTestStore) Continuation(runID string) core.Result {
 }
 
 func (store *orchestratorTestStore) Snapshot(workID string) core.Result {
+	store.mu.Lock()
+	before := store.beforeSnapshot
+	store.mu.Unlock()
+	if before != nil {
+		before(workID)
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	if store.snapshotFail {

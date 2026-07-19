@@ -423,6 +423,9 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 		if !hasSnapshotState {
 			return false, "change review overlay is scheduled for Task 14"
 		}
+		if selectedState.RecoveryCount > 0 || selectedState.Recovery.EventID != "" {
+			return false, "resolve the retained cleanup recovery before reviewing changes"
+		}
 		return selectedState.NativeRunID != "" && status == "completed", "selected native run is not completed and reviewable"
 	case agentFeatureAccept:
 		if !hasSnapshotState {

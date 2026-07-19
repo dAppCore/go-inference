@@ -41,6 +41,9 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 	if run.Status != work.RunCompleted {
 		return core.Fail(core.NewError("agent change review requires a completed run"))
 	}
+	if guarded := orchestrator.guardDurableReviewCleanup(run); !guarded.OK {
+		return guarded
+	}
 	projectResult := orchestrator.store.Project(run.ProjectID)
 	if !projectResult.OK {
 		return projectResult
@@ -126,10 +129,73 @@ func (orchestrator *Orchestrator) reviewCleanupFailure(run work.Run, failure cor
 	receipt := recoveryResult.Value.(workspace.RecoveryReceipt)
 	receiptJSON := core.JSONMarshalString(receipt)
 	message := core.Join("; ", failure.Error(), core.Concat("review cleanup recovery: ", receiptJSON))
-	if persisted := orchestrator.persistCleanupRecovery(run, receipt, "review_cleanup_retained", false); !persisted.OK {
+	if persisted := orchestrator.persistCleanupRecovery(run, receipt, "review_cleanup_retained", false, ""); !persisted.OK {
 		message = core.Join("; ", message, persisted.Error())
 	}
 	return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", message, failure.Err()))
+}
+
+type durableReviewCleanupGroup struct {
+	receipt workspace.RecoveryReceipt
+	events  []work.Event
+}
+
+func (orchestrator *Orchestrator) guardDurableReviewCleanup(run work.Run) core.Result {
+	snapshotResult := orchestrator.store.Snapshot(run.WorkID)
+	if !snapshotResult.OK {
+		return snapshotResult
+	}
+	snapshot, ok := snapshotResult.Value.(work.Snapshot)
+	if !ok {
+		return core.Fail(core.Errorf("agent store returned %T instead of snapshot", snapshotResult.Value))
+	}
+	groups := make(map[string]*durableReviewCleanupGroup)
+	for _, event := range snapshot.Events {
+		if event.Kind != "review_cleanup_retained" || event.RunID != run.ID {
+			continue
+		}
+		retainedResult := cleanupRecoveryEvent(snapshot.Events, run, event.ID)
+		if !retainedResult.OK {
+			return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", "durable retained review cleanup recovery is invalid", retainedResult.Err()))
+		}
+		retained := retainedResult.Value.(work.Event)
+		var receipt workspace.RecoveryReceipt
+		if decoded := core.JSONUnmarshalString(retained.DetailJSON, &receipt); !decoded.OK {
+			return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", core.Concat("durable retained review cleanup recovery is invalid for ", retained.Detail), decoded.Err()))
+		}
+		if validated := validateCleanupRecoveryIdentity(snapshot, run, retained, receipt); !validated.OK {
+			return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", core.Concat("durable retained review cleanup recovery is invalid for ", core.JSONMarshalString(receipt)), validated.Err()))
+		}
+		key := core.JSONMarshalString(receipt)
+		group := groups[key]
+		if group == nil {
+			group = &durableReviewCleanupGroup{receipt: receipt}
+			groups[key] = group
+		}
+		group.events = append(group.events, retained)
+	}
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	core.SliceSortFunc(keys, func(left, right string) bool { return left < right })
+	for _, key := range keys {
+		group := groups[key]
+		resolved := false
+		for _, retained := range group.events {
+			terminalResult := terminalCleanupRecovery(snapshot.Events, run, retained.ID, group.receipt)
+			if !terminalResult.OK {
+				return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", core.Concat("durable retained review cleanup recovery is invalid for ", key), terminalResult.Err()))
+			}
+			if terminalResult.Value != nil {
+				resolved = true
+			}
+		}
+		if !resolved {
+			return core.Fail(core.NewError(core.Concat("agent change review is blocked by retained review cleanup recovery ", key)))
+		}
+	}
+	return core.Ok(nil)
 }
 
 // Accept applies a confirmed review and atomically records its durable decision.
