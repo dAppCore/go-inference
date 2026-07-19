@@ -71,6 +71,12 @@ func resetNativePipelineCachesForCoverage() {
 	ropeFreqsPSOBF16Cache = map[string]metal.MTLComputePipelineState{}
 	ropeFreqsPSOBF16Mu.Unlock()
 
+	sdpaRTDimMu.Lock()
+	sdpaRTDimPSO, sdpaRTDimPSOBuilt = nil, false
+	sdpaRTDim2Pass1PSO, sdpaRTDim2Pass1PSOBuilt = nil, false
+	sdpaVectorHeadDimMissing = map[int]bool{}
+	sdpaRTDimMu.Unlock()
+
 	sdpaPSOMu.Lock()
 	sdpaPSOCache = map[string]metal.MTLComputePipelineState{}
 	sdpaVectorHeadDimPSOCache = map[int]metal.MTLComputePipelineState{}

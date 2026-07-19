@@ -40,11 +40,9 @@ var (
 	sdpaRTDimMu sync.Mutex
 
 	sdpaRTDimPSO      metal.MTLComputePipelineState
-	sdpaRTDimPSOErr   error
 	sdpaRTDimPSOBuilt bool
 
 	sdpaRTDim2Pass1PSO      metal.MTLComputePipelineState
-	sdpaRTDim2Pass1PSOErr   error
 	sdpaRTDim2Pass1PSOBuilt bool
 
 	// sdpaVectorHeadDimMissing records head dims confirmed absent from the FIXED metallib (mirrors
