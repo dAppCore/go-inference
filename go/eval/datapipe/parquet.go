@@ -39,7 +39,7 @@ func ExportParquet(trainingDir, outputDir string) core.Result {
 		if !result.OK {
 			return core.Fail(core.E("datapipe.ExportParquet", core.Sprintf("export %s", split), result.Value.(error)))
 		}
-		total += result.Value.(int)
+		total += result.Int()
 	}
 
 	return core.Ok(total)

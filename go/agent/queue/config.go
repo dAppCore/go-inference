@@ -275,7 +275,7 @@ func decodeConcurrency(values map[string]any) core.Result {
 			if !integerResult.OK {
 				return core.Fail(core.Errorf("agent queue concurrency for %s must be an integer or map", provider))
 			}
-			limits[provider] = ConcurrencyLimit{Total: integerResult.Value.(int)}
+			limits[provider] = ConcurrencyLimit{Total: integerResult.Int()}
 		}
 	}
 	return core.Ok(limits)
@@ -288,7 +288,7 @@ func decodeConcurrencyMap(values map[string]any) core.Result {
 		if !integerResult.OK {
 			return integerResult
 		}
-		integer := integerResult.Value.(int)
+		integer := integerResult.Int()
 		if name == "total" {
 			limit.Total = integer
 			continue

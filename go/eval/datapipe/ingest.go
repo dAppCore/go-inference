@@ -77,7 +77,7 @@ func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 		if !result.OK {
 			return core.Fail(core.E("datapipe.Ingest", "ingest content scores", result.Value.(error)))
 		}
-		totalPoints += result.Value.(int)
+		totalPoints += result.Int()
 	}
 
 	if cfg.CapabilityFile != "" {
@@ -85,7 +85,7 @@ func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 		if !result.OK {
 			return core.Fail(core.E("datapipe.Ingest", "ingest capability scores", result.Value.(error)))
 		}
-		totalPoints += result.Value.(int)
+		totalPoints += result.Int()
 	}
 
 	if cfg.TrainingLog != "" {
@@ -93,7 +93,7 @@ func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 		if !result.OK {
 			return core.Fail(core.E("datapipe.Ingest", "ingest training log", result.Value.(error)))
 		}
-		totalPoints += result.Value.(int)
+		totalPoints += result.Int()
 	}
 
 	core.Print(w, "Ingested %d total points into InfluxDB", totalPoints)
