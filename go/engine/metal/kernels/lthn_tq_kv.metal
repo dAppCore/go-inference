@@ -22,54 +22,85 @@ typedef bfloat bf16;
 //                                       bf16 rows in ORIGINAL space (Πᵀ·γ·c),
 //                                       the batched-prefill read scratch (#48)
 //   lthn_tq_rot_rows_bf16 /             y = Π·x (and Πᵀ·x) over bf16 rows —
-//   lthn_tq_unrot_rows_bf16             the once-per-step q pre-rotation and
-//                                       the once-per-step output unrotation
+//   lthn_tq_unrot_rows_bf16             the 2-PASS lane's once-per-step q
+//                                       pre-rotation and output unrotation
 //                                       (the O(output) fold: rotation cost
-//                                       never enters the N-row scan)
-//   lthn_sdpa_vector_tq_bf16_{D}        single-pass decode SDPA over codes
-//   lthn_sdpa_vector_2pass_1_tq_bf16_{D} 2-pass pass 1 over codes (pass 2 is
-//                                       MLX's sdpa_vector_2pass_2 UNCHANGED —
-//                                       it merges f32 partials and never
-//                                       touches K/V; the q8 precedent)
+//                                       never enters the N-row scan), plus the
+//                                       host round-trip test driver. The
+//                                       SINGLE-pass SDPA below no longer calls
+//                                       these — it folds the same fold itself
+//                                       (#48 perf recovery, campaign slice).
+//   lthn_sdpa_vector_tq_bf16_{D}        FUSED single-pass decode SDPA: q
+//                                       pre-rotation and output unrotation are
+//                                       INSIDE this kernel (one threadgroup
+//                                       per head, so each fold runs exactly
+//                                       once) — queries in, out FINAL, no
+//                                       separate rotation dispatch either
+//                                       side (#48).
+//   lthn_sdpa_vector_2pass_1_tq_bf16_{D} 2-pass pass 1 over codes — NOT fused:
+//                                       this grid runs `blocks` threadgroups
+//                                       PER kv-head (up to 512,
+//                                       sdpa2PassBlocks), so folding the
+//                                       rotation here would redo the O(d²)
+//                                       work per block, not per head —
+//                                       exactly what the house fusion rule
+//                                       forbids. Pass 2 is MLX's
+//                                       sdpa_vector_2pass_2 UNCHANGED — it
+//                                       merges f32 partials, never touches
+//                                       K/V, and is shared kernel code this
+//                                       lane does not own, so it cannot fold
+//                                       the unrotation either; the 2-pass lane
+//                                       keeps the explicit rot/unrot pair
+//                                       around it (decode_forward_arch_icb.go).
 //
 // The math (matching kv/turboquant EncodeQMSE with f32 Π/centroids): a row x
 // stores γ = ‖x‖₂ and codes of y = Π·(x/γ) quantised per coordinate to the
 // nearest Lloyd-Max centroid. Π is orthogonal, so scores need no unrotation:
 //   q·k̃ = q·(γ Πᵀc) = γ·(Πq)·c
-// — the SDPA kernels read a PRE-ROTATED q (lthn_tq_rot_rows_bf16, once per
-// step per layer) and dot against centroid values in rotated space. The
-// V-weighted sum accumulates in rotated space too; ONE Πᵀ per output head
-// (lthn_tq_unrot_rows_bf16) lands it back. Nothing O(d²) sits inside the
-// key/value scan — the house fusion rule.
+// — the SDPA kernels score a ROTATED q against centroid values in rotated
+// space and accumulate the V-weighted sum in rotated space too; ONE Πᵀ per
+// output head lands it back. lthn_sdpa_vector_tq computes BOTH folds itself
+// (Πq at kernel start, Πᵀy in its epilogue, once each, in threadgroup
+// memory); lthn_sdpa_vector_2pass_1_tq still reads a q the CALLER pre-rotated
+// via lthn_tq_rot_rows_bf16 and leaves its output in rotated space for the
+// caller's lthn_tq_unrot_rows_bf16 pass. Either way nothing O(d²) sits inside
+// the key/value scan — the house fusion rule.
 //
 // SDPA structure is the lthn_sdpa_vector_q8 pair verbatim where it matters:
 // same loop order, same fp32 online-softmax stations, same fast::exp, same
-// simd_sum points, same cross-simdgroup combine — the ONLY change is each
+// simd_sum points, same cross-simdgroup combine — the ONLY changes are each
 // lane's K/V element loads unpack BITS-wide indices and look centroids up from
 // a threadgroup table (γ applied after simd_sum: the norm is row-wide, unlike
-// q8's per-lane group scales). The decode form is fixed: no masks, no sinks,
+// q8's per-lane group scales), and (single-pass only) the fused Πq/Πᵀy fold
+// bracketing that structure. The decode form is fixed: no masks, no sinks,
 // not causal, batch 1.
 //
 // ABI (mirroring the q8 pair with the code planes swapped in; strides are in
 // BYTES of the packed-code planes — khs = ceil(d·kBits/8) per head, kss =
 // kvHeads·khs per row — and the γ planes derive from them in-kernel):
 //   single:  q=0 kCodes=1 vCodes=2 out=3 gqa=4 N=5 khs=6 kss=7 vhs=8 vss=9
-//            scale=10 kGammas=11 vGammas=12 kCentroids=13 vCentroids=14
+//            scale=10 kGammas=11 vGammas=12 kCentroids=13 vCentroids=14 pi=15
+//            (q RAW in, out FINAL — pi is the fused rotation's ONLY new bind)
 //   2pass_1: q=0 kCodes=1 vCodes=2 partials=3 sums=4 maxs=5 kCentroids=6
 //            N=7 khs=8 kss=9 vhs=10 vss=11 scale=12 kGammas=13 vGammas=14
-//            vCentroids=15   (blocks = fc 26, as MLX)
+//            vCentroids=15   (blocks = fc 26, as MLX; q PRE-ROTATED by the
+//            caller, out left in ROTATED space — unchanged, no free bind)
 //   bits:    kBits = fc 27, vBits = fc 28 (2, 3 or 4 — the S1/S2 widths)
 //
-// The 2-pass table binds sit at 6 (the MLX ABI's free slot) and 15 — NOT 16:
-// the recorded arch ICB is built with maxKernelBufferBindCount = 16, so bind
-// indices stop at 15; an index-16 bind records as a silent no-op and the
-// kernel reads garbage there (the S3 bring-up bug — encoder paths carry no
-// such limit, which is why only the ICB lane broke).
+// Both kernels' binds stop at 15 — NOT 16: the recorded arch ICB is built
+// with maxKernelBufferBindCount = 16, so bind indices stop at 15; an index-16
+// bind records as a silent no-op and the kernel reads garbage there (the S3
+// bring-up bug — encoder paths carry no such limit, which is why only the ICB
+// lane broke). The single-pass fold fits EXACTLY inside that ceiling (14 was
+// the old high-water mark, pi lands at the last free slot, 15); the 2-pass
+// ABI was already AT 16/16 binds before this change, which is the other
+// reason (beside the per-block redundant-FLOP one above) it stays unfused.
 //
-// The per-coordinate unpack reads bit-by-bit from the packed row (LSB-first,
-// cross-byte — kv/turboquant packBits, identical to lthn_tq_dequant_unrotate's
-// own unpack), so no per-lane byte-alignment assumption is needed at any
-// (D, BITS) pairing (D=128 b=3 puts lane spans mid-byte).
+// The per-coordinate unpack (tq_unpack_idx, below) reads a masked packed-row
+// WORD (LSB-first, cross-byte — kv/turboquant packBits) rather than looping
+// bit-by-bit, so no per-lane byte-alignment assumption is needed at any
+// (D, BITS) pairing (D=128 b=3 puts lane spans mid-byte) and no extra device
+// memory traffic is spent re-reading the same byte once per bit.
 
 constant int lthn_tq_blocks [[function_constant(26)]];
 constant int lthn_tq_kbits [[function_constant(27)]];
@@ -82,17 +113,27 @@ constant int lthn_tq_vbits [[function_constant(28)]];
 #define LTHN_TQ_KV_CAP 512
 
 // tq_unpack_idx reads coordinate c's BITS-wide index from a packed row —
-// kv/turboquant packBits layout (bit b of coordinate c at packed bit c·BITS+b).
+// kv/turboquant packBits layout (bit b of coordinate c at packed bit c·BITS+b)
+// — as a masked 16-bit WORD load instead of the original per-bit loop (#48
+// perf recovery, campaign slice, item 3): a BITS≤4 span never covers more
+// than 2 bytes, so byte0 is always read and byte1 is read ONLY when the span
+// actually crosses into it (bit0+BITS>8). byte1 is provably inside the row
+// for EVERY coordinate, including the row's very last one: the packed row is
+// sized bytesPerHead=ceil(d·BITS/8) bytes, and a coordinate's span-ending
+// byte is floor((pos0+BITS-1)/8), which for c=d-1 equals bytesPerHead-1 by
+// the ceiling identity — so the conditional byte1 read never runs past the
+// row (and never past the whole cache buffer, since rows sit contiguous).
+// Bit-for-bit identical to the original loop — a widened load, not a
+// widened tolerance.
 inline int tq_unpack_idx(const device uint8_t* prow, int c, int BITS) {
   const int pos0 = c * BITS;
-  int idx = 0;
-  for (int b = 0; b < BITS; b++) {
-    const int pos = pos0 + b;
-    if ((prow[pos / 8] >> (pos % 8)) & 1) {
-      idx |= (1 << b);
-    }
+  const int byte0 = pos0 / 8;
+  const int bit0 = pos0 % 8;
+  uint word = uint(prow[byte0]);
+  if (bit0 + BITS > 8) {
+    word |= uint(prow[byte0 + 1]) << 8;
   }
-  return idx;
+  return int((word >> bit0) & uint((1 << BITS) - 1));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -326,9 +367,28 @@ lthn_tq_rot_rows_bf16_t<true>(
     const device bf16*, const device float*, device bf16*, constant int&, uint, uint);
 
 // ---------------------------------------------------------------------------------------------
-// lthn_sdpa_vector_tq<D> — single-pass decode SDPA over TurboQuant codes.
-// queries are PRE-ROTATED (Πq per head — lthn_tq_rot_rows_bf16); out is the
-// ROTATED-space attention output (the recorded unrotation op follows).
+// lthn_sdpa_vector_tq<D> — single-pass decode SDPA over TurboQuant codes, WITH
+// the q pre-rotation and output unrotation FUSED into this kernel (#48 perf
+// recovery, campaign slice, items 1+2): queries are the RAW (un-rotated) RoPE'd
+// row, out is the FINAL (un-rotated) attention output — exactly the plain/q8
+// SDPA kernels' ABI shape, no separate lthn_tq_rot_rows_bf16 dispatch either
+// side. The fold is safe here because this kernel runs as ONE threadgroup per
+// head (1024 threads ≥ any instantiated D), so Πq and Πᵀy are each computed
+// EXACTLY ONCE per head — O(d²) outside the N-row KV scan, same total FLOPs as
+// the two separate dispatches, just recorded/launched as one op. The 2-pass
+// pair below (lthn_sdpa_vector_2pass_1_tq) does NOT get this fold: its grid
+// runs `blocks` threadgroups per kv-head (up to 512, sdpa2PassBlocks), so
+// fusing the rotation there would redo the O(d²) work per BLOCK instead of
+// per head — exactly the "O(d²) inside the scan" the house fusion rule
+// forbids. The 2-pass lane keeps the explicit lthn_tq_rot_rows_bf16 pair
+// (decode_forward_arch_icb.go's TQ block); its pass-2 merge is also shared MLX
+// kernel code outside this file's ownership, so its epilogue cannot fold the
+// unrotation either. Both kernels still get the tq_unpack_idx word-widening
+// above.
+//
+// ABI: buffer 15 is a NEW bind — the same resident Π [d,d] row-major buffer
+// the store/dequant/rot-rows kernels already use (tqKVPiBuffer). It is the
+// ONLY buffer this fold adds; 15 was free (the single-pass ABI used 0..14).
 template <int D>
 [[kernel]] void lthn_sdpa_vector_tq(
     const device bf16* queries [[buffer(0)]],
@@ -346,6 +406,7 @@ template <int D>
     const device float* v_gammas [[buffer(12)]],
     const device float* k_centroids [[buffer(13)]],
     const device float* v_centroids [[buffer(14)]],
+    const device float* pi [[buffer(15)]],
     uint3 tid [[threadgroup_position_in_grid]],
     uint simd_gid [[simdgroup_index_in_threadgroup]],
     uint simd_lid [[thread_index_in_simdgroup]]) {
@@ -372,10 +433,20 @@ template <int D>
   threadgroup U sum_exp_scores[BN];
   threadgroup U kcent[16];
   threadgroup U vcent[16];
+  // fused-rotation scratch (the O(output) fold this kernel now performs
+  // itself): rot0 stages the raw query row, then — after its barrier — the
+  // SAME memory restages the rotated-space attention output for the epilogue
+  // fold; rot1 holds the once-computed Πq the whole KV scan reads from.
+  threadgroup U rot0[D];
+  threadgroup U rot1[D];
+
+  // flat == thread_position_in_threadgroup for this kernel's 1D (BN·BD)
+  // dispatch (Metal linearises SIMD-groups in thread-index order), so this is
+  // the same per-thread output-coordinate index lthn_tq_rot_rows_bf16 uses.
+  const uint flat = simd_gid * BD + simd_lid;
 
   // centroid tables → threadgroup memory (≤16 entries each; low threads load both)
   {
-    const uint flat = simd_gid * BD + simd_lid;
     if (flat < uint(1 << lthn_tq_kbits)) {
       kcent[flat] = k_centroids[flat];
     } else if (flat < 16) {
@@ -387,20 +458,36 @@ template <int D>
       vcent[flat] = 0;
     }
   }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
 
   // decode form: one query row per head, batch 1
   const int head_idx = tid.x;
   const int kv_head_idx = head_idx / gqa_factor;
-  queries += head_idx * D + simd_lid * qk_per_thread;
+
+  // fused q pre-rotation: Πq, matching lthn_tq_rot_rows_bf16_t<false> EXACTLY
+  // ((Π·x)[c] = row c of Π dot x) — stage the raw row, barrier, every
+  // flat<D thread computes one rotated coordinate into rot1.
+  const device bf16* qraw = queries + head_idx * D;
+  if (flat < uint(D)) {
+    rot0[flat] = float(qraw[flat]);
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (flat < uint(D)) {
+    const device float* pirow = pi + flat * (uint)D;
+    float yc = 0.0f;
+    for (int j = 0; j < D; j++) {
+      yc += pirow[j] * rot0[j];
+    }
+    rot1[flat] = yc;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
   keys += kv_head_idx * k_head_stride + simd_gid * k_seq_stride;
   values += kv_head_idx * v_head_stride + simd_gid * v_seq_stride;
   k_gammas += kv_head_idx + simd_gid * kg_seq_stride;
   v_gammas += kv_head_idx + simd_gid * vg_seq_stride;
-  out += head_idx * D + simd_gid * v_per_thread;
 
   for (int i = 0; i < qk_per_thread; i++) {
-    q[i] = static_cast<U>(scale) * static_cast<U>(queries[i]);
+    q[i] = static_cast<U>(scale) * rot1[simd_lid * qk_per_thread + i];
   }
   for (int i = 0; i < v_per_thread; i++) {
     o[i] = 0;
@@ -457,10 +544,25 @@ template <int D>
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
+  // fused output unrotation: simd-group g holds the softmax-normalised
+  // rotated-space output for coordinates [g*v_per_thread, (g+1)*v_per_thread)
+  // replicated across its 32 lanes (simd_sum's broadcast) — lane 0 stages it
+  // once into rot0 (reused; the q-rotation phase above no longer needs it),
+  // then every flat<D thread folds Πᵀ, matching lthn_tq_rot_rows_bf16_t<true>
+  // EXACTLY ((Πᵀ·x)[c] = Σ_r Π[r][c]·x[r]), and writes the FINAL value
+  // straight to the caller's out row — no rotated-space scratch buffer.
   if (simd_lid == 0) {
     for (int i = 0; i < v_per_thread; i++) {
-      out[i] = static_cast<bf16>(o[i]);
+      rot0[simd_gid * v_per_thread + i] = o[i];
     }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (flat < uint(D)) {
+    float xc = 0.0f;
+    for (int r = 0; r < D; r++) {
+      xc += pi[(uint)r * (uint)D + flat] * rot0[r];
+    }
+    out[head_idx * D + flat] = static_cast<bf16>(xc);
   }
 }
 
@@ -590,7 +692,8 @@ template <int D>
       const constant size_t&, const constant size_t&,                       \
       const constant size_t&, const constant size_t&,                       \
       const constant float&, const device float*, const device float*,      \
-      const device float*, const device float*, uint3, uint, uint);         \
+      const device float*, const device float*, const device float*,        \
+      uint3, uint, uint);                                                   \
   template                                                                  \
       [[host_name("lthn_sdpa_vector_2pass_1_tq_bf16_" #dim)]] [[kernel]]    \
   void lthn_sdpa_vector_2pass_1_tq<dim>(                                    \

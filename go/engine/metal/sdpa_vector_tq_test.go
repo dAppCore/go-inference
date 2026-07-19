@@ -26,11 +26,20 @@ import (
 //
 // Measured bands (this box, 2026-07-19, n=64/96 single-pass + n=knee+512
 // 2-pass, hd ∈ {128, 256, 512}, modes (4,4)/(4,3)/(3,3)/(2,2), kv ∈ {1, 2}):
-// max |Δ| vs the f64 oracle is ≤ 0.0041 in 33 of 36 cases; the outliers are
-// hd=512 (4,4): single-pass kv=2 0.0369, 2-pass 0.0253, and 2-pass (4,3)
-// 0.0137 — near-tied softmax weights where the bf16 rounding of the
-// pre-rotated q tips a dominant score. The asserted band 0.08 carries ~2×
-// margin over the worst measured case.
+// post-#48 fusion (single-pass folds Πq/Πᵀy INTO lthn_sdpa_vector_tq, no
+// intermediate bf16 rotated-q / rotated-out buffers) max |Δ| vs the f64
+// oracle is ≤ 0.0020 across all 24 single-pass cases and ≤ 0.0008 across all
+// 12 2-pass cases (2-pass is unfused — see kernels/lthn_tq_kv.metal's header
+// — so its band is arithmetically the same computation as before this
+// change). The single-pass band TIGHTENED versus the pre-fusion measurement
+// (was ≤0.0041 typical, 0.0369 worst case): removing the pre-fusion q
+// rotation's and SDPA output's intermediate bf16 round-trips (the separate
+// dispatches wrote/read a real bf16 buffer between rotate and read/unrotate;
+// the fused kernel keeps both in f32 threadgroup memory throughout) is a
+// strict precision win, not a wash — consistent with "a fused kernel that
+// widens the band is a bug, not a tolerance update" holding in the tighter
+// direction. The asserted band 0.08 carries ~40× margin over the worst
+// measured case now.
 
 func tqKVRequire(t *testing.T, kBits, vBits, headDim int) {
 	t.Helper()
@@ -197,9 +206,10 @@ func TestTurboQuantKVStoreDevice_Bad(t *testing.T) {
 }
 
 // TestTurboQuantSDPADevice_Good gates the SINGLE-PASS code-reading SDPA chain
-// (q pre-rotation → lthn_sdpa_vector_tq → output unrotation) against the f64
-// oracle on dequantised rows, across head dims 128/256/512, every mode
-// contract bit pairing, and MQA (kv=1) + GQA (kv=2) geometries.
+// — lthn_sdpa_vector_tq, which FUSES the q pre-rotation and output unrotation
+// into itself (#48) — against the f64 oracle on dequantised rows, across head
+// dims 128/256/512, every mode contract bit pairing, and MQA (kv=1) + GQA
+// (kv=2) geometries.
 func TestTurboQuantSDPADevice_Good(t *testing.T) {
 	for _, d := range []int{128, 256, 512} {
 		for _, mode := range tqKVModes {
@@ -415,16 +425,21 @@ func TestTurboQuantSDPADevice_Ugly(t *testing.T) {
 	}
 }
 
-// TestEmitSDPAVectorTQ_Good asserts the single-pass TQ binding ABI on the
-// recording sink: γ planes at 11/12, centroid tables at 13/14, gqa at 4, the
-// inline N at 5 — and nothing at the q8 lane's scale indices beyond them.
+// TestEmitSDPAVectorTQ_Good asserts the FUSED single-pass TQ binding ABI on
+// the recording sink: γ planes at 11/12, centroid tables at 13/14, the fused
+// rotation's Π bind at 15 (#48 — the only bind the fusion added), gqa at 4,
+// the inline N at 5 — and nothing at the 2-pass lane's index-16-and-beyond
+// territory.
 func TestEmitSDPAVectorTQ_Good(t *testing.T) {
 	rec := &recordingDispatchSink{}
-	emitSDPAVectorTQ(rec, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, 8, 2, 64, 128, 512, 96, 384, 0.125)
-	for _, idx := range []uint{11, 12, 13, 14} {
+	emitSDPAVectorTQ(rec, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, 8, 2, 64, 128, 512, 96, 384, 0.125, nil)
+	for _, idx := range []uint{11, 12, 13, 14, 15} {
 		if !rec.boundBuf(idx) {
 			t.Fatalf("emitSDPAVectorTQ did not bind buffer(%d)", idx)
 		}
+	}
+	if rec.boundBuf(16) {
+		t.Fatal("emitSDPAVectorTQ bound buffer(16) — past the ICB's maxKernelBufferBindCount, a silent no-op")
 	}
 	if got := rec.i32[4]; got != 4 {
 		t.Fatalf("gqa_factor(4) = %d, want 4", got)

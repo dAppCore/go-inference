@@ -24,8 +24,16 @@ import (
 // land into FIXED bf16 staging rows, one lthn_tq_kv_store op each rotates +
 // quantises staging → the code cache row + γ row (those two stores' output
 // offsets are what prepareStepRebind rebinds per token), and the layer's SDPA
-// reads codes through the TQ kernel pair with q pre-rotated once per step and
-// the output unrotated once per step (lthn_tq_rot_rows — the O(output) fold).
+// reads codes through the TQ kernel pair. Below the 2-pass knee (maxLen <
+// sdpa2PassMinKV) that SDPA is the FUSED single-pass kernel
+// (lthn_sdpa_vector_tq, #48 perf recovery): q pre-rotation and output
+// unrotation happen INSIDE it, one op, no separate lthn_tq_rot_rows dispatch
+// either side. At/past the knee the recorded op stays the 2-pass pair with
+// q pre-rotated once per step and the output unrotated once per step
+// (lthn_tq_rot_rows — the O(output) fold) bracketing it, same as before —
+// fusing the rotation into a kernel that runs `blocks` threadgroups per
+// kv-head would redo that O(d²) work per block, not per head (see
+// kernels/lthn_tq_kv.metal's header).
 //
 // Coherence: most lanes that would read or write these caches as bf16 rows
 // DECLINE — prompt reuse falls back to the whole prefill, KV snapshot / -state
