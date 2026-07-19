@@ -6,7 +6,11 @@ package native
 
 import (
 	"math"
+	"os"
 	"runtime"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -174,9 +178,9 @@ func encAttnHalfSharedInputAt(
 // unbound for MoE layers (MoEBlockBF16 owns that FFN).
 type archLayerBufs struct {
 	anw, mnw                 bufView
-	postAttnNorm, postFFNorm bufView // gemma4 post-attn/post-FF norms (nil buf = skip)
-	qNorm, kNorm             bufView // gemma4 per-head QK-norm (nil buf = skip)
-	sinks                    bufView // gpt_oss attention sinks (bf16 [nHeads] logits; nil buf = plain softmax)
+	postAttnNorm, postFFNorm bufView         // gemma4 post-attn/post-FF norms (nil buf = skip)
+	qNorm, kNorm             bufView         // gemma4 per-head QK-norm (nil buf = skip)
+	sinks                    bufView         // gpt_oss attention sinks (bf16 [nHeads] logits; nil buf = plain softmax)
 	layerScalar              metal.MTLBuffer // gemma4 per-layer output scalar, broadcast to dModel (synthesised, nil = skip)
 	kCache, vCache           metal.MTLBuffer
 	kCachePtr, vCachePtr     *byte
@@ -785,6 +789,168 @@ func (s *archDecodeState) resetDevicePagedAttentionScratch() {
 	}
 }
 
+// kvSyncDeltaDisabled restores the O(position) full-snapshot sync/reload at the
+// batched-verify seam (LTHN_KV_SYNC_DELTA=0) — the repro anchor for the #372
+// delta paths. The full paths also remain the in-code fallback for any layer
+// geometry the delta helpers decline.
+var kvSyncDeltaDisabled = os.Getenv("LTHN_KV_SYNC_DELTA") == "0"
+
+// syncLinearKVDeltaLayer copies ONLY the paged rows the linear twin is missing
+// — [watermark, position) — instead of snapshotting the whole prefix. The MTP
+// verify seam calls sync+reload EVERY round; at 26B geometry the full snapshot
+// cost 5-12ms (sync) + 25-42ms (reload) per round, growing with position — the
+// #372 whale: the pair decoded 50 tok/s against 138 plain WITH 64% acceptance.
+// handled=false defers to the full path (identical behaviour) for any geometry
+// this helper does not model.
+func (s *archDecodeState) syncLinearKVDeltaLayer(li int, cache *devicePagedKVCache, position int) (bool, error) {
+	if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
+		return false, nil // full path raises the canonical missing-cache error
+	}
+	spec := s.specs[li]
+	lkv, lhd := kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim)
+	rowBytes := lkv * lhd * bf16Size
+	if rowBytes <= 0 {
+		return false, nil
+	}
+	cacheBytes := int(bufferLengthFast(s.lb[li].kCache))
+	if cacheBytes%rowBytes != 0 || int(bufferLengthFast(s.lb[li].vCache)) != cacheBytes {
+		return false, nil
+	}
+	lbRows := cacheBytes / rowBytes
+	var from int
+	if cache.ring {
+		if position > cache.offset {
+			return false, nil // rows beyond the pool's high-water: full path semantics
+		}
+		from = max(cache.linearSyncedAbs, position-cache.maxSize, 0)
+	} else {
+		if position > cache.length {
+			return false, nil // full path raises the canonical shorter-than-position error
+		}
+		from = min(cache.linearSynced, position)
+	}
+	if from >= position {
+		return true, nil
+	}
+	if position > lbRows && !cache.ring {
+		return false, nil
+	}
+	s.lb[li].cacheKVContents()
+	if err := cache.syncRowsToLinear(unsafe.Slice(s.lb[li].kCachePtr, cacheBytes), unsafe.Slice(s.lb[li].vCachePtr, cacheBytes), lbRows, from, position); err != nil {
+		return false, err
+	}
+	if cache.ring {
+		cache.linearSyncedAbs = position
+	} else {
+		cache.linearSynced = position
+	}
+	return true, nil
+}
+
+// reloadDevicePagedKVDeltaLayer pushes ONLY the batch's landed rows — [pool
+// high-water, position) — back into the pages, instead of rebuilding every
+// page from row zero. Valid at the batched-verify seam by construction: sync
+// ran at basePos (linear == paged through basePos), the batch landed
+// [basePos, position) into the linear twin, and nothing else touched the pool.
+// handled=false defers to the full rebuild.
+func (s *archDecodeState) reloadDevicePagedKVDeltaLayer(li int, cache *devicePagedKVCache, position int) (bool, error) {
+	if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
+		return false, nil
+	}
+	spec := s.specs[li]
+	lkv, lhd := kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim)
+	rowBytes := lkv * lhd * bf16Size
+	if rowBytes <= 0 {
+		return false, nil
+	}
+	cacheBytes := int(bufferLengthFast(s.lb[li].kCache))
+	if cacheBytes%rowBytes != 0 || int(bufferLengthFast(s.lb[li].vCache)) != cacheBytes {
+		return false, nil
+	}
+	lbRows := cacheBytes / rowBytes
+	from := cache.length
+	if cache.ring {
+		from = cache.offset
+	} else if position > lbRows || (cache.maxSize > 0 && position > cache.maxSize) {
+		return false, nil // full path clamps; keep its semantics
+	}
+	to := position
+	if from > to {
+		return false, nil // pool ahead of the target position: full rebuild truncates
+	}
+	if cache.ring && cache.maxSize > 0 && to-from > cache.maxSize {
+		from = to - cache.maxSize // only the surviving window's rows exist to load
+	}
+	if from < to {
+		s.lb[li].cacheKVContents()
+		if err := cache.loadRowsFromLinear(unsafe.Slice(s.lb[li].kCachePtr, cacheBytes), unsafe.Slice(s.lb[li].vCachePtr, cacheBytes), lbRows, from, to); err != nil {
+			return false, err
+		}
+	}
+	if cache.ring {
+		cache.offset = position // slot() advanced to the last written row; a truncated tail keeps the caller's position
+		cache.linearSyncedAbs = position
+	} else {
+		cache.linearSynced = position
+	}
+	return true, nil
+}
+
+// forEachPagedOwnerLayerDelta fans deltaFn over every owner layer's paged
+// cache in parallel — each layer's cache, lb twin, and scratch are
+// independent, and the per-layer work is host memcpy/quantise (the q8 26B
+// pays ~30 layers × K rows of scalar quant per verify round; serial it was
+// ~3-4ms of the round, #53). Layers deltaFn declines (handled=false) are
+// returned for the caller's serial full-path pass. Metal calls inside
+// (bufferLength / Contents / page allocation) are device-level thread-safe.
+func (s *archDecodeState) forEachPagedOwnerLayerDelta(deltaFn func(li int, cache *devicePagedKVCache) (bool, error)) (unhandled []int, err error) {
+	type layerRef struct {
+		li    int
+		cache *devicePagedKVCache
+	}
+	var refs []layerRef
+	for li, spec := range s.specs {
+		cache := s.layerPagedKV(li)
+		if cache == nil || !spec.OwnsCache() {
+			continue
+		}
+		refs = append(refs, layerRef{li, cache})
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	handled := make([]bool, len(refs))
+	errs := make([]error, len(refs))
+	// stride-1 fan-out: parallelRows' 64-wide batches would hand all ~30
+	// layers to one worker; here each unit is a whole layer's copy loop.
+	workers := min(runtime.GOMAXPROCS(0), len(refs))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(refs) {
+					return
+				}
+				handled[i], errs[i] = deltaFn(refs[i].li, refs[i].cache)
+			}
+		}()
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+		if !handled[i] {
+			unhandled = append(unhandled, refs[i].li)
+		}
+	}
+	return unhandled, nil
+}
+
 func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if s == nil || !s.hasDevicePagedKV() {
 		return nil
@@ -792,7 +958,23 @@ func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy source
 		return err
 	}
+	var deltaUnhandled []int
+	if !kvSyncDeltaDisabled {
+		unhandled, err := s.forEachPagedOwnerLayerDelta(func(li int, cache *devicePagedKVCache) (bool, error) {
+			return s.reloadDevicePagedKVDeltaLayer(li, cache, position)
+		})
+		if err != nil {
+			return err
+		}
+		if unhandled == nil {
+			return nil
+		}
+		deltaUnhandled = unhandled
+	}
 	for li, spec := range s.specs {
+		if deltaUnhandled != nil && !slices.Contains(deltaUnhandled, li) {
+			continue
+		}
 		cache := s.layerPagedKV(li)
 		if cache == nil || !spec.OwnsCache() {
 			continue
@@ -834,7 +1016,28 @@ func (s *archDecodeState) syncLinearKVFromDevicePaged(position int) error {
 	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy target
 		return err
 	}
+	var deltaUnhandled []int
+	if !kvSyncDeltaDisabled {
+		unhandled, err := s.forEachPagedOwnerLayerDelta(func(li int, cache *devicePagedKVCache) (bool, error) {
+			if position < cache.length {
+				if terr := cache.truncate(position); terr != nil {
+					return false, terr
+				}
+			}
+			return s.syncLinearKVDeltaLayer(li, cache, position)
+		})
+		if err != nil {
+			return err
+		}
+		if unhandled == nil {
+			return nil
+		}
+		deltaUnhandled = unhandled
+	}
 	for li, spec := range s.specs {
+		if deltaUnhandled != nil && !slices.Contains(deltaUnhandled, li) {
+			continue
+		}
 		cache := s.layerPagedKV(li)
 		if cache == nil || !spec.OwnsCache() {
 			continue
@@ -2296,7 +2499,7 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		p := bf16Projector{
 			wQ: view(w.WQ), wK: wK, wV: wV, wO: view(w.WO),
 			bQ: normView(w.BQ), bK: normView(w.BK), bV: normView(w.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
-			bO:     normView(w.BO),                                     // gpt_oss o_proj bias (zero bufView otherwise)
+			bO:     normView(w.BO), // gpt_oss o_proj bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 		}
 		if layers[li].MoE == nil {
