@@ -186,26 +186,118 @@ func (t *LoRATrainer) forwardFrozen(ids []int32) (normed, baseLogits []float32, 
 	return normed, baseLogits, tokens, nil
 }
 
-// seqGrads runs one sequence's head-LoRA forward+backward under the current A/B and returns its loss and
-// the gradients of A and B. Targets are the sequence's own next token (causal SFT): hidden t predicts
-// token t+1, so the trainable rows are 0..T-2. No optimiser step (the caller accumulates then steps).
-func (t *LoRATrainer) seqGrads(ids []int32) (loss float32, dA, dB []float32, err error) {
-	if len(ids) < 2 {
-		return 0, nil, nil, core.NewError("native.LoRATrainer: a training sequence needs at least 2 tokens")
+// lossMaskRows resolves a batch's LossMask for ONE sequence into the prediction-row indices that
+// contribute to the loss. The mask is per TOKEN over the full sequence (len(ids) entries): entry t marks
+// whether token t contributes AS A TARGET, so prediction row p (hidden p predicting token p+1) trains
+// iff mask[p+1] > 0 — the same target-token semantics as engine/hip's hipTrainerIncludesTarget. An
+// unset mask (no Values) returns masked=false: every row trains, the pre-mask behaviour. A set mask
+// that does not cover the sequence (missing sample row, or a row whose length is not the token count)
+// is a malformed batch and is refused LOUDLY — never silently treated as all-masked. Values are a
+// binary restriction (positive = contributes); fractional loss WEIGHTING is not implemented.
+func lossMaskRows(mask inference.LossMask, sample, tokens int) (rows []int, masked bool, err error) {
+	if len(mask.Values) == 0 {
+		return nil, false, nil
 	}
-	normed, baseLogits, tokens, err := t.forwardFrozen(ids)
+	if sample >= len(mask.Values) {
+		return nil, true, core.NewError(core.Concat(
+			"native.LoRATrainer: batch.LossMask has ", core.Sprintf("%d", len(mask.Values)),
+			" rows but sequence ", core.Sprintf("%d", sample),
+			" needs one — a set mask must carry a row per sequence (or clear the mask)"))
+	}
+	row := mask.Values[sample]
+	if len(row) != tokens {
+		return nil, true, core.NewError(core.Concat(
+			"native.LoRATrainer: batch.LossMask row ", core.Sprintf("%d", sample),
+			" has ", core.Sprintf("%d", len(row)), " entries but the sequence has ",
+			core.Sprintf("%d", tokens), " tokens — the mask is per token"))
+	}
+	rows = make([]int, 0, tokens-1)
+	for p := 0; p < tokens-1; p++ {
+		if row[p+1] > 0 {
+			rows = append(rows, p)
+		}
+	}
+	return rows, true, nil
+}
+
+// gatherRowsF32 gathers the given rows of a row-major [*, width] tensor into a packed
+// [len(rows), width] tensor — the loss-mask row selection. Rows must be in range.
+func gatherRowsF32(src []float32, rows []int, width int) []float32 {
+	out := make([]float32, len(rows)*width)
+	for i, r := range rows {
+		copy(out[i*width:(i+1)*width], src[r*width:(r+1)*width])
+	}
+	return out
+}
+
+// forwardFrozenRows is forwardFrozen restricted to the given prediction rows — the loss-masked frozen
+// half. The engine forward still runs over the WHOLE sequence (a masked token is still an input every
+// later position attends), but the final norm + frozen head matmul run only on the contributing rows,
+// so a response-masked batch pays the [rows × vocab] head cost for its response rows only. Row-for-row
+// identical to forwardFrozen's rows (both the norm and the head matmul are row-independent).
+func (t *LoRATrainer) forwardFrozenRows(ids []int32, rows []int) (normedRows, baseLogits []float32, err error) {
+	lastHidden, err := t.sess.ForwardCaptureFinalHidden(ids)
 	if err != nil {
-		return 0, nil, nil, err
+		return nil, nil, err
 	}
-	rows := tokens - 1
-	normedPred := normed[:rows*t.dModel]
-	targets := make([]int32, rows)
-	for i := range rows {
-		targets[i] = ids[i+1]
+	hRows := gatherRowsF32(bf16ToF32Slice(lastHidden), rows, t.dModel)
+	normedRows = rmsNormForwardF32(hRows, t.finalNorm, len(rows), t.dModel, t.eps)
+	baseLogits, err = MatMulF32NT(normedRows, t.lmHead, len(rows), t.dModel, t.vocab)
+	if err != nil {
+		return nil, nil, err
+	}
+	return normedRows, baseLogits, nil
+}
+
+// seqGrads runs one sequence's head-LoRA forward+backward under the current A/B and returns its loss,
+// the gradients of A and B, and the number of prediction rows that contributed. Targets are the
+// sequence's own next token (causal SFT): hidden t predicts token t+1, so the trainable rows are
+// 0..T-2 — restricted to the response rows when the batch carries a LossMask (lossMaskRows): a masked
+// position contributes zero loss and zero gradient, and the per-sequence mean divides by the UNMASKED
+// row count. A fully-masked sequence returns rows=0 with no error (and skips the forward entirely) —
+// the caller drops it from the batch mean. No optimiser step (the caller accumulates then steps).
+func (t *LoRATrainer) seqGrads(ids []int32, mask inference.LossMask, sample int) (loss float32, dA, dB []float32, rows int, err error) {
+	if len(ids) < 2 {
+		return 0, nil, nil, 0, core.NewError("native.LoRATrainer: a training sequence needs at least 2 tokens")
+	}
+	maskRows, masked, err := lossMaskRows(mask, sample, len(ids))
+	if err != nil {
+		return 0, nil, nil, 0, err
+	}
+	if masked && len(maskRows) == 0 {
+		return 0, nil, nil, 0, nil // every position masked: nothing to train, nothing to forward
+	}
+
+	var normedPred, baseLogits []float32
+	var targets []int32
+	if masked {
+		normedPred, baseLogits, err = t.forwardFrozenRows(ids, maskRows)
+		if err != nil {
+			return 0, nil, nil, 0, err
+		}
+		rows = len(maskRows)
+		targets = make([]int32, rows)
+		for i, p := range maskRows {
+			targets[i] = ids[p+1]
+		}
+	} else {
+		var normed []float32
+		var tokens int
+		normed, baseLogits, tokens, err = t.forwardFrozen(ids)
+		if err != nil {
+			return 0, nil, nil, 0, err
+		}
+		rows = tokens - 1
+		normedPred = normed[:rows*t.dModel]
+		baseLogits = baseLogits[:rows*t.vocab]
+		targets = make([]int32, rows)
+		for i := range rows {
+			targets[i] = ids[i+1]
+		}
 	}
 	xA, delta, err := LoRAForwardF32(normedPred, t.a, t.b, rows, t.dModel, t.vocab, t.rank, t.scaling)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, 0, err
 	}
 	logits := make([]float32, rows*t.vocab)
 	for i := range logits {
@@ -213,23 +305,28 @@ func (t *LoRATrainer) seqGrads(ids []int32) (loss float32, dA, dB []float32, err
 	}
 	loss, dLogits, err := CrossEntropyBackwardF32Auto(logits, targets, rows, t.vocab)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, 0, err
 	}
 	dA, dB, _, err = LoRABackwardF32(dLogits, normedPred, t.a, t.b, xA, rows, t.dModel, t.vocab, t.rank, t.scaling)
 	if err != nil {
-		return 0, nil, nil, err
+		return 0, nil, nil, 0, err
 	}
-	return loss, dA, dB, nil
+	return loss, dA, dB, rows, nil
 }
 
-// accumulate sums the per-sequence loss and A/B gradients across every sequence in batch (no step).
+// accumulate sums the per-sequence loss and A/B gradients across every sequence in batch (no step),
+// honouring batch.LossMask: a fully-masked sequence contributes nothing and is not counted in n, so
+// the batch mean divides by the sequences that actually trained.
 func (t *LoRATrainer) accumulate(batch inference.Batch) (lossSum float64, sumDA, sumDB []float32, n int, err error) {
 	sumDA = make([]float32, len(t.a))
 	sumDB = make([]float32, len(t.b))
-	for _, ids := range batch.TokenIDs {
-		loss, dA, dB, e := t.seqGrads(ids)
+	for si, ids := range batch.TokenIDs {
+		loss, dA, dB, rows, e := t.seqGrads(ids, batch.LossMask, si)
 		if e != nil {
 			return 0, nil, nil, 0, e
+		}
+		if rows == 0 {
+			continue // fully-masked sequence: zero loss, zero gradient, not counted
 		}
 		for i := range sumDA {
 			sumDA[i] += dA[i]
@@ -259,7 +356,10 @@ func (t *LoRATrainer) applyMeanStep(sumDA, sumDB []float32, count int) error {
 }
 
 // Step runs one SFT gradient step over batch (one AdamW update from the batch-mean gradient) and returns
-// the mean cross-entropy loss. Implements engine.Trainer.
+// the mean cross-entropy loss. batch.LossMask, when set, restricts the loss to response positions —
+// masked positions contribute zero loss and zero gradient, and every mean divides by the UNMASKED
+// counts (the engine.Trainer contract); a batch whose mask leaves nothing trainable is refused rather
+// than divided by zero. Implements engine.Trainer.
 func (t *LoRATrainer) Step(batch inference.Batch) (float64, error) {
 	if len(batch.TokenIDs) == 0 {
 		return 0, core.NewError("native.LoRATrainer.Step: empty batch")
@@ -269,7 +369,7 @@ func (t *LoRATrainer) Step(batch inference.Batch) (float64, error) {
 		return 0, err
 	}
 	if n == 0 {
-		return 0, core.NewError("native.LoRATrainer.Step: batch produced no trainable sequences")
+		return 0, core.NewError("native.LoRATrainer.Step: batch produced no trainable sequences (a set LossMask masks every position)")
 	}
 	if err := t.applyMeanStep(sumDA, sumDB, n); err != nil {
 		return 0, err
@@ -302,7 +402,7 @@ func (t *LoRATrainer) StepAccumulated(batches []inference.Batch) (float64, error
 		total += n
 	}
 	if total == 0 {
-		return 0, core.NewError("native.LoRATrainer.StepAccumulated: batches produced no trainable sequences")
+		return 0, core.NewError("native.LoRATrainer.StepAccumulated: batches produced no trainable sequences (a set LossMask masks every position)")
 	}
 	if err := t.applyMeanStep(totalDA, totalDB, total); err != nil {
 		return 0, err
@@ -311,26 +411,53 @@ func (t *LoRATrainer) StepAccumulated(batches []inference.Batch) (float64, error
 }
 
 // Loss is the forward-only mean cross-entropy over batch under the current adapter weights: no
-// gradients, no optimiser update — the validation lane. Implements engine.Trainer.
+// gradients, no optimiser update — the validation lane, honouring batch.LossMask exactly as Step does
+// (masked positions contribute nothing; the mean divides by the unmasked counts). Implements
+// engine.Trainer.
 func (t *LoRATrainer) Loss(batch inference.Batch) (float64, error) {
 	if len(batch.TokenIDs) == 0 {
 		return 0, core.NewError("native.LoRATrainer.Loss: empty batch")
 	}
 	var lossSum float64
 	n := 0
-	for _, ids := range batch.TokenIDs {
+	for si, ids := range batch.TokenIDs {
 		if len(ids) < 2 {
 			return 0, core.NewError("native.LoRATrainer.Loss: a sequence needs at least 2 tokens")
 		}
-		normed, baseLogits, tokens, err := t.forwardFrozen(ids)
+		maskRows, masked, err := lossMaskRows(batch.LossMask, si, len(ids))
 		if err != nil {
 			return 0, err
 		}
-		rows := tokens - 1
-		normedPred := normed[:rows*t.dModel]
-		targets := make([]int32, rows)
-		for i := range rows {
-			targets[i] = ids[i+1]
+		if masked && len(maskRows) == 0 {
+			continue // fully-masked sequence: contributes nothing to the validation mean
+		}
+		var normedPred, baseLogits []float32
+		var targets []int32
+		var rows int
+		if masked {
+			normedPred, baseLogits, err = t.forwardFrozenRows(ids, maskRows)
+			if err != nil {
+				return 0, err
+			}
+			rows = len(maskRows)
+			targets = make([]int32, rows)
+			for i, p := range maskRows {
+				targets[i] = ids[p+1]
+			}
+		} else {
+			var normed []float32
+			var tokens int
+			normed, baseLogits, tokens, err = t.forwardFrozen(ids)
+			if err != nil {
+				return 0, err
+			}
+			rows = tokens - 1
+			normedPred = normed[:rows*t.dModel]
+			baseLogits = baseLogits[:rows*t.vocab]
+			targets = make([]int32, rows)
+			for i := range rows {
+				targets[i] = ids[i+1]
+			}
 		}
 		_, delta, err := LoRAForwardF32(normedPred, t.a, t.b, rows, t.dModel, t.vocab, t.rank, t.scaling)
 		if err != nil {
@@ -346,6 +473,9 @@ func (t *LoRATrainer) Loss(batch inference.Batch) (float64, error) {
 		}
 		lossSum += float64(loss)
 		n++
+	}
+	if n == 0 {
+		return 0, core.NewError("native.LoRATrainer.Loss: batch produced no scoreable sequences (a set LossMask masks every position)")
 	}
 	return lossSum / float64(n), nil
 }
