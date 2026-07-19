@@ -69,7 +69,7 @@ func encAttnHalfShared(
 	attnNormW, postAttnNorm, qNorm bufView,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
-	ropeFreqs metal.MTLBuffer,
+	ropeFreqs metal.MTLBuffer, sinks bufView,
 ) error {
 	kvDim := nKVHeads * headDim
 	if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
@@ -100,7 +100,9 @@ func encAttnHalfShared(
 	if slideW > 0 && n > slideW {
 		n = slideW
 	}
-	if err := encSDPADecode(enc, sc, sc.q, attendK, attendV, sc.attn,
+	// sinks are the SHARER layer's own per-head logits (a per-layer weight even when the KV is an
+	// owner's); the zero bufView keeps the plain pipelines — byte-identical for every sink-free arch.
+	if err := encSDPADecodeSinksAt(enc, sc, sinks, sc.q, 0, attendK, attendV, sc.attn, 0,
 		nHeads, nKVHeads, headDim, n,
 		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale, 0); err != nil {
 		return err
@@ -123,7 +125,7 @@ func encAttnHalfSharedInputAt(
 	attnNormW, postAttnNorm, qNorm bufView,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
-	ropeFreqs metal.MTLBuffer,
+	ropeFreqs metal.MTLBuffer, sinks bufView,
 ) error {
 	kvDim := nKVHeads * headDim
 	// entry rms via the size-specialised single-row kernel at the row's offset — the batched
@@ -155,7 +157,7 @@ func encAttnHalfSharedInputAt(
 	if slideW > 0 && n > slideW {
 		n = slideW
 	}
-	if err := encSDPADecode(enc, sc, sc.q, attendK, attendV, sc.attn,
+	if err := encSDPADecodeSinksAt(enc, sc, sinks, sc.q, 0, attendK, attendV, sc.attn, 0,
 		nHeads, nKVHeads, headDim, n,
 		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale, 0); err != nil {
 		return err
@@ -172,8 +174,9 @@ func encAttnHalfSharedInputAt(
 // unbound for MoE layers (MoEBlockBF16 owns that FFN).
 type archLayerBufs struct {
 	anw, mnw                 bufView
-	postAttnNorm, postFFNorm bufView         // gemma4 post-attn/post-FF norms (nil buf = skip)
-	qNorm, kNorm             bufView         // gemma4 per-head QK-norm (nil buf = skip)
+	postAttnNorm, postFFNorm bufView // gemma4 post-attn/post-FF norms (nil buf = skip)
+	qNorm, kNorm             bufView // gemma4 per-head QK-norm (nil buf = skip)
+	sinks                    bufView // gpt_oss attention sinks (bf16 [nHeads] logits; nil buf = plain softmax)
 	layerScalar              metal.MTLBuffer // gemma4 per-layer output scalar, broadcast to dModel (synthesised, nil = skip)
 	kCache, vCache           metal.MTLBuffer
 	kCachePtr, vCachePtr     *byte
@@ -643,6 +646,17 @@ func (s *archDecodeState) initDevicePagedKV(pageSize int) error {
 func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc bool) error {
 	if s == nil {
 		return core.NewError("native.archDecodeState.initDevicePagedKV: nil state")
+	}
+	// Attention sinks (gpt_oss): the paged-attention kernels (lthn_paged_* — sdpa_paged.go) have no
+	// has_sinks lane, so a sinks session must decode over the LINEAR lb caches, where encAttnHalfKV
+	// routes through the sinks-enabled MLX sdpa_vector variants. Declining the pool here forces every
+	// stepToken onto that lane (stepTokenEncode binds the deferred linear caches when no pool exists).
+	// Paged support for sinks is a named perf follow-up, not a silent wrong answer.
+	for li := range s.lb {
+		if s.lb[li].sinks.buf != nil {
+			s.pagedKV = nil
+			return nil
+		}
 	}
 	for _, cache := range s.pagedKV {
 		if cache != nil {
@@ -1623,7 +1637,7 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 				}
 			} else {
 				toSerial() // the plain KV attention half is a serial emitter
-				if err := encAttnHalfKV(enc, in, s.lb[li].kCache, s.lb[li].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+				if err := encAttnHalfKV(enc, in, s.lb[li].kCache, s.lb[li].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 					endEncodingFast(enc)
 					return nil, err
 				}
@@ -1636,7 +1650,7 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 					endEncodingFast(enc)
 					return nil, err
 				}
-			} else if err := encAttnHalfShared(enc, in, s.lb[own].kCache, s.lb[own].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+			} else if err := encAttnHalfShared(enc, in, s.lb[own].kCache, s.lb[own].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 				endEncodingFast(enc)
 				return nil, err
 			}
@@ -2213,6 +2227,7 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		lb[li].postFFNorm = normView(w.PostFFNormW)
 		lb[li].qNorm = normView(w.QNormW)
 		lb[li].kNorm = normView(w.KNormW)
+		lb[li].sinks = normView(w.Sinks)                            // gpt_oss attention sinks (zero bufView otherwise)
 		lb[li].layerScalar = layerScalarBuf(w.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
 			if setup != nil {

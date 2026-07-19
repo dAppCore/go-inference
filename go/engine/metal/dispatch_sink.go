@@ -382,6 +382,35 @@ func emitSDPAAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q met
 	sink.dispatchThreadgroups(metal.MTLSize{Width: uint(nHeads), Height: 1, Depth: 1}, metal.MTLSize{Width: 1024, Height: 1, Depth: 1})
 }
 
+// emitSDPAAtSinks is emitSDPAAt with the gpt_oss attention-sink bindings: sinks (bf16 [nHeads]
+// per-head logits) at buffer(16) and num_q_heads at buffer(17), both gated in-kernel on the
+// has_sinks(25) function constant — pso MUST therefore be the sinks variant
+// (sdpaVectorSinksPipelineForHeadDim); binding these indices on the plain pipeline would dangle.
+// num_q_heads is the PER-BATCH head count: the kernel indexes sinks[q_batch_head_idx % num_q_heads],
+// so a b>1 dispatch (nHeads argument = b·heads) still lands each batch row on the same [heads] table.
+// Everything else is byte-identical to emitSDPAAt — same ABI 0..10, same grid.
+func emitSDPAAtSinks[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q metal.MTLBuffer, qOff uint, k, v, out metal.MTLBuffer, outOff, kvByteOff uint, nBuf metal.MTLBuffer, nHeads, nKVHeads, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, sinks metal.MTLBuffer, sinksOff uint, numQHeads int) {
+	sink.setPSO(pso)
+	sink.setBuf(q, qOff, 0)
+	sink.setBuf(k, kvByteOff, 1)
+	sink.setBuf(v, kvByteOff, 2)
+	sink.setBuf(out, outOff, 3)
+	sink.setI32(int32(nHeads/nKVHeads), 4) // gqa_factor
+	if nBuf != nil {
+		sink.setBuf(nBuf, 0, 5) // ICB: the N buffer, rebound per token at replay
+	} else {
+		sink.setI32(int32(n), 5) // live: inline N (the live cache length this token)
+	}
+	sink.setI64(kHeadStride, 6)
+	sink.setI64(kSeqStride, 7)
+	sink.setI64(vHeadStride, 8)
+	sink.setI64(vSeqStride, 9)
+	sink.setF32(scale, 10)
+	sink.setBuf(sinks, sinksOff, 16)  // per-head sink logits (has_sinks lane)
+	sink.setI32(int32(numQHeads), 17) // num_q_heads (has_sinks lane)
+	sink.dispatchThreadgroups(metal.MTLSize{Width: uint(nHeads), Height: 1, Depth: 1}, metal.MTLSize{Width: 1024, Height: 1, Depth: 1})
+}
+
 // emitSDPA2Pass1 records the first long-context SDPA pass. It writes one partial
 // weighted-V sum plus online-softmax sum/max per (batch, kv-head, block).
 func emitSDPA2Pass1[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q, k, v, partials, sums, maxs metal.MTLBuffer, kvByteOff uint, batch, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
@@ -418,6 +447,37 @@ func emitSDPA2Pass1NAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState
 	sink.setI64(vHeadStride, 10)
 	sink.setI64(vSeqStride, 11)
 	sink.setF32(scale, 12)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(nKVHeads), Height: uint(batch), Depth: uint(blocks)},
+		metal.MTLSize{Width: 32, Height: uint(nHeads / nKVHeads), Depth: 1},
+	)
+}
+
+// emitSDPA2Pass1NAtSinks is emitSDPA2Pass1NAt with the gpt_oss attention-sink binding: sinks (bf16
+// [nHeads] per-head logits) at buffer(18), gated in-kernel on has_sinks(25) — pso MUST be the sinks
+// variant (sdpaVector2Pass1SinksPipelineForHeadDim). Pass 1 computes the head index from its own grid
+// (q_head_idx = gqa_factor·kv_head_idx + tidtg.y — no num_q_heads scalar) and seeds the sink ONLY in
+// block 0, so the merged softmax counts it exactly once; pass 2 is unchanged. Everything else is
+// byte-identical to emitSDPA2Pass1NAt — same ABI 0..12, same grid.
+func emitSDPA2Pass1NAtSinks[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q metal.MTLBuffer, qOff uint, k, v, partials, sums, maxs metal.MTLBuffer, kvByteOff uint, nBuf metal.MTLBuffer, batch, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, sinks metal.MTLBuffer, sinksOff uint) {
+	sink.setPSO(pso)
+	sink.setBuf(q, qOff, 0)
+	sink.setBuf(k, kvByteOff, 1)
+	sink.setBuf(v, kvByteOff, 2)
+	sink.setBuf(partials, 0, 3)
+	sink.setBuf(sums, 0, 4)
+	sink.setBuf(maxs, 0, 5)
+	if nBuf != nil {
+		sink.setBuf(nBuf, 0, 7) // ICB: the N buffer, rebound per token at replay
+	} else {
+		sink.setI32(int32(n), 7)
+	}
+	sink.setI64(kHeadStride, 8)
+	sink.setI64(kSeqStride, 9)
+	sink.setI64(vHeadStride, 10)
+	sink.setI64(vSeqStride, 11)
+	sink.setF32(scale, 12)
+	sink.setBuf(sinks, sinksOff, 18) // per-head sink logits (has_sinks lane)
 	sink.dispatchThreadgroups(
 		metal.MTLSize{Width: uint(nKVHeads), Height: uint(batch), Depth: uint(blocks)},
 		metal.MTLSize{Width: 32, Height: uint(nHeads / nKVHeads), Depth: 1},

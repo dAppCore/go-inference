@@ -345,6 +345,7 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		lb[li].postFFNorm = normView(ql.PostFFNormW)
 		lb[li].qNorm = normView(ql.QNormW)
 		lb[li].kNorm = normView(ql.KNormW)
+		lb[li].sinks = normView(ql.Sinks)                            // gpt_oss attention sinks (zero bufView otherwise)
 		lb[li].layerScalar = layerScalarBuf(ql.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
 			if setup != nil {

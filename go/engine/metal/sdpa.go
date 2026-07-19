@@ -22,8 +22,12 @@ var (
 	sdpaVectorHeadDimPSOCache    = map[int]metal.MTLComputePipelineState{}
 	sdpaVector2Pass1HeadDimCache = map[sdpa2Pass1Key]metal.MTLComputePipelineState{}
 	sdpaVector2Pass2HeadDimCache = map[int]metal.MTLComputePipelineState{}
-	sdpaBF16ScratchPools         sync.Map
-	errSDPABF16ScratchDim        = core.NewError("native.sdpaBF16Scratch: dimension mismatch")
+	// sinks-enabled variants (has_sinks fc(25) TRUE) live in their OWN caches so the plain decode
+	// pipelines above are never touched by a sinks arch — the non-sinks path stays byte-identical.
+	sdpaVectorSinksHeadDimPSOCache    = map[int]metal.MTLComputePipelineState{}
+	sdpaVector2Pass1SinksHeadDimCache = map[sdpa2Pass1Key]metal.MTLComputePipelineState{}
+	sdpaBF16ScratchPools              sync.Map
+	errSDPABF16ScratchDim             = core.NewError("native.sdpaBF16Scratch: dimension mismatch")
 )
 
 type sdpa2Pass1Key struct {
@@ -265,6 +269,73 @@ func sdpaVectorPipelineForHeadDim(headDim int) (metal.MTLComputePipelineState, e
 	return pso, nil
 }
 
+// sdpaVectorSinksPipeline builds (and caches, under a ":sinks"-suffixed key) the sdpa_vector kernel
+// with has_sinks(25) TRUE and the five mask/transpose/causal constants false — the gpt_oss decode
+// configuration. With the constant on, the kernel gains two bindings (MLX v0.32.0
+// mlx/backend/metal/kernels/sdpa_vector.h — the exact source of the shipped metallib):
+//
+//	const device T* sinks           [[buffer(16), function_constant(has_sinks)]]
+//	const constant int& num_q_heads [[buffer(17), function_constant(has_sinks)]]
+//
+// and seeds ONE simdgroup's online softmax with max_score = sinks[q_batch_head_idx % num_q_heads],
+// sum_exp_score = 1 — the sink joins the softmax denominator as a virtual key contributing NO value
+// mass, exactly transformers' eager reference (modeling_gpt_oss.py eager_attention_forward:
+// cat([attn_weights, sinks]) → softmax → drop the last column), fetched 2026-07-19.
+func sdpaVectorSinksPipeline(name string) (metal.MTLComputePipelineState, error) {
+	key := name + ":sinks"
+	sdpaPSOMu.Lock()
+	defer sdpaPSOMu.Unlock()
+	if pso, ok := sdpaPSOCache[key]; ok {
+		return pso, nil
+	}
+	if library == nil || library.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVectorSinksPipeline: library unavailable for " + name)
+	}
+	fc := metal.NewMTLFunctionConstantValues()
+	off, on := uint8(0), uint8(1)
+	// indices: has_mask(20) query_transposed(21) do_causal(22) bool_mask(23) float_mask(24)
+	for _, idx := range []uint{20, 21, 22, 23, 24} {
+		fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&off), metal.MTLDataTypeBool, idx)
+	}
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&on), metal.MTLDataTypeBool, 25) // has_sinks
+	fn, err := library.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil {
+		return nil, core.E("native.sdpaVectorSinksPipeline", name, err)
+	}
+	if fn == nil || fn.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVectorSinksPipeline: kernel " + name + " not found")
+	}
+	pso, err := device.NewComputePipelineStateWithFunctionError(fn)
+	if err != nil {
+		return nil, core.E("native.sdpaVectorSinksPipeline", "pipeline "+name, err)
+	}
+	sdpaPSOCache[key] = pso
+	return pso, nil
+}
+
+func sdpaVectorSinksPipelineForHeadDim(headDim int) (metal.MTLComputePipelineState, error) {
+	sdpaPSOMu.Lock()
+	if pso, ok := sdpaVectorSinksHeadDimPSOCache[headDim]; ok {
+		sdpaPSOMu.Unlock()
+		return pso, nil
+	}
+	sdpaPSOMu.Unlock()
+
+	pso, err := sdpaVectorSinksPipeline(core.Sprintf("sdpa_vector_bfloat16_t_%d_%d", headDim, headDim))
+	if err != nil {
+		return nil, err
+	}
+
+	sdpaPSOMu.Lock()
+	if existing, ok := sdpaVectorSinksHeadDimPSOCache[headDim]; ok {
+		sdpaPSOMu.Unlock()
+		return existing, nil
+	}
+	sdpaVectorSinksHeadDimPSOCache[headDim] = pso
+	sdpaPSOMu.Unlock()
+	return pso, nil
+}
+
 // sdpaVector2Pass1Pipeline builds (and caches) the sdpa_vector_2pass_1 kernel —
 // attention function constants 20..25 false (decode-time: no mask/transpose/
 // causal/sinks) PLUS function constant 26 = blocks (the cache-split count). blocks
@@ -346,6 +417,72 @@ func sdpaVector2Pass1PipelineForHeadDim(headDim int, blocks int32) (metal.MTLCom
 		return existing, nil
 	}
 	sdpaVector2Pass1HeadDimCache[key] = pso
+	sdpaPSOMu.Unlock()
+	return pso, nil
+}
+
+// sdpaVector2Pass1SinksPipeline is sdpaVector2Pass1Pipeline with has_sinks(25) TRUE — the gpt_oss
+// long-context pass 1. With the constant on the kernel binds (MLX v0.32.0 sdpa_vector.h):
+//
+//	const device T* sinks [[buffer(18), function_constant(has_sinks)]]
+//
+// (no num_q_heads sibling — pass 1 computes the head index from its own grid: q_head_idx =
+// gqa_factor·kv_head_idx + tidtg.y) and seeds max/sum ONLY in block_idx == 0, so the sink joins the
+// merged softmax exactly once; pass 2 (sdpa_vector_2pass_2) needs no change — the sink mass flows
+// through block 0's sums/maxs intermediates.
+func sdpaVector2Pass1SinksPipeline(name string, blocks int32) (metal.MTLComputePipelineState, error) {
+	key := core.Sprintf("%s:b%d:sinks", name, blocks)
+	sdpaPSOMu.Lock()
+	defer sdpaPSOMu.Unlock()
+	if pso, ok := sdpaPSOCache[key]; ok {
+		return pso, nil
+	}
+	if library == nil || library.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass1SinksPipeline: library unavailable for " + name)
+	}
+	fc := metal.NewMTLFunctionConstantValues()
+	off, on := uint8(0), uint8(1)
+	for _, idx := range []uint{20, 21, 22, 23, 24} { // has_mask query_transposed do_causal bool_mask float_mask
+		fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&off), metal.MTLDataTypeBool, idx)
+	}
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&on), metal.MTLDataTypeBool, 25) // has_sinks
+	blk := blocks
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&blk), metal.MTLDataTypeInt, 26) // blocks
+	fn, err := library.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil {
+		return nil, core.E("native.sdpaVector2Pass1SinksPipeline", name, err)
+	}
+	if fn == nil || fn.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass1SinksPipeline: kernel " + name + " not found")
+	}
+	pso, err := device.NewComputePipelineStateWithFunctionError(fn)
+	if err != nil {
+		return nil, core.E("native.sdpaVector2Pass1SinksPipeline", "pipeline "+name, err)
+	}
+	sdpaPSOCache[key] = pso
+	return pso, nil
+}
+
+func sdpaVector2Pass1SinksPipelineForHeadDim(headDim int, blocks int32) (metal.MTLComputePipelineState, error) {
+	key := sdpa2Pass1Key{headDim: headDim, blocks: blocks}
+	sdpaPSOMu.Lock()
+	if pso, ok := sdpaVector2Pass1SinksHeadDimCache[key]; ok {
+		sdpaPSOMu.Unlock()
+		return pso, nil
+	}
+	sdpaPSOMu.Unlock()
+
+	pso, err := sdpaVector2Pass1SinksPipeline(core.Sprintf("sdpa_vector_2pass_1_bfloat16_t_%d_%d", headDim, headDim), blocks)
+	if err != nil {
+		return nil, err
+	}
+
+	sdpaPSOMu.Lock()
+	if existing, ok := sdpaVector2Pass1SinksHeadDimCache[key]; ok {
+		sdpaPSOMu.Unlock()
+		return existing, nil
+	}
+	sdpaVector2Pass1SinksHeadDimCache[key] = pso
 	sdpaPSOMu.Unlock()
 	return pso, nil
 }

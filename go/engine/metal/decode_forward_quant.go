@@ -36,7 +36,12 @@ type QuantizedLayerWeights struct {
 	// packs still carry Qwen2/2.5's bias=True q/k/v biases as plain (unquantised) bf16
 	// vectors beside the packed weights. Added after the qmv, before QK-norm/RoPE (see
 	// qmvProjector.project). nil for bias-free arches; o_proj/MLP carry none (no BO).
-	BQ, BK, BV      []byte
+	BQ, BK, BV []byte
+	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [nHeads]): a learned
+	// per-head score seeding each head's softmax denominator as one extra key with NO value mass
+	// (the sdpa_vector kernels' has_sinks lane — see sdpa.go). nil for every sink-free arch, which
+	// keeps the plain SDPA pipelines byte-identical.
+	Sinks           []byte
 	GroupSize, Bits int
 	// DFF is this layer's FFN width — gemma4 E2B/E4B (MatFormer) vary it per layer, so the decode
 	// can't assume a single arch.FF. 0 ⇒ use the arch default (uniform models).
@@ -240,7 +245,7 @@ func DecodeForwardQuant(
 			in, out := sc.xA, sc.xB
 			for li := range nLayers {
 				l := lb[li]
-				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil); encErr != nil {
+				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil, bufView{}); encErr != nil {
 					endEncodingFast(enc)
 					return
 				}

@@ -443,3 +443,58 @@ func TestAssemble_NormOpSelections_Ugly(t *testing.T) {
 		t.Fatalf("absent norms declared: %+v", spec)
 	}
 }
+
+// TestAssemble_Sinks_Good proves the attention-sink load path: with WeightNames.Sinks declared,
+// the per-layer sinks tensor lands RAW on LoadedLayer.Sinks — bytes verbatim, never through the
+// NormBiasOne (1+w) fold, even when the arch folds its norms (a sink is a logit, not a norm).
+func TestAssemble_Sinks_Good(t *testing.T) {
+	tensors := minimalDenseTensors("BF16")
+	sinkBytes := []byte{0x80, 0x3F, 0x00, 0xC0} // two distinct bf16 values, recognisable verbatim
+	tensors["layer.0.sinks"] = safetensors.Tensor{Shape: []int{2}, Data: sinkBytes, Dtype: "BF16"}
+	names := minimalDenseNames()
+	names.Sinks = ".sinks"
+	names.NormBiasOne = true // the norms fold; the sinks must NOT
+
+	m, err := Assemble(tensors, minimalDenseArch(), names)
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	got := m.Layers[0].Sinks
+	if len(got) != len(sinkBytes) {
+		t.Fatalf("Sinks length = %d, want %d", len(got), len(sinkBytes))
+	}
+	for i := range sinkBytes {
+		if got[i] != sinkBytes[i] {
+			t.Fatalf("Sinks[%d] = %#x, want the RAW checkpoint byte %#x (NormBiasOne fold must not touch sinks)", i, got[i], sinkBytes[i])
+		}
+	}
+}
+
+// TestAssemble_Sinks_Bad proves absence stays nil-safe: Sinks declared but the tensor missing
+// loads nil (the executor-skip sentinel), not an error.
+func TestAssemble_Sinks_Bad(t *testing.T) {
+	names := minimalDenseNames()
+	names.Sinks = ".sinks"
+	m, err := Assemble(minimalDenseTensors("BF16"), minimalDenseArch(), names)
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if m.Layers[0].Sinks != nil {
+		t.Fatalf("Sinks = %v with no tensor present, want nil", m.Layers[0].Sinks)
+	}
+}
+
+// TestAssemble_Sinks_Ugly proves the default is inert: with WeightNames.Sinks left "" (every
+// existing arch), a sinks-named tensor in the checkpoint is NOT picked up — no accidental
+// consumption, byte-identical loading for every sink-free arch.
+func TestAssemble_Sinks_Ugly(t *testing.T) {
+	tensors := minimalDenseTensors("BF16")
+	tensors["layer.0.sinks"] = safetensors.Tensor{Shape: []int{2}, Data: make([]byte, 4), Dtype: "BF16"}
+	m, err := Assemble(tensors, minimalDenseArch(), minimalDenseNames()) // Sinks left ""
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if m.Layers[0].Sinks != nil {
+		t.Fatalf("Sinks = %v with names.Sinks unset, want nil", m.Layers[0].Sinks)
+	}
+}

@@ -38,7 +38,12 @@ type DecodeLayerWeights struct {
 	// distinguishing trait (bias=True on q_proj/k_proj/v_proj; o_proj and the MLP carry
 	// none, so there is no BO). nil for the bias-free arches (llama/gemma/mistral/qwen3).
 	// Added after the projection matvec, before QK-norm/RoPE (see bf16Projector.project).
-	BQ, BK, BV                  []byte
+	BQ, BK, BV []byte
+	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [nHeads]): a learned
+	// per-head score seeding each head's softmax denominator as one extra key with NO value mass
+	// (the sdpa_vector kernels' has_sinks lane — see sdpa.go). nil for every sink-free arch, which
+	// keeps the plain SDPA pipelines byte-identical.
+	Sinks                       []byte
 	MLPNormW, WGate, WUp, WDown []byte
 	// MoE, when non-nil, replaces the dense MLP half with the gemma4 dual-branch MoE
 	// feed-forward (MoEBlockBF16) for this layer. The dense MLPNormW/WGate/WUp/WDown
@@ -385,7 +390,7 @@ func decodeForwardInto(
 			in, out := sc.xA, sc.xB
 			for li := range nLayers {
 				l := lb[li]
-				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil); encErr != nil {
+				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil, bufView{}); encErr != nil {
 					endEncodingFast(enc)
 					return
 				}

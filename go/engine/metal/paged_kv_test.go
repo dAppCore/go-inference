@@ -370,7 +370,7 @@ func TestDevicePagedKVSharedAttentionMatchesLinearShared(t *testing.T) {
 
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
-	if err := encAttnHalfShared(enc, residentBytes(sharedX), residentBytes(kContig), residentBytes(vContig), scalarI32(int32(pos)), wantBuf, sharedNorm, bufView{}, bufView{}, *sharedScratch, sharedProj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, scale, eps, nil); err != nil {
+	if err := encAttnHalfShared(enc, residentBytes(sharedX), residentBytes(kContig), residentBytes(vContig), scalarI32(int32(pos)), wantBuf, sharedNorm, bufView{}, bufView{}, *sharedScratch, sharedProj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, scale, eps, nil, bufView{}); err != nil {
 		endEncodingFast(enc)
 		t.Fatalf("encAttnHalfShared reference: %v", err)
 	}

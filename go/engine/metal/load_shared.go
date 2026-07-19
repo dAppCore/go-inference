@@ -61,6 +61,7 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 		if L.V != nil {
 			ql.BV = L.V.Bias
 		}
+		ql.Sinks = L.Sinks // gpt_oss attention sinks (bf16 [nHeads]); nil for every sink-free arch
 		ql.PerLayerGate, ql.PerLayerProjection = qw(L.PerLayerGate), qw(L.PerLayerProjection)
 		ql.PostPerLayerInputNormW = L.PostPerLayerInputNorm
 		ql.GatedDelta, ql.GatedDeltaCfg = L.GatedDelta, L.GatedDeltaCfg // MixerGatedDelta recurrence (#18); nil for attention layers
@@ -206,6 +207,7 @@ func loadedToBF16(m *model.LoadedModel) *BF16Model {
 		l.MLPNormW, l.PostFFNormW = L.MLPNorm, L.PostFFNorm
 		l.WQ, l.WK, l.WV, l.WO = bw(L.Q), bw(L.K), bw(L.V), bw(L.O)
 		l.BQ, l.BK, l.BV = bb(L.Q), bb(L.K), bb(L.V) // Qwen2/2.5 additive QKV bias (nil otherwise)
+		l.Sinks = L.Sinks                            // gpt_oss attention sinks (bf16 [nHeads]); nil otherwise
 		l.WGate, l.WUp, l.WDown = bw(L.Gate), bw(L.Up), bw(L.Down)
 		if L.Gate != nil { // per-layer MatFormer FFN width, read from the gate's output rows
 			l.DFF = L.Gate.OutDim

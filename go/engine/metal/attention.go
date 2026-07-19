@@ -882,6 +882,38 @@ func encSDPADecodeAt(enc metal.MTLComputeCommandEncoder, sc attnScratch, q metal
 	return nil
 }
 
+// encSDPADecodeSinksAt is encSDPADecodeAt for a layer that carries attention sinks (gpt_oss): the
+// SAME single-pass/2-pass routing and knee, but through the has_sinks(25) pipeline variants with the
+// sinks logits bound (buffer 16 + num_q_heads 17 single-pass; buffer 18 pass 1 — MLX v0.32.0
+// sdpa_vector.h). A zero sinks bufView delegates to encSDPADecodeAt unchanged, so every sink-free
+// caller/arch stays byte-identical by construction.
+func encSDPADecodeSinksAt(enc metal.MTLComputeCommandEncoder, sc attnScratch, sinks bufView, q metal.MTLBuffer, qOff uint, k, v, out metal.MTLBuffer, outOff uint, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
+	if sinks.buf == nil {
+		return encSDPADecodeAt(enc, sc, q, qOff, k, v, out, outOff, nHeads, nKVHeads, headDim, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale, kvByteOff)
+	}
+	if n >= sdpa2PassMinKV && sc.p2Partials != nil && !sdpa2PassDisabledForTest {
+		blocks := sdpa2PassBlocks(n, nKVHeads)
+		pso1, err := sdpaVector2Pass1SinksPipelineForHeadDim(headDim, blocks)
+		if err != nil {
+			return err
+		}
+		pso2, err := sdpaVector2Pass2PipelineForHeadDim(headDim) // pass 2 is sink-agnostic (the sink mass rides block 0's sums/maxs)
+		if err != nil {
+			return err
+		}
+		sink := encSink{enc}
+		emitSDPA2Pass1NAtSinks(sink, pso1, q, qOff, k, v, sc.p2Partials, sc.p2Sums, sc.p2Maxs, kvByteOff, nil, 1, nHeads, nKVHeads, n, int(blocks), kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale, sinks.buf, sinks.off)
+		emitSDPA2Pass2At(sink, pso2, sc.p2Partials, sc.p2Sums, sc.p2Maxs, out, outOff, 1, nHeads, int(blocks))
+		return nil
+	}
+	pso, err := sdpaVectorSinksPipelineForHeadDim(headDim)
+	if err != nil {
+		return err
+	}
+	emitSDPAAtSinks(encSink{enc}, pso, q, qOff, k, v, out, outOff, kvByteOff, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale, sinks.buf, sinks.off, nHeads)
+	return nil
+}
+
 // encBinaryDT encodes the element-wise binary op (op = "Add" | "Multiply") in the
 // activation dtype dt — kernel "vv_<op><dt.Name>" — over n elements into enc. The
 // dtype is resolved from the registered scheme (scheme.BFloat16, scheme.Float32, …),
