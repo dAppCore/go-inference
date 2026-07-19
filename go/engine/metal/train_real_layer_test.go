@@ -144,6 +144,37 @@ func TestRealLayerProjLoRABackwardF32_QKNorm(t *testing.T) {
 	})
 }
 
+// TestRealLayerProjLoRABackwardF32_SandwichNorms is the rung-3 FD gate: the gemma4 post-attention
+// and post-feed-forward norms sit on the BRANCH outputs before their residual adds (the
+// encResidualMaybeNorm order — norm the branch, then add), stacked ON TOP of the QK-norm rung.
+// Every target's dA/dB and dH must ride the two extra norm Jacobians.
+func TestRealLayerProjLoRABackwardF32_SandwichNorms(t *testing.T) {
+	mk := func() *RealTrainLayerF32 {
+		L := tinyRealLayer()
+		near1 := func(salt int, n int) []float32 {
+			w := syntheticFloat32(n, salt)
+			for i := range w {
+				w[i] = 1 + 0.3*w[i]
+			}
+			return w
+		}
+		L.QNormW, L.KNormW = near1(41, L.HeadDim), near1(43, L.HeadDim)
+		L.PostAttnNormW, L.PostFFNormW = near1(47, L.DModel), near1(51, L.DModel)
+		return L
+	}
+	for _, target := range realLayerTargets {
+		t.Run(target, func(t *testing.T) {
+			realLayerFDCheck(t, mk(), target)
+		})
+	}
+	// a post-attn-only sandwich (no post-FF) exercises the two stations independently.
+	t.Run("post-attn-only/"+ProjDown, func(t *testing.T) {
+		L := mk()
+		L.PostFFNormW = nil
+		realLayerFDCheck(t, L, ProjDown)
+	})
+}
+
 // TestRealLayerProjLoRABackwardF32_Bad: an unknown target, a nil layer, a wrong-shaped upstream
 // gradient, and a broken geometry are refused before any work.
 func TestRealLayerProjLoRABackwardF32_Bad(t *testing.T) {
@@ -182,6 +213,11 @@ func TestRealLayerProjLoRABackwardF32_Bad(t *testing.T) {
 	bad3.QNormW = make([]float32, bad3.HeadDim+1)
 	if _, _, _, err := RealLayerProjLoRABackwardF32(dout, h, bad3, ProjDown, a, b, rank, 1); err == nil {
 		t.Fatal("a wrong-length QNormW must be refused")
+	}
+	bad4 := tinyRealLayer()
+	bad4.PostAttnNormW = make([]float32, bad4.DModel-1)
+	if _, _, _, err := RealLayerProjLoRABackwardF32(dout, h, bad4, ProjDown, a, b, rank, 1); err == nil {
+		t.Fatal("a wrong-length PostAttnNormW must be refused")
 	}
 }
 

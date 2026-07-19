@@ -43,10 +43,17 @@ type RealTrainLayerF32 struct {
 	// heads), applied between the projection and rope (encAttnHalfKV's QK-norm station). nil =
 	// the layer carries no QK-norm (LayerSpec.AttentionQNorm/AttentionKNorm false).
 	QNormW, KNormW []float32
-	MLPNormW       []float32 // [DModel] pre-feed-forward RMSNorm
-	WGate          []float32 // [DFF, DModel]
-	WUp            []float32 // [DFF, DModel]
-	WDown          []float32 // [DModel, DFF]
+	// PostAttnNormW is the gemma4 post-attention "sandwich" norm ([DModel]), applied to the
+	// attention BRANCH output (Wo·attn) before the residual add — encResidualMaybeNorm's norm.
+	// nil = plain residual (LayerSpec.PostAttnNorm false).
+	PostAttnNormW []float32
+	MLPNormW      []float32 // [DModel] pre-feed-forward RMSNorm
+	WGate []float32 // [DFF, DModel]
+	WUp   []float32 // [DFF, DModel]
+	WDown []float32 // [DModel, DFF]
+	// PostFFNormW is the gemma4 post-feed-forward sandwich norm ([DModel]) on the MLP branch
+	// output (Wdown·…) before its residual add. nil = plain residual (LayerSpec.PostFFNorm false).
+	PostFFNormW []float32
 
 	T, DModel, DFF          int // rows (tokens), hidden, feed-forward width
 	Heads, KVHeads, HeadDim int // GQA head geometry (Heads % KVHeads == 0)
@@ -100,6 +107,9 @@ func (L *RealTrainLayerF32) validate() error {
 	}
 	if (len(L.QNormW) != 0 && len(L.QNormW) != L.HeadDim) || (len(L.KNormW) != 0 && len(L.KNormW) != L.HeadDim) {
 		return core.NewError("native.RealTrainLayerF32: QNormW/KNormW must be [HeadDim] when set (per-head, shared across heads)")
+	}
+	if (len(L.PostAttnNormW) != 0 && len(L.PostAttnNormW) != L.DModel) || (len(L.PostFFNormW) != 0 && len(L.PostFFNormW) != L.DModel) {
+		return core.NewError("native.RealTrainLayerF32: PostAttnNormW/PostFFNormW must be [DModel] when set")
 	}
 	return nil
 }
@@ -376,6 +386,9 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 	}
 	tp.attnBranchPre = hostLinearF32(tp.o, wO, T, qDim, D)
 	tp.attnBranch = tp.attnBranchPre
+	if len(L.PostAttnNormW) > 0 { // gemma4 sandwich: norm the BRANCH, then add the residual
+		tp.attnBranch = rmsNormForwardF32(tp.attnBranchPre, L.PostAttnNormW, T, D, L.Eps)
+	}
 	tp.h1 = make([]float32, T*D)
 	for i := range tp.h1 {
 		tp.h1[i] = h[i] + tp.attnBranch[i]
@@ -391,6 +404,9 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 	}
 	tp.mlpBranchPre = hostLinearF32(tp.gated, wDown, T, L.DFF, D)
 	tp.mlpBranch = tp.mlpBranchPre
+	if len(L.PostFFNormW) > 0 {
+		tp.mlpBranch = rmsNormForwardF32(tp.mlpBranchPre, L.PostFFNormW, T, D, L.Eps)
+	}
 	tp.out = make([]float32, T*D)
 	for i := range tp.out {
 		tp.out[i] = tp.h1[i] + tp.mlpBranch[i]
@@ -425,11 +441,19 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 	qDim, kvDim := L.Heads*d, L.KVHeads*d
 	g := &realLayerGrads{}
 
-	// MLP half backward: residual → down → gelu·up → gate/up projections → pre-FF norm → residual join.
-	dMlpBranch := dout // out = h1 + mlpBranch
+	// MLP half backward: residual → (post-FF sandwich norm) → down → gelu·up → gate/up projections
+	// → pre-FF norm → residual join.
+	dMlpBranchPre := dout // out = h1 + mlpBranch
+	if len(L.PostFFNormW) > 0 {
+		var err error
+		dMlpBranchPre, _, err = RMSNormBackwardF32(dout, tp.mlpBranchPre, L.PostFFNormW, T, D, L.Eps)
+		if err != nil {
+			return nil, err
+		}
+	}
 	// down forward was gated[T,DFF]·wDown[D,DFF]ᵀ → [T,D]: M=T, K=DFF, N=D.
 	var dGated []float32
-	dGated, g.dWDown = hostLinearBackwardF32(dMlpBranch, tp.gated, wDown, T, L.DFF, D)
+	dGated, g.dWDown = hostLinearBackwardF32(dMlpBranchPre, tp.gated, wDown, T, L.DFF, D)
 	dGate, dUp, err := GeluGateMulBackwardF32(dGated, tp.gate, tp.up, T*L.DFF)
 	if err != nil {
 		return nil, err
@@ -450,13 +474,20 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 		dH1[i] = dout[i] + dH1Norm[i]
 	}
 
-	// attention half backward: residual → o-proj → SDPA core (windowed, GQA) → rope → q/k/v
-	// projections → pre-attn norm → residual join.
-	dAttnBranch := dH1 // h1 = h + attnBranch
+	// attention half backward: residual → (post-attention sandwich norm) → o-proj → SDPA core
+	// (windowed, GQA) → rope → QK-norm → q/k/v projections → pre-attn norm → residual join.
+	dAttnBranchPre := dH1 // h1 = h + attnBranch
+	if len(L.PostAttnNormW) > 0 {
+		var nerr error
+		dAttnBranchPre, _, nerr = RMSNormBackwardF32(dH1, tp.attnBranchPre, L.PostAttnNormW, T, D, L.Eps)
+		if nerr != nil {
+			return nil, nerr
+		}
+	}
 	// o-proj forward was o[T,qDim]·wO[D,qDim]ᵀ → [T,D]: M=T, K=qDim, N=D, so
 	// dO = dy·wO → [T,qDim] and dWO = dyᵀ·o → [D,qDim].
 	var dO []float32
-	dO, g.dWO = hostLinearBackwardF32(dAttnBranch, tp.o, wO, T, qDim, D)
+	dO, g.dWO = hostLinearBackwardF32(dAttnBranchPre, tp.o, wO, T, qDim, D)
 	gqa := L.Heads / L.KVHeads
 	dQr := make([]float32, T*qDim)
 	dKr := make([]float32, T*kvDim)
