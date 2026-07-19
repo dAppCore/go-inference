@@ -63,11 +63,11 @@ type Config struct {
 	// leaves generate on the plain path with the "no speculative path" note.
 	SpeculativeLoader serving.SpeculativeLoader
 
-	// Engine knobs preserved for the drop-in flag surface. These have no
-	// inference.LoadOption seam on the current engine/metal, so RunGenerate
-	// prints an honest notice and loads the engine default (see the notice
-	// wiring below); they light up when the engine exposes the seam.
-	KVCacheMode string // paged, fp16, q8, kq8vq4, turboquant
+	// Engine knobs. KVCacheMode rides the load spec (inference.WithCacheMode) —
+	// the metal engine honours the turboquant family live and refuses unknown or
+	// unservable modes at load; noteCacheKnobs prints the honest capability note.
+	// The remaining knobs keep the drop-in flag surface with honest notices.
+	KVCacheMode string // live KV cache mode: native (default), turboquant[:4|:3.5|:3|:2]
 	KVStorage   string // retained KV storage dtype
 	Pipeline    bool   // one-ahead pipelined decode
 	Native      bool   // no-cgo native token loop (the default go-inference metal engine already is)
@@ -90,10 +90,14 @@ func RunGenerate(ctx context.Context, cfg Config) error {
 	if cfg.ContextLen > 0 {
 		loadOpts = append(loadOpts, inference.WithContextLen(cfg.ContextLen))
 	}
-	// KV-cache mode / storage dtype overrides are validated against the loaded
-	// engine's reported capabilities (noteCacheKnobs, once the model is loaded)
-	// rather than blanket-noted here — the note then names what the engine
-	// actually honours instead of guessing.
+	if mode := core.Trim(cfg.KVCacheMode); mode != "" {
+		// The LIVE cache mode rides the load spec (the metal engine honours the
+		// turboquant family; an unknown or unservable mode fails the load loudly).
+		loadOpts = append(loadOpts, inference.WithCacheMode(mode))
+	}
+	// KV-cache mode / storage dtype overrides are additionally validated against
+	// the loaded engine's reported capabilities (noteCacheKnobs, once the model
+	// is loaded) — the note then names what the engine actually honours.
 	if cfg.Native {
 		printNote(cfg.Log, "generate: native no-cgo token loop (the default go-inference metal engine already is native)")
 	}
@@ -416,11 +420,17 @@ func reportedCacheModes(tm inference.TextModel) []string {
 }
 
 // cacheModeHonoured reports whether want is one of the engine's declared cache
-// modes (case-insensitive). An empty list means the engine declares no
-// selectable mode, so nothing is honoured.
+// modes (case-insensitive). A parameterised request ("turboquant:3.5") matches
+// its declared base family ("turboquant") — engines declare families, not every
+// bit-width spelling. An empty list means the engine declares no selectable
+// mode, so nothing is honoured.
 func cacheModeHonoured(modes []string, want string) bool {
+	base := core.Lower(want)
+	if i := core.Index(base, ":"); i >= 0 {
+		base = base[:i]
+	}
 	for _, mode := range modes {
-		if core.Lower(mode) == core.Lower(want) {
+		if core.Lower(mode) == core.Lower(want) || core.Lower(mode) == base {
 			return true
 		}
 	}

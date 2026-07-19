@@ -45,7 +45,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	temp := fs.Float64("temp", 1.0, "sampling temperature (0 = greedy/argmax — fastest, fair vs llama-bench)")
 	think := fs.Bool("think", false, "enable the thinking channel (off keeps the decode rate clean)")
 	contextLen := fs.Int("context", 0, "context length override (0 = model default)")
-	kvCacheMode := fs.String("kv-cache", "", "KV cache mode override (engine-reported; the no-cgo metal engine runs its built-in cache only — other values are noted and ignored)")
+	kvCacheMode := fs.String("kv-cache", "", "live KV cache mode: native (default) or turboquant[:4|:3.5|:3|:2] — TurboQuant codes on global attention layers; unknown/unservable modes fail the load loudly")
 	pipeline := fs.Bool("pipeline", true, "one-ahead pipelined decode (the engine default; false forces the chained serial loop, for A/B traces)")
 	kvStorage := fs.String("kv-storage", "", "KV snapshot encoding for --state sleeps (native, q8, float32; empty = native) — inert without --state")
 	tracePhases := fs.Bool("trace", false, "print the per-token decode time budget — GPU wait vs host-serial work")

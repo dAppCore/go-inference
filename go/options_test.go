@@ -390,6 +390,31 @@ func TestOptions_WithBackend_Bad(t *testing.T) {
 	checkEqual(t, 0, cfg.ContextLen)
 }
 
+// --- WithCacheMode ---
+
+func TestOptions_WithCacheMode_Good(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{"turboquant", "turboquant"},
+		{"turboquant with bits", "turboquant:3.5"},
+		{"native", "native"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ApplyLoadOpts([]LoadOption{WithCacheMode(tt.mode)})
+			checkEqual(t, tt.mode, cfg.CacheMode)
+		})
+	}
+}
+
+func TestOptions_WithCacheMode_Bad(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithCacheMode("")})
+	checkEqual(t, "", cfg.CacheMode)
+	checkEqual(t, -1, cfg.GPULayers)
+}
+
 // --- WithContextLen ---
 
 func TestOptions_WithContextLen_Good(t *testing.T) {

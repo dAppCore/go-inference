@@ -207,7 +207,11 @@ type archICBReplay struct {
 	// q8 KV (#367): per-layer int8+scale caches on GLOBAL owners; the store
 	// ops' output offsets (kStoreIdx/vStoreIdx binds 1+2) are the per-token
 	// rebind targets — the rope/vProj/vNorm binds stay fixed on staging.
-	kvQ8                            *archICBKVQ8
+	kvQ8 *archICBKVQ8
+	// TurboQuant KV (#41 S3): per-layer code caches + γ planes on qualifying
+	// GLOBAL owners (mutually exclusive with q8 per layer); the store ops'
+	// outputs (binds 3+4) share kStoreIdx/vStoreIdx as rebind targets.
+	kvTQ                            *archICBKVTQ
 	kStoreIdx, vStoreIdx            []int
 	kCachePtrs, vCachePtrs          []*byte
 	offBuf, nGlobalBuf, nSlidingBuf metal.MTLBuffer
@@ -807,6 +811,21 @@ func (r *archICBReplay) prepareStepRebind(pos int) {
 				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.vStoreIdx[li]), r.kvQ8.vScales[li], scOff, 2)
 				continue
 			}
+			if r.kvTQ.on(li) {
+				// TurboQuant owner (#41 S3): the landing writes staging (fixed
+				// binds); rebind the two rotate-quantise-store ops' code row
+				// (K and V stride differently under mixed bits) + γ row.
+				row := pos
+				if rows := r.cacheRows[li]; rows > 0 {
+					row = pos % rows
+				}
+				gOff := uint(row * r.kvTQ.gammaRowBytes[li])
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.kStoreIdx[li]), r.kCaches[li], uint(row*r.kvTQ.kRowBytes[li]), 3)
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.kStoreIdx[li]), r.kvTQ.kGammas[li], gOff, 4)
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.vStoreIdx[li]), r.vCaches[li], uint(row*r.kvTQ.vRowBytes[li]), 3)
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.vStoreIdx[li]), r.kvTQ.vGammas[li], gOff, 4)
+				continue
+			}
 			rowOff := uint(pos * r.rowBytes[li]) // per-layer: global layers' rows are wider (larger head_dim)
 			if rows := r.cacheRows[li]; rows > 0 {
 				rowOff = uint((pos % rows) * r.rowBytes[li])
@@ -1183,7 +1202,7 @@ func recordArchICB(
 	perLayerDFF []int,
 	rope icbRope, scale, ropeScale, eps float32,
 	useSiLU bool, qBiasBufs, kBiasBufs, vBiasBufs []metal.MTLBuffer,
-	kvQ8 *archICBKVQ8,
+	kvQ8 *archICBKVQ8, kvTQ *archICBKVTQ,
 ) (*archICBReplay, error) {
 	nLayers := len(anwBufs)
 	// The value projection reads the DECLARED per-layer op selection (model.LayerSpec.AttentionKEqV):
@@ -1376,6 +1395,58 @@ func recordArchICB(
 						return nil, e1
 					}
 					sdpaQ8P1PSOByHd[hd] = p1
+				}
+			}
+		}
+	}
+	// TurboQuant KV layers (#41 S3): resolve the rotate-quantise stores, the
+	// q-rotation/output-unrotation pair, and the code-reading SDPA pipelines up
+	// front — a TQ cache with a missing kernel is a hard error at record time,
+	// never a silent bf16 misread of packed codes.
+	tqOn := func(li int) bool { return kvTQ.on(li) }
+	nTQOps := 0
+	var tqStoreKICB, tqStoreVICB metal.MTLComputePipelineState
+	var tqRotICB, tqUnrotICB metal.MTLComputePipelineState
+	sdpaTQPSOByHd := make(map[int]metal.MTLComputePipelineState)
+	sdpaTQP1PSOByHd := make(map[int]metal.MTLComputePipelineState)
+	if kvTQ.any() {
+		var terr error
+		if tqStoreKICB, terr = tqKVStorePipelineICB(kvTQ.kBits); terr != nil {
+			return nil, terr
+		}
+		if tqStoreVICB, terr = tqKVStorePipelineICB(kvTQ.vBits); terr != nil {
+			return nil, terr
+		}
+		if tqRotICB, terr = tqRotRowsPipelineICB(false); terr != nil {
+			return nil, terr
+		}
+		if tqUnrotICB, terr = tqRotRowsPipelineICB(true); terr != nil {
+			return nil, terr
+		}
+		for li := range nLayers {
+			if tqOn(li) && !specs[li].OwnsCache() {
+				return nil, core.NewError("native.recordArchICB: TurboQuant KV on a non-owner layer")
+			}
+			if tqOn(li) {
+				nTQOps += 2 // the K and V rotate-quantise stores
+			}
+			if !kvTQ.on(specs[li].KVShareFrom) {
+				continue
+			}
+			nTQOps += 2 // the q pre-rotation + output unrotation around this layer's SDPA
+			hd := hdOf(li)
+			if _, ok := sdpaTQPSOByHd[hd]; !ok {
+				pso, e := sdpaVectorTQPipelineICB(hd, kvTQ.kBits, kvTQ.vBits)
+				if e != nil {
+					return nil, e
+				}
+				sdpaTQPSOByHd[hd] = pso
+				if sdpa2PassICBBlocks > 0 {
+					p1, e1 := sdpaVector2Pass1TQPipelineICB(hd, kvTQ.kBits, kvTQ.vBits, int32(sdpa2PassICBBlocks))
+					if e1 != nil {
+						return nil, e1
+					}
+					sdpaTQP1PSOByHd[hd] = p1
 				}
 			}
 		}
@@ -1622,6 +1693,40 @@ func recordArchICB(
 				resident = append(resident, scalarI32(int32(kvdOf(li))))
 			}
 		}
+		// TurboQuant staging + rotated-q/rotated-out scratch (#41 S3): the K
+		// rope/norm and V projection land in the bf16 staging rows (fixed binds;
+		// the store ops rotate+quantise staging into the code cache + γ rows),
+		// the q pre-rotation writes qRotTQ and the SDPA's rotated output lands
+		// in attnRotTQ for the unrotation op. Shared across TQ layers — the
+		// recorded barriers serialise the stack on them, exactly as the
+		// attention scratch. Π and centroid tables are process-resident.
+		var kStageTQ, vStageTQ, qRotTQ, attnRotTQ metal.MTLBuffer
+		if kvTQ.any() {
+			kStageTQ = device.NewBufferWithLengthOptions(uint(maxKvd*bf16Size), metal.MTLResourceStorageModeShared)
+			vStageTQ = device.NewBufferWithLengthOptions(uint(maxKvd*bf16Size), metal.MTLResourceStorageModeShared)
+			qRotTQ = device.NewBufferWithLengthOptions(uint(maxQd*bf16Size), metal.MTLResourceStorageModeShared)
+			attnRotTQ = device.NewBufferWithLengthOptions(uint(maxQd*bf16Size), metal.MTLResourceStorageModeShared)
+			resident = append(resident, kStageTQ, vStageTQ, qRotTQ, attnRotTQ)
+			for li := range nLayers {
+				if tqOn(li) {
+					resident = append(resident, kvTQ.kGammas[li], kvTQ.vGammas[li])
+				}
+				if !kvTQ.on(specs[li].KVShareFrom) {
+					continue
+				}
+				hd := hdOf(li)
+				kb, vb := int64(tqBytesPerRow(kvTQ.kBits, hd)), int64(tqBytesPerRow(kvTQ.vBits, hd))
+				resident = append(resident,
+					tqKVPiBuffer(hd), tqKVCentroidsBuffer(hd, kvTQ.kBits), tqKVCentroidsBuffer(hd, kvTQ.vBits),
+					// the stores/rot ops bind d via the memoised i32 scalar and the
+					// SDPA ops bind the code-plane byte strides via memoised i64
+					// scalars — register them all (an ICB op reading a
+					// non-resident scalar buffer reads garbage).
+					scalarI32(int32(hd)),
+					scalarI64(kb), scalarI64(int64(kvOf(li))*kb),
+					scalarI64(vb), scalarI64(int64(kvOf(li))*vb))
+			}
+		}
 		if !hasFusedGELU {
 			resident = append(resident, x2, x3, x3s, inner, scaled, tnh, onePlus, halfG, gelu, c044, c079, c1c, c05)
 		}
@@ -1720,7 +1825,7 @@ func recordArchICB(
 		hasQN, hasKN, hasPA, hasPF := lay.hasQN, lay.hasKN, lay.hasPA, lay.hasPF
 		kRopeBindIdx := lay.kRopeBindIdx
 		opsPerLayer := lay.opsPerLayer
-		total := lay.total(nLayers, nGlobal2Pass, nQ8Store)
+		total := lay.total(nLayers, nGlobal2Pass, nQ8Store, nTQOps)
 		recorder := icbop.New(device, uint(total), 16)
 		icb := recorder.Buffer
 
@@ -1899,7 +2004,35 @@ func recordArchICB(
 				setBin(emit(), addPSO, kProj, kBiasBufs[li], kProj, kvOf(li)*hdOf(li))
 			}
 			fuseK := useFusedQKRope && hasKN // fuse kNorm+ropeK into one op (writes the cache at buf 2)
-			if owns && q8On(li) {
+			if owns && tqOn(li) {
+				// TurboQuant GLOBAL owner (#41 S3): K rope/norm and the V
+				// projection land in the FIXED bf16 staging rows, then one
+				// rotate-quantise store op each writes the packed code row + γ
+				// row — those two stores' outputs (binds 3/4) are what
+				// prepareStepRebind rebinds per token.
+				if fuseK {
+					setQKNormRope(emit(), kProj, 0, kNormBufs[li], kStageTQ, 0, kvOf(li), li)
+				} else {
+					if hasKN {
+						setRMSRows(emit(), kProj, kNormBufs[li], kProj, kvOf(li), hdOf(li))
+					}
+					setRope(emit(), kProj, kStageTQ, kvOf(li), li)
+				}
+				cks := emit()
+				emitTQKVStore(fastICBSink{cks}, tqStoreKICB, kStageTQ, tqKVPiBuffer(hdOf(li)), tqKVCentroidsBuffer(hdOf(li), kvTQ.kBits), kCaches[li], 0, kvTQ.kGammas[li], 0, kvOf(li), hdOf(li))
+				kStoreIdx[li] = opIdx - 1
+				cv := emitNB() // 2nd consumer of `normed` (q barriered it) — overlap
+				recInputProj(cv, li, inBuf, anwBufs[li], normed, vStageTQ, 0, vProjOf(li))
+				if lay.qkvBias { // additive V bias on the staged V row (fixed bind, before the store)
+					setBin(emit(), addPSO, vStageTQ, vBiasBufs[li], vStageTQ, kvOf(li)*hdOf(li))
+				}
+				if valueNormOnes != nil { // gemma4 value-norm on the staged V row (fixed bind)
+					setRMSRows(emit(), vStageTQ, valueNormOnes, vStageTQ, kvOf(li), hdOf(li))
+				}
+				cvs := emit()
+				emitTQKVStore(fastICBSink{cvs}, tqStoreVICB, vStageTQ, tqKVPiBuffer(hdOf(li)), tqKVCentroidsBuffer(hdOf(li), kvTQ.vBits), vCaches[li], 0, kvTQ.vGammas[li], 0, kvOf(li), hdOf(li))
+				vStoreIdx[li] = opIdx - 1
+			} else if owns && q8On(li) {
 				// q8 GLOBAL owner (#367): K rope/norm and the V projection land in
 				// the FIXED bf16 staging rows, then one quantise-store op each
 				// writes the int8 cache row + f32 scale row — those two stores'
@@ -2010,7 +2143,30 @@ func recordArchICB(
 			hd, kv := hdOf(li), kvOf(li)
 			kvd := int64(kv * hd)
 			q8Read := kvQ8.on(ownerIdx) // sharers of a q8 owner read q8 too
-			if sdpa2PassICBBlocks > 0 && specs[li].Attention == model.GlobalAttention {
+			if kvTQ.on(ownerIdx) {
+				// TurboQuant read (#41 S3): rotate q once for this layer (Πq per
+				// head — O(d²) OUTSIDE the KV scan), run the code-reading SDPA in
+				// rotated space, then ONE unrotation lands the output in `attn`
+				// (the O(output) fold). TQ owners are GLOBAL-only, so no sliding
+				// read-offset rebind ever touches these ops.
+				emitTQRotRows(fastICBSink{emit()}, tqRotICB, qr, tqKVPiBuffer(hd), qRotTQ, nHeads, hd)
+				kb, vb := int64(tqBytesPerRow(kvTQ.kBits, hd)), int64(tqBytesPerRow(kvTQ.vBits, hd))
+				kCent, vCent := tqKVCentroidsBuffer(hd, kvTQ.kBits), tqKVCentroidsBuffer(hd, kvTQ.vBits)
+				if sdpa2PassICBBlocks > 0 && specs[li].Attention == model.GlobalAttention {
+					emitSDPAVector2Pass1TQ(fastICBSink{emit()}, sdpaTQP1PSOByHd[hd], qRotTQ, attendK, attendV,
+						p2Partials, p2Sums, p2Maxs, kvTQ.kGammas[ownerIdx], kvTQ.vGammas[ownerIdx], kCent, vCent,
+						nBufForLayer, nHeads, kv, 0, sdpa2PassICBBlocks, kb, int64(kv)*kb, vb, int64(kv)*vb, scale)
+					sdpaIdx[li] = opIdx - 1
+					emitSDPA2Pass2(fastICBSink{emit()}, sdpa2Pass2PSOByHd[hd], p2Partials, p2Sums, p2Maxs,
+						attnRotTQ, 1, nHeads, sdpa2PassICBBlocks)
+				} else {
+					emitSDPAVectorTQ(fastICBSink{emit()}, sdpaTQPSOByHd[hd], qRotTQ, attendK, attendV, attnRotTQ,
+						kvTQ.kGammas[ownerIdx], kvTQ.vGammas[ownerIdx], kCent, vCent, nBufForLayer,
+						nHeads, kv, 0, kb, int64(kv)*kb, vb, int64(kv)*vb, scale)
+					sdpaIdx[li] = opIdx - 1
+				}
+				emitTQRotRows(fastICBSink{emit()}, tqUnrotICB, attnRotTQ, tqKVPiBuffer(hd), attn, nHeads, hd)
+			} else if sdpa2PassICBBlocks > 0 && specs[li].Attention == model.GlobalAttention {
 				// GLOBAL layer deep-decode: the 2-pass pair fans the growing-cache reduction over
 				// blocks threadgroups (pass 1) and merges the partials (pass 2) — the recorded
 				// replacement for the single-pass kernel that serialised the whole cache on one
@@ -2149,7 +2305,7 @@ func recordArchICB(
 		// the recorded layout diverged from opsPerLayer·nLayers — a recorder bug, not a numeric
 		// drift; fail loud rather than replay a misaligned ICB.
 		if opIdx != total {
-			coreErr = core.NewError(core.Sprintf("native.decodeForwardArchICBCore: recorded %d ops, expected %d (opsPerLayer=%d × %d layers + %d global 2-pass + %d q8 stores) — heterogeneous layout misaligned", opIdx, total, opsPerLayer, nLayers, nGlobal2Pass, nQ8Store))
+			coreErr = core.NewError(core.Sprintf("native.decodeForwardArchICBCore: recorded %d ops, expected %d (opsPerLayer=%d × %d layers + %d global 2-pass + %d q8 stores + %d TQ ops) — heterogeneous layout misaligned", opIdx, total, opsPerLayer, nLayers, nGlobal2Pass, nQ8Store, nTQOps))
 			return
 		}
 
@@ -2191,6 +2347,8 @@ func recordArchICB(
 				physRow := rowBytesByLayer[li]
 				if q8On(li) {
 					physRow = kvdOf(li)
+				} else if tqOn(li) {
+					physRow = kvTQ.kRowBytes[li] // packed codes: kvHeads·ceil(hd·kBits/8) bytes/row
 				}
 				cacheRowsByLayer[li] = int(bufferLengthFast(kCaches[li])) / physRow
 			}
@@ -2201,7 +2359,7 @@ func recordArchICB(
 			specs:   specs, nLayers: nLayers, vOutBind: vOutBind, kRopeBind: kRopeBindIdx, hasValueNorm: valueNormOnes != nil,
 			kRopeIdx: kRopeIdx, vIdx: vIdx, vNormIdx: vNormIdx, sdpaIdx: sdpaIdx, vBiasIdx: vBiasIdx, barrierOps: barrierOps,
 			kCaches: kCaches, vCaches: vCaches,
-			kvQ8: kvQ8, kStoreIdx: kStoreIdx, vStoreIdx: vStoreIdx,
+			kvQ8: kvQ8, kvTQ: kvTQ, kStoreIdx: kStoreIdx, vStoreIdx: vStoreIdx,
 			offBuf: offBuf, nGlobalBuf: nGlobalBuf, nSlidingBuf: nSlidingBuf,
 			ping: ping, ping0: ping[0], lastOut: lastOut, pleInput: pleInput,
 			finalOutIdx: finalOutIdx, finalOutBind: finalOutBind, hasFinalOut: hasFinalOut,
@@ -2235,7 +2393,7 @@ func decodeForwardArchICBCore(
 	base, scale, eps float32,
 	useCallerOut bool,
 ) ([][]byte, error) {
-	r, err := recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, ple, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, perLayerDFF, simpleICBRope(base, headDim), scale, scale, eps, false, nil, nil, nil, nil)
+	r, err := recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, ple, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, perLayerDFF, simpleICBRope(base, headDim), scale, scale, eps, false, nil, nil, nil, nil, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2260,7 +2418,7 @@ func recordArchICBBF16(
 	pleRuntime *archDecodePLEInputs, pliDim int,
 	dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow int,
 	rope icbRope, scale, ropeScale, eps float32, valueNorm, useSiLU bool,
-	kvQ8 *archICBKVQ8,
+	kvQ8 *archICBKVQ8, kvTQ *archICBKVTQ,
 ) (*archICBReplay, error) {
 	qlayers := make([]QuantizedLayerWeights, len(layers))
 	dense := func(b []byte) QuantWeight { return QuantWeight{Packed: b} }
@@ -2280,7 +2438,7 @@ func recordArchICBBF16(
 			PostPerLayerInputNormW: w.PostPerLayerInputNormW,
 		}
 	}
-	return recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, 0, 0, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, rope, scale, ropeScale, eps, valueNorm, useSiLU, kvQ8)
+	return recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, 0, 0, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, rope, scale, ropeScale, eps, valueNorm, useSiLU, kvQ8, kvTQ)
 }
 
 // DecodeForwardArchICB is the bf16 ARCH-driven cache-grow ICB: the encode-bypass replay

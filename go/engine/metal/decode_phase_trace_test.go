@@ -99,11 +99,12 @@ func TestBeginDecodePhaseTrace_NilSessionSafe(t *testing.T) {
 }
 
 // TestSupportedCacheModes pins the capability seam's honest answer: the no-cgo
-// engine reports its single native cache mode (no go-mlx-era selector).
+// engine reports its built-in native cache and the TurboQuant live-code family
+// (#41 S3) — nothing else (the go-mlx-era fp16/q8/kq8vq4 selectors never ported).
 func TestSupportedCacheModes(t *testing.T) {
 	m := &NativeTokenModel{}
 	modes := m.SupportedCacheModes()
-	if len(modes) != 1 || modes[0] != "native" {
-		t.Fatalf("SupportedCacheModes = %v, want [native]", modes)
+	if len(modes) != 2 || modes[0] != "native" || modes[1] != "turboquant" {
+		t.Fatalf("SupportedCacheModes = %v, want [native turboquant]", modes)
 	}
 }

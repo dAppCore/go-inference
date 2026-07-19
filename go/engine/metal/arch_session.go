@@ -834,38 +834,55 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 		// recorder (recordArchICBBF16): record the decode stack once + replay it per Step/
 		// StepWithID instead of re-encoding every layer every token. The replay holds its OWN
 		// linear/ring caches; the PLE runtime wraps the session's perLayerInput closure.
-		if sess.icbEligible() {
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && !sess.icbEligible() {
+			// A session the ICB cannot record (trace, MoE, hybrid) has no
+			// TurboQuant lane — refuse rather than run silently native (#41 S3).
+			buildErr = core.NewError("native.NewArchSession: -kv-cache turboquant requires the recorded decode lane (this session cannot record the arch ICB)")
+			return
+		} else if sess.icbEligible() {
 			var pleRuntime *archDecodePLEInputs
 			if g.HasPLE() {
 				pleRuntime = &archDecodePLEInputs{compute: sess.perLayerInput}
 			}
 			// per-owner caches (sliding = bounded ring; global = maxLen rows), with the
-			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367).
-			kCaches, vCaches, icbKVQ8 := allocArchICBCaches(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow)
+			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367)
+			// and -kv-cache turboquant allocating code+γ caches instead (#41 S3).
+			kCaches, vCaches, icbKVQ8, icbKVTQ := allocArchICBCachesTQ(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow, tqMode)
+			if tqMode != nil && !icbKVTQ.any() {
+				buildErr = core.NewError("native.NewArchSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
 			rope := icbRope{
 				base: arch.RopeBase, localBase: arch.RopeLocalBase,
 				rotaryDim: arch.RotaryDim, rotaryDimLocal: arch.RotaryDimLocal,
 				globalHeadDim: state.globalHeadDim,
 				globalFreqs:   state.globalRopeFreqs, freqs: state.ropeFreqs,
 			}
-			rep, rerr := recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8)
+			rep, rerr := recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
 			if rerr != nil {
 				buildErr = rerr
 				return
 			}
 			sess.state.icb = rep
-			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
-			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
-			sess.recordPeerICB = func() (*archICBReplay, error) {
-				return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8)
-			}
-			if pipelinedGPUDecodeEnabled {
-				peer, perr := sess.recordPeerICB()
-				if perr != nil {
-					buildErr = perr
-					return
+			if tqMode == nil {
+				// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
+				// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
+				// TurboQuant sessions DECLINE the submit-ahead/live-link tails (v1): recordPeerICB stays
+				// nil, so every pipelined gate falls through to the serial chained loop.
+				sess.recordPeerICB = func() (*archICBReplay, error) {
+					return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, nil)
 				}
-				sess.icbPeer = peer
+				if pipelinedGPUDecodeEnabled {
+					peer, perr := sess.recordPeerICB()
+					if perr != nil {
+						buildErr = perr
+						return
+					}
+					sess.icbPeer = peer
+				}
 			}
 		}
 	})
@@ -1142,38 +1159,55 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		// it per Step/StepWithID instead of re-encoding every layer. The replay holds its OWN linear
 		// maxLen caches (the session's lb sliding caches are RING-sized + unused on this path); the PLE
 		// runtime wraps the session's own perLayerInput closure (the per-token tensor stays host-side).
-		if sess.icbEligible() {
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && !sess.icbEligible() {
+			// A session the ICB cannot record (trace, MoE, hybrid) has no
+			// TurboQuant lane — refuse rather than run silently native (#41 S3).
+			buildErr = core.NewError("native.NewArchQuantSession: -kv-cache turboquant requires the recorded decode lane (this session cannot record the arch ICB)")
+			return
+		} else if sess.icbEligible() {
 			var pleRuntime *archDecodePLEInputs
 			if g.HasPLE() {
 				pleRuntime = &archDecodePLEInputs{compute: sess.perLayerInput}
 			}
 			// per-owner caches (sliding = bounded ring; global = maxLen rows), with the
-			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367).
-			kCaches, vCaches, icbKVQ8 := allocArchICBCaches(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow)
+			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367)
+			// and -kv-cache turboquant allocating code+γ caches instead (#41 S3).
+			kCaches, vCaches, icbKVQ8, icbKVTQ := allocArchICBCachesTQ(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow, tqMode)
+			if tqMode != nil && !icbKVTQ.any() {
+				buildErr = core.NewError("native.NewArchQuantSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
 			rope := icbRope{
 				base: arch.RopeBase, localBase: arch.RopeLocalBase,
 				rotaryDim: arch.RotaryDim, rotaryDimLocal: arch.RotaryDimLocal,
 				globalHeadDim: state.globalHeadDim,
 				globalFreqs:   state.globalRopeFreqs, freqs: state.ropeFreqs,
 			}
-			rep, rerr := recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8)
+			rep, rerr := recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
 			if rerr != nil {
 				buildErr = rerr
 				return
 			}
 			sess.state.icb = rep
-			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
-			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
-			sess.recordPeerICB = func() (*archICBReplay, error) {
-				return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8)
-			}
-			if pipelinedGPUDecodeEnabled {
-				peer, perr := sess.recordPeerICB()
-				if perr != nil {
-					buildErr = perr
-					return
+			if tqMode == nil {
+				// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
+				// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
+				// TurboQuant sessions DECLINE the submit-ahead/live-link tails (v1): recordPeerICB stays
+				// nil, so every pipelined gate falls through to the serial chained loop.
+				sess.recordPeerICB = func() (*archICBReplay, error) {
+					return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, nil)
 				}
-				sess.icbPeer = peer
+				if pipelinedGPUDecodeEnabled {
+					peer, perr := sess.recordPeerICB()
+					if perr != nil {
+						buildErr = perr
+						return
+					}
+					sess.icbPeer = peer
+				}
 			}
 		}
 	})

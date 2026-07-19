@@ -58,7 +58,7 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 	// maxLen <= 0 defers to the loader's checkpoint-window default
 	// (resolveDefaultContext — the trained window capped at 32768).
 	maxLen := cfg.ContextLen
-	tm, err := LoadTokenModelDirWithConfig(path, maxLen, TokenModelLoadConfig{AdapterPath: cfg.AdapterPath})
+	tm, err := LoadTokenModelDirWithConfig(path, maxLen, TokenModelLoadConfig{AdapterPath: cfg.AdapterPath, KVCacheMode: cfg.CacheMode})
 	if err != nil {
 		return core.Fail(core.E("native.metalBackend.LoadModel", "load token model", err))
 	}

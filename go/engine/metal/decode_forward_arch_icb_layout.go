@@ -129,8 +129,10 @@ func resolveArchICBOpLayout(specs []model.LayerSpec, caps archICBOpCaps) archICB
 
 // total is the whole-stack ICB command count: the uniform per-layer stride plus the
 // stack-global additions — each GLOBAL layer recording the 2-pass SDPA costs one op
-// over the single-pass layout, and each q8 owner layer records two quantise-store
-// ops (K row, V row).
-func (l archICBOpLayout) total(nLayers, nGlobal2Pass, nQ8Store int) int {
-	return l.opsPerLayer*nLayers + nGlobal2Pass + nQ8Store
+// over the single-pass layout, each q8 owner layer records two quantise-store ops
+// (K row, V row), and the TurboQuant lane adds nTQOps (two rotate-quantise stores
+// per TQ owner + the q pre-rotation and output unrotation around each TQ-reading
+// layer's SDPA).
+func (l archICBOpLayout) total(nLayers, nGlobal2Pass, nQ8Store, nTQOps int) int {
+	return l.opsPerLayer*nLayers + nGlobal2Pass + nQ8Store + nTQOps
 }

@@ -148,6 +148,12 @@ func (m *NativeTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.L
 	if m == nil {
 		return nil, core.NewError("native.OpenLaneSet: nil model")
 	}
+	// TurboQuant live KV declines the batch/interleave lanes (v1): the laneSet's
+	// interleaved landings and GEMM folds read/write bf16 cache rows. Refuse
+	// loudly — the per-session decode lane carries TQ.
+	if tqMode, _ := parseTurboQuantCacheMode(m.kvCacheMode); tqMode != nil {
+		return nil, core.NewError("native.OpenLaneSet: -kv-cache turboquant declines the continuous-batching laneSet (v1) — serve per-session or drop -kv-cache")
+	}
 	maxLanes := cfg.MaxLanes
 	if maxLanes <= 0 {
 		maxLanes = defaultLaneSetMaxLanes
