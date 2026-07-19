@@ -174,11 +174,7 @@ func DetectDFlashDraft(draftPath string) (dflash.Config, bool) {
 	if !data.OK {
 		return dflash.Config{}, false
 	}
-	raw, ok := data.Value.([]byte)
-	if !ok {
-		return dflash.Config{}, false
-	}
-	return dflash.ParseConfig(raw)
+	return dflash.ParseConfig(data.Bytes())
 }
 
 // DFlashDraftNotice is the honest boot notice for a detected-but-unrunnable
@@ -264,10 +260,7 @@ func isGemma4FamilyConfig(modelPath string) bool {
 	if !data.OK {
 		return false
 	}
-	raw, ok := data.Value.([]byte)
-	if !ok {
-		return false
-	}
+	raw := data.Bytes()
 	var probe struct {
 		ModelType string `json:"model_type"`
 	}
