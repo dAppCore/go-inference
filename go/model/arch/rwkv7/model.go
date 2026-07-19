@@ -146,6 +146,14 @@ func (s *RWKV7Session) headLogits(hidden []float32) []float32 {
 // block for Generate and the prefill-vs-decode equivalence test.
 func (s *RWKV7Session) Forward(tokens []int32) ([]float32, error) { return s.forward(tokens) }
 
+// HeadLogits is the exported form of headLogits: maps a single hidden [D] to full f32 vocab logits via the
+// final norm + LM head. Generate stays on the unexported path (no seam needed internally); this export
+// exists for a caller OUTSIDE the package that needs full-precision logits rather than the lossy bf16
+// round-trip RWKV7TokenModel.Head returns (the SessionModel serve contract's seam) — engine/metal's
+// device-vs-host parity tests use it to measure the exact logit gap at a greedy argmax, f64-accumulation
+// noise vs a real divergence.
+func (s *RWKV7Session) HeadLogits(hidden []float32) []float32 { return s.headLogits(hidden) }
+
 // Generate greedily decodes up to maxNew tokens after prefilling prompt, threading every layer's carried
 // state (so each new token is O(1)). eosID < 0 disables early stop. Token-identical to a one-pass run.
 func (s *RWKV7Session) Generate(prompt []int32, maxNew, eosID int) ([]int32, error) {
