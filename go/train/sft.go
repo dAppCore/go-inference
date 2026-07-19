@@ -15,9 +15,9 @@
 // LoRA.TargetKeys naming per-layer projections (q_proj, v_proj, …) is REFUSED
 // at trainer open by the metal engine (#31) — never silently trained as
 // head-only; leave TargetKeys empty (or ["lm_head"]) for the head. The
-// inference.Batch carries a LossMask for response-only masking, but the current
-// engine trainer does not yet honour it — a LAYER-projection LoRA with response
-// masking is a separate engine train-step follow-up, not this loop.
+// inference.Batch LossMask IS honoured by the engine trainers (response-only
+// masking: masked positions contribute zero loss and zero gradient, and the
+// loss normaliser divides by the unmasked count).
 
 package train
 
