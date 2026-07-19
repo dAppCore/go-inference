@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math"
 	"os"
 
 	core "dappco.re/go"
@@ -25,6 +26,75 @@ func physicalRAMBytes() uint64 {
 		return 0
 	}
 	return v
+}
+
+// kvRowBytes is one cache-owning layer's per-row KV cost: K+V at the bf16
+// rate (2 × kvDim × 2B) — deliberately ignoring the q8 saving, because the q8
+// GEMM-prefix mirrors transiently return those layers to bf16 size during a
+// long prefill. Shared by clampContextToRAM (which solves budget → rows) and
+// sessionKVBytesAt (which solves rows → budget) so the two directions read
+// from ONE formula and can never drift apart.
+func kvRowBytes(spec model.LayerSpec, arch model.Arch) uint64 {
+	lhd, lkv := headDimOf(spec, arch.HeadDim), kvHeadsOf(spec, arch.KVHeads)
+	return uint64(lkv*lhd) * bf16Size * 2
+}
+
+// sessionMemoryBudgetBytes is the KV-row budget clampContextToRAM (and the
+// batch-lane admission gate, lane_set.go) solve against: physical RAM minus
+// headroom for the OS and everything that isn't this session — min(max(20%
+// of RAM, 8GiB), 24GiB), so small boxes keep breathing room without the
+// reserve swallowing them — minus the checkpoint's mapped weight bytes
+// (zero-copy weights go resident as decode touches them, so steady state is
+// all of them), minus the fixed batch/staging slack (the bounded batch slabs
+// + staging headroom — 4GiB flat). ok=false when weights and the fixed
+// overhead alone already crowd the box: no room for any KV rows, so the
+// caller must fail closed rather than treat a zero/negative budget as room.
+func sessionMemoryBudgetBytes(weightsBytes, ramBytes uint64) (budget uint64, ok bool) {
+	reserve := min(max(ramBytes/5, 8<<30), 24<<30)
+	const fixed = uint64(4) << 30
+	if ramBytes <= reserve+weightsBytes+fixed {
+		return 0, false
+	}
+	return ramBytes - reserve - weightsBytes - fixed, true
+}
+
+// sessionKVBytesAt returns the KV-cache bytes ONE session of context length
+// ctxLen costs for arch: kvRowBytes per row for every cache-owning layer, a
+// sliding-window layer's ring capped at SlidingWindow rows once ctxLen
+// exceeds the window. This is the forward direction (length → bytes) of the
+// same per-row/sliding-window accounting clampContextToRAM inverts (budget →
+// length) — the batch-lane admission gate (lane_set.go, admitMemoryBudget)
+// uses it to price a lane at the model's already-decided context length
+// instead of re-deriving the cost a second way.
+func sessionKVBytesAt(arch model.Arch, ctxLen int) uint64 {
+	if ctxLen <= 0 {
+		return 0
+	}
+	var total uint64
+	for li := range arch.Layer {
+		spec := arch.Layer[li]
+		if !spec.OwnsCache() {
+			continue
+		}
+		rowBytes := kvRowBytes(spec, arch)
+		rows := uint64(ctxLen)
+		if arch.SlidingWindow > 0 && arch.SlidingWindow < ctxLen && spec.Attention != model.GlobalAttention {
+			rows = uint64(arch.SlidingWindow) // ring-bounded: fixed charge, not per-row
+		}
+		total += rows * rowBytes
+	}
+	return total
+}
+
+// intFromBytes saturates a byte count to the platform int range. Realistic
+// device/RAM sizes stay many orders of magnitude below the ceiling; this only
+// guards the theoretical overflow so an absurd value fails a budget.FitsMemory
+// check rather than wrapping negative and passing one it shouldn't.
+func intFromBytes(b uint64) int {
+	if b > math.MaxInt {
+		return math.MaxInt
+	}
+	return int(b)
 }
 
 // clampContextToRAM bounds a DEFAULT context so the session's KV plan fits
@@ -48,20 +118,17 @@ func clampContextToRAM(defCtx int, arch model.Arch, weightsBytes, ramBytes uint6
 	if !contextRAMGuardEnabled || defCtx <= 4096 || ramBytes == 0 {
 		return defCtx
 	}
-	reserve := min(max(ramBytes/5, 8<<30), 24<<30)
-	const fixed = uint64(4) << 30
-	if ramBytes <= reserve+weightsBytes+fixed {
+	budget, ok := sessionMemoryBudgetBytes(weightsBytes, ramBytes)
+	if !ok {
 		return 4096 // weights alone crowd the box: keep the floor (explicit -context overrides)
 	}
-	budget := ramBytes - reserve - weightsBytes - fixed
 	var perRow uint64
 	for li := range arch.Layer {
 		spec := arch.Layer[li]
 		if !spec.OwnsCache() {
 			continue
 		}
-		lhd, lkv := headDimOf(spec, arch.HeadDim), kvHeadsOf(spec, arch.KVHeads)
-		rowBytes := uint64(lkv*lhd) * bf16Size * 2 // K+V per row, bf16 rate
+		rowBytes := kvRowBytes(spec, arch)
 		if arch.SlidingWindow > 0 && arch.SlidingWindow < defCtx && spec.Attention != model.GlobalAttention {
 			cost := uint64(arch.SlidingWindow) * rowBytes // ring-bounded: fixed charge
 			if budget <= cost {
