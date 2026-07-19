@@ -153,7 +153,9 @@ func TestGatherRowsF32_Good(t *testing.T) {
 // fresh trainers over it step identically.
 func maskTrainerFixture(t *testing.T) *NativeTokenModel {
 	t.Helper()
-	const dModel, nHeads, nKV, headDim, dFF, vocab, nL, maxLen = 64, 2, 1, 32, 128, 32, 2, 16
+	// headDim 64 (nHeads 1): the metallib ships sdpa_vector width instantiations for real head
+	// dims only — hd32 has no pipeline anywhere (#28); the mask semantics under test are width-blind.
+	const dModel, nHeads, nKV, headDim, dFF, vocab, nL, maxLen = 64, 1, 1, 64, 128, 32, 2, 16
 	layers := make([]DecodeLayerWeights, nL)
 	types := make([]string, nL)
 	for li := range layers {
@@ -201,7 +203,7 @@ func TestLoRATrainerStepLossMask_Good(t *testing.T) {
 	requireNativeRuntime(t)
 	tm := maskTrainerFixture(t)
 	ids1 := []int32{1, 2, 3, 4, 5, 6}
-	ids2 := []int32{1, 2, 3, 4, 5, 29} // differs ONLY in the last token
+	ids2 := []int32{1, 2, 3, 4, 5, 29}                                  // differs ONLY in the last token
 	mask := inference.LossMask{Values: [][]float32{{1, 1, 1, 1, 1, 0}}} // last target masked
 
 	step := func(ids []int32, m inference.LossMask) (float64, []float32, []float32) {

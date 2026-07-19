@@ -78,6 +78,7 @@ type adapterConfigJSON struct {
 type LoRATrainer struct {
 	sess      *ArchSession
 	finalNorm []float32 // [dModel] bf16→f32, the frozen final RMSNorm weight
+	softCap   float32   // final-logit soft-cap (arch.SoftCap; 0 = none) — the trainer's head forward matches serving (train_softcap.go)
 	lmHead    []float32 // [vocab,dModel] bf16→f32, the frozen output head
 	a, b      []float32 // trainable (head mode): A [rank,dModel], B [vocab,rank] (B starts at zero → adapter is a no-op)
 	optA      *AdamW
@@ -161,6 +162,7 @@ func NewLoRATrainer(tm *NativeTokenModel, cfg inference.TrainingConfig) (*LoRATr
 	t := &LoRATrainer{
 		sess:      sess,
 		finalNorm: bf16ToF32Slice(tm.bf16.FinalNorm),
+		softCap:   tm.arch.SoftCap,
 		lmHead:    bf16ToF32Slice(tm.bf16.LMHead),
 		dModel:    dModel,
 		vocab:     vocab,
@@ -349,10 +351,12 @@ func (t *LoRATrainer) seqGrads(ids []int32, mask inference.LossMask, sample int)
 	for i := range logits {
 		logits[i] = baseLogits[i] + delta[i]
 	}
+	softcapForwardF32(logits, t.softCap) // match serving's capped head (no-op when 0)
 	loss, dLogits, err := CrossEntropyBackwardF32Auto(logits, targets, rows, t.vocab)
 	if err != nil {
 		return 0, nil, nil, 0, err
 	}
+	softcapBackwardScaleF32(dLogits, logits, t.softCap)
 	dA, dB, _, err = LoRABackwardF32(dLogits, normedPred, t.a, t.b, xA, rows, t.dModel, t.vocab, t.rank, t.scaling)
 	if err != nil {
 		return 0, nil, nil, 0, err
@@ -562,6 +566,7 @@ func (t *LoRATrainer) Loss(batch inference.Batch) (float64, error) {
 		for i := range logits {
 			logits[i] = baseLogits[i] + delta[i]
 		}
+		softcapForwardF32(logits, t.softCap)
 		loss, _, err := CrossEntropyBackwardF32Auto(logits, targets, rows, t.vocab)
 		if err != nil {
 			return 0, err

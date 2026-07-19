@@ -53,7 +53,8 @@ func TestLoRATargetMode_Bad(t *testing.T) {
 // eligibleFixtureModel builds a host-only (no session) synthetic bf16 model + arch of the shape the
 // per-layer path accepts: uniform dense full-attention layers, no extras.
 func eligibleFixtureModel(nL int) (*BF16Model, model.Arch) {
-	const dModel, nHeads, nKV, headDim, dFF, vocab = 64, 2, 1, 32, 128, 32
+	// headDim 64 (nHeads 1): hd32 has no sdpa_vector pipeline in the metallib (#28).
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 64, 1, 1, 64, 128, 32
 	layers := make([]DecodeLayerWeights, nL)
 	types := make([]string, nL)
 	for li := range layers {
@@ -125,7 +126,19 @@ func TestValidatePerLayerLoRAShape_Bad(t *testing.T) {
 	})
 	check("moe", "MoE", func(g *BF16Model, arch *model.Arch) { arch.Experts = 8 })
 	check("moe layer", "MoE", func(g *BF16Model, arch *model.Arch) { arch.Layer[0].MoE = true })
-	check("softcap", "soft-cap", func(g *BF16Model, arch *model.Arch) { arch.SoftCap = 30 })
+	// SoftCap is WIRED since #42's follow-through (train_softcap.go, FD-gated) — a capped shape
+	// now VALIDATES; the head-dim switch is the live refusal in its place.
+	{
+		g, arch := eligibleFixtureModel(2)
+		arch.SoftCap = 30
+		if err := validatePerLayerLoRAShape(&NativeTokenModel{NativeBackend: &NativeBackend{arch: arch}, bf16: g}); err != nil {
+			t.Fatalf("softcap shape must validate (wired + FD-gated): %v", err)
+		}
+	}
+	check("per-layer head-dim switch", "head-dim switching", func(g *BF16Model, arch *model.Arch) {
+		arch.Layer[1].HeadDim = arch.HeadDim * 2
+		arch.Layer[1].KVShareFrom = 1 // owns its cache; only the head dim differs
+	})
 	check("qkv bias", "biases", func(g *BF16Model, arch *model.Arch) {
 		g.Layers[0].BQ = toBF16Bytes(make([]float32, arch.Heads*arch.HeadDim))
 	})
@@ -334,7 +347,8 @@ func TestLoRATrainerPerLayerSFT_Good(t *testing.T) {
 // gemma4 E2B/E4B tail shape), bound as a real NativeTokenModel.
 func sharingFixtureTokenModel(t *testing.T, nL, numShared int) *NativeTokenModel {
 	t.Helper()
-	const dModel, nHeads, nKV, headDim, dFF, vocab = 64, 2, 1, 32, 128, 32
+	// headDim 64 (nHeads 1): hd32 has no sdpa_vector pipeline in the metallib (#28).
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 64, 1, 1, 64, 128, 32
 	layers := make([]DecodeLayerWeights, nL)
 	types := make([]string, nL)
 	for li := range layers {
@@ -435,7 +449,7 @@ func TestNewLoRATrainerSharedKV_Good(t *testing.T) {
 func TestNewLoRATrainerPerLayer_Bad(t *testing.T) {
 	requireNativeRuntime(t)
 	g, arch := eligibleFixtureModel(2)
-	arch.SoftCap = 30 // the un-gated feature: the head backward does not model the soft-cap
+	arch.LogitsScaling = 2 // an un-gated head feature (weight-independent, so the head adapter still opens below)
 	tm, err := NewBF16TokenModel(g, arch, 16)
 	if err != nil {
 		t.Fatalf("NewBF16TokenModel: %v", err)
@@ -443,9 +457,9 @@ func TestNewLoRATrainerPerLayer_Bad(t *testing.T) {
 
 	_, err = NewLoRATrainer(tm, inference.TrainingConfig{LoRA: inference.LoRAConfig{TargetKeys: []string{"q_proj"}}})
 	if err == nil {
-		t.Fatal("per-layer targets on a soft-cap shape must be refused")
+		t.Fatal("per-layer targets on a logit-scaling shape must be refused")
 	}
-	for _, want := range []string{"q_proj", "soft-cap", "lm_head"} {
+	for _, want := range []string{"q_proj", "final-logit scaling", "lm_head"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the boundary refusal must name %q; got: %s", want, err.Error())
 		}

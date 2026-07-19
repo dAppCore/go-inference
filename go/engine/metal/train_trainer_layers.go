@@ -81,8 +81,10 @@ func validatePerLayerLoRAShape(tm *NativeTokenModel) error {
 	if arch.Experts > 0 {
 		return refuse("the MoE feed-forward")
 	}
-	if arch.SoftCap != 0 || arch.LogitsScaling != 0 || arch.LogitScale != 0 {
-		return refuse("final-logit soft-cap/scaling in the head backward")
+	// arch.SoftCap is WIRED: the trainer's head forward caps like serving and the CE gradient is
+	// scaled by the cap's derivative (train_softcap.go) — FD-gated by TestSoftcapHeadBackward_FD.
+	if arch.LogitsScaling != 0 || arch.LogitScale != 0 {
+		return refuse("final-logit scaling in the head backward")
 	}
 	if arch.AttnOutputGate {
 		return refuse("the attention output gate")
@@ -140,6 +142,16 @@ func validatePerLayerLoRAShape(tm *NativeTokenModel) error {
 			if w.MoE != nil || w.GatedDelta != nil {
 				return refuse("a MoE/recurrent layer body")
 			}
+		}
+	}
+	// Per-layer head-dim switching (gemma4 global layers run hd 512 vs 256 sliding): the host
+	// mirror FAILS the B=0 parity anchor on the real E2B (worst layer just after the first global
+	// layer, cosine 0.83 vs the 0.999 bar — TestLoRATrainerE2BSharedKVSFT_Good's receipt, #42).
+	// Training on a divergent mirror is wrong-gradient training; refused until the anchor passes.
+	// Checked AFTER the KV-share topology loop so a malformed topology keeps its own refusal.
+	for li := range arch.Layer {
+		if hd := arch.Layer[li].HeadDim; hd != 0 && hd != arch.HeadDim {
+			return refuse("per-layer head-dim switching (the global-layer host mirror fails the B=0 parity anchor)")
 		}
 	}
 	return nil
@@ -423,6 +435,7 @@ func (t *LoRATrainer) perLayerSeqGrads(ids []int32, mask inference.LossMask, sam
 	if err != nil {
 		return 0, 0, err
 	}
+	softcapForwardF32(baseLogits, t.softCap) // match serving's capped head (no-op when 0)
 	targets := make([]int32, rows)
 	for i, p := range maskRows {
 		targets[i] = ids[p+1]
@@ -431,6 +444,7 @@ func (t *LoRATrainer) perLayerSeqGrads(ids []int32, mask inference.LossMask, sam
 	if err != nil {
 		return 0, 0, err
 	}
+	softcapBackwardScaleF32(dLogits, baseLogits, t.softCap)
 
 	// head backward: dNormed = dLogits·lmHead, scattered to the full rows (masked rows zero),
 	// then through the frozen final norm onto the top layer's output.
@@ -576,6 +590,7 @@ func (t *LoRATrainer) perLayerLoss(batch inference.Batch) (float64, error) {
 		if err != nil {
 			return 0, err
 		}
+		softcapForwardF32(baseLogits, t.softCap)
 		targets := make([]int32, rows)
 		for i, p := range maskRows {
 			targets[i] = ids[p+1]
