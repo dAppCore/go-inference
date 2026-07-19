@@ -2849,6 +2849,9 @@ func (s *ArchSession) Step(emb []byte) ([]byte, error) {
 	}
 	var res []byte
 	var err error
+	if s.state.tqPrefill != nil { // prefill→decode: the codes-reading SDPA needs no bf16 scratch (#48)
+		s.state.releaseTQPrefillScratch()
+	}
 	withAutoreleasePool(func() {
 		if s.state.icb != nil && !icbDisabledForTest { // recorded encode-bypass: replay one token over the ICB's caches
 			res = s.state.icb.stepBody(emb, s.pos, nil)
@@ -2879,6 +2882,9 @@ func (s *ArchSession) StepWithID(id int32, emb []byte) ([]byte, error) {
 	}
 	var res []byte
 	var err error
+	if s.state.tqPrefill != nil { // prefill→decode: the codes-reading SDPA needs no bf16 scratch (#48)
+		s.state.releaseTQPrefillScratch()
+	}
 	withAutoreleasePool(func() {
 		var pli []byte
 		if s.perLayerInput != nil { // PLE: per-layer inputs from this token's id + embedding

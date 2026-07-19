@@ -124,11 +124,12 @@ func tqKVCentroidsBuffer(d, bits int) metal.MTLBuffer {
 // --- pipeline resolvers -----------------------------------------------------------------------
 
 var (
-	tqKVPSOMu          sync.Mutex
-	tqKVStorePSOCache  = map[int]metal.MTLComputePipelineState{}
-	tqRotRowsPSOCache  = map[bool]metal.MTLComputePipelineState{}
-	sdpaVectorTQPSOs   = map[[3]int]metal.MTLComputePipelineState{}
-	sdpaV2P1TQPSOCache = map[[4]int]metal.MTLComputePipelineState{}
+	tqKVPSOMu           sync.Mutex
+	tqKVStorePSOCache   = map[int]metal.MTLComputePipelineState{}
+	tqKVDequantPSOCache = map[int]metal.MTLComputePipelineState{}
+	tqRotRowsPSOCache   = map[bool]metal.MTLComputePipelineState{}
+	sdpaVectorTQPSOs    = map[[3]int]metal.MTLComputePipelineState{}
+	sdpaV2P1TQPSOCache  = map[[4]int]metal.MTLComputePipelineState{}
 )
 
 // tqKVStorePipeline resolves lthn_tq_kv_store_bf16_bN for bits ∈ {2,3,4}.
@@ -159,6 +160,38 @@ func tqKVStorePipeline(bits int) (metal.MTLComputePipelineState, error) {
 		return nil, err
 	}
 	tqKVStorePSOCache[bits] = pso
+	return pso, nil
+}
+
+// tqKVDequantPipeline resolves lthn_tq_kv_dequant_bf16_bN for bits ∈ {2,3,4} —
+// the store's inverse feeding the batched-prefill read scratch (#48).
+func tqKVDequantPipeline(bits int) (metal.MTLComputePipelineState, error) {
+	if !tqKVBitsOK(bits) {
+		return nil, core.NewError("native.tqKVDequantPipeline: unsupported bit width (want 2, 3, or 4)")
+	}
+	tqKVPSOMu.Lock()
+	defer tqKVPSOMu.Unlock()
+	if pso, ok := tqKVDequantPSOCache[bits]; ok {
+		if pso == nil {
+			return nil, core.NewError("native.tqKVDequantPipeline: kernel unavailable")
+		}
+		return pso, nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		return nil, core.NewError("native.tqKVDequantPipeline: custom library unavailable")
+	}
+	name := core.Sprintf("lthn_tq_kv_dequant_bf16_b%d", bits)
+	fn := customLibrary.NewFunctionWithName(name)
+	if fn == nil || fn.GetID() == 0 {
+		tqKVDequantPSOCache[bits] = nil
+		return nil, core.NewError("native.tqKVDequantPipeline: kernel " + name + " not found")
+	}
+	pso, err := device.NewComputePipelineStateWithFunctionError(fn)
+	if err != nil {
+		tqKVDequantPSOCache[bits] = nil
+		return nil, err
+	}
+	tqKVDequantPSOCache[bits] = pso
 	return pso, nil
 }
 
@@ -298,6 +331,24 @@ func emitTQKVStore[S dispatchSink](sink S, pso metal.MTLComputePipelineState, ro
 	)
 }
 
+// emitTQKVDequant records the codes→bf16 reconstruction (the store's inverse):
+// codes(0, offset-bound) gammas(1, offset-bound) pi(2) centroids(3) out(4,
+// offset-bound) d(5). numHeadRows is the FLAT (numRows·kvHeads) count — one
+// threadgroup per head-row, exactly the store's grid convention.
+func emitTQKVDequant[S dispatchSink](sink S, pso metal.MTLComputePipelineState, codes metal.MTLBuffer, codesOff uint, gammas metal.MTLBuffer, gammasOff uint, pi, centroids, out metal.MTLBuffer, outOff uint, numHeadRows, headDim int) {
+	sink.setPSO(pso)
+	sink.setBuf(codes, codesOff, 0)
+	sink.setBuf(gammas, gammasOff, 1)
+	sink.setBuf(pi, 0, 2)
+	sink.setBuf(centroids, 0, 3)
+	sink.setBuf(out, outOff, 4)
+	sink.setI32(int32(headDim), 5)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(numHeadRows), Height: 1, Depth: 1},
+		metal.MTLSize{Width: tqKVStoreThreads, Height: 1, Depth: 1},
+	)
+}
+
 // emitTQRotRows records y = Π·x (transpose=false: the once-per-step q
 // pre-rotation) or y = Πᵀ·x (transpose=true: the once-per-step output
 // unrotation) over `rows` bf16 rows of dimension d — in=0, pi=1, out=2, d=3.
@@ -382,6 +433,54 @@ func emitSDPAVector2Pass1TQ[S dispatchSink](sink S, pso metal.MTLComputePipeline
 	)
 }
 
+// --- batched-prefill enc wrappers (#48) -------------------------------------------------------
+
+// gpuHasTQKVStore / gpuHasTQKVDequant gate the batched TurboQuant prefill: both
+// the chunk-wide code landing and the history reconstruction must be servable
+// for a layer's bit width, else the pass declines to the per-token replay.
+func gpuHasTQKVStore(bits int) bool {
+	pso, err := tqKVStorePipeline(bits)
+	return err == nil && pso != nil && pso.GetID() != 0
+}
+
+func gpuHasTQKVDequant(bits int) bool {
+	pso, err := tqKVDequantPipeline(bits)
+	return err == nil && pso != nil && pso.GetID() != 0
+}
+
+// encTQKVStoreRows quantises `numRows` contiguous bf16 staging rows
+// [numRows × kvHeads × headDim] into the packed code cache + γ planes in ONE
+// dispatch — the batched prefill's landing (the per-token store's twin, grid
+// width kvHeads·numRows). codesOff/gammasOff carry the chunk-base byte offsets
+// (row basePos → codes at basePos·kRowBytes, γ at basePos·kvHeads·4).
+func encTQKVStoreRows(enc metal.MTLComputeCommandEncoder, stage, codes metal.MTLBuffer, codesOff uint, gammas metal.MTLBuffer, gammasOff uint, numRows, kvHeads, headDim, bits int) error {
+	if numRows <= 0 || kvHeads <= 0 || !tqKVBitsOK(bits) || !tqKVHeadDimOK(headDim) {
+		return core.NewError("native.encTQKVStoreRows: invalid geometry")
+	}
+	pso, err := tqKVStorePipeline(bits)
+	if err != nil {
+		return err
+	}
+	emitTQKVStore(encSink{enc}, pso, stage, tqKVPiBuffer(headDim), tqKVCentroidsBuffer(headDim, bits), codes, codesOff, gammas, gammasOff, numRows*kvHeads, headDim)
+	return nil
+}
+
+// encTQKVDequantRows reconstructs `numRows` contiguous code rows + γ back to bf16
+// rows in ORIGINAL space in ONE dispatch — the batched prefill's read scratch
+// fill. Offsets carry the range-start bytes (codes at start·kRowBytes, γ at
+// start·kvHeads·4, out at start·kvHeads·headDim·bf16Size).
+func encTQKVDequantRows(enc metal.MTLComputeCommandEncoder, codes metal.MTLBuffer, codesOff uint, gammas metal.MTLBuffer, gammasOff uint, out metal.MTLBuffer, outOff uint, numRows, kvHeads, headDim, bits int) error {
+	if numRows <= 0 || kvHeads <= 0 || !tqKVBitsOK(bits) || !tqKVHeadDimOK(headDim) {
+		return core.NewError("native.encTQKVDequantRows: invalid geometry")
+	}
+	pso, err := tqKVDequantPipeline(bits)
+	if err != nil {
+		return err
+	}
+	emitTQKVDequant(encSink{enc}, pso, codes, codesOff, gammas, gammasOff, tqKVPiBuffer(headDim), tqKVCentroidsBuffer(headDim, bits), out, outOff, numRows*kvHeads, headDim)
+	return nil
+}
+
 // --- host round-trip drivers (the kernel-gate tests + pre-integration probes) -----------------
 
 // TurboQuantKVStoreDevice quantises `heads` contiguous bf16 rows (headDim
@@ -434,6 +533,47 @@ func TurboQuantKVStoreDevice(rows []byte, heads, headDim, bits int) ([]byte, []f
 		return nil, nil, encErr
 	}
 	return codes, gammas, nil
+}
+
+// TurboQuantKVDequantDevice reconstructs `heads` contiguous code rows + γ back
+// to bf16 rows in ORIGINAL space (Πᵀ·γ·centroid), the batched prefill scratch
+// fill in isolation — the store's inverse for the kernel-gate test. codes is
+// [heads × ceil(headDim·bits/8)] bytes, gammas [heads] f32; returns [heads ×
+// headDim] bf16.
+func TurboQuantKVDequantDevice(codes []byte, gammas []float32, heads, headDim, bits int) ([]byte, error) {
+	if err := ensureInit(); err != nil {
+		return nil, err
+	}
+	if !tqKVBitsOK(bits) || !tqKVHeadDimOK(headDim) || heads <= 0 {
+		return nil, core.NewError("native.TurboQuantKVDequantDevice: unsupported geometry")
+	}
+	bytesPerHead := tqBytesPerRow(bits, headDim)
+	if len(codes) != heads*bytesPerHead || len(gammas) != heads {
+		return nil, core.NewError("native.TurboQuantKVDequantDevice: size mismatch")
+	}
+	pso, err := tqKVDequantPipeline(bits)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, heads*headDim*bf16Size)
+	var encErr error
+	withAutoreleasePool(func() {
+		codesBuf := device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&codes[0]), uint(len(codes)), metal.MTLResourceStorageModeShared)
+		gammasBuf := residentFloat32(gammas)
+		outBuf := device.NewBufferWithLengthOptions(uint(len(out)), metal.MTLResourceStorageModeShared)
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		emitTQKVDequant(encSink{enc}, pso, codesBuf, 0, gammasBuf, 0, tqKVPiBuffer(headDim), tqKVCentroidsBuffer(headDim, bits), outBuf, 0, heads, headDim)
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+		copy(out, unsafe.Slice((*byte)(outBuf.Contents()), len(out)))
+		releaseDeviceBuffers(codesBuf, outBuf)
+	})
+	if encErr != nil {
+		return nil, encErr
+	}
+	return out, nil
 }
 
 // TurboQuantSDPADevice runs the full TQ decode read chain over host slices —

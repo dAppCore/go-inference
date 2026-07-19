@@ -19,9 +19,9 @@ import (
 // planted ~1K tokens back is still retrieved through the code caches (the
 // global layers' long-range read IS the thing TurboQuant compresses).
 //
-// Gated behind LEM_REAL_E2B like the sibling real-model tests (loads ~3.5GB;
-// the TQ prefill runs the per-token replay — the batched pass declines — so
-// the ~1.1K-token retrieval prefill takes tens of seconds).
+// Gated behind LEM_REAL_E2B like the sibling real-model tests (loads ~3.5GB).
+// The retrieval prefill now takes the BATCHED TQ pass (#48) — ~1.5s for the
+// ~1.1K-token prompt vs the ~11s per-token replay (LTHN_TQ_BATCHED_PREFILL=0).
 //
 // Measured (this box, 2026-07-19, greedy, 64 teacher-forced steps, real
 // e2b-4bit): top-1 agreement 62/64 with max |logit Δ| 6.31 on the 2-pass lane
@@ -160,7 +160,7 @@ func TestRealE2BTurboQuantLive_Retrieval_Good(t *testing.T) {
 		t.Skip("metallib not set")
 	}
 	if os.Getenv("LEM_REAL_E2B") == "" {
-		t.Skip("set LEM_REAL_E2B=1 to run the real e2b-4bit TurboQuant retrieval smoke (loads ~3.5GB; the TQ prefill is per-token)")
+		t.Skip("set LEM_REAL_E2B=1 to run the real e2b-4bit TurboQuant retrieval smoke (loads ~3.5GB; the TQ prefill now takes the batched pass, #48)")
 	}
 	dir := resolveE2B4bitDir(t)
 	const maxLen = 2048

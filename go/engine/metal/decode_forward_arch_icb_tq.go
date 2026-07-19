@@ -27,12 +27,14 @@ import (
 // reads codes through the TQ kernel pair with q pre-rotated once per step and
 // the output unrotated once per step (lthn_tq_rot_rows — the O(output) fold).
 //
-// V1 coherence: every lane that would read or write these caches as bf16 rows
-// DECLINES — the batched dense pass falls back to the per-token replay (prompt
-// prefill goes sequential), prompt reuse falls back to the whole prefill, KV
-// snapshot / -state sleep-wake / the MTP pairing / paged KV / the laneSet /
-// the submit-ahead peer refuse loudly. The chained replay lane IS the decode;
-// it is fully TQ-aware by recording.
+// Coherence: most lanes that would read or write these caches as bf16 rows
+// DECLINE — prompt reuse falls back to the whole prefill, KV snapshot / -state
+// sleep-wake / the MTP pairing / paged KV / the laneSet refuse loudly. The
+// chained replay lane IS the decode; it is fully TQ-aware by recording. TWO
+// lanes are now wired: the submit-ahead peer records the SAME kvTQ set (e870c2ef)
+// and the BATCHED dense prefill lands codes + reconstructs the history into a
+// bf16 scratch the ordinary chunk-attention scores against (#48,
+// decode_batched_tq.go) — so a turboquant session prefills at batched speed.
 
 // archICBKVTQ carries the per-layer TurboQuant KV state threaded from the
 // session constructor (which owns the cache allocation) into the recorder and
