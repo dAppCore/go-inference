@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	charm.land/log/v2 v2.0.0
-	dappco.re/go v0.11.0
+	dappco.re/go v0.12.0
 	dappco.re/go/api v0.19.0
 	dappco.re/go/cgo v0.11.2
 	dappco.re/go/cli v0.11.1

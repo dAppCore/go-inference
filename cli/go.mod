@@ -9,7 +9,7 @@ go 1.26.2
 require dappco.re/go/inference v0.14.0
 
 require (
-	dappco.re/go v0.11.0
+	dappco.re/go v0.12.0
 	dappco.re/go/api v0.19.0
 	dappco.re/go/config v0.18.0
 	dappco.re/go/container v0.11.0
