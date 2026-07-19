@@ -59,39 +59,63 @@ func TestConfig_ParseConfig_Ugly(t *testing.T) {
 	}
 }
 
-// TestConfig_Arch_Good pins the documented "always refuses" behaviour for a
-// realistic, fully-populated config: the refusal echoes the config's ACTUAL
-// layer/expert/vocab counts (proving it doesn't fabricate a generic message).
+// TestConfig_Arch_Good pins the documented "resolves cleanly, still refuses" behaviour for the REAL
+// openai/gpt-oss-20b config fixture: buildArch's geometry construction must succeed (proving parse +
+// layer schedule + MoE dims + YaRN table all resolve against real data), and the refusal that follows
+// must echo the config's ACTUAL layer/expert/vocab counts (proving it doesn't fabricate a generic
+// message) and name the specific missing primitives (sinks, biases) rather than a vague "not validated".
 func TestConfig_Arch_Good(t *testing.T) {
-	cfg := Config{NumHiddenLayers: 24, NumLocalExperts: 32, NumExpertsPerTok: 4, VocabSize: 201088}
-	_, err := cfg.Arch()
+	data := core.ReadFile(core.PathJoin("testdata", "openai-gpt-oss-20b-config.json"))
+	if !data.OK {
+		t.Fatal("read openai/gpt-oss-20b fixture")
+	}
+	cfg, err := ParseConfig(data.Value.([]byte))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	_, err = cfg.Arch()
 	if err == nil {
-		t.Fatal("Arch: expected a clean not-yet-validated refusal, got a resolved architecture")
+		t.Fatal("Arch: expected a clean sinks/bias-boundary refusal, got a resolved architecture")
 	}
 	if !core.Contains(err.Error(), "24") || !core.Contains(err.Error(), "32") || !core.Contains(err.Error(), "201088") {
 		t.Fatalf("Arch refusal %q must echo the config's actual layer/expert/vocab counts", err.Error())
 	}
+	if !core.Contains(err.Error(), "self_attn.sinks") {
+		t.Fatalf("Arch refusal %q must name the attention-sinks gap", err.Error())
+	}
+	if !core.Contains(err.Error(), "biases") {
+		t.Fatalf("Arch refusal %q must name the o_proj/router/expert bias gap", err.Error())
+	}
 }
 
+// TestConfig_Arch_Bad proves Arch validates the STRUCTURAL geometry first (a change from the old
+// unconditional-refusal shape): an empty config fails on the basic hidden_size/layers/heads guard, not
+// the sinks/bias boundary — the boundary is only reachable once the geometry genuinely resolves.
 func TestConfig_Arch_Bad(t *testing.T) {
 	_, err := (&Config{}).Arch()
 	if err == nil {
 		t.Fatal("Arch accepted an empty config")
 	}
-	if !core.Contains(err.Error(), "gpt_oss is a generative MoE causal-LM") {
-		t.Fatalf("Arch refusal %q must still explain the arch even for an empty config", err.Error())
+	if !core.Contains(err.Error(), "hidden_size") {
+		t.Fatalf("Arch refusal %q for an empty config must name the missing hidden_size/layers/heads, not the sinks/bias boundary", err.Error())
+	}
+	if core.Contains(err.Error(), "self_attn.sinks") {
+		t.Fatalf("Arch refusal %q reached the sinks/bias boundary on a structurally invalid config", err.Error())
 	}
 }
 
-// TestConfig_Arch_Ugly proves Arch performs NO validation at all — even
-// nonsensical negative counts are echoed verbatim in the refusal (there is
-// only ever one refusal shape, unconditionally) — distinct from _Bad's
-// zero-value case.
+// TestConfig_Arch_Ugly proves Arch validates the layer_types SCHEDULE specifically — a config that is
+// otherwise fully populated (hidden/heads/experts all valid) but whose layer_types length disagrees with
+// num_hidden_layers is rejected with a schedule-specific error, distinct from _Bad's basic-geometry gap.
 func TestConfig_Arch_Ugly(t *testing.T) {
-	cfg := Config{NumHiddenLayers: -1, NumLocalExperts: -1, NumExpertsPerTok: -1, VocabSize: -1}
+	cfg := Config{
+		HiddenSize: 2880, NumHiddenLayers: 24, NumAttentionHeads: 64, NumKeyValueHeads: 8, HeadDim: 64,
+		VocabSize: 201088, NumLocalExperts: 32, NumExpertsPerTok: 4, IntermediateSize: 2880,
+		LayerTypes: []string{"sliding_attention", "full_attention"}, // 2 entries, not 24
+	}
 	_, err := cfg.Arch()
-	if err == nil || !core.Contains(err.Error(), "-1") {
-		t.Fatalf("Arch refusal %v must echo even nonsensical negative counts verbatim", err)
+	if err == nil || !core.Contains(err.Error(), "layer_types length 2 != num_hidden_layers 24") {
+		t.Fatalf("Arch refusal %v must name the layer_types/num_hidden_layers length mismatch", err)
 	}
 }
 

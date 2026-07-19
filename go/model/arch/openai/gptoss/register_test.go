@@ -11,9 +11,10 @@ import (
 
 // TestGptOssRefusal mirrors composed.TestComposedMTPRefusal: gpt_oss is a REGISTERED model_type
 // (model.LookupArch succeeds — a user pointing lem at a GPT-OSS checkpoint gets direction, not "unknown
-// model architecture"), and its real config parses cleanly (recognised + configured), but deriving a decode
-// Arch from it still refuses — the MoE Weights mapping and end-to-end forward are not yet validated in this
-// engine, so no test here claims generation works.
+// model architecture"), its real config parses cleanly AND its Weights mapping is populated (recognised +
+// configured + weight-mapped), but deriving a decode Arch from it still refuses — engine/metal has no
+// consumer yet for attention sinks or the o_proj/router/expert additive biases, so no test here claims
+// generation works.
 func TestGptOssRefusal(t *testing.T) {
 	spec, ok := model.LookupArch("gpt_oss")
 	if !ok {
@@ -21,6 +22,9 @@ func TestGptOssRefusal(t *testing.T) {
 	}
 	if spec.Parse == nil {
 		t.Fatal("gpt_oss registered without a Parse func")
+	}
+	if spec.Weights.Embed == "" || spec.Weights.MoE.ExpGate == "" {
+		t.Fatalf("gpt_oss registered without a Weights mapping: %+v", spec.Weights)
 	}
 	data := core.ReadFile(core.PathJoin("testdata", "openai-gpt-oss-20b-config.json"))
 	if !data.OK {
@@ -37,11 +41,11 @@ func TestGptOssRefusal(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a clean refusal, got a decode Arch — gpt_oss serving is not yet validated, so Arch must not claim it")
 	}
-	if !core.Contains(err.Error(), "generative MoE causal-LM") {
-		t.Fatalf("refusal message %q must identify gpt_oss as a generative MoE causal-LM", err.Error())
+	if !core.Contains(err.Error(), "self_attn.sinks") {
+		t.Fatalf("refusal message %q must name the attention-sinks gap", err.Error())
 	}
-	if !core.Contains(err.Error(), "not yet validated") {
-		t.Fatalf("refusal message %q must say the forward is not yet validated", err.Error())
+	if !core.Contains(err.Error(), "geometry resolves cleanly") {
+		t.Fatalf("refusal message %q must confirm the geometry itself resolved (this is the real checkpoint config)", err.Error())
 	}
 }
 

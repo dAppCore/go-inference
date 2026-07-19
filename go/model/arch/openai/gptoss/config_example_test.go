@@ -11,7 +11,20 @@ func ExampleParseConfig() {
 }
 
 func ExampleConfig_Arch() {
-	cfg := Config{NumHiddenLayers: 24, NumLocalExperts: 32, NumExpertsPerTok: 4, VocabSize: 201088}
+	// A fully-populated, structurally valid gpt_oss config — geometry resolves cleanly, but Arch still
+	// refuses: engine/metal has no consumer yet for attention sinks or the o_proj/router/expert biases.
+	cfg := Config{
+		HiddenSize: 2880, NumHiddenLayers: 24, NumAttentionHeads: 64, NumKeyValueHeads: 8, HeadDim: 64,
+		VocabSize: 201088, NumLocalExperts: 32, NumExpertsPerTok: 4, IntermediateSize: 2880,
+		LayerTypes: []string{
+			"sliding_attention", "full_attention", "sliding_attention", "full_attention",
+			"sliding_attention", "full_attention", "sliding_attention", "full_attention",
+			"sliding_attention", "full_attention", "sliding_attention", "full_attention",
+			"sliding_attention", "full_attention", "sliding_attention", "full_attention",
+			"sliding_attention", "full_attention", "sliding_attention", "full_attention",
+			"sliding_attention", "full_attention", "sliding_attention", "full_attention",
+		},
+	}
 	_, err := cfg.Arch()
 	core.Println(err != nil)
 	// Output: true
