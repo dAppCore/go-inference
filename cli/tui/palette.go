@@ -25,6 +25,7 @@ const (
 	commandPanelWork        commandID = "panel.work"
 	commandPanelModels      commandID = "panel.models"
 	commandPanelService     commandID = "panel.service"
+	commandPanelData        commandID = "panel.data"
 	commandSaveSettings     commandID = "settings.save"
 	commandExportMarkdown   commandID = "session.export.markdown"
 	commandExportJSON       commandID = "session.export.json"
@@ -207,6 +208,32 @@ func (palette *commandPalette) SetWorkSelection(hasSelectedWork bool) {
 	palette.list.SetItems(items)
 }
 
+// SetDataContext rebuilds every "data."-prefixed command against a live
+// dataPanel.Capabilities() snapshot — the SetAgentContext precedent
+// applied to the Data panel, called after every selection or status
+// change (app.refreshDataPalette).
+func (palette *commandPalette) SetDataContext(capabilities []dataCapability) {
+	if palette == nil {
+		return
+	}
+	commands := make([]workspaceCommand, 0, len(palette.commands)+len(capabilities))
+	for _, command := range palette.commands {
+		if !core.HasPrefix(string(command.ID), "data.") {
+			commands = append(commands, command)
+		}
+	}
+	commands = append(commands, dataWorkspaceCommandsForContext(capabilities)...)
+	items := make([]list.Item, 0, len(commands))
+	byID := make(map[commandID]workspaceCommand, len(commands))
+	for _, command := range commands {
+		items = append(items, commandListItem{command: command})
+		byID[command.ID] = command
+	}
+	palette.commands = commands
+	palette.byID = byID
+	palette.list.SetItems(items)
+}
+
 func (palette *commandPalette) SetExporter(exporter sessionExporter, medium coreio.Medium, directory string) {
 	if palette == nil {
 		return
@@ -305,6 +332,7 @@ func defaultWorkspaceCommands() []workspaceCommand {
 		panelCommand(commandPanelWork, "Work panel", panelWork),
 		panelCommand(commandPanelModels, "Models panel", panelModels),
 		panelCommand(commandPanelService, "Service panel", panelService),
+		panelCommand(commandPanelData, "Data panel", panelData),
 		{ID: commandSaveSettings, Title: "Save settings", Description: "Commit generation and appearance preferences", Available: true, run: func(target *app) core.Result {
 			return target.inspector.Save(target)
 		}},
@@ -333,7 +361,13 @@ func defaultWorkspaceCommands() []workspaceCommand {
 		unavailable(commandRefreshRuntimes, "Refresh runtimes", "Refresh local runtime capabilities", "manual refresh is not connected; restart LEM to rescan"),
 		unavailable(commandRefreshKnowledge, "Refresh knowledge", "Refresh local knowledge packs", "manual refresh is not connected; restart LEM to rescan"),
 	}
-	return append(commands, agentWorkspaceCommands(agentFeatureCatalog(defaultAgentUnavailableReason))...)
+	commands = append(commands, agentWorkspaceCommands(agentFeatureCatalog(defaultAgentUnavailableReason))...)
+	// The static data.* catalogue is informational, same precedent as
+	// agentWorkspaceCommands above — runtime invokability is rebuilt
+	// through SetDataContext once an app has a connected Data panel.
+	// (*dataPanel)(nil).Capabilities() is safe: every dataPanel method is
+	// nil-receiver-guarded, matching workPanel's own idiom.
+	return append(commands, dataWorkspaceCommandsForContext((*dataPanel)(nil).Capabilities())...)
 }
 
 func agentCommandID(feature agentFeature) commandID {
@@ -457,6 +491,60 @@ func agentFeatureNeedsWork(feature agentFeature) bool {
 	default:
 		return false
 	}
+}
+
+// dataCommandID builds the palette command id for a Data panel action —
+// "data.<action>" for a single-item action, "data.bulk.<action>" for its
+// bulk-apply-to-filter counterpart — mirroring agentCommandID's "agent."
+// namespace one level down.
+func dataCommandID(action dataAction, bulk bool) commandID {
+	name := dataActionSlug(action)
+	if bulk {
+		return commandID(core.Concat("data.bulk.", name))
+	}
+	return commandID(core.Concat("data.", name))
+}
+
+func dataActionSlug(action dataAction) string {
+	switch action {
+	case dataActionApprove:
+		return "approve"
+	case dataActionReject:
+		return "reject"
+	case dataActionQuarantineClear:
+		return "quarantine-clear"
+	case dataActionEditAsDerived:
+		return "edit-as-derived"
+	case dataActionTag:
+		return "tag"
+	default:
+		return "unknown"
+	}
+}
+
+// dataWorkspaceCommandsForContext builds the "data."-prefixed palette
+// commands from capabilities (dataPanel.Capabilities(), already carrying
+// live Available/Reason per action) — the agentcap pattern applied to the
+// Data panel: every action always appears, unavailable ones render their
+// reason rather than hiding (commandListItem.Description). Every run
+// closure forces the Data panel into view before dispatching, mirroring
+// agentWorkspaceCommandsForContext's own target.activePanel assignment.
+func dataWorkspaceCommandsForContext(capabilities []dataCapability) []workspaceCommand {
+	commands := make([]workspaceCommand, 0, len(capabilities))
+	for _, capability := range capabilities {
+		capability := capability
+		commands = append(commands, workspaceCommand{
+			ID:          dataCommandID(capability.Action, capability.Bulk),
+			Title:       capability.Title,
+			Description: core.Concat("Data review · ", capability.Title),
+			Available:   capability.Available,
+			Reason:      capability.Reason,
+			run: func(target *app) core.Result {
+				return target.runDataCommand(capability)
+			},
+		})
+	}
+	return commands
 }
 
 type sessionSwitcherItem struct {
@@ -718,6 +806,10 @@ const (
 	overlayAgentSelection
 	overlayAgentAnswer
 	overlayChangeReview
+	overlayDataEditor
+	overlayDataNote
+	overlayDataFilter
+	overlayDataBulk
 )
 
 type helpOverlay struct {

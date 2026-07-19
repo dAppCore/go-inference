@@ -8,6 +8,9 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference/dataset"
 )
 
 func TestCommandPalette_Good(t *testing.T) {
@@ -61,6 +64,61 @@ func TestAgentCommandPalette_LifecycleActionMatrix(t *testing.T) {
 				t.Fatalf("status %q availability = cancel %v review %v, want %v/%v", status, available[agentFeatureCancel], available[agentFeatureChangesReview], wantCancel, wantReview)
 			}
 		})
+	}
+}
+
+// TestDataCommandPalette_Good proves the agentcap pattern applied to the
+// Data panel: every data.* command exists from construction (informational,
+// all unavailable with an honest reason before a store connects), and once
+// a real dataPanel is attached, Invoke on a live command both runs the
+// action through the exact same path the panel's own hotkeys use and
+// forces the Data panel into view.
+func TestDataCommandPalette_Good(t *testing.T) {
+	reason := "dataset store is not connected"
+	palette := newCommandPalette(newUIStyles(midnightTheme()))
+	for _, action := range []dataAction{dataActionApprove, dataActionReject, dataActionQuarantineClear, dataActionEditAsDerived, dataActionTag} {
+		id := dataCommandID(action, false)
+		command, exists := palette.byID[id]
+		if !exists || command.Available || command.Reason != reason {
+			t.Fatalf("data command %q = %#v, exists=%v", id, command, exists)
+		}
+		matches := palette.Filter(string(id))
+		found := false
+		for _, match := range matches {
+			found = found || match.ID == id
+		}
+		if !found {
+			t.Fatalf("data command %q is not searchable", id)
+		}
+	}
+	bulkID := dataCommandID(dataActionApprove, true)
+	if command, exists := palette.byID[bulkID]; !exists || command.Available {
+		t.Fatalf("bulk data command %q = %#v, exists=%v", bulkID, command, exists)
+	}
+
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	item := seedDataItem(t, store, ds.ID, "p", "r", at)
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel = panelWork
+
+	approveID := dataCommandID(dataActionApprove, false)
+	if command, exists := a.palette.byID[approveID]; !exists || !command.Available {
+		t.Fatalf("live approve command = %#v, exists=%v", command, exists)
+	}
+	if result := a.palette.Invoke(approveID, &a); !result.OK {
+		t.Fatalf("Invoke approve: %v", result.Value)
+	}
+	if a.activePanel != panelData {
+		t.Fatalf("Invoke did not focus the Data panel: %d", a.activePanel)
+	}
+	if review := core.MustCast[dataset.Review](store.ReviewLatest(item.ID)); review.Status != dataset.StatusApproved {
+		t.Fatalf("palette-invoked approve did not write: %#v", review)
 	}
 }
 

@@ -660,6 +660,111 @@ func (s *duckDatasetStore) Exports(datasetID string) core.Result {
 	return core.Ok(out)
 }
 
+// ---- CLI-only capability extensions ----
+//
+// go/dataset's Store interface (Tasks 1-7, off limits to the Data panel
+// per the dataset loop plan's Task 8/9 lane split) exposes only
+// ReviewLatest and no item-level archive — DatasetArchive flags a whole
+// Dataset, never one Item. The Data panel's edit-as-derived action
+// (archive the superseded original) and its review-history detail view
+// both need a bit more than Store promises. Rather than reaching around
+// dataset.Store with raw SQL from datapanel.go, or widening the
+// root-module interface (out of this task's lane), both capabilities are
+// declared here as small optional interfaces — discovered by type
+// assertion, the same "separate interface, never extend the base one"
+// idiom this repo already uses for engine capabilities. duckDatasetStore
+// implements both; dataset.MemoryStore (the root-module test double) does
+// not, so panel code must treat their absence as an honest "unavailable",
+// never a hard requirement.
+
+// ItemArchiver is an optional [dataset.Store] capability exposing
+// item-level archive. Mirrors DatasetArchive's shape exactly, one level
+// down the hierarchy.
+type ItemArchiver interface {
+	// ItemArchive flags the item archived (idempotent) and returns the
+	// updated dataset.Item.
+	ItemArchive(id string) core.Result
+}
+
+var _ ItemArchiver = (*duckDatasetStore)(nil)
+
+func (s *duckDatasetStore) ItemArchive(id string) core.Result {
+	if r := s.ready("ItemArchive"); !r.OK {
+		return r
+	}
+	if core.Trim(id) == "" {
+		return datasetStoreFailure("ItemArchive", "item id is required", nil)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.conn().Exec("UPDATE dataset_items SET archived = ?, archived_at = ? WHERE id = ?", true, time.Now().UTC(), id)
+	if err != nil {
+		return datasetStoreFailure("ItemArchive", "archive item", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return datasetStoreFailure("ItemArchive", "count archived rows", err)
+	}
+	if count == 0 {
+		return core.Fail(datasetNotFoundErr("tui.duckDatasetStore.ItemArchive", "item", id))
+	}
+	item, err := scanItem(s.conn().QueryRow(itemSelect+" WHERE id = ?", id))
+	if err != nil {
+		return datasetStoreFailure("ItemArchive", "scan archived item", err)
+	}
+	return core.Ok(item)
+}
+
+// ReviewHistoryStore is an optional [dataset.Store] capability exposing an
+// item's full review history. dataset.Store's ReviewLatest only ever
+// returns the current row (append-only, latest wins); the underlying
+// dataset_reviews table keeps every row, per the design's "history kept".
+type ReviewHistoryStore interface {
+	// ReviewHistory returns every Review row for itemID, oldest first.
+	// Fails if itemID does not exist.
+	ReviewHistory(itemID string) core.Result
+}
+
+var _ ReviewHistoryStore = (*duckDatasetStore)(nil)
+
+func (s *duckDatasetStore) ReviewHistory(itemID string) core.Result {
+	if r := s.ready("ReviewHistory"); !r.OK {
+		return r
+	}
+	if core.Trim(itemID) == "" {
+		return datasetStoreFailure("ReviewHistory", "item id is required", nil)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	exists, err := s.itemExistsLocked(itemID)
+	if err != nil {
+		return datasetStoreFailure("ReviewHistory", "check item exists", err)
+	}
+	if !exists {
+		return core.Fail(datasetNotFoundErr("tui.duckDatasetStore.ReviewHistory", "item", itemID))
+	}
+
+	rows, err := s.conn().Query("SELECT item_id, status, reviewer, note, created_at FROM dataset_reviews WHERE item_id = ? ORDER BY created_at, seq", itemID)
+	if err != nil {
+		return datasetStoreFailure("ReviewHistory", "query review history", err)
+	}
+	defer closeAgentRows(rows)
+	out := make([]dataset.Review, 0)
+	for rows.Next() {
+		var review dataset.Review
+		if err := rows.Scan(&review.ItemID, &review.Status, &review.Reviewer, &review.Note, &review.CreatedAt); err != nil {
+			return datasetStoreFailure("ReviewHistory", "scan review", err)
+		}
+		out = append(out, review)
+	}
+	if err := rows.Err(); err != nil {
+		return datasetStoreFailure("ReviewHistory", "iterate review history", err)
+	}
+	return core.Ok(out)
+}
+
 // ---- CLI-facing entry point ----
 
 // DatasetStore is the [dataset.Store] handle [OpenDatasetStore] returns.

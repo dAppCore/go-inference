@@ -73,9 +73,9 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 8: TUI Data panel
 
-- [ ] Fifth `panelID` + tab; list with filters (dataset/status/score/source) + keyboard idiom; detail view (Glamour-rendered content, score breakdown, lineage, welfare flags).
-- [ ] Actions: approve / reject / quarantine-clear (note required) / edit-as-derived (original archived) / tag / bulk-apply-to-filter with count confirmation; palette mirroring; honest unavailable states.
-- [ ] Tests: panel state machine, action wiring, bulk-confirm; render snapshots per the existing layout-test idiom.
+- [x] Fifth `panelID` + tab; list with filters (dataset/status/score/source) + keyboard idiom; detail view (Glamour-rendered content, score breakdown, lineage, welfare flags).
+- [x] Actions: approve / reject / quarantine-clear (note required) / edit-as-derived (original archived) / tag / bulk-apply-to-filter with count confirmation; palette mirroring; honest unavailable states.
+- [x] Tests: panel state machine, action wiring, bulk-confirm; render snapshots per the existing layout-test idiom.
 
 ### Task 9: Judge tier driver
 
