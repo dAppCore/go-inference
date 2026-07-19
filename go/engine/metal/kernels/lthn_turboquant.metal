@@ -46,6 +46,22 @@ using namespace metal;
 // dispatches, independent of the row's actual dimension d ≤ LTHN_TQ_CAP.
 #define LTHN_TQ_CAP 256
 
+// lthn_tq_unpack_idx reads coordinate o's BITS-wide index from a packed row — the same packBits
+// layout and the same masked-word widening as engine/metal/kernels/lthn_tq_kv.metal's
+// tq_unpack_idx (that file's header proves the conditional second-byte read never runs past the
+// row, including the row's last coordinate; the identical bytesPerRow=ceil(d·BITS/8) sizing here
+// makes the same proof hold). Bit-for-bit identical to a per-bit loop, just fewer device reads.
+inline int lthn_tq_unpack_idx(const device uint8_t* prow, int o, int BITS) {
+  const int pos0 = o * BITS;
+  const int byte0 = pos0 / 8;
+  const int bit0 = pos0 % 8;
+  uint word = uint(prow[byte0]);
+  if (bit0 + BITS > 8) {
+    word |= uint(prow[byte0 + 1]) << 8;
+  }
+  return int((word >> bit0) & uint((1 << BITS) - 1));
+}
+
 // ---------------------------------------------------------------------------------------------
 // lthn_tq_rotate_quant<BITS> — encode: x -> (gamma, packed indices).
 //
@@ -168,16 +184,7 @@ template <int BITS>
     if (active) {
         // unpack this thread's own coordinate index — pure reads, safe even where a value's bits
         // straddle a byte another thread also reads.
-        const int pos0 = int(o) * BITS;
-        int idx = 0;
-        for (int b = 0; b < BITS; b++) {
-            const int pos = pos0 + b;
-            const int byteIdx = pos / 8;
-            const int bitIdx = pos % 8;
-            if ((prow[byteIdx] >> bitIdx) & 1) {
-                idx |= (1 << b);
-            }
-        }
+        const int idx = lthn_tq_unpack_idx(prow, int(o), BITS);
         ys[o] = centroids[idx];
     } else {
         ys[o] = 0.0f;
