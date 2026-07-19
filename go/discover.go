@@ -146,7 +146,7 @@ func probeModelDir(fsys *core.Fs, dir string, entries []core.FsDirEntry) (Discov
 			GroupSize int `json:"group_size"`
 		} `json:"quantization_config"`
 	}
-	if data, ok := config.Value.(string); ok && core.JSONUnmarshalString(data, &probe).OK {
+	if data := config.String(); core.JSONUnmarshalString(data, &probe).OK {
 		model.ModelType = probe.ModelType
 		if probe.Quantization != nil {
 			model.QuantBits = probe.Quantization.Bits
