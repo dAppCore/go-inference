@@ -20,9 +20,19 @@
 // qmv_impl parity — refuted 2026-07-13 (value-dependent ~1 ulp accumulation
 // drift on production dims, which route fast); matched to the fast twin since.
 //
-// M bakes as a function constant (2..6 — the MTP verify's draft block +
-// carry; larger blocks keep the gather path). Same include chain as
-// lthn_gather_qmv.metal (built with -I the mlx headers).
+// M bakes as a function constant (2..8 — the MTP verify's draft block +
+// carry; larger blocks keep the gather path). M ≤ 4 rides the flat register
+// tile below; M 5..8 ride lthn_qmv_rows_wide_impl's HALVED tile — the flat
+// tile's x registers (M×16 floats) collapse occupancy past M=4 (12B verify:
+// M=3 18.7ms vs 20 gather, M=5 35.3ms vs 27.6 gather), so the wide variant
+// keeps only ceil(M/2) x-slices live and walks the rows in two halves per
+// k-block. The second half re-touches the k-block's weight bytes just read by
+// the first (same threadgroup, ~2KB — L1-resident), so the DEVICE weight
+// stream still happens once per threadgroup. Per-row byte identity is
+// preserved by construction: a fixed row's operation sequence (load_vector →
+// qdot per out-row, accumulator chaining, simd_sum) is exactly the flat
+// tile's — halving only reorders ACROSS rows, and rows never mix.
+// Same include chain as lthn_gather_qmv.metal (built with -I the mlx headers).
 // clang-format off
 #include "mlx/backend/metal/kernels/utils.h"
 #include "mlx/backend/metal/kernels/steel/gemm/gemm.h"
@@ -110,6 +120,95 @@ METAL_FUNC void lthn_qmv_rows_impl(
   }
 }
 
+// lthn_qmv_rows_wide_impl — the M=5..8 register-lean variant: x lives in a
+// ceil(M/2)-row tile refilled per half, results[M][4] persist across halves.
+// packs_per_thread / loop structure / qdot / simd_sum match qmv_fast_impl row
+// for row exactly as the flat tile does — the byte-parity constraint that
+// refuted the packs=1 predecessor applies here unchanged, gated by
+// TestLthnQMVRowsWideByteBand.
+template <typename T, int group_size, int bits, int M>
+METAL_FUNC void lthn_qmv_rows_wide_impl(
+    const device uint32_t* w,
+    const device T* scales,
+    const device T* biases,
+    const device T* x,
+    device T* y,
+    const constant int& in_vec_size,
+    const constant int& out_vec_size,
+    uint3 tid,
+    uint simd_gid,
+    uint simd_lid) {
+  constexpr int packs_per_thread = bits == 2 ? 1 : 2; // qmv_fast_impl's choice — byte parity
+  constexpr int num_simdgroups = 2;
+  constexpr int results_per_simdgroup = 4;
+  constexpr int pack_factor = get_pack_factor<bits, 32>();
+  constexpr int bytes_per_pack = get_bytes_per_pack<bits, 32>();
+  constexpr int values_per_thread = pack_factor * packs_per_thread;
+  constexpr int block_size = values_per_thread * SIMD_SIZE;
+  constexpr int scale_step_per_thread = group_size / values_per_thread;
+  constexpr int MH = (M + 1) / 2; // live half-tile — the occupancy lever
+
+  const device uint8_t* ws = (const device uint8_t*)w;
+
+  typedef float U;
+
+  thread U x_thread[MH][values_per_thread];
+  thread U sums[MH];
+  thread U result[M][results_per_simdgroup] = {{0}};
+
+  const int in_vec_size_w = in_vec_size * bytes_per_pack / pack_factor;
+  const int in_vec_size_g = in_vec_size / group_size;
+  const int out_row = tid.y * (num_simdgroups * results_per_simdgroup) +
+      simd_gid * results_per_simdgroup;
+  if (out_row >= out_vec_size) {
+    return;
+  }
+
+  ws += out_row * in_vec_size_w + simd_lid * packs_per_thread * bytes_per_pack;
+  scales += out_row * in_vec_size_g + simd_lid / scale_step_per_thread;
+  biases += out_row * in_vec_size_g + simd_lid / scale_step_per_thread;
+  x += simd_lid * values_per_thread;
+  y += out_row;
+
+  for (int k = 0; k < in_vec_size; k += block_size) {
+    for (int h = 0; h < 2; h++) {
+      const int m0 = h * MH;
+      const int mn = (h == 0) ? MH : (M - MH);
+      for (int m = 0; m < mn; m++) {
+        sums[m] = load_vector<T, U, values_per_thread, bits>(
+            x + (m0 + m) * in_vec_size, x_thread[m]);
+      }
+
+      for (int row = 0; row < results_per_simdgroup; row++) {
+        auto wl = (const device uint8_t*)(ws + row * in_vec_size_w);
+        const device T* sl = scales + row * in_vec_size_g;
+        const device T* bl = biases + row * in_vec_size_g;
+
+        U s = sl[0];
+        U b = bl[0];
+        for (int m = 0; m < mn; m++) {
+          result[m0 + m][row] +=
+              qdot<U, values_per_thread, bits>(wl, x_thread[m], s, b, sums[m]);
+        }
+      }
+    }
+
+    ws += block_size * bytes_per_pack / pack_factor;
+    scales += block_size / group_size;
+    biases += block_size / group_size;
+    x += block_size;
+  }
+
+  for (int row = 0; row < results_per_simdgroup; row++) {
+    for (int m = 0; m < M; m++) {
+      result[m][row] = simd_sum(result[m][row]);
+      if (simd_lid == 0) {
+        y[m * out_vec_size + row] = static_cast<T>(result[m][row]);
+      }
+    }
+  }
+}
+
 template <typename T, int group_size, int bits>
 [[kernel]] void lthn_qmv_rows(
     const device uint32_t* w [[buffer(0)]],
@@ -136,11 +235,19 @@ template <typename T, int group_size, int bits>
           w, scales, biases, x, y, in_vec_size, out_vec_size, tid, simd_gid, simd_lid);
       break;
     case 5:
-      lthn_qmv_rows_impl<T, group_size, bits, 5>(
+      lthn_qmv_rows_wide_impl<T, group_size, bits, 5>(
           w, scales, biases, x, y, in_vec_size, out_vec_size, tid, simd_gid, simd_lid);
       break;
     case 6:
-      lthn_qmv_rows_impl<T, group_size, bits, 6>(
+      lthn_qmv_rows_wide_impl<T, group_size, bits, 6>(
+          w, scales, biases, x, y, in_vec_size, out_vec_size, tid, simd_gid, simd_lid);
+      break;
+    case 7:
+      lthn_qmv_rows_wide_impl<T, group_size, bits, 7>(
+          w, scales, biases, x, y, in_vec_size, out_vec_size, tid, simd_gid, simd_lid);
+      break;
+    case 8:
+      lthn_qmv_rows_wide_impl<T, group_size, bits, 8>(
           w, scales, biases, x, y, in_vec_size, out_vec_size, tid, simd_gid, simd_lid);
       break;
     default:

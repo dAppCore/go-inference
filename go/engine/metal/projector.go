@@ -409,7 +409,7 @@ func (m qmvProjector) rowsByteTier(rows int) bool {
 		if w.bits > 0 {
 			gs, bits = w.gs, w.bits
 		}
-		if rows > lthnQMVRowsMaxM {
+		if rows > qmvRowsTiledCap() {
 			// The chunked byte-tier route (projectRowsByteTier): every chunk size
 			// must resolve a tiled PSO on the fast-twin envelope.
 			if rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
@@ -436,7 +436,7 @@ func (m qmvProjector) rowsByteTier(rows int) bool {
 // the per-lane replay outranks the gather's throughput. Callers gate on
 // rowsByteTier first; a false return here means the byte route fell through.
 func (m qmvProjector) projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) (bool, error) {
-	if rows <= lthnQMVRowsMaxM {
+	if rows <= qmvRowsTiledCap() {
 		return m.projectRows(enc, in, out, inOff, outOff, rows, p)
 	}
 	w, outDim, inDim, ok := m.weightDims(p)
