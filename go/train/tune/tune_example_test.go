@@ -10,11 +10,14 @@ import (
 )
 
 // ExampleRunTune demonstrates the tune plan for a target with an active MTP
-// drafter beside it: RunTune resolves the drafter and reports the plan, but —
-// honestly — the MTP sweep itself is blocked on a speculative-pair engine
-// seam go-inference does not yet expose (see the package doc), so no
-// measurement is run and no profile is written. The report is written to an
-// io.Writer (here a buffer, since the temp model path it names is not
+// drafter beside it: RunTune resolves the drafter and reports the plan. This
+// example's process registers no concrete engine backend, so — honestly — no
+// registered backend exposes inference.SpeculativePairBackend (see the
+// package doc): no measurement is run and no profile is written. A process
+// that DOES register one (the metal engine does, on darwin/arm64) sweeps
+// every requested block and persists the winner instead — see
+// TestTune_RunTune_GoodSeamPresent in tune_test.go. The report is written to
+// an io.Writer (here a buffer, since the temp model path it names is not
 // deterministic across runs) — only the fixed parts of the report are shown.
 func ExampleRunTune() {
 	baseResult := core.MkdirTemp("", "tune-example-*")
@@ -50,7 +53,7 @@ func ExampleRunTune() {
 
 	report := out.String()
 	core.Println(core.Contains(report, "tune: target "+modelDir))
-	core.Println(core.Contains(report, "no registered go-inference engine exposes one yet"))
+	core.Println(core.Contains(report, "no registered go-inference engine backend exposes a speculative-pair loader"))
 	// Output:
 	// true
 	// true
