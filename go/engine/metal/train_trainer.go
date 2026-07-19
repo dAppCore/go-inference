@@ -610,7 +610,7 @@ func (t *LoRATrainer) Save(path string) error {
 	if !cj.OK {
 		return core.E("native.LoRATrainer.Save", "marshal adapter_config.json", nil)
 	}
-	if werr := coreio.Local.Write(core.PathJoin(path, "adapter_config.json"), string(cj.Value.([]byte))); werr != nil {
+	if werr := coreio.Local.Write(core.PathJoin(path, "adapter_config.json"), string(cj.Bytes())); werr != nil {
 		return core.E("native.LoRATrainer.Save", "write adapter_config.json", werr)
 	}
 	return nil

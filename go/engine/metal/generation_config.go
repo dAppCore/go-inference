@@ -54,11 +54,7 @@ func loadGenerationConfigStops(dir string) []int32 {
 	if !read.OK {
 		return nil
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return nil
-	}
-	return generationConfigStops(data)
+	return generationConfigStops(read.Bytes())
 }
 
 // DeclaredStopTokens reports the checkpoint's generation_config stop set
@@ -82,11 +78,7 @@ func loadGenerationConfigSamplingDefaults(dir string) engine.SamplingDefaults {
 	if !read.OK {
 		return engine.SamplingDefaults{}
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return engine.SamplingDefaults{}
-	}
-	return engine.ParseGenerationConfigSampling(data)
+	return engine.ParseGenerationConfigSampling(read.Bytes())
 }
 
 // DeclaredSamplingDefaults reports the checkpoint's generation_config sampling

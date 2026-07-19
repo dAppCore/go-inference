@@ -20,20 +20,15 @@ import (
 // file, the same soft-optional convention as loadGenerationConfigStops.
 func loadChatTemplateDefaultSystem(dir string) string {
 	if read := core.ReadFile(core.PathJoin(dir, "chat_template.jinja")); read.OK {
-		if data, ok := read.Value.([]byte); ok {
-			if sys := engine.ExtractDefaultSystem(string(data)); sys != "" {
-				return sys
-			}
+		if sys := engine.ExtractDefaultSystem(string(read.Bytes())); sys != "" {
+			return sys
 		}
 	}
 	read := core.ReadFile(core.PathJoin(dir, "tokenizer_config.json"))
 	if !read.OK {
 		return ""
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return ""
-	}
+	data := read.Bytes()
 	var cfg struct {
 		ChatTemplate string `json:"chat_template"`
 	}
