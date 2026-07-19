@@ -11,18 +11,20 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestLoRATrainerE2BSharedKVSFT_Good is the #42 stage-3 END-TO-END harness on the REAL gemma4 E2B
 // checkpoint — the shape the whole shared-KV backward exists for: a bf16 E2B (per-layer MatFormer
-// FFN widths, PLE towers, K==V global owners, sliding own-V owners, and the KV-SHARED tail whose
-// consumers attend the last owners' caches). It opens the real model, proves the share-aware host
-// chain mirrors the ENGINE's own forward at B = 0 (per-layer capture parity — the receipt that
-// the consumer mirror carries encAttnHalfShared's semantics on the true geometry), runs a SHORT
-// per-layer LoRA SFT (tiny rank, q_proj + v_proj — v resolves on own-V owners only; K==V and
-// consumer layers skip it by construction), and asserts the loss falls and the saved adapter
-// round-trips with adapters exactly where tensors exist.
+// FFN widths, PLE towers, own-V owners in BOTH attention classes — sliding hd-256 and global
+// hd-512 with the proportional rope; attention_k_eq_v is false on E2B — and the KV-SHARED tail
+// whose consumers attend the last owners' caches). It opens the real model, proves the
+// share-aware host chain mirrors the ENGINE's own forward at B = 0 (per-layer capture parity —
+// the receipt that the consumer mirror carries encAttnHalfShared's semantics on the true
+// geometry), runs a SHORT per-layer LoRA SFT (tiny rank, q_proj + v_proj — v resolves on own-V
+// owners only; consumer layers skip it by construction), and asserts the loss falls and the
+// saved adapter round-trips with adapters exactly where tensors exist.
 //
 // Runtime-gated twice: the package TestMain skips everything without MLX_METALLIB_PATH, and the
 // real checkpoint comes from E2B_BF16_DIR (the bf16 snapshot dir — the per-layer trainer requires
@@ -64,19 +66,17 @@ func TestLoRATrainerE2BSharedKVSFT_Good(t *testing.T) {
 		LearningRate: 0.02,
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "head-dim switching") {
-			// The DOCUMENTED #42 boundary: E2B's global layers (hd 512 vs 256) fail the B=0
-			// mirror-parity anchor (worst-layer cosine 0.83 vs the 0.999 bar), so per-layer LoRA
-			// refuses on this real shape until the global-layer mirror rung lands. This skip IS
-			// the tripwire — it flips to the full live gate the moment the refusal lifts.
-			t.Skipf("per-layer LoRA on real E2B blocked at the documented boundary: %v", err)
-		}
 		t.Fatalf("NewLoRATrainer must accept q_proj+v_proj on the real E2B: %v", err)
 	}
 	defer func() { _ = tr.Close() }()
 
 	// B = 0 mirror parity on the REAL geometry: the share-aware host chain must reproduce the
 	// engine's own captured hiddens layer by layer — consumers reading the true owners' caches.
+	// Logged PER LAYER CLASS (sliding / global × owner / consumer) so a divergence names the class
+	// that carries it — the decomposition the boundary-era single worst-layer number lacked. The
+	// host mirror itself is receipted against the ecosystem reference per class at cosine 1.000000
+	// on this checkpoint (TestRealChainE2BMirrorVsReference_Good), so a failure here localises to
+	// the engine-side inputs/capture, not the mirror maths.
 	parityIDs := []int32{1204, 2381, 977, 4102, 355, 2048, 613, 1777}
 	embeds, perLayer, err := tr.sess.ForwardCaptureHiddens(parityIDs)
 	if err != nil {
@@ -91,11 +91,26 @@ func TestLoRATrainerE2BSharedKVSFT_Good(t *testing.T) {
 		t.Fatalf("layerChainForward: %v", err)
 	}
 	worst, worstL := 2.0, -1
+	worstByClass := map[string]float64{}
 	for li := range tapes {
+		class := "sliding"
+		if tm.arch.Layer[li].Attention == model.GlobalAttention {
+			class = "global"
+		}
+		if tm.arch.Layer[li].KVShareFrom != li {
+			class += "-consumer"
+		}
 		cos := cosineBF16(toBF16Bytes(tapes[li].out), perLayer[li])
+		t.Logf("B=0 layer %2d %-16s cosine=%.6f", li, class, cos)
+		if prev, ok := worstByClass[class]; !ok || cos < prev {
+			worstByClass[class] = cos
+		}
 		if cos < worst {
 			worst, worstL = cos, li
 		}
+	}
+	for class, cos := range worstByClass {
+		t.Logf("B=0 worst %-16s cosine=%.6f", class, cos)
 	}
 	t.Logf("B=0 host-chain vs engine-capture: worst layer %d cosine=%.6f over %d layers", worstL, worst, len(tapes))
 	if worst < 0.999 {
