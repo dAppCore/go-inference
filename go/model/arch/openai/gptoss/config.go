@@ -157,6 +157,13 @@ func (c *Config) buildArch() (model.Arch, error) {
 	}
 	rotaryDim := headDim // gpt_oss carries no partial_rotary_factor: every rotary layer is full rotary
 
+	// swiglu_limit defaults to 7.0 when the config omits it — transformers' GptOssConfig default
+	// (modeling/configuration_gpt_oss: limit=7.0; every published checkpoint sets it explicitly).
+	swigluLimit := c.SwigluLimit
+	if swigluLimit == 0 {
+		swigluLimit = 7.0
+	}
+
 	freqs, err := c.yarnRopeFreqs(rotaryDim, ropeBase)
 	if err != nil {
 		return model.Arch{}, err
@@ -186,6 +193,7 @@ func (c *Config) buildArch() (model.Arch, error) {
 		// would silently mis-route a future serving pass onto the WRONG (uncapped, unshifted) activation —
 		// exactly the coherent-but-wrong GELU/SiLU trap this repo's house rule warns against.
 		Activation:        "gpt_oss_clamped_swiglu",
+		SwigluLimit:       swigluLimit,
 		SlidingWindow:     c.SlidingWindow,
 		Experts:           numExperts,
 		TopK:              topK,

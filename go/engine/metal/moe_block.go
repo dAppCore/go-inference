@@ -1174,6 +1174,19 @@ type MoEQuantLayerWeights struct {
 	// (SharedSigmoid, [1×dModel]) added to the routed output. A bound SharedGate MARKS a qwen MoE layer,
 	// which decodes on the host (encQwenMoEHalf) rather than the gemma device MoE (#18).
 	SharedGate, SharedUp, SharedDown, SharedSigmoid QuantWeight
+
+	// gpt_oss (#37): ClampedSwiGLU MARKS a gpt_oss MoE layer — clamped-sigmoid SwiGLU experts
+	// (MoEExpertsQuantClampedSiLU at SwigluLimit) + an additive router bias, no local dense MLP, no
+	// router norm, no sandwich norms — which decodes on the host (encGptOssMoEHalf) rather than the
+	// gemma device MoE or the qwen half. RouterBias (bf16 [NumExperts], mlx-lm gpt_oss.py: router =
+	// nn.Linear(..., bias=True)) is added to the router logits BEFORE top-k. ExpGateBias/ExpUpBias
+	// (bf16 [NumExperts×ExpertDFF]) and ExpDownBias (bf16 [NumExperts×dModel]) are the per-expert
+	// additive projection biases (SwitchGLU(..., bias=True)), added after each expert matvec. All
+	// zero/nil on every other arch — the gemma/qwen paths never read them.
+	ClampedSwiGLU                       bool
+	SwigluLimit                         float32
+	RouterBias                          []byte
+	ExpGateBias, ExpUpBias, ExpDownBias []byte
 }
 
 type mlpTransformScratch struct {

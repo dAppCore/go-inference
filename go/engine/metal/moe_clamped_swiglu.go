@@ -173,8 +173,17 @@ func encClampedSwiGLUGateMulBF16(enc metal.MTLComputeCommandEncoder, gate, up, o
 // documented at the top of this file, not gemma's GELU or plain SiLU. limit is config.swiglu_limit (7.0
 // on every published gpt-oss checkpoint) — passed through, never hardcoded, so a future checkpoint that
 // declares a different limit is served correctly rather than silently pinned to 7.0.
-func MoEExpertsQuantClampedSiLU(x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, numExperts, topK, dModel, dFF, groupSize, bits int, limit float32) ([]byte, error) {
-	return moeExpertsQuantClampedInto(nil, x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, groupSize, bits, limit, false)
+//
+// gateBias/upBias (bf16 [numExperts×dFF]) and downBias (bf16 [numExperts×dModel]) are GPT-OSS's
+// per-expert ADDITIVE projection biases (mlx-lm gpt_oss.py: SwitchGLU(..., bias=True); the real
+// gpt-oss-20b MLX-4bit checkpoint ships mlp.experts.{gate,up,down}_proj.bias as BF16 [32, 2880] —
+// shard header read 2026-07-19). Each selected expert e adds its own [dFF]/[dModel] slice right
+// after its matvec — gate'/up' BEFORE the clamp (the reference clamps the biased projection), down
+// before the router-weighted combine. nil biases skip the adds — the encode stream is then
+// dispatch-for-dispatch identical to the pre-bias form (the biasless-sibling regression contract;
+// MoEExpertsQuant/MoEExpertsQuantSiLU are untouched entirely).
+func MoEExpertsQuantClampedSiLU(x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, gateBias, upBias, downBias []byte, numExperts, topK, dModel, dFF, groupSize, bits int, limit float32) ([]byte, error) {
+	return moeExpertsQuantClampedInto(nil, x, idx, weights, gate, up, down, gateBias, upBias, downBias, numExperts, topK, dModel, dFF, groupSize, bits, limit, false)
 }
 
 // moeExpertsQuantClampedInto is moeExpertsQuantInto (moe.go) with the gate/up/down dispatch chain
@@ -184,7 +193,7 @@ func MoEExpertsQuantClampedSiLU(x []byte, idx []int32, weights []byte, gate, up,
 // MoEExpertsQuantInto/MoEExpertsQuantSiLU) even by signature change alone; gpt_oss has no live caller of
 // its own yet (Config.Arch still refuses — see model/arch/openai/gptoss), so there is no serving path to
 // regress by editing the shared helper, but also no need to accept that risk for a function nothing calls.
-func moeExpertsQuantClampedInto(out []byte, x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, numExperts, topK, dModel, dFF, groupSize, bits int, limit float32, useCallerOut bool) ([]byte, error) {
+func moeExpertsQuantClampedInto(out []byte, x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, gateBias, upBias, downBias []byte, numExperts, topK, dModel, dFF, groupSize, bits int, limit float32, useCallerOut bool) ([]byte, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
@@ -199,6 +208,17 @@ func moeExpertsQuantClampedInto(out []byte, x []byte, idx []int32, weights []byt
 	}
 	if limit <= 0 {
 		return nil, core.NewError("native.MoEExpertsQuantClampedSiLU: limit must be > 0")
+	}
+	// per-expert additive biases: each nil (skip — the pre-bias encode stream, dispatch for
+	// dispatch) or exactly its batched [numExperts × outDim] bf16 shape.
+	if len(gateBias) != 0 && len(gateBias) != numExperts*dFF*bf16Size {
+		return nil, core.NewError("native.MoEExpertsQuantClampedSiLU: gateBias must be numExperts*dFF bf16 bytes or nil")
+	}
+	if len(upBias) != 0 && len(upBias) != numExperts*dFF*bf16Size {
+		return nil, core.NewError("native.MoEExpertsQuantClampedSiLU: upBias must be numExperts*dFF bf16 bytes or nil")
+	}
+	if len(downBias) != 0 && len(downBias) != numExperts*dModel*bf16Size {
+		return nil, core.NewError("native.MoEExpertsQuantClampedSiLU: downBias must be numExperts*dModel bf16 bytes or nil")
 	}
 	gatePacked, gateScale := dFF*dModel*bits/8, dFF*(dModel/groupSize)*bf16Size // per expert (gate, up)
 	downPacked, downScale := dModel*dFF*bits/8, dModel*(dFF/groupSize)*bf16Size // per expert (down)
@@ -261,6 +281,18 @@ func moeExpertsQuantClampedInto(out []byte, x []byte, idx []int32, weights []byt
 		gatePackedBuf, gateScalesBuf, gateBiasesBuf := quantWeightViews(gate)
 		upPackedBuf, upScalesBuf, upBiasesBuf := quantWeightViews(up)
 		downPackedBuf, downScalesBuf, downBiasesBuf := quantWeightViews(down)
+		// additive per-expert biases (gpt_oss): resident once (residentBytes memoises by base
+		// pointer), each expert binds its slice by byte offset inside the encode loop below.
+		var gateBiasBuf, upBiasBuf, downBiasBuf metal.MTLBuffer
+		if len(gateBias) > 0 {
+			gateBiasBuf = residentBytes(gateBias)
+		}
+		if len(upBias) > 0 {
+			upBiasBuf = residentBytes(upBias)
+		}
+		if len(downBias) > 0 {
+			downBiasBuf = residentBytes(downBias)
+		}
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
@@ -272,12 +304,30 @@ func moeExpertsQuantClampedInto(out []byte, x []byte, idx []int32, weights []byt
 				endEncodingFast(enc)
 				return
 			}
+			if gateBiasBuf != nil { // gate += gateBias[e] — BEFORE the clamp (the reference clamps the biased projection)
+				if encErr = encAddBF16To(enc, msc.gate, gateBiasBuf, msc.gate, 0, uint(e*dFF*bf16Size), 0, dFF); encErr != nil {
+					endEncodingFast(enc)
+					return
+				}
+			}
 			_ = encQMVBF16(enc, upPackedBuf.buf, upScalesBuf.buf, upBiasesBuf.buf, xBuf, msc.up, upPackedBuf.off+gatePackedOff, upScalesBuf.off+gateScaleOff, upBiasesBuf.off+gateScaleOff, 0, dFF, dModel, groupSize, bits)
+			if upBiasBuf != nil { // up += upBias[e] — before the symmetric clamp
+				if encErr = encAddBF16To(enc, msc.up, upBiasBuf, msc.up, 0, uint(e*dFF*bf16Size), 0, dFF); encErr != nil {
+					endEncodingFast(enc)
+					return
+				}
+			}
 			if encErr = encClampedSwiGLUGateMulBF16(enc, msc.gate, msc.up, msc.gated, cst, dFF); encErr != nil {
 				endEncodingFast(enc)
 				return
 			}
 			_ = encQMVBF16(enc, downPackedBuf.buf, downScalesBuf.buf, downBiasesBuf.buf, msc.gated, downE, downPackedBuf.off+downPackedOff, downScalesBuf.off+downScaleOff, downBiasesBuf.off+downScaleOff, 0, dModel, dFF, groupSize, bits)
+			if downBiasBuf != nil { // down += downBias[e] — before the router-weighted combine
+				if encErr = encAddBF16To(enc, downE, downBiasBuf, downE, 0, uint(e*dModel*bf16Size), 0, dModel); encErr != nil {
+					endEncodingFast(enc)
+					return
+				}
+			}
 			if i == 0 {
 				if encErr = encScaleBF16(enc, downE, weightsBuf, acc, uint(i*bf16Size), weights[i*bf16Size:(i+1)*bf16Size], dModel); encErr != nil {
 					endEncodingFast(enc)

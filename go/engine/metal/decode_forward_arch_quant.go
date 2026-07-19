@@ -364,6 +364,7 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		proj := qmvProjector{
 			q: mkW(ql.Q), k: mkW(ql.K), v: mkW(ql.V), o: mkW(ql.O),
 			bQ: normView(ql.BQ), bK: normView(ql.BK), bV: normView(ql.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
+			bO:     normView(ql.BO),                                       // gpt_oss o_proj bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 			groupSize: ql.GroupSize, bits: ql.Bits,
 		}

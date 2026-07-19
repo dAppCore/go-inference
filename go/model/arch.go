@@ -194,6 +194,7 @@ type Arch struct {
 	NoFinalNorm                                              bool            // layer stack has no final norm (OPT post-norm checkpoints)
 	MultiQueryAttention                                      bool            // one K/V head is shared by every query head
 	Activation                                               string          // declared feed-forward activation (for example gelu_new)
+	SwigluLimit                                              float32         // gpt_oss clamped-SwiGLU clip bound (config swiglu_limit, 7.0 on every published checkpoint); zero = activation has no clamp
 	QKNormalization                                          QKNormalization // per-head Q/K normalisation before position encoding
 	QKVClip                                                  float32         // symmetric clamp applied to projected Q/K/V; zero disables it
 	LayerNorm                                                bool            // centred LayerNorm for block and final norms instead of RMSNorm

@@ -1409,6 +1409,12 @@ func (s *archDecodeState) sharedEncodeEligible() bool {
 			!routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
 			return false
 		}
+		if moeQ.ClampedSwiGLU || len(moeQ.SharedGate.Packed) > 0 {
+			// gpt_oss (clamped host half) and qwen (shared-expert host half) both break the command
+			// buffer mid-token — a shared submission cannot absorb either, even when the gemma
+			// device-router predicates above would otherwise pass on their expert geometry.
+			return false
+		}
 	}
 	return true
 }
@@ -1672,6 +1678,21 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		if qwenWholeLayer {
 			// the fused Qwen device lane already applied the FFN tail and wrote the layer output to
 			// `out` — no FFN half runs for this layer.
+		} else if moeQ != nil && moeQ.ClampedSwiGLU {
+			// gpt_oss — host MoE forward (clamped-SwiGLU experts + router/expert biases), same
+			// flush/resume shape as the qwen half below. Neither existing lane can serve it: the
+			// gemma device MoE assumes a local MLP + sandwich norms + router norm gpt_oss lacks, and
+			// the qwen half runs plain SiLU. Marked by ClampedSwiGLU, so both stay untouched.
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			if err := s.encGptOssMoEHalf(li, moeQ, out); err != nil {
+				return nil, err
+			}
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
 		} else if moeQ != nil && len(moeQ.SharedGate.Packed) > 0 {
 			// qwen3_5_moe — host MoE forward (SiLU switch-MLP experts + the always-on shared expert),
 			// correctness-first, same flush/resume shape as the gated mixer. The gemma device MoE below
@@ -2257,6 +2278,7 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		p := bf16Projector{
 			wQ: view(w.WQ), wK: wK, wV: wV, wO: view(w.WO),
 			bQ: normView(w.BQ), bK: normView(w.BK), bV: normView(w.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
+			bO:     normView(w.BO),                                     // gpt_oss o_proj bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 		}
 		if layers[li].MoE == nil {

@@ -35,10 +35,11 @@ import (
 type DecodeLayerWeights struct {
 	AttnNormW, WQ, WK, WV, WO []byte
 	// BQ/BK/BV are the ADDITIVE q/k/v projection biases (bf16, [outDim]) — Qwen2/2.5's
-	// distinguishing trait (bias=True on q_proj/k_proj/v_proj; o_proj and the MLP carry
-	// none, so there is no BO). nil for the bias-free arches (llama/gemma/mistral/qwen3).
-	// Added after the projection matvec, before QK-norm/RoPE (see bf16Projector.project).
-	BQ, BK, BV []byte
+	// bias=True q/k/v. BO is o_proj's sibling (gpt_oss attention_bias=true reaches o_proj
+	// — bf16 [dModel], added after the attention output projection). All nil for the
+	// bias-free arches (llama/gemma/mistral/qwen3); the MLP projections carry none in any
+	// supported arch. Added after the projection matvec (see bf16Projector.project).
+	BQ, BK, BV, BO []byte
 	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [nHeads]): a learned
 	// per-head score seeding each head's softmax denominator as one extra key with NO value mass
 	// (the sdpa_vector kernels' has_sinks lane — see sdpa.go). nil for every sink-free arch, which
