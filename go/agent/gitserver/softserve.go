@@ -129,7 +129,7 @@ func (service *softServe) EnsureRepository(ctx context.Context, configuredName s
 	if !nameResult.OK {
 		return nameResult
 	}
-	name := nameResult.Value.(string)
+	name := nameResult.String()
 	if started := service.Start(ctx); !started.OK {
 		return started
 	}
@@ -311,7 +311,7 @@ func loopbackAuthority(authority string) bool {
 	if !parsedPort.OK {
 		return false
 	}
-	portNumber := parsedPort.Value.(int)
+	portNumber := parsedPort.Int()
 	return portNumber >= 0 && portNumber <= 65535
 }
 
@@ -410,7 +410,7 @@ func (service *softServe) acquireOwner() core.Result {
 			return core.Fail(core.E("gitserver.acquireOwner", "failed to read existing owner receipt", existing.Err()))
 		}
 		var owner ownerRecord
-		decoded := core.JSONUnmarshal(existing.Value.([]byte), &owner)
+		decoded := core.JSONUnmarshal(existing.Bytes(), &owner)
 		if !decoded.OK || owner.PID <= 0 || owner.StartedAt.IsZero() {
 			return core.Fail(core.NewError("agent git server owner receipt is malformed; refusing unsafe recovery"))
 		}
@@ -443,7 +443,7 @@ func (service *softServe) releaseOwner() core.Result {
 		}
 		return core.Fail(core.E("gitserver.releaseOwner", "failed to read owner receipt", existing.Err()))
 	}
-	if string(existing.Value.([]byte)) != service.ownerReceipt {
+	if string(existing.Bytes()) != service.ownerReceipt {
 		return core.Fail(core.NewError("agent git server owner receipt changed; refusing to remove another owner's lock"))
 	}
 	removed := service.runOperation("owner-release-remove", func() core.Result {

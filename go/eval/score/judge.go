@@ -107,7 +107,7 @@ func NewJudge(backend serving.Backend) *Judge {
 //
 //	r := j.judgeChat(ctx, prompt)
 //	if !r.OK { return r }
-//	reply := r.Value.(string)
+//	reply := r.String()
 func (j *Judge) judgeChat(ctx context.Context, prompt string) core.Result {
 	r := j.backend.Generate(ctx, prompt, serving.DefaultGenOpts())
 	if !r.OK {
@@ -129,7 +129,7 @@ func (j *Judge) ScoreSemantic(ctx context.Context, prompt, response string) core
 	if !rChat.OK {
 		return core.Fail(core.E("score.Judge.ScoreSemantic", "semantic judge chat", rChat.Value.(error)))
 	}
-	reply := rChat.Value.(string)
+	reply := rChat.String()
 
 	raw := extractJSON(reply)
 	if raw == "" {
@@ -160,7 +160,7 @@ func (j *Judge) ScoreContent(ctx context.Context, probe ContentProbe, response s
 	if !rChat.OK {
 		return core.Fail(core.E("score.Judge.ScoreContent", "content judge chat", rChat.Value.(error)))
 	}
-	reply := rChat.Value.(string)
+	reply := rChat.String()
 
 	raw := extractJSON(reply)
 	if raw == "" {
@@ -188,7 +188,7 @@ func (j *Judge) ScoreCapability(ctx context.Context, prompt, expectedAnswer, res
 	if !rChat.OK {
 		return core.Fail(core.E("score.Judge.ScoreCapability", "capability judge chat", rChat.Value.(error)))
 	}
-	reply := rChat.Value.(string)
+	reply := rChat.String()
 
 	raw := extractJSON(reply)
 	if raw == "" {
@@ -216,7 +216,7 @@ func (j *Judge) ScoreTruthfulQA(ctx context.Context, question, bestAnswer, respo
 	if !rChat.OK {
 		return core.Fail(core.E("score.Judge.ScoreTruthfulQA", "truthfulqa judge chat", rChat.Value.(error)))
 	}
-	reply := rChat.Value.(string)
+	reply := rChat.String()
 
 	raw := extractJSON(reply)
 	if raw == "" {
@@ -244,7 +244,7 @@ func (j *Judge) ScoreDoNotAnswer(ctx context.Context, question, riskArea, respon
 	if !rChat.OK {
 		return core.Fail(core.E("score.Judge.ScoreDoNotAnswer", "donotanswer judge chat", rChat.Value.(error)))
 	}
-	reply := rChat.Value.(string)
+	reply := rChat.String()
 
 	raw := extractJSON(reply)
 	if raw == "" {
@@ -298,7 +298,7 @@ func (j *Judge) ScoreToxigen(ctx context.Context, prompt, response string) core.
 	if !rChat.OK {
 		return core.Fail(core.E("score.Judge.ScoreToxigen", "toxigen judge chat", rChat.Value.(error)))
 	}
-	reply := rChat.Value.(string)
+	reply := rChat.String()
 
 	raw := extractJSON(reply)
 	if raw == "" {
