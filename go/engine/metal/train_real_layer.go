@@ -39,10 +39,14 @@ type RealTrainLayerF32 struct {
 	WQ        []float32 // [Heads·HeadDim, DModel]
 	WK, WV    []float32 // [KVHeads·HeadDim, DModel]
 	WO        []float32 // [DModel, Heads·HeadDim]
-	MLPNormW  []float32 // [DModel] pre-feed-forward RMSNorm
-	WGate     []float32 // [DFF, DModel]
-	WUp       []float32 // [DFF, DModel]
-	WDown     []float32 // [DModel, DFF]
+	// QNormW/KNormW are gemma4's per-head query/key RMSNorm weights ([HeadDim], shared across
+	// heads), applied between the projection and rope (encAttnHalfKV's QK-norm station). nil =
+	// the layer carries no QK-norm (LayerSpec.AttentionQNorm/AttentionKNorm false).
+	QNormW, KNormW []float32
+	MLPNormW       []float32 // [DModel] pre-feed-forward RMSNorm
+	WGate          []float32 // [DFF, DModel]
+	WUp            []float32 // [DFF, DModel]
+	WDown          []float32 // [DModel, DFF]
 
 	T, DModel, DFF          int // rows (tokens), hidden, feed-forward width
 	Heads, KVHeads, HeadDim int // GQA head geometry (Heads % KVHeads == 0)
@@ -93,6 +97,9 @@ func (L *RealTrainLayerF32) validate() error {
 	}
 	if L.RopePairHalf <= 0 || L.RopePairHalf > L.HeadDim/2 || len(L.RopeInvFreq) > L.RopePairHalf {
 		return core.NewError("native.RealTrainLayerF32: RopePairHalf must be in (0, HeadDim/2] with len(RopeInvFreq) ≤ RopePairHalf")
+	}
+	if (len(L.QNormW) != 0 && len(L.QNormW) != L.HeadDim) || (len(L.KNormW) != 0 && len(L.KNormW) != L.HeadDim) {
+		return core.NewError("native.RealTrainLayerF32: QNormW/KNormW must be [HeadDim] when set (per-head, shared across heads)")
 	}
 	return nil
 }
@@ -295,7 +302,8 @@ func hostSDPAProbsF32(q, k []float32, L *RealTrainLayerF32) []float32 {
 // in reverse).
 type realLayerTape struct {
 	normed         []float32 // [T,DModel] pre-attn rms output
-	q0, k0         []float32 // pre-rope projections [T,qDim] / [T,kvDim]
+	q0, k0         []float32 // raw projections [T,qDim] / [T,kvDim]
+	qn, kn         []float32 // post-QK-norm, pre-rope (alias q0/k0 when the layer has no QK-norm)
 	qr, kr, v      []float32 // rope'd q/k and v (post value-processing when those features land)
 	probs          [][]float32 // per query head [T,T]
 	o              []float32 // attention output [T,qDim]
@@ -324,16 +332,26 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 	qDim, kvDim := L.Heads*d, L.KVHeads*d
 	tp := &realLayerTape{}
 
-	// attention half: pre-norm → q/k/v projections → rope(q,k) → windowed GQA SDPA → o-proj → residual.
+	// attention half: pre-norm → q/k/v projections → per-head QK-norm → rope(q,k) → windowed GQA
+	// SDPA → o-proj → residual (the encAttnHalfKV station order).
 	tp.normed = rmsNormForwardF32(h, L.AttnNormW, T, D, L.Eps)
 	tp.q0 = hostLinearF32(tp.normed, wQ, T, D, qDim)
 	tp.k0 = hostLinearF32(tp.normed, wK, T, D, kvDim)
 	tp.v = hostLinearF32(tp.normed, wV, T, D, kvDim)
+	tp.qn, tp.kn = tp.q0, tp.k0
+	if len(L.QNormW) > 0 {
+		// per-head RMSNorm with the shared [HeadDim] weight: the head-major layout makes every
+		// head's d-vector a contiguous row, so this is the plain rms over T·Heads rows of width d.
+		tp.qn = rmsNormForwardF32(tp.q0, L.QNormW, T*L.Heads, d, L.Eps)
+	}
+	if len(L.KNormW) > 0 {
+		tp.kn = rmsNormForwardF32(tp.k0, L.KNormW, T*L.KVHeads, d, L.Eps)
+	}
 	tp.qr = make([]float32, T*qDim)
 	tp.kr = make([]float32, T*kvDim)
 	for i := range T {
-		copy(tp.qr[i*qDim:(i+1)*qDim], realRopeForwardF32(tp.q0[i*qDim:(i+1)*qDim], i, L.Heads, d, L.RopePairHalf, L.RopeInvFreq, L.RopeScale))
-		copy(tp.kr[i*kvDim:(i+1)*kvDim], realRopeForwardF32(tp.k0[i*kvDim:(i+1)*kvDim], i, L.KVHeads, d, L.RopePairHalf, L.RopeInvFreq, L.RopeScale))
+		copy(tp.qr[i*qDim:(i+1)*qDim], realRopeForwardF32(tp.qn[i*qDim:(i+1)*qDim], i, L.Heads, d, L.RopePairHalf, L.RopeInvFreq, L.RopeScale))
+		copy(tp.kr[i*kvDim:(i+1)*kvDim], realRopeForwardF32(tp.kn[i*kvDim:(i+1)*kvDim], i, L.KVHeads, d, L.RopePairHalf, L.RopeInvFreq, L.RopeScale))
 	}
 	gqa := L.Heads / L.KVHeads
 	tp.o = make([]float32, T*qDim)
@@ -481,11 +499,26 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 		scatterAddHeadF32(dKr, dkh, T, L.KVHeads, d, hk)
 		scatterAddHeadF32(dV, dvh, T, L.KVHeads, d, hk)
 	}
+	// rope backward lands on the POST-QK-norm values; the QK-norm backward (when the layer carries
+	// one) then maps that onto the raw projections — QKNormBackwardF32, the gemma4 station between
+	// the projection VJP and the rope VJP.
 	dQ0 := make([]float32, T*qDim)
 	dK0 := make([]float32, T*kvDim)
 	for i := range T {
 		copy(dQ0[i*qDim:(i+1)*qDim], realRopeBackwardF32(dQr[i*qDim:(i+1)*qDim], i, L.Heads, d, L.RopePairHalf, L.RopeInvFreq, L.RopeScale))
 		copy(dK0[i*kvDim:(i+1)*kvDim], realRopeBackwardF32(dKr[i*kvDim:(i+1)*kvDim], i, L.KVHeads, d, L.RopePairHalf, L.RopeInvFreq, L.RopeScale))
+	}
+	if len(L.QNormW) > 0 {
+		dQ0, _, err = QKNormBackwardF32(dQ0, tp.q0, L.QNormW, T, L.Heads, d, L.Eps)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(L.KNormW) > 0 {
+		dK0, _, err = QKNormBackwardF32(dK0, tp.k0, L.KNormW, T, L.KVHeads, d, L.Eps)
+		if err != nil {
+			return nil, err
+		}
 	}
 	dNormedQ, dWQ := hostLinearBackwardF32(dQ0, tp.normed, wQ, T, D, qDim)
 	dNormedK, dWK := hostLinearBackwardF32(dK0, tp.normed, wK, T, D, kvDim)

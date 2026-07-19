@@ -114,6 +114,36 @@ func TestRealLayerProjLoRABackwardF32(t *testing.T) {
 	}
 }
 
+// TestRealLayerProjLoRABackwardF32_QKNorm is the rung-2 FD gate: the same seven-target check with
+// gemma4's per-head QK-norm present (shared [HeadDim] weights on Q and K, between projection and
+// rope — the station the simplified reference lacked). dH and every dA/dB must still match central
+// differences with the extra norm Jacobian in the chain.
+func TestRealLayerProjLoRABackwardF32_QKNorm(t *testing.T) {
+	mk := func() *RealTrainLayerF32 {
+		L := tinyRealLayer()
+		// weights near 1 (the real checkpoints' shape) so the norm actually scales.
+		qn := syntheticFloat32(L.HeadDim, 41)
+		kn := syntheticFloat32(L.HeadDim, 43)
+		for i := range qn {
+			qn[i] = 1 + 0.3*qn[i]
+			kn[i] = 1 + 0.3*kn[i]
+		}
+		L.QNormW, L.KNormW = qn, kn
+		return L
+	}
+	for _, target := range realLayerTargets {
+		t.Run(target, func(t *testing.T) {
+			realLayerFDCheck(t, mk(), target)
+		})
+	}
+	// a Q-only norm (K bare) exercises the asymmetric wiring: the two stations are independent.
+	t.Run("q-norm-only/"+ProjK, func(t *testing.T) {
+		L := mk()
+		L.KNormW = nil
+		realLayerFDCheck(t, L, ProjK)
+	})
+}
+
 // TestRealLayerProjLoRABackwardF32_Bad: an unknown target, a nil layer, a wrong-shaped upstream
 // gradient, and a broken geometry are refused before any work.
 func TestRealLayerProjLoRABackwardF32_Bad(t *testing.T) {
@@ -147,6 +177,11 @@ func TestRealLayerProjLoRABackwardF32_Bad(t *testing.T) {
 	bad2.RopePairHalf = bad2.HeadDim // > HeadDim/2
 	if _, _, _, err := RealLayerProjLoRABackwardF32(dout, h, bad2, ProjDown, a, b, rank, 1); err == nil {
 		t.Fatal("a rope pairing wider than the head must be refused")
+	}
+	bad3 := tinyRealLayer()
+	bad3.QNormW = make([]float32, bad3.HeadDim+1)
+	if _, _, _, err := RealLayerProjLoRABackwardF32(dout, h, bad3, ProjDown, a, b, rank, 1); err == nil {
+		t.Fatal("a wrong-length QNormW must be refused")
 	}
 }
 
