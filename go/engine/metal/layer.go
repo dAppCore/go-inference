@@ -209,7 +209,7 @@ func decodeLayerInto(
 			encErr = err
 			return
 		}
-		sdpaPSO, err := sdpaVectorPipelineForHeadDim(headDim)
+		sdpaPSO, sdpaRTDim, err := sdpaVectorDispatchForHeadDim(headDim)
 		if err != nil {
 			encErr = err
 			return
@@ -226,7 +226,12 @@ func decodeLayerInto(
 		emitRMSNorm(sink, rmsPSO, xBuf, anwBuf, asc.normed, 0, dModel, eps, rmsTG)
 		emitBF16GemvPlan(sink, qPlan, wqBuf, asc.normed, asc.q, dModel, qDim)
 		emitRopeAt(sink, ropePSO, asc.q, asc.qr, 0, 0, offBuf, 0, nil, nHeads, headDim, headDim, scale, float32(math.Log2(float64(base))))
-		emitSDPA(sink, sdpaPSO, asc.qr, kBuf, vBuf, asc.attn, 0, nil, nHeads, nKVHeads, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		// sdpaRTDim: headDim has no fixed pipeline (#28) — the runtime-dim fallback needs one extra binding.
+		if sdpaRTDim {
+			emitSDPARTDim(sink, sdpaPSO, asc.qr, kBuf, vBuf, asc.attn, 0, nil, nHeads, nKVHeads, headDim, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		} else {
+			emitSDPA(sink, sdpaPSO, asc.qr, kBuf, vBuf, asc.attn, 0, nil, nHeads, nKVHeads, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		}
 		emitBF16GemvPlan(sink, oPlan, woBuf, asc.attn, asc.attnOut, qDim, dModel)
 		emitBinary(sink, addPSO, xBuf, 0, asc.attnOut, 0, layerScratch.h, 0, dModel)
 		emitRMSNorm(sink, rmsPSO, layerScratch.h, mnwBuf, msc.mlpNormed, 0, dModel, eps, rmsTG)
