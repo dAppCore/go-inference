@@ -1,6 +1,6 @@
 # LEM Dataset Loop Design (lem-native training data)
 
-**Status:** DRAFT for review — nothing below is approved until Snider signs off.
+**Status:** APPROVED (Snider, 2026-07-19) with all four recommendations accepted: fifth TUI Data panel; separate `~/.lem/datasets.duckdb`; serve capture default OFF (explicit `--capture`); judge templates in-repo with `~/.lem/judges/` overrides. Implementation plan: `../plans/2026-07-19-lem-dataset-loop.md`.
 
 **Goal:** The complete training-data loop — capture → score → review → export — as lem features: DuckDB-backed under `~/.lem/`, driven from the TUI and `lem data` verbs, feeding `lem train --sft` and `lem ssd` directly. No external labelling platform; Argilla is retired (2026-07-19, anti-piecemeal: we code the features we need and carry no extras).
 
@@ -94,9 +94,9 @@ Web UI · multi-user/remote sync · DPO/RLHF pair formats (v2 when training need
 
 `~/.lem/` only, medium-backed paths, no `--home` override · `dappco.re/go` wrappers; `core.Result`; no banned stdlib imports in production code · root module stays portable (no DuckDB/TUI deps); CLI owns the drivers · archive-by-flag, never hard-delete · one test per symbol per variant, `_Good/_Bad/_Ugly`, Examples for public symbols; behavioural test before implementation · every score names its scorer + fingerprint; no re-scoring in place · welfare screen at every ingest door · truthful partials: a stage that can't land honestly refuses loudly and the plan records the boundary.
 
-## Open questions for review
+## Decisions (resolved at review, 2026-07-19)
 
-1. **Data panel vs inspector mode** — the panel is my recommendation (primary workflow), but it amends the approved four-panel TUI design.
-2. **Separate `datasets.duckdb`** vs folding into `lem.duckdb` — separate is my recommendation (bulk/lifecycle/blast-radius), stated above.
-3. **Serve capture default** — OFF (explicit `--capture`) is my recommendation; confirm the privacy stance.
-4. **Judge prompts** — where do the named judge templates live: in-repo (versioned, shared) or `~/.lem/judges/` (user-owned)? My lean: in-repo defaults + user overrides in `~/.lem/judges/`.
+1. **Fifth primary panel `Data`** — approved; this amends the TUI design's four-panel line, recorded here.
+2. **Separate `~/.lem/datasets.duckdb`** — approved (bulk/lifecycle/blast-radius rationale above).
+3. **Serve capture defaults OFF** — approved; capture is always an explicit `--capture <dataset>` act.
+4. **Judge templates: in-repo defaults + `~/.lem/judges/` user overrides** — approved.
