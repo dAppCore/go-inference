@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/agent/gitserver"
 	"dappco.re/go/inference/agent/orchestrator"
 	"dappco.re/go/inference/agent/provider"
 	"dappco.re/go/inference/agent/queue"
@@ -175,6 +176,64 @@ func TestAgentAdapterSnapshotFoldsCleanupRecoveryOutcomes(t *testing.T) {
 				core.AssertEqual(t, "", state.Recovery.EventID)
 			} else {
 				core.AssertEqual(t, retained.ID, state.Recovery.EventID)
+			}
+		})
+	}
+}
+
+func TestAgentAdapterSnapshotDeduplicatesHistoricalCleanupRecoveryReceipts(t *testing.T) {
+	at := time.Date(2026, time.July, 19, 13, 45, 0, 0, time.UTC)
+	receipt := agentRecoveryReceipt{
+		Kind: "review", ProjectID: "project-1", WorkID: "work-1", RunID: "attempt-8",
+		RunNumber: 8, ReviewID: "review-2", Branch: "lem/integration/attempt-8/review-2",
+		Worktree: "/private/workspaces/project-1/reviews/lineage-root/review-2/worktree",
+	}
+	first := work.Event{
+		ID: "recovery-event-a", RunID: receipt.RunID, WorkID: receipt.WorkID,
+		Kind: "review_cleanup_retained", Detail: receipt.Worktree,
+		DetailJSON: core.JSONMarshalString(receipt), CreatedAt: at,
+	}
+	duplicate := first
+	duplicate.ID = "recovery-event-b"
+	duplicate.CreatedAt = at.Add(time.Second)
+	mismatched := receipt
+	mismatched.Worktree = core.Concat(receipt.Worktree, "-other")
+	for _, test := range []struct {
+		name           string
+		outcomeKind    string
+		outcomeReceipt agentRecoveryReceipt
+		wantCount      int
+	}{{name: "duplicates fold", wantCount: 1},
+		{name: "failed alias remains folded", outcomeKind: "cleanup_recovery_failed", outcomeReceipt: receipt, wantCount: 1},
+		{name: "successful alias resolves receipt", outcomeKind: "cleanup_recovery_succeeded", outcomeReceipt: receipt, wantCount: 0},
+		{name: "mismatched alias fails closed", outcomeKind: "cleanup_recovery_succeeded", outcomeReceipt: mismatched, wantCount: 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			events := []work.Event{duplicate, first}
+			if test.outcomeKind != "" {
+				outcome := agentRecoveryOutcome{RecoveryEventID: duplicate.ID, Receipt: test.outcomeReceipt}
+				if test.outcomeKind == "cleanup_recovery_failed" {
+					outcome.Error = "worktree remove failed"
+				}
+				events = append(events, work.Event{
+					ID: "recovery-outcome", RunID: receipt.RunID, WorkID: receipt.WorkID,
+					Kind: test.outcomeKind, Detail: test.outcomeReceipt.Worktree,
+					DetailJSON: core.JSONMarshalString(outcome), CreatedAt: at.Add(2 * time.Second),
+				})
+			}
+			adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{
+				Runs:   []work.Run{{ID: receipt.RunID, WorkID: receipt.WorkID, ProjectID: receipt.ProjectID, Number: receipt.RunNumber, Status: work.RunCompleted}},
+				Events: events,
+			}})
+
+			result := adapter.Snapshot(context.Background())
+			core.AssertTrue(t, result.OK, result.Error())
+			state := result.Value.(agentSnapshot).Work[0]
+			core.AssertEqual(t, test.wantCount, state.RecoveryCount)
+			if test.wantCount == 0 {
+				core.AssertEqual(t, "", state.Recovery.EventID)
+			} else {
+				core.AssertEqual(t, first.ID, state.Recovery.EventID)
+				core.AssertEqual(t, receipt, state.Recovery.Receipt)
 			}
 		})
 	}
@@ -741,6 +800,287 @@ func TestAgentAdapterDurableAnsweredWaitingResumeAfterRestartReceipt(t *testing.
 	if child.ID != answer.ResumeRunID || child.Status != work.RunQueued || child.Attempt != parent.Attempt+1 || child.Branch != parent.Branch || child.Worktree != parent.Worktree {
 		t.Fatalf("durable answered resumed child = %#v", child)
 	}
+}
+
+func TestAgentAdapterDurableCleanupRecoveryAfterTransientPersistenceFailureReopensActionable(t *testing.T) {
+	if contract := linkedAgentRuntimeContract(context.Background()); !contract.OK {
+		t.Skip("standalone inference dependency predates durable cleanup recovery persistence")
+	}
+	root, repository, agentStore := openTestAgentStore(t)
+	initialRepositoryClosed := false
+	t.Cleanup(func() {
+		if !initialRepositoryClosed {
+			_ = repository.Close()
+		}
+	})
+	at := time.Date(2026, time.July, 19, 14, 0, 0, 0, time.UTC)
+	workspaceRoot := core.PathJoin(root, "native-workspaces")
+	core.AssertTrue(t, core.MkdirAll(workspaceRoot, 0o700).OK)
+	files, filesErr := coreio.NewSandboxed(workspaceRoot)
+	if filesErr != nil {
+		t.Fatalf("construct cleanup recovery workspace medium: %s", filesErr)
+	}
+	runner := &agentAdapterRecoveryGitRunner{}
+	server := &agentAdapterRecoveryGitServer{root: core.PathJoin(root, "private-git")}
+	managerIDs := &agentAdapterRecoveryIDs{prefix: "review-"}
+	managerResult := workspace.NewManager(workspace.ManagerOptions{
+		Root: workspaceRoot, Files: files, Git: runner, Server: server,
+		IDs: managerIDs.New, Now: func() time.Time { return at },
+	})
+	core.AssertTrue(t, managerResult.OK, managerResult.Error())
+	manager := managerResult.Value.(*workspace.Manager)
+	sourceProject := testDurableAgentProject(t, at)
+	sourceReview := manager.ReviewSource(context.Background(), sourceProject.SourcePath)
+	core.AssertTrue(t, sourceReview.OK, sourceReview.Error())
+	registered := manager.Register(context.Background(), workspace.RegisterRequest{
+		ProjectID: "project-agent", SourcePath: sourceProject.SourcePath, RepositoryName: "project-agent",
+		Confirmed: true, ExpectedIncludedHash: sourceReview.Value.(workspace.SourceReview).IncludedHash,
+	})
+	core.AssertTrue(t, registered.OK, registered.Error())
+	project := registered.Value.(work.Project)
+	run := work.Run{
+		ID: "cleanup-recovery-run", WorkID: "work-agent", ProjectID: project.ID, Provider: "codex", Model: "gpt-5",
+		SourceRevision: project.SourceRevision, Status: work.RunPreparing, Number: 1, Attempt: 1,
+		QueuedAt: at, UpdatedAt: at,
+	}
+	preparedResult := manager.PrepareRun(context.Background(), project, run)
+	core.AssertTrue(t, preparedResult.OK, preparedResult.Error())
+	prepared := preparedResult.Value.(workspace.RunWorkspace)
+	core.AssertTrue(t, core.WriteFile(core.PathJoin(prepared.Path, "agent.txt"), []byte("durable cleanup recovery\n"), 0o600).OK)
+	capturedResult := manager.CaptureRun(context.Background(), prepared)
+	core.AssertTrue(t, capturedResult.OK, capturedResult.Error())
+	captured := capturedResult.Value.(workspace.Capture)
+	core.AssertTrue(t, captured.Pushed)
+	run.Status = work.RunCompleted
+	run.Branch = prepared.Branch
+	run.Worktree = prepared.Path
+	run.DurableRevision = captured.DurableRevision
+	run.ExecutionRevision = captured.Revision
+	run.FinishedAt = at
+	run.UpdatedAt = at
+	if committed := agentStore.Commit(orchestrator.Commit{Project: &project, Run: &run, CreateRun: true}); !committed.OK {
+		t.Fatalf("persist completed cleanup recovery run: %s", committed.Error())
+	}
+
+	transientStore := &agentAdapterTransientCleanupStore{Store: agentStore}
+	engine := newAgentAdapterRecoveryEngine(t, transientStore, manager, server, at, "persist-")
+	runner.setCleanupFailure(true)
+	reviewed := engine.ReviewChanges(context.Background(), run.ID)
+	core.AssertFalse(t, reviewed.OK)
+	core.AssertEqual(t, 2, len(transientStore.eventIDs()))
+	if len(transientStore.eventIDs()) == 2 {
+		core.AssertEqual(t, transientStore.eventIDs()[0], transientStore.eventIDs()[1])
+	}
+	initialSnapshot := requireAgentValue[work.Snapshot](t, "transient cleanup Snapshot", agentStore.Snapshot(run.WorkID))
+	retainedEvents := make([]work.Event, 0, 1)
+	for _, event := range initialSnapshot.Events {
+		if event.Kind == "review_cleanup_retained" {
+			retainedEvents = append(retainedEvents, event)
+		}
+	}
+	core.AssertEqual(t, 1, len(retainedEvents))
+	if len(retainedEvents) == 0 {
+		_ = engine.Close()
+		return
+	}
+	retained := retainedEvents[0]
+	var receipt agentRecoveryReceipt
+	decoded := core.JSONUnmarshalString(retained.DetailJSON, &receipt)
+	core.AssertTrue(t, decoded.OK, decoded.Error())
+	core.AssertEqual(t, transientStore.eventIDs()[0], retained.ID)
+	core.AssertTrue(t, core.Stat(receipt.Worktree).OK)
+	core.AssertTrue(t, engine.Close().OK)
+	if closed := repository.Close(); !closed.OK {
+		t.Fatalf("close transient cleanup repository: %s", closed.Error())
+	}
+	initialRepositoryClosed = true
+
+	reopenedResult := openDuckRepository(core.PathJoin(root, "lem.duckdb"))
+	core.AssertTrue(t, reopenedResult.OK, reopenedResult.Error())
+	reopened := reopenedResult.Value.(workspaceRepository)
+	reopenedClosed := false
+	t.Cleanup(func() {
+		if !reopenedClosed {
+			_ = reopened.Close()
+		}
+	})
+	reopenedStore := requireAgentValue[*duckAgentStore](t, "newDuckAgentStore reopened cleanup action", newDuckAgentStore(reopened))
+	restartedFiles, restartedFilesErr := coreio.NewSandboxed(workspaceRoot)
+	if restartedFilesErr != nil {
+		t.Fatalf("construct restarted cleanup workspace medium: %s", restartedFilesErr)
+	}
+	restartedRunner := &agentAdapterRecoveryGitRunner{}
+	restartedServer := &agentAdapterRecoveryGitServer{root: server.root}
+	restartedManagerIDs := &agentAdapterRecoveryIDs{prefix: "restart-review-"}
+	restartedManagerResult := workspace.NewManager(workspace.ManagerOptions{
+		Root: workspaceRoot, Files: restartedFiles, Git: restartedRunner, Server: restartedServer,
+		IDs: restartedManagerIDs.New, Now: func() time.Time { return at.Add(time.Hour) },
+	})
+	core.AssertTrue(t, restartedManagerResult.OK, restartedManagerResult.Error())
+	restartedEngine := newAgentAdapterRecoveryEngine(t, reopenedStore, restartedManagerResult.Value.(*workspace.Manager), restartedServer, at.Add(time.Hour), "restart-")
+	adapter := requireAgentAdapter(t, restartedEngine)
+	adapterClosed := false
+	t.Cleanup(func() {
+		if !adapterClosed {
+			_ = adapter.Close()
+		}
+	})
+
+	reopenedSnapshot := adapter.Snapshot(context.Background())
+	core.AssertTrue(t, reopenedSnapshot.OK, reopenedSnapshot.Error())
+	mapped := reopenedSnapshot.Value.(agentSnapshot)
+	core.AssertEqual(t, 1, len(mapped.Work))
+	core.AssertEqual(t, 1, mapped.Work[0].RecoveryCount)
+	core.AssertEqual(t, retained.ID, mapped.Work[0].Recovery.EventID)
+	recovery := mapped.Work[0].Recovery
+	reviewResult := adapter.Review(context.Background(), agentReviewRequest{
+		Feature: agentFeatureRecoveryAbandon, WorkID: recovery.Receipt.WorkID, Recovery: recovery,
+	})
+	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+	review := reviewResult.Value.(agentReview)
+	runResult := adapter.Run(context.Background(), agentRequest{
+		Feature: agentFeatureRecoveryAbandon, WorkID: recovery.Receipt.WorkID, RunID: recovery.Receipt.RunID,
+		Recovery: recovery, Review: review, Confirmed: true,
+	})
+	core.AssertTrue(t, runResult.OK, runResult.Error())
+	refreshed := adapter.Snapshot(context.Background())
+	core.AssertTrue(t, refreshed.OK, refreshed.Error())
+	core.AssertEqual(t, 0, refreshed.Value.(agentSnapshot).Work[0].RecoveryCount)
+	core.AssertFalse(t, core.Stat(receipt.Worktree).OK)
+	branches := agentAdapterGit(t, workspaceRoot, "--git-dir", project.ClonePath, "branch", "--list", receipt.Branch)
+	core.AssertEqual(t, "", core.Trim(branches))
+	core.AssertTrue(t, adapter.Close().OK)
+	adapterClosed = true
+	if closed := reopened.Close(); !closed.OK {
+		t.Fatalf("close reopened cleanup repository: %s", closed.Error())
+	}
+	reopenedClosed = true
+}
+
+type agentAdapterTransientCleanupStore struct {
+	orchestrator.Store
+	mu       sync.Mutex
+	failed   bool
+	attempts []string
+}
+
+func (store *agentAdapterTransientCleanupStore) Commit(commit orchestrator.Commit) core.Result {
+	if commit.Event == nil || (commit.Event.Kind != "workspace_cleanup_retained" && commit.Event.Kind != "review_cleanup_retained") {
+		return store.Store.Commit(commit)
+	}
+	store.mu.Lock()
+	store.attempts = append(store.attempts, commit.Event.ID)
+	if !store.failed {
+		store.failed = true
+		store.mu.Unlock()
+		return core.Fail(core.NewError("injected transient cleanup persistence failure"))
+	}
+	store.mu.Unlock()
+	return store.Store.Commit(commit)
+}
+
+func (store *agentAdapterTransientCleanupStore) eventIDs() []string {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return append([]string(nil), store.attempts...)
+}
+
+type agentAdapterRecoveryGitRunner struct {
+	mu          sync.Mutex
+	failCleanup bool
+}
+
+func (runner *agentAdapterRecoveryGitRunner) setCleanupFailure(fail bool) {
+	runner.mu.Lock()
+	runner.failCleanup = fail
+	runner.mu.Unlock()
+}
+
+func (runner *agentAdapterRecoveryGitRunner) Run(ctx context.Context, command workspace.Command) core.Result {
+	runner.mu.Lock()
+	fail := runner.failCleanup
+	runner.mu.Unlock()
+	if fail {
+		hasWorktree := agentAdapterCommandHasArgument(command, "worktree")
+		if agentAdapterCommandHasArgument(command, "log") || hasWorktree &&
+			(agentAdapterCommandHasArgument(command, "remove") || agentAdapterCommandHasArgument(command, "list")) {
+			return core.Fail(core.NewError("injected retained cleanup Git failure"))
+		}
+	}
+	return (agentAdapterDirectGitRunner{}).Run(ctx, command)
+}
+
+func agentAdapterCommandHasArgument(command workspace.Command, expected string) bool {
+	for _, argument := range command.Args {
+		if argument == expected {
+			return true
+		}
+	}
+	return false
+}
+
+type agentAdapterRecoveryGitServer struct{ root string }
+
+func (server *agentAdapterRecoveryGitServer) Start(context.Context) core.Result {
+	return core.MkdirAll(server.root, 0o700)
+}
+
+func (server *agentAdapterRecoveryGitServer) EnsureRepository(ctx context.Context, name string) core.Result {
+	if started := server.Start(ctx); !started.OK {
+		return started
+	}
+	path := core.PathJoin(server.root, core.Concat(name, ".git"))
+	if !core.Stat(path).OK {
+		created := (agentAdapterDirectGitRunner{}).Run(ctx, workspace.Command{
+			Executable: "git", Args: []string{"init", "--bare", "--initial-branch=main", path},
+			Environment: []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C"},
+		})
+		if !created.OK {
+			return created
+		}
+	}
+	return core.Ok(gitserver.Repository{Name: name, CloneURL: path})
+}
+
+func (server *agentAdapterRecoveryGitServer) Health(context.Context) core.Result {
+	return core.Ok(gitserver.Health{Running: true, Address: server.root})
+}
+
+func (*agentAdapterRecoveryGitServer) Close() core.Result { return core.Ok(nil) }
+
+type agentAdapterRecoveryIDs struct {
+	mu     sync.Mutex
+	prefix string
+	next   int
+}
+
+func (ids *agentAdapterRecoveryIDs) New() string {
+	ids.mu.Lock()
+	defer ids.mu.Unlock()
+	ids.next++
+	return core.Sprintf("%s%d", ids.prefix, ids.next)
+}
+
+func newAgentAdapterRecoveryEngine(t *testing.T, store orchestrator.Store, manager *workspace.Manager, server gitserver.Service, at time.Time, idPrefix string) *orchestrator.Orchestrator {
+	t.Helper()
+	registryResult := provider.NewRegistry(&fixtureNativeProvider{name: "codex", available: true})
+	core.AssertTrue(t, registryResult.OK, registryResult.Error())
+	queueResult := queue.NewController(queue.Policy{
+		Version:     1,
+		Dispatch:    queue.DispatchConfig{DefaultAgent: "codex", GlobalConcurrency: 1, TimeoutMinutes: 1},
+		Concurrency: map[string]queue.ConcurrencyLimit{"codex": {Total: 1}},
+		Rates:       map[string]queue.RateConfig{},
+		Providers:   map[string]queue.NativeConfig{"codex": {Executable: "codex"}},
+	}, work.QueueState{ID: "default", Status: work.QueueFrozen}, nil)
+	core.AssertTrue(t, queueResult.OK, queueResult.Error())
+	engineResult := orchestrator.New(orchestrator.Options{
+		Store: store, GitServer: server, Workspaces: manager,
+		Providers: registryResult.Value.(*provider.Registry), Queue: queueResult.Value.(*queue.Controller),
+		Launcher: &fixtureAgentLauncher{}, Clock: agentClock{now: func() time.Time { return at }},
+		IDs: &agentAdapterRecoveryIDs{prefix: idPrefix},
+	})
+	core.AssertTrue(t, engineResult.OK, engineResult.Error())
+	return engineResult.Value.(*orchestrator.Orchestrator)
 }
 
 func newDurableResumeReceiptEngine(t *testing.T, store orchestrator.Store, at time.Time) nativeAgentEngine {

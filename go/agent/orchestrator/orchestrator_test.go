@@ -319,6 +319,13 @@ func (store *orchestratorTestStore) Commit(commit Commit) core.Result {
 			}
 		}
 	}
+	if commit.Event != nil {
+		for _, event := range store.events {
+			if event.ID == commit.Event.ID {
+				return core.Fail(core.NewError("duplicate event"))
+			}
+		}
+	}
 	if commit.Project != nil {
 		store.projects[commit.Project.ID] = *commit.Project
 	}

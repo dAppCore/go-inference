@@ -51,20 +51,7 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 	}
 	reviewResult := orchestrator.workspaces.ReviewChanges(ctx, project, run, orchestrator.queue.Validation())
 	if !reviewResult.OK {
-		recoveryResult := orchestrator.workspaceRecovery(run.ID, "review")
-		if !recoveryResult.OK {
-			return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", reviewResult.Error(), recoveryResult.Err()))
-		}
-		if recoveryResult.Value == nil {
-			return reviewResult
-		}
-		receipt := recoveryResult.Value.(workspace.RecoveryReceipt)
-		receiptJSON := core.JSONMarshalString(receipt)
-		message := core.Join("; ", reviewResult.Error(), core.Concat("review cleanup recovery: ", receiptJSON))
-		if persisted := orchestrator.persistCleanupRecovery(run, receipt, "review_cleanup_retained", false); !persisted.OK {
-			message = core.Join("; ", message, persisted.Error())
-		}
-		return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", message, reviewResult.Err()))
+		return orchestrator.reviewCleanupFailure(run, reviewResult)
 	}
 	review, ok := reviewResult.Value.(workspace.ChangeReview)
 	if !ok {
@@ -81,11 +68,11 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 		if cleaned.OK {
 			return
 		}
-		if result.OK {
-			result = cleaned
-			return
+		failure := cleaned
+		if !result.OK {
+			failure = core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", result.Error(), cleaned.Err()))
 		}
-		result = core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", result.Error(), cleaned.Err()))
+		result = orchestrator.reviewCleanupFailure(run, failure)
 	}()
 	reviewJSONResult := encodeChangeReview(review)
 	if !reviewJSONResult.OK {
@@ -126,6 +113,23 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 		return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", "durable review receipt could not take ownership of integration worktree", retained.Err()))
 	}
 	return decodeChangeReview(reviewJSON)
+}
+
+func (orchestrator *Orchestrator) reviewCleanupFailure(run work.Run, failure core.Result) core.Result {
+	recoveryResult := orchestrator.workspaceRecovery(run.ID, "review")
+	if !recoveryResult.OK {
+		return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", failure.Error(), recoveryResult.Err()))
+	}
+	if recoveryResult.Value == nil {
+		return failure
+	}
+	receipt := recoveryResult.Value.(workspace.RecoveryReceipt)
+	receiptJSON := core.JSONMarshalString(receipt)
+	message := core.Join("; ", failure.Error(), core.Concat("review cleanup recovery: ", receiptJSON))
+	if persisted := orchestrator.persistCleanupRecovery(run, receipt, "review_cleanup_retained", false); !persisted.OK {
+		message = core.Join("; ", message, persisted.Error())
+	}
+	return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", message, failure.Err()))
 }
 
 // Accept applies a confirmed review and atomically records its durable decision.

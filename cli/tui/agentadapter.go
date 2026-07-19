@@ -5,6 +5,7 @@ package tui
 import (
 	"context"
 	"sync"
+	"time"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/agent/orchestrator"
@@ -231,7 +232,9 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		item.Agent = run.Provider
 		item.Runtime = run.Model
 	}
-	pendingRecoveries := make(map[string]agentPendingRecovery)
+	pendingRecoveries := make(map[agentRecoveryReceipt]agentPendingRecovery)
+	pendingRecoveryTimes := make(map[agentRecoveryReceipt]time.Time)
+	recoveryAliases := make(map[string]agentRecoveryReceipt)
 	for _, event := range snapshot.Events {
 		workID := event.WorkID
 		if workID == "" {
@@ -247,7 +250,13 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 			}
 		}
 		if recovery, available := mapRetainedAgentRecovery(event, runs); available {
-			pendingRecoveries[recovery.EventID] = recovery
+			recoveryAliases[recovery.EventID] = recovery.Receipt
+			createdAt, exists := pendingRecoveryTimes[recovery.Receipt]
+			canonical := pendingRecoveries[recovery.Receipt]
+			if !exists || event.CreatedAt.Before(createdAt) || event.CreatedAt.Equal(createdAt) && recovery.EventID < canonical.EventID {
+				pendingRecoveries[recovery.Receipt] = recovery
+				pendingRecoveryTimes[recovery.Receipt] = event.CreatedAt
+			}
 		}
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
 			ExternalID: event.ID, WorkID: workID, RunID: event.RunID, Kind: event.Kind,
@@ -259,12 +268,12 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		if !available {
 			continue
 		}
-		pending, exists := pendingRecoveries[outcome.RecoveryEventID]
-		if !exists || pending.Receipt != outcome.Receipt || event.RunID != outcome.Receipt.RunID || event.WorkID != outcome.Receipt.WorkID {
+		receipt, exists := recoveryAliases[outcome.RecoveryEventID]
+		if !exists || receipt != outcome.Receipt || event.RunID != outcome.Receipt.RunID || event.WorkID != outcome.Receipt.WorkID {
 			continue
 		}
 		if succeeded {
-			delete(pendingRecoveries, outcome.RecoveryEventID)
+			delete(pendingRecoveries, receipt)
 		}
 	}
 	orderedRecoveries := make([]agentPendingRecovery, 0, len(pendingRecoveries))

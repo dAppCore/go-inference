@@ -1026,9 +1026,16 @@ func (orchestrator *Orchestrator) startPreparingRun(preparation queuedPreparatio
 			run.Worktree = receipt.Worktree
 			receiptJSON := core.JSONMarshalString(receipt)
 			reason = core.Join("; ", reason, core.Concat("workspace cleanup recovery: ", receiptJSON))
-			if persisted := orchestrator.persistCleanupRecovery(run, receipt, "workspace_cleanup_retained", true); !persisted.OK {
-				reason = core.Join("; ", reason, persisted.Error())
+			atResult := orchestrator.now()
+			if !atResult.OK {
+				return core.Ok(true)
 			}
+			run.Status = work.RunFailed
+			run.FailureReason = reason
+			run.FinishedAt = atResult.Value.(time.Time)
+			run.UpdatedAt = run.FinishedAt
+			orchestrator.persistCleanupRecovery(run, receipt, "workspace_cleanup_retained", true)
+			return core.Ok(true)
 		} else if !recoveryResult.OK {
 			reason = core.Join("; ", reason, recoveryResult.Error())
 		}
@@ -1651,22 +1658,172 @@ func (orchestrator *Orchestrator) workspaceRecovery(runID, kind string) core.Res
 
 func (orchestrator *Orchestrator) persistCleanupRecovery(run work.Run, receipt workspace.RecoveryReceipt, kind string, updateRun bool) core.Result {
 	receiptJSON := core.JSONMarshalString(receipt)
-	eventResult := orchestrator.newEvent(run, kind, "provisional workspace cleanup retained", receipt.Worktree)
-	if !eventResult.OK {
-		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), eventResult.Err()))
+	key := cleanupRecoveryKey(kind, receiptJSON)
+	expected := run.Status
+	if updateRun && terminalOwnershipStatus(run.Status) {
+		expected = work.RunPreparing
 	}
-	event := eventResult.Value.(work.Event)
-	event.DetailJSON = receiptJSON
+	orchestrator.mu.Lock()
+	pending := orchestrator.pendingCleanupRecoveries[key]
+	if pending == nil {
+		pending = &pendingCleanupRecovery{
+			Run: run, Receipt: receipt, Kind: kind, UpdateRun: updateRun, ExpectedStatus: expected,
+		}
+		orchestrator.pendingCleanupRecoveries[key] = pending
+	} else if pending.Run.ID != run.ID || pending.Run.WorkID != run.WorkID || pending.Kind != kind ||
+		pending.UpdateRun != updateRun || pending.ExpectedStatus != expected {
+		orchestrator.mu.Unlock()
+		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), core.NewError("pending cleanup recovery conflicts with the exact receipt")))
+	}
+	orchestrator.mu.Unlock()
+
+	persisted := orchestrator.flushPendingCleanupRecovery(key, pending)
+	if !persisted.OK {
+		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), persisted.Err()))
+	}
+	return persisted
+}
+
+func cleanupRecoveryKey(kind, receiptJSON string) string {
+	return core.Concat(kind, "\x00", receiptJSON)
+}
+
+func (orchestrator *Orchestrator) flushPendingCleanupRecovery(key string, pending *pendingCleanupRecovery) core.Result {
+	reconciled := orchestrator.reconcileCleanupRecovery(pending)
+	if !reconciled.OK {
+		return reconciled
+	}
+	if reconciled.Value != nil {
+		return orchestrator.completePendingCleanupRecovery(key, pending, reconciled.Value.(work.Event))
+	}
+
+	orchestrator.mu.Lock()
+	if !pending.EventReady {
+		eventResult := orchestrator.newEvent(pending.Run, pending.Kind, "provisional workspace cleanup retained", pending.Receipt.Worktree)
+		if !eventResult.OK {
+			orchestrator.mu.Unlock()
+			return eventResult
+		}
+		pending.Event = eventResult.Value.(work.Event)
+		pending.Event.DetailJSON = core.JSONMarshalString(pending.Receipt)
+		pending.EventReady = true
+	}
+	event := pending.Event
+	orchestrator.mu.Unlock()
+
 	commit := Commit{Event: &event}
-	if updateRun {
-		expected := run.Status
+	if pending.UpdateRun {
+		run := pending.Run
+		expected := pending.ExpectedStatus
 		commit.Run = &run
 		commit.ExpectedStatus = &expected
 	}
-	if committed := commitStore(orchestrator.store, commit); !committed.OK {
-		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), committed.Err()))
+	var committed core.Result
+	for attempt := 0; attempt < retainedEventAttempts; attempt++ {
+		committed = commitStore(orchestrator.store, commit)
+		if committed.OK {
+			return orchestrator.completePendingCleanupRecovery(key, pending, event)
+		}
+		reconciled = orchestrator.reconcileCleanupRecovery(pending)
+		if !reconciled.OK {
+			return reconciled
+		}
+		if reconciled.Value != nil {
+			return orchestrator.completePendingCleanupRecovery(key, pending, reconciled.Value.(work.Event))
+		}
+	}
+	return committed
+}
+
+func (orchestrator *Orchestrator) reconcileCleanupRecovery(pending *pendingCleanupRecovery) core.Result {
+	snapshotResult := orchestrator.store.Snapshot(pending.Run.WorkID)
+	if !snapshotResult.OK {
+		return snapshotResult
+	}
+	snapshot, ok := snapshotResult.Value.(work.Snapshot)
+	if !ok {
+		return core.Fail(core.Errorf("agent store returned %T instead of snapshot", snapshotResult.Value))
+	}
+	receiptJSON := core.JSONMarshalString(pending.Receipt)
+	var durable *work.Event
+	for _, event := range snapshot.Events {
+		if pending.EventReady && event.ID == pending.Event.ID && !sameCleanupRecoveryEvent(event, pending.Event) {
+			return core.Fail(core.NewError("durable cleanup recovery event conflicts with the attempted event"))
+		}
+		if event.RunID != pending.Run.ID || event.WorkID != pending.Run.WorkID || event.Kind != pending.Kind ||
+			event.Title != "provisional workspace cleanup retained" || event.Detail != pending.Receipt.Worktree ||
+			event.DetailJSON != receiptJSON {
+			continue
+		}
+		if durable == nil || event.CreatedAt.Before(durable.CreatedAt) || event.CreatedAt.Equal(durable.CreatedAt) && event.ID < durable.ID {
+			candidate := event
+			durable = &candidate
+		}
+	}
+	var storedRun *work.Run
+	for index := range snapshot.Runs {
+		if snapshot.Runs[index].ID == pending.Run.ID {
+			storedRun = &snapshot.Runs[index]
+			break
+		}
+	}
+	if durable != nil {
+		if pending.UpdateRun && (storedRun == nil || !sameCleanupRecoveryRun(*storedRun, pending.Run)) {
+			return core.Fail(core.NewError("durable cleanup recovery event is missing its exact terminal run"))
+		}
+		return core.Ok(*durable)
+	}
+	if pending.UpdateRun && (storedRun == nil || storedRun.Status != pending.ExpectedStatus) {
+		return core.Fail(core.NewError("cleanup recovery run changed before the retained event became durable"))
+	}
+	return core.Ok(nil)
+}
+
+func sameCleanupRecoveryEvent(stored, expected work.Event) bool {
+	return stored.ID == expected.ID && stored.RunID == expected.RunID && stored.WorkID == expected.WorkID &&
+		stored.Kind == expected.Kind && stored.Title == expected.Title && stored.Detail == expected.Detail &&
+		stored.DetailJSON == expected.DetailJSON && stored.CreatedAt.Equal(expected.CreatedAt)
+}
+
+func sameCleanupRecoveryRun(stored, expected work.Run) bool {
+	return stored.ID == expected.ID && stored.WorkID == expected.WorkID && stored.ProjectID == expected.ProjectID &&
+		stored.Status == expected.Status && stored.Branch == expected.Branch && stored.Worktree == expected.Worktree &&
+		stored.FailureReason == expected.FailureReason && stored.FinishedAt.Equal(expected.FinishedAt) &&
+		stored.UpdatedAt.Equal(expected.UpdatedAt)
+}
+
+func (orchestrator *Orchestrator) completePendingCleanupRecovery(key string, pending *pendingCleanupRecovery, event work.Event) core.Result {
+	orchestrator.mu.Lock()
+	if orchestrator.pendingCleanupRecoveries[key] == pending {
+		delete(orchestrator.pendingCleanupRecoveries, key)
+	}
+	orchestrator.mu.Unlock()
+	if pending.UpdateRun {
+		orchestrator.finishRunOwnership(pending.Run.ID)
 	}
 	return core.Ok(event)
+}
+
+func (orchestrator *Orchestrator) flushPendingCleanupRecoveries() core.Result {
+	orchestrator.mu.Lock()
+	keys := make([]string, 0, len(orchestrator.pendingCleanupRecoveries))
+	for key := range orchestrator.pendingCleanupRecoveries {
+		keys = append(keys, key)
+	}
+	orchestrator.mu.Unlock()
+	core.SliceSortFunc(keys, func(left, right string) bool { return left < right })
+	for _, key := range keys {
+		orchestrator.mu.Lock()
+		pending := orchestrator.pendingCleanupRecoveries[key]
+		orchestrator.mu.Unlock()
+		if pending == nil {
+			continue
+		}
+		if persisted := orchestrator.flushPendingCleanupRecovery(key, pending); !persisted.OK {
+			return core.Fail(core.E("orchestrator.flushPendingCleanupRecoveries", core.Concat("cleanup recovery ", core.JSONMarshalString(pending.Receipt)), persisted.Err()))
+		}
+	}
+	return core.Ok(nil)
 }
 
 func (orchestrator *Orchestrator) finishDrainingQueue() {

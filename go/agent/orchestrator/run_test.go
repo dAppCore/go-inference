@@ -1407,6 +1407,179 @@ func TestRunOrchestratorPreparationCleanupFailurePersistsRecoveryIdentity(t *tes
 	core.AssertTrue(t, found)
 }
 
+func TestRunOrchestratorPreparationCleanupRecoveryRetriesSameEventID(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	worktreePath := core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", run.ID, "worktree")
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		if command.Dir == worktreePath && orchestratorWorkspaceCommandHasArgument(command, "HEAD") {
+			return true
+		}
+		return orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+			(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+	var attemptedEventIDs []string
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained" {
+			attemptedEventIDs = append(attemptedEventIDs, commit.Event.ID)
+		}
+	}
+	fixture.store.failNext(func(commit Commit) bool {
+		return commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained"
+	})
+
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	failed := orchestratorWaitRunStatus(t, fixture.store, run.ID, work.RunFailed)
+	core.AssertEqual(t, worktreePath, failed.Worktree)
+	core.AssertEqual(t, 2, len(attemptedEventIDs))
+	if len(attemptedEventIDs) == 2 {
+		core.AssertEqual(t, attemptedEventIDs[0], attemptedEventIDs[1])
+	}
+	retained := 0
+	fixture.store.mu.Lock()
+	for _, event := range fixture.store.events {
+		if event.RunID == run.ID && event.Kind == "workspace_cleanup_retained" {
+			if len(attemptedEventIDs) != 0 {
+				core.AssertEqual(t, attemptedEventIDs[0], event.ID)
+			}
+			retained++
+		}
+	}
+	fixture.store.mu.Unlock()
+	core.AssertEqual(t, 1, retained)
+}
+
+func TestRunOrchestratorPreparationCleanupRecoveryReconcilesAmbiguousCommit(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	worktreePath := core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", run.ID, "worktree")
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		if command.Dir == worktreePath && orchestratorWorkspaceCommandHasArgument(command, "HEAD") {
+			return true
+		}
+		return orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+			(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+	var attemptedEventIDs []string
+	durableInjected := false
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Event == nil || commit.Event.Kind != "workspace_cleanup_retained" {
+			return
+		}
+		attemptedEventIDs = append(attemptedEventIDs, commit.Event.ID)
+		if durableInjected {
+			return
+		}
+		durableInjected = true
+		fixture.store.mu.Lock()
+		if commit.Run != nil {
+			fixture.store.runs[commit.Run.ID] = *commit.Run
+		}
+		fixture.store.events = append(fixture.store.events, *commit.Event)
+		fixture.store.mu.Unlock()
+	}
+	fixture.store.failNext(func(commit Commit) bool {
+		return commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained"
+	})
+
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	failed := orchestratorWaitRunStatus(t, fixture.store, run.ID, work.RunFailed)
+	core.AssertEqual(t, worktreePath, failed.Worktree)
+	core.AssertEqual(t, 1, len(attemptedEventIDs))
+	retained := 0
+	fixture.store.mu.Lock()
+	for _, event := range fixture.store.events {
+		if event.RunID == run.ID && event.Kind == "workspace_cleanup_retained" {
+			if len(attemptedEventIDs) != 0 {
+				core.AssertEqual(t, attemptedEventIDs[0], event.ID)
+			}
+			retained++
+		}
+	}
+	fixture.store.mu.Unlock()
+	core.AssertEqual(t, 1, retained)
+}
+
+func TestRunOrchestratorPreparationCleanupRecoveryFailsClosedUntilCloseRetry(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	worktreePath := core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", run.ID, "worktree")
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		if command.Dir == worktreePath && orchestratorWorkspaceCommandHasArgument(command, "HEAD") {
+			return true
+		}
+		return orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+			(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+	attempted := make(chan struct{}, retainedEventAttempts)
+	fixture.store.mu.Lock()
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained" {
+			select {
+			case attempted <- struct{}{}:
+			default:
+			}
+		}
+	}
+	fixture.store.failCommit = func(commit Commit) bool {
+		return commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained"
+	}
+	fixture.store.mu.Unlock()
+
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	for attempt := 0; attempt < retainedEventAttempts; attempt++ {
+		select {
+		case <-attempted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("cleanup recovery persistence was not attempted")
+		}
+	}
+	stored := fixture.store.Run(run.ID)
+	core.AssertTrue(t, stored.OK, stored.Error())
+	core.AssertEqual(t, work.RunPreparing, stored.Value.(work.Run).Status)
+	firstClose := fixture.orchestrator.Close()
+	core.AssertFalse(t, firstClose.OK)
+	core.AssertContains(t, firstClose.Error(), worktreePath)
+	fixture.server.mu.Lock()
+	serverClosed := fixture.server.closed
+	fixture.server.mu.Unlock()
+	fixture.launcher.mu.Lock()
+	launcherClosed := fixture.launcher.closed
+	fixture.launcher.mu.Unlock()
+	core.AssertFalse(t, serverClosed)
+	core.AssertFalse(t, launcherClosed)
+
+	fixture.store.mu.Lock()
+	fixture.store.failCommit = nil
+	fixture.store.mu.Unlock()
+	secondClose := fixture.orchestrator.Close()
+	core.AssertTrue(t, secondClose.OK, secondClose.Error())
+	failed := fixture.store.Run(run.ID)
+	core.AssertTrue(t, failed.OK, failed.Error())
+	core.AssertEqual(t, work.RunFailed, failed.Value.(work.Run).Status)
+	core.AssertEqual(t, worktreePath, failed.Value.(work.Run).Worktree)
+	retained := 0
+	atomicTerminal := false
+	fixture.store.mu.Lock()
+	for _, event := range fixture.store.events {
+		if event.RunID == run.ID && event.Kind == "workspace_cleanup_retained" {
+			retained++
+		}
+	}
+	for _, commit := range fixture.store.commits {
+		if commit.Run != nil && commit.Run.ID == run.ID && commit.Run.Status == work.RunFailed &&
+			commit.Event != nil && commit.Event.Kind == "workspace_cleanup_retained" {
+			atomicTerminal = true
+		}
+	}
+	fixture.store.mu.Unlock()
+	core.AssertEqual(t, 1, retained)
+	core.AssertTrue(t, atomicTerminal)
+}
+
 func TestRun_Orchestrator_StartQueue_Bad(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.StartQueue(nil).OK)

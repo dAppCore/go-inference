@@ -65,6 +65,16 @@ type cleanupRecoveryOutcome struct {
 	Error           string
 }
 
+type pendingCleanupRecovery struct {
+	Run            work.Run
+	Receipt        workspace.RecoveryReceipt
+	Kind           string
+	UpdateRun      bool
+	ExpectedStatus work.RunStatus
+	Event          work.Event
+	EventReady     bool
+}
+
 // DispatchReview is the exact source, provider, command, and queue review awaiting dispatch consent.
 type DispatchReview struct {
 	Request      work.DispatchRequest
@@ -125,11 +135,12 @@ type Orchestrator struct {
 	queueMu        sync.Mutex
 	decisionMu     sync.Mutex
 
-	mu         sync.Mutex
-	runs       map[string]Process
-	pending    map[string]DispatchReview
-	executions map[string]*runExecution
-	closed     bool
+	mu                       sync.Mutex
+	runs                     map[string]Process
+	pending                  map[string]DispatchReview
+	pendingCleanupRecoveries map[string]*pendingCleanupRecovery
+	executions               map[string]*runExecution
+	closed                   bool
 }
 
 // New recovers durable state, freezes admission, and starts an idle queue owner.
@@ -179,7 +190,8 @@ func New(options Options) core.Result {
 		logBatchDelay: options.LogBatchDelay, attemptTimeout: options.AttemptTimeout, cleanupTimeout: options.CleanupTimeout,
 		ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1),
 		runs: make(map[string]Process), pending: make(map[string]DispatchReview),
-		executions: make(map[string]*runExecution), closeResult: core.Ok(nil),
+		pendingCleanupRecoveries: make(map[string]*pendingCleanupRecovery),
+		executions:               make(map[string]*runExecution), closeResult: core.Ok(nil),
 	}
 	orchestrator.workers.Add(1)
 	go orchestrator.queueLoop()
@@ -641,6 +653,9 @@ func (orchestrator *Orchestrator) close() core.Result {
 		processes = append(processes, process)
 	}
 	orchestrator.mu.Unlock()
+	if persisted := orchestrator.flushPendingCleanupRecoveries(); !persisted.OK {
+		return persisted
+	}
 
 	if withdrawn := orchestrator.withdrawQueued(); !withdrawn.OK {
 		failures = append(failures, withdrawn.Error())
