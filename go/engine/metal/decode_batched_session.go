@@ -690,11 +690,27 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		// the live and the restored session route those identically by size.
 		foldable := !batchedMLPFoldDisabledForTest && K > batchedDenseICBMaxRows && gpuHasGeluKernel()
 		if s.icb.hasKVTQ() {
-			// TurboQuant ICB caches (#41 S3, v1): every batched lane would land
-			// bf16 rows into (or read bf16 rows from) the packed code caches —
-			// decline to the per-token replay, which is TQ-aware by recording
-			// (prompt prefill and turn-appends go sequential).
-			return decline("turboquant icb caches: per-token replay only (v1)")
+			// TurboQuant ICB caches (#48): the batched pass lands the chunk into
+			// the code caches (encTQKVStoreRows) and scores the ordinary bf16
+			// SDPA against a per-layer scratch reconstructed from the prior codes
+			// (tqBatchedLanding, decode_batched_tq.go). It needs the whole-chunk
+			// batched-rope landing (the fold shape); anything below the fold gate,
+			// a bidirectional span, or a missing kernel declines to the per-token
+			// replay, which is TQ-aware by recording.
+			if batchedTQPrefillDisabledForTest || tqBatchedPrefillEnvOff || batchedMLPFoldDisabledForTest ||
+				batchedRopeDisabledForTest || batchedEpilogueDisabledForTest || sdpaMultiQDisabledForTest ||
+				!gpuHasQKNormRopeRows() || !gpuHasMulRowsKernel() {
+				return decline("turboquant icb caches: batched prefill disabled or fold prerequisites")
+			}
+			if !(K > batchedDenseICBMaxRows) || K <= 1 || !gpuHasGeluKernel() {
+				return decline("turboquant icb caches: batch below the fold gate — per-token replay")
+			}
+			if s.rowAttnCaps != nil {
+				return decline("turboquant icb caches: bidirectional span — per-token replay")
+			}
+			if !s.tqBatchedPrefillUsable() {
+				return decline("turboquant icb caches: store/dequant kernel or fold geometry unservable")
+			}
 		}
 		if s.icb.hasKVQ8() {
 			// q8 ICB caches (#367 slice C): the pass is q8-aware ONLY on the
@@ -1168,6 +1184,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 			}
 			kvQ8Layer := s.icb != nil && s.icb.kvQ8.on(li)
+			kvTQLayer := s.icb != nil && s.icb.kvTQ.on(li)
 			if ownsCache {
 				kDst, vDst, dstOff := layerK, layerV, uint(basePos*kvDim*bf16Size)
 				if kvQ8Layer {
@@ -1175,6 +1192,12 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					// rope/norm there, then ONE rows-store quantises the K rows
 					// into the int8 cache + scale rows — the batch attends its own
 					// rows post-round-trip, exactly as the sequential replay does.
+					kDst, vDst, dstOff = kStage, vStage, 0
+				} else if kvTQLayer {
+					// TQ global owner (#48): project into the shared stage slabs,
+					// rope/norm there, then encTQKVStoreRows quantises the whole
+					// chunk into the code cache + γ planes and encTQKVDequantRows
+					// reconstructs the history into the bf16 scratch the SDPA reads.
 					kDst, vDst, dstOff = kStage, vStage, 0
 				} else if deferredRing {
 					kDst, vDst = s.denseBatch.layerStage(li, len(s.specs), K, foldKVDimMax)
@@ -1217,6 +1240,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// differ. Token-identity tier (S stores bf16 between the GEMMs), the same
 			// boundary the fold's qmm and ≥32-row steel projections already trade at.
 			ownerQ8 := s.icb != nil && s.icb.kvQ8.on(ownIdx) // sharers of a q8 owner read q8 too
+			ownerTQ := s.icb != nil && s.icb.kvTQ.on(ownIdx) // sharers of a TQ owner read its bf16 scratch too
 			// q8 GEMM prefix (#367): the steel GEMM composition reads bf16, so a
 			// q8 owner dequantises its attended prefix into the layer's snapshot
 			// mirrors first (in this encoder, after the landing) and the GEMM
@@ -1276,6 +1300,26 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 						endEncodingFast(enc)
 						return nil, false, err
 					}
+				} else if ownsCache && kvTQLayer {
+					// TQ global owner (#48): rope/norm the STAGED rows in place, then
+					// tqBatchedLanding quantises the whole chunk into the code cache
+					// and reconstructs the code history into the bf16 scratch the SDPA
+					// scores against. V is value-normed but NOT roped, exactly as the
+					// q8 twin above and the recorded per-token store.
+					if err = encQKNormRopeRows(enc, kStage, s.lb[li].kNorm.buf, kStage, 0, s.lb[li].kNorm.off, 0, kvDim, kvDim, offBuf[0], layerRopeFreqs, K, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+					if s.valueNormOnes != nil {
+						if err = encRMSNormRowsBF16(enc, vStage, s.valueNormOnes, vStage, 0, 0, 0, K*lkv, lhd, s.eps); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
+					}
+					if _, _, err = s.tqBatchedLanding(enc, li, basePos, K, kStage, vStage); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
 				} else if ownsCache && deferredRing {
 					// rope/norm the staged rows IN PLACE — the deferred landing copies the
 					// finished bytes into the ring slots, so the landed rows are identical to
@@ -1304,6 +1348,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 						}
 					}
 				}
+			}
+			if ownerTQ {
+				// TQ (#48): score the ordinary bf16 SDPA against the reconstructed
+				// code history — tqBatchedLanding filled the owner's scratch this
+				// chunk (a GQA sharer reads the same owner scratch). ownerQ8 is
+				// false for a TQ layer, so every SDPA route below stays bf16.
+				ownerK, ownerV = s.tqPrefill.k[ownIdx], s.tqPrefill.v[ownIdx]
 			}
 			// the sdpa span, labelled by ROUTE (#375): the lump hid which lane the
 			// time lived in — window flash (sliding layers), the steel GEMM

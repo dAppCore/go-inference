@@ -247,8 +247,13 @@ type archDecodeState struct {
 	coreScratch                    *archDecodeCoreScratch
 	hBuf, xA, xB                   metal.MTLBuffer
 	denseBatch                     denseBatchScratch
-	offBuf                         metal.MTLBuffer
-	offPtr                         *int32
+	// tqPrefill holds the batched TurboQuant prefill's per-layer bf16 read
+	// scratch (#48, decode_batched_tq.go) — the reconstructed code history the
+	// chunk-attention SDPA scores against. nil until a TQ session first prefills
+	// batched; freed at the prefill→decode transition.
+	tqPrefill *tqPrefillScratch
+	offBuf    metal.MTLBuffer
+	offPtr    *int32
 	// offRing rotates the position buffer across step encodes. offBuf holds
 	// ONE int32 the kernels read at EXECUTION time (RoPE position, KV append
 	// row); the submit-ahead chained decode keeps a committed-not-waited link
@@ -572,6 +577,8 @@ func (s *archDecodeState) Close() {
 		s.inputEmbScratch = nil
 	}
 	s.denseBatch.Close()
+	s.releaseTQPrefillScratch()
+	s.tqPrefill = nil
 	for _, cache := range s.pagedKV {
 		if cache != nil {
 			cache.Close()

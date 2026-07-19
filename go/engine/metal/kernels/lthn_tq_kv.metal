@@ -9,13 +9,18 @@ typedef bfloat bf16;
 // cache for GLOBAL attention layers holds TurboQuant CODES (packed Lloyd-Max
 // centroid indices in a rotated basis + one f32 norm per row per head — the
 // kv/turboquant Q_mse format, the same wire layout turboquant_device.go's S2
-// kernels prove), and the decode SDPA reads the codes directly. Four kernel
+// kernels prove), and the decode SDPA reads the codes directly. Five kernel
 // families:
 //
 //   lthn_tq_kv_store_bf16_b{2,3,4}      append: one bf16 staging row
 //                                       [kvHeads × d] → per-head packed codes
 //                                       + per-head γ (the recorded ICB's
-//                                       per-token landing, the q8 store's twin)
+//                                       per-token landing, the q8 store's twin;
+//                                       grid width kvHeads·numRows BATCHES a
+//                                       whole prefill chunk in one dispatch #48)
+//   lthn_tq_kv_dequant_bf16_b{2,3,4}    the store's inverse: packed codes + γ →
+//                                       bf16 rows in ORIGINAL space (Πᵀ·γ·c),
+//                                       the batched-prefill read scratch (#48)
 //   lthn_tq_rot_rows_bf16 /             y = Π·x (and Πᵀ·x) over bf16 rows —
 //   lthn_tq_unrot_rows_bf16             the once-per-step q pre-rotation and
 //                                       the once-per-step output unrotation
@@ -139,6 +144,13 @@ template <int BITS>
   if (c == 0) {
     gammas[head] = gamma;
   }
+  // EVERY thread must finish reading red[0] (γ) before red is reused for u
+  // below: without this barrier a simd-group that reaches the overwrite races a
+  // lagging group still reading red[0], handing it u[0] as γ. Benign at 1
+  // threadgroup (the per-token decode kept the groups in step) but a hard
+  // corruption once the batched prefill interleaves many threadgroups at
+  // d=512's 16 simd-groups — the #48 root cause.
+  threadgroup_barrier(mem_flags::mem_threadgroup);
 
   // u = x/γ in shared memory (every thread's Π-row dot below reads ALL of u)
   red[c] = active ? (xc * invGamma) : 0.0f;
@@ -197,6 +209,72 @@ template <int BITS>
 LTHN_TQ_KV_STORE_INSTANTIATE(2)
 LTHN_TQ_KV_STORE_INSTANTIATE(3)
 LTHN_TQ_KV_STORE_INSTANTIATE(4)
+
+// ---------------------------------------------------------------------------------------------
+// lthn_tq_kv_dequant_bf16<BITS> — the store's inverse for the BATCHED prefill
+// read side (#48): reconstruct packed codes + γ back to bf16 rows in the
+// ORIGINAL (un-rotated) K/V space, so the existing bf16 chunk-attention SDPA
+// scores against them UNCHANGED. One threadgroup per (row×head), flat-indexed
+// exactly like the store (grid width = numRows·kvHeads, codes/γ/out bound at the
+// chunk-range byte offset) so ONE dispatch expands a contiguous [start,end) run.
+//
+// Reconstruction (the store's γ = ‖x‖₂, y = Π·(x/γ), quantise-to-centroids read
+// backwards): x̃ = Πᵀ·(γ·centroid[idx]). This is EXACTLY what the decode SDPA
+// scores implicitly — q·k̃ = q·(γ Πᵀc) = γ·(Πq)·c — so a prefill chunk reading
+// x̃ from a bf16 scratch and a later decode step reading the codes directly agree
+// by construction (the codec band, not byte-tight: the scratch rounds x̃ to bf16
+// once, whereas the decode keeps c/γ split and applies γ after the score sum).
+//
+// ABI: codes(0: u8, offset-bound) gammas(1: f32 [rows·heads], offset-bound)
+//      pi(2: f32 [d,d] row-major) centroids(3: f32 [1<<BITS] ascending)
+//      out(4: bf16 [rows·heads×d], offset-bound) d(5).
+// Dispatch: grid (numRows·kvHeads, 1, 1), threadgroup (LTHN_TQ_KV_CAP, 1, 1).
+template <int BITS>
+[[kernel]] void lthn_tq_kv_dequant_bf16(
+    const device uint8_t* codes     [[buffer(0)]],
+    const device float*   gammas    [[buffer(1)]],
+    const device float*   pi        [[buffer(2)]],
+    const device float*   centroids [[buffer(3)]],
+    device       bf16*    out       [[buffer(4)]],
+    constant     int&     d         [[buffer(5)]],
+    uint g [[threadgroup_position_in_grid]],
+    uint c [[thread_position_in_threadgroup]])
+{
+  threadgroup float y[LTHN_TQ_KV_CAP]; // reconstructed ROTATED row (γ·centroid[idx])
+
+  const bool active = c < (uint)d;
+  const int bytesPerHead = (d * BITS + 7) / 8;
+  const device uint8_t* prow = codes + g * (uint)bytesPerHead;
+  const float gamma = gammas[g];
+
+  // y = γ·centroid[idx] per coordinate (the rotated-space reconstruction)
+  if (active) {
+    const int idx = tq_unpack_idx(prow, c, BITS);
+    y[c] = gamma * centroids[idx];
+  } else {
+    y[c] = 0.0f;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  // x̃ = Πᵀ·y — column c of Π (strided by d), matching lthn_tq_unrot_rows_bf16
+  if (active) {
+    float xc = 0.0f;
+    for (int r = 0; r < d; r++) {
+      xc += pi[(uint)r * (uint)d + c] * y[r];
+    }
+    out[g * (uint)d + c] = bf16(xc);
+  }
+}
+
+#define LTHN_TQ_KV_DEQUANT_INSTANTIATE(BITS)                                    \
+  template [[host_name("lthn_tq_kv_dequant_bf16_b" #BITS)]] [[kernel]] void     \
+  lthn_tq_kv_dequant_bf16<BITS>(                                                \
+      const device uint8_t*, const device float*, const device float*,          \
+      const device float*, device bf16*, constant int&, uint, uint);
+
+LTHN_TQ_KV_DEQUANT_INSTANTIATE(2)
+LTHN_TQ_KV_DEQUANT_INSTANTIATE(3)
+LTHN_TQ_KV_DEQUANT_INSTANTIATE(4)
 
 // ---------------------------------------------------------------------------------------------
 // lthn_tq_rot_rows_bf16<TRANSPOSE> — y = Π·x (TRANSPOSE=false) or y = Πᵀ·x
