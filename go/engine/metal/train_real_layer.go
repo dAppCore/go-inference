@@ -94,6 +94,15 @@ type RealTrainLayerF32 struct {
 	AttnScale float32
 	Window    int // sliding window: row i attends [max(0, i−Window+1), i]; 0 = global (all of [0, i])
 	Eps       float32
+
+	// SharesKV declares a KV-CACHE CONSUMER layer (model.LayerSpec.KVShareFrom naming an earlier
+	// owner): the layer projects ONLY its query and attends the owner's cached rows — no k/v
+	// projection, no K-norm, no value-norm of its own (encAttnHalfShared). A consumer layer
+	// carries NO WK/WV/KNormW and ValueNorm false (the checkpoint has no such tensors); its
+	// KVHeads/HeadDim mirror the owner's cache geometry. The chain wiring (train_real_shared.go)
+	// feeds it the owner's post-rope K and post-value-norm V rows; the single-layer entry points
+	// here refuse it (a consumer's forward is only defined inside a chain).
+	SharesKV bool
 }
 
 // realRopeInvFreqs builds the standard base-derived rope spectrum: invFreq[j] = base^(−2j/rotDim),
@@ -122,11 +131,22 @@ func (L *RealTrainLayerF32) validate() error {
 	if len(L.AttnNormW) != L.DModel || len(L.MLPNormW) != L.DModel {
 		return core.NewError("native.RealTrainLayerF32: norm weights must be [DModel]")
 	}
-	if len(L.WQ) != qDim*L.DModel || len(L.WK) != kvDim*L.DModel || len(L.WO) != L.DModel*qDim {
+	if len(L.WQ) != qDim*L.DModel || len(L.WO) != L.DModel*qDim {
 		return core.NewError("native.RealTrainLayerF32: attention projection weight size mismatch")
 	}
-	if L.WV != nil && len(L.WV) != kvDim*L.DModel { // nil WV = the K==V layer (no v_proj)
-		return core.NewError("native.RealTrainLayerF32: WV must be [KVHeads·HeadDim, DModel] (or nil for a K==V layer)")
+	if L.SharesKV {
+		// a KV-share consumer projects only Q and reads the owner's cached rows: it must carry
+		// NO key/value machinery of its own (encAttnHalfShared applies none).
+		if len(L.WK) != 0 || len(L.WV) != 0 || len(L.KNormW) != 0 || L.ValueNorm {
+			return core.NewError("native.RealTrainLayerF32: a SharesKV consumer carries no WK/WV/KNormW/ValueNorm (it attends the owner's cache)")
+		}
+	} else {
+		if len(L.WK) != kvDim*L.DModel {
+			return core.NewError("native.RealTrainLayerF32: attention projection weight size mismatch")
+		}
+		if L.WV != nil && len(L.WV) != kvDim*L.DModel { // nil WV = the K==V layer (no v_proj)
+			return core.NewError("native.RealTrainLayerF32: WV must be [KVHeads·HeadDim, DModel] (or nil for a K==V layer)")
+		}
 	}
 	if len(L.WGate) != L.DFF*L.DModel || len(L.WUp) != L.DFF*L.DModel || len(L.WDown) != L.DModel*L.DFF {
 		return core.NewError("native.RealTrainLayerF32: MLP projection weight size mismatch")
@@ -163,11 +183,17 @@ func (L *RealTrainLayerF32) projDims(target string) (out, in int, err error) {
 	case ProjQ:
 		return L.Heads * L.HeadDim, L.DModel, nil
 	case ProjV:
+		if L.SharesKV {
+			return 0, 0, core.NewError("native.RealTrainLayerF32: this layer shares another layer's KV cache (no k/v projection of its own) — train the OWNER layer's " + ProjK + "/" + ProjV)
+		}
 		if L.WV == nil {
 			return 0, 0, core.NewError("native.RealTrainLayerF32: this layer shares K==V (no v_proj) — target " + ProjK + " trains both paths")
 		}
 		return L.KVHeads * L.HeadDim, L.DModel, nil
 	case ProjK:
+		if L.SharesKV {
+			return 0, 0, core.NewError("native.RealTrainLayerF32: this layer shares another layer's KV cache (no k/v projection of its own) — train the OWNER layer's " + ProjK + "/" + ProjV)
+		}
 		return L.KVHeads * L.HeadDim, L.DModel, nil
 	case ProjO:
 		return L.DModel, L.Heads * L.HeadDim, nil
@@ -395,6 +421,9 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 	if err := L.validate(); err != nil {
 		return nil, err
 	}
+	if L.SharesKV {
+		return nil, core.NewError("native.RealTrainLayerF32: a SharesKV consumer has no self-contained forward — use realConsumerForwardTape with the owner's cached rows")
+	}
 	if len(h) != L.T*L.DModel {
 		return nil, core.NewError("native.RealTrainLayerF32: h must be [T,DModel]")
 	}
@@ -466,6 +495,18 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 		tp.h1[i] = h[i] + tp.attnBranch[i]
 	}
 
+	realLayerTailForward(tp, L, wGate, wUp, wDown)
+	return tp, nil
+}
+
+// realLayerTailForward runs the layer stations AFTER the attention residual — pre-norm gated-GELU
+// MLP, the PLE gate, the per-layer output scalar — from tp.h1 into tp.out. Shared VERBATIM by the
+// dense/owner forward (realLayerForwardTape) and the KV-share consumer forward
+// (realConsumerForwardTape, train_real_shared.go): the two layer kinds differ only in the
+// attention half, so the tail lives once and cannot drift between them.
+func realLayerTailForward(tp *realLayerTape, L *RealTrainLayerF32, wGate, wUp, wDown []float32) {
+	T, D := L.T, L.DModel
+
 	// MLP half: pre-norm → gate/up → gelu·up → down → residual.
 	tp.mlpNormed = rmsNormForwardF32(tp.h1, L.MLPNormW, T, D, L.Eps)
 	tp.gate = hostLinearF32(tp.mlpNormed, wGate, T, D, L.DFF)
@@ -509,7 +550,6 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 		}
 		tp.out = scaled
 	}
-	return tp, nil
 }
 
 // RealLayerForwardF32 is the pure-host forward of one real gemma4 layer over h [T,DModel] — the
@@ -527,6 +567,10 @@ func RealLayerForwardF32(h []float32, L *RealTrainLayerF32) ([]float32, error) {
 type realLayerGrads struct {
 	dWQ, dWK, dWV, dWO, dWGate, dWUp, dWDown []float32
 	dH                                       []float32
+	// dExtK/dExtV are set ONLY by the KV-share consumer backward (realConsumerBackward,
+	// train_real_shared.go): the gradients w.r.t. the OWNER's cached post-rope K / post-value-norm
+	// V rows this consumer attended ([T, KVHeads·HeadDim] each). nil on dense/owner backwards.
+	dExtK, dExtV []float32
 }
 
 // realLayerBackward walks the tape in reverse: given dout [T,DModel] it returns every projection's
@@ -539,86 +583,9 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 	qDim, kvDim := L.Heads*d, L.KVHeads*d
 	g := &realLayerGrads{}
 
-	// layer scalar backward first (it is the OUTERMOST op): out = scalar·y ⇒ dY = scalar·dout.
-	if L.LayerScalar != 0 {
-		scaled := make([]float32, len(dout))
-		for i := range scaled {
-			scaled[i] = dout[i] * L.LayerScalar
-		}
-		dout = scaled
-	}
-
-	// PLE gate backward (the gate is the layer's last station before the scalar): out = h2 +
-	// rms(proj(mult)), so dH2 = dout + the gate-branch VJP. The PLE weights and the per-layer
-	// input are FROZEN — only the flow back to h2 matters (dPli is discarded: the input is a
-	// constant of the layer).
-	dH2 := dout
-	if L.hasPLE() {
-		dPleProj, _, perr := RMSNormBackwardF32(dout, tp.pleProj, L.PLEPostNormW, T, D, L.Eps)
-		if perr != nil {
-			return nil, perr
-		}
-		// proj forward was mult[T,PLIDim]·WProj[D,PLIDim]ᵀ: M=T, K=PLIDim, N=D → dMult = dy·WProj.
-		dMult := make([]float32, T*L.PLIDim)
-		for m := range T {
-			dyr := dPleProj[m*D : (m+1)*D]
-			for k := range L.PLIDim {
-				var acc float64
-				for n := range D {
-					acc += float64(dyr[n]) * float64(L.PLEProjW[n*L.PLIDim+k])
-				}
-				dMult[m*L.PLIDim+k] = float32(acc)
-			}
-		}
-		dPleGate, _, gerr := GeluGateMulBackwardF32(dMult, tp.pleGate, L.PLEInput, T*L.PLIDim)
-		if gerr != nil {
-			return nil, gerr
-		}
-		// gate forward was h2[T,D]·WGate[PLIDim,D]ᵀ: M=T, K=D, N=PLIDim → dH2gate = dy·WGate.
-		dH2 = make([]float32, T*D)
-		for m := range T {
-			dyr := dPleGate[m*L.PLIDim : (m+1)*L.PLIDim]
-			for k := range D {
-				var acc float64
-				for n := range L.PLIDim {
-					acc += float64(dyr[n]) * float64(L.PLEGateW[n*D+k])
-				}
-				dH2[m*D+k] = dout[m*D+k] + float32(acc) // residual + gate branch
-			}
-		}
-	}
-
-	// MLP half backward: residual → (post-FF sandwich norm) → down → gelu·up → gate/up projections
-	// → pre-FF norm → residual join.
-	dMlpBranchPre := dH2 // h2 = h1 + mlpBranch
-	if len(L.PostFFNormW) > 0 {
-		var err error
-		dMlpBranchPre, _, err = RMSNormBackwardF32(dH2, tp.mlpBranchPre, L.PostFFNormW, T, D, L.Eps)
-		if err != nil {
-			return nil, err
-		}
-	}
-	// down forward was gated[T,DFF]·wDown[D,DFF]ᵀ → [T,D]: M=T, K=DFF, N=D.
-	var dGated []float32
-	dGated, g.dWDown = hostLinearBackwardF32(dMlpBranchPre, tp.gated, wDown, T, L.DFF, D)
-	dGate, dUp, err := GeluGateMulBackwardF32(dGated, tp.gate, tp.up, T*L.DFF)
+	dH1, err := realLayerTailBackward(dout, L, tp, wGate, wUp, wDown, g)
 	if err != nil {
 		return nil, err
-	}
-	dMlpNormedG, dWGate := hostLinearBackwardF32(dGate, tp.mlpNormed, wGate, T, D, L.DFF)
-	dMlpNormedU, dWUp := hostLinearBackwardF32(dUp, tp.mlpNormed, wUp, T, D, L.DFF)
-	g.dWGate, g.dWUp = dWGate, dWUp
-	dMlpNormed := make([]float32, T*D)
-	for i := range dMlpNormed {
-		dMlpNormed[i] = dMlpNormedG[i] + dMlpNormedU[i]
-	}
-	dH1Norm, _, err := RMSNormBackwardF32(dMlpNormed, tp.h1, L.MLPNormW, T, D, L.Eps)
-	if err != nil {
-		return nil, err
-	}
-	dH1 := make([]float32, T*D)
-	for i := range dH1 {
-		dH1[i] = dH2[i] + dH1Norm[i]
 	}
 
 	// attention half backward: residual → (post-attention sandwich norm) → o-proj → SDPA core
@@ -737,6 +704,98 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 		g.dH[i] = dH1[i] + dHNorm[i]
 	}
 	return g, nil
+}
+
+// realLayerTailBackward walks the shared tail stations in reverse — layer scalar → PLE gate → MLP
+// half — from dout to dH1, the gradient at the post-attention residual (tp.h1), filling g's MLP
+// weight gradients on the way. The attention-half backward differs per layer kind (dense/owner vs
+// KV-share consumer) and continues from the returned dH1; the tail is shared VERBATIM so the two
+// backwards cannot drift (the twin of realLayerTailForward).
+func realLayerTailBackward(dout []float32, L *RealTrainLayerF32, tp *realLayerTape, wGate, wUp, wDown []float32, g *realLayerGrads) ([]float32, error) {
+	T, D := L.T, L.DModel
+
+	// layer scalar backward first (it is the OUTERMOST op): out = scalar·y ⇒ dY = scalar·dout.
+	if L.LayerScalar != 0 {
+		scaled := make([]float32, len(dout))
+		for i := range scaled {
+			scaled[i] = dout[i] * L.LayerScalar
+		}
+		dout = scaled
+	}
+
+	// PLE gate backward (the gate is the layer's last station before the scalar): out = h2 +
+	// rms(proj(mult)), so dH2 = dout + the gate-branch VJP. The PLE weights and the per-layer
+	// input are FROZEN — only the flow back to h2 matters (dPli is discarded: the input is a
+	// constant of the layer).
+	dH2 := dout
+	if L.hasPLE() {
+		dPleProj, _, perr := RMSNormBackwardF32(dout, tp.pleProj, L.PLEPostNormW, T, D, L.Eps)
+		if perr != nil {
+			return nil, perr
+		}
+		// proj forward was mult[T,PLIDim]·WProj[D,PLIDim]ᵀ: M=T, K=PLIDim, N=D → dMult = dy·WProj.
+		dMult := make([]float32, T*L.PLIDim)
+		for m := range T {
+			dyr := dPleProj[m*D : (m+1)*D]
+			for k := range L.PLIDim {
+				var acc float64
+				for n := range D {
+					acc += float64(dyr[n]) * float64(L.PLEProjW[n*L.PLIDim+k])
+				}
+				dMult[m*L.PLIDim+k] = float32(acc)
+			}
+		}
+		dPleGate, _, gerr := GeluGateMulBackwardF32(dMult, tp.pleGate, L.PLEInput, T*L.PLIDim)
+		if gerr != nil {
+			return nil, gerr
+		}
+		// gate forward was h2[T,D]·WGate[PLIDim,D]ᵀ: M=T, K=D, N=PLIDim → dH2gate = dy·WGate.
+		dH2 = make([]float32, T*D)
+		for m := range T {
+			dyr := dPleGate[m*L.PLIDim : (m+1)*L.PLIDim]
+			for k := range D {
+				var acc float64
+				for n := range L.PLIDim {
+					acc += float64(dyr[n]) * float64(L.PLEGateW[n*D+k])
+				}
+				dH2[m*D+k] = dout[m*D+k] + float32(acc) // residual + gate branch
+			}
+		}
+	}
+
+	// MLP half backward: residual → (post-FF sandwich norm) → down → gelu·up → gate/up projections
+	// → pre-FF norm → residual join.
+	dMlpBranchPre := dH2 // h2 = h1 + mlpBranch
+	if len(L.PostFFNormW) > 0 {
+		var err error
+		dMlpBranchPre, _, err = RMSNormBackwardF32(dH2, tp.mlpBranchPre, L.PostFFNormW, T, D, L.Eps)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// down forward was gated[T,DFF]·wDown[D,DFF]ᵀ → [T,D]: M=T, K=DFF, N=D.
+	var dGated []float32
+	dGated, g.dWDown = hostLinearBackwardF32(dMlpBranchPre, tp.gated, wDown, T, L.DFF, D)
+	dGate, dUp, err := GeluGateMulBackwardF32(dGated, tp.gate, tp.up, T*L.DFF)
+	if err != nil {
+		return nil, err
+	}
+	dMlpNormedG, dWGate := hostLinearBackwardF32(dGate, tp.mlpNormed, wGate, T, D, L.DFF)
+	dMlpNormedU, dWUp := hostLinearBackwardF32(dUp, tp.mlpNormed, wUp, T, D, L.DFF)
+	g.dWGate, g.dWUp = dWGate, dWUp
+	dMlpNormed := make([]float32, T*D)
+	for i := range dMlpNormed {
+		dMlpNormed[i] = dMlpNormedG[i] + dMlpNormedU[i]
+	}
+	dH1Norm, _, err := RMSNormBackwardF32(dMlpNormed, tp.h1, L.MLPNormW, T, D, L.Eps)
+	if err != nil {
+		return nil, err
+	}
+	dH1 := make([]float32, T*D)
+	for i := range dH1 {
+		dH1[i] = dH2[i] + dH1Norm[i]
+	}
+	return dH1, nil
 }
 
 // RealLayerProjLoRABackwardF32 is the host-side backward of ONE real gemma4 layer with a LoRA on the

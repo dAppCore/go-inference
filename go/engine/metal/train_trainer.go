@@ -24,15 +24,18 @@ import (
 // mirrors go-mlx pkg/metal.LoRAAdapter (Step / StepAccumulated / Loss / Save), with the no-cgo gradient
 // kernels (train_lora.go / train_optim.go) standing in for mlx autodiff.
 //
-// Scope note (the honest boundary, #31 → #40): the HEAD LoRA trains on EVERY shape — the seam is
-// exact over any real base via the frozen capture. Per-LAYER projection targets (TargetKeys naming
-// q_proj/v_proj/…) train through the FD-gated real-arch layer reference (train_real_layer.go +
-// train_trainer_layers.go) — but ONLY on shapes whose every layer feature that reference covers
-// (validatePerLayerLoRAShape): dense attention layers with QK-norm / sandwich norms / value-norm /
-// K==V / PLE / sliding+partial+proportional rope / layer scalars. Any other feature — MoE,
-// KV-cache-sharing (the gemma4 E2B/E4B tail), recurrent mixers, projection biases, logit
-// soft-caps, non-rotary positions — REFUSES per-layer targets at open, naming the blocking
-// feature, exactly the #31 shape: never silently train less (or wronger) than asked.
+// Scope note (the honest boundary, #31 → #40 → #42): the HEAD LoRA trains on EVERY shape — the
+// seam is exact over any real base via the frozen capture. Per-LAYER projection targets
+// (TargetKeys naming q_proj/v_proj/…) train through the FD-gated real-arch layer reference
+// (train_real_layer.go + train_real_shared.go + train_trainer_layers.go) — but ONLY on shapes
+// whose every layer feature that reference covers (validatePerLayerLoRAShape): dense attention
+// layers with QK-norm / sandwich norms / value-norm / K==V / PLE / sliding+partial+proportional
+// rope / layer scalars / KV-cache sharing (the gemma4 E2B/E4B tail — with the stage-1 adapter
+// boundary of validateSharedKVAdapterSubset: adapters at-or-above every consumed owner, k/v
+// excluded on the owner, until the owner-routed dK/dV backward lands). Any other feature — MoE,
+// recurrent mixers, projection biases, logit soft-caps, non-rotary positions — REFUSES per-layer
+// targets at open, naming the blocking feature, exactly the #31 shape: never silently train less
+// (or wronger) than asked.
 
 // loraTargetHead is the one adapter target this trainer trains: the output head. It is the tensor-name
 // prefix LoRATrainer.Save writes (lm_head.lora_a / lm_head.lora_b), the name the load path reads back
@@ -88,10 +91,11 @@ type LoRATrainer struct {
 
 	// per-layer projection mode (#40 stage 3) — set when TargetKeys name layer projections and the
 	// shape passed validatePerLayerLoRAShape; the head factors above are then unused (nil).
-	perLayer bool
-	layers   []*RealTrainLayerF32 // frozen per-layer templates (T + PLEInput filled per sequence)
-	adapters []*layerLoRAAdapter  // the trainable (layer, projection) adapters + optimiser state
-	hasPLE   bool                 // the session computes per-layer inputs (gemma4 E2B/E4B)
+	perLayer  bool
+	layers    []*RealTrainLayerF32 // frozen per-layer templates (T + PLEInput filled per sequence)
+	adapters  []*layerLoRAAdapter  // the trainable (layer, projection) adapters + optimiser state
+	shareFrom []int                // per-layer KV-cache owner map (arch.Layer[i].KVShareFrom; == i for owners)
+	hasPLE    bool                 // the session computes per-layer inputs (gemma4 E2B/E4B)
 }
 
 // NewLoRATrainer opens a head-LoRA trainer over tm: it takes a fresh frozen base session, widens the
@@ -166,9 +170,20 @@ func NewLoRATrainer(tm *NativeTokenModel, cfg inference.TrainingConfig) (*LoRATr
 		eps:       eps,
 	}
 	if perLayer {
+		shareFrom := make([]int, len(tm.arch.Layer))
+		for li := range tm.arch.Layer {
+			shareFrom[li] = tm.arch.Layer[li].KVShareFrom
+		}
 		layers, lerr := buildRealLayerTemplates(tm.bf16, tm.arch)
 		if lerr == nil {
 			t.adapters, lerr = buildLayerAdapters(layers, cfg.LoRA.TargetKeys, rank, lr)
+		}
+		if lerr == nil {
+			// the stage-1 shared-KV boundary (#42): on a KV-sharing stack, only adapter
+			// placements for which the cached rows are constants of every trainable parameter
+			// are exact without the owner-routed dK/dV path — anything else refuses, naming
+			// that path (realSharedChainBackward's exactness rule).
+			lerr = validateSharedKVAdapterSubset(shareFrom, t.adapters)
 		}
 		if lerr != nil {
 			_ = sess.Close()
@@ -176,6 +191,7 @@ func NewLoRATrainer(tm *NativeTokenModel, cfg inference.TrainingConfig) (*LoRATr
 		}
 		t.perLayer = true
 		t.layers = layers
+		t.shareFrom = shareFrom
 		t.hasPLE = sess.perLayerInput != nil
 		return t, nil
 	}

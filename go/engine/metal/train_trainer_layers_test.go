@@ -75,12 +75,21 @@ func eligibleFixtureModel(nL int) (*BF16Model, model.Arch) {
 	return g, arch
 }
 
-// TestValidatePerLayerLoRAShape_Good: the eligible dense shape passes the stage-3 gate.
+// TestValidatePerLayerLoRAShape_Good: the eligible dense shape passes the stage-3 gate, and a
+// WELL-FORMED KV-sharing shape now passes it too (#42 — the consumer mirror is FD-gated; which
+// adapter placements train is the separate validateSharedKVAdapterSubset gate).
 func TestValidatePerLayerLoRAShape_Good(t *testing.T) {
 	g, arch := eligibleFixtureModel(2)
 	tm := &NativeTokenModel{NativeBackend: &NativeBackend{arch: arch}, bf16: g}
 	if err := validatePerLayerLoRAShape(tm); err != nil {
 		t.Fatalf("the eligible dense shape must pass: %v", err)
+	}
+	gS, archS := eligibleFixtureModel(2)
+	archS.Layer[1].KVShareFrom = 0 // layer 1 consumes layer 0's cache — the E2B tail shape
+	archS.Layer[1].CacheIndex = -1
+	tmS := &NativeTokenModel{NativeBackend: &NativeBackend{arch: archS}, bf16: gS}
+	if err := validatePerLayerLoRAShape(tmS); err != nil {
+		t.Fatalf("a well-formed KV-sharing shape must pass the shape gate (#42): %v", err)
 	}
 }
 
@@ -102,9 +111,17 @@ func TestValidatePerLayerLoRAShape_Bad(t *testing.T) {
 	if err := validatePerLayerLoRAShape(nil); err == nil || !strings.Contains(err.Error(), "lm_head") {
 		t.Fatalf("nil model must refuse with the lm_head pointer; got: %v", err)
 	}
-	check("kv sharing", "KV-cache sharing", func(g *BF16Model, arch *model.Arch) {
+	// well-formed KV sharing passes since #42 (see _Good); only a topology the decode itself
+	// could not serve refuses — a later/self "owner", an owner that is itself a consumer, and a
+	// consumer whose cache geometry differs from its owner's.
+	check("kv share later owner", "malformed KV-share topology", func(g *BF16Model, arch *model.Arch) {
+		arch.Layer[0].KVShareFrom = 1
+		arch.Layer[0].CacheIndex = -1
+	})
+	check("kv share geometry mismatch", "cache geometry", func(g *BF16Model, arch *model.Arch) {
 		arch.Layer[1].KVShareFrom = 0
 		arch.Layer[1].CacheIndex = -1
+		arch.Layer[1].HeadDim = arch.Layer[0].HeadDim * 2
 	})
 	check("moe", "MoE", func(g *BF16Model, arch *model.Arch) { arch.Experts = 8 })
 	check("moe layer", "MoE", func(g *BF16Model, arch *model.Arch) { arch.Layer[0].MoE = true })
@@ -312,19 +329,19 @@ func TestLoRATrainerPerLayerSFT_Good(t *testing.T) {
 	}
 }
 
-// TestNewLoRATrainerPerLayer_Bad: the refusal boundary in both directions on a REAL model — a
-// KV-sharing shape (the gemma4 E2B/E4B tail) refuses per-layer targets naming the feature, while
-// the head adapter still opens on the very same model.
-func TestNewLoRATrainerPerLayer_Bad(t *testing.T) {
-	requireNativeRuntime(t)
-	const dModel, nHeads, nKV, headDim, dFF, vocab, nL = 64, 2, 1, 32, 128, 32, 2
+// sharingFixtureTokenModel builds the runtime KV-sharing fixture: nL uniform full-attention
+// layers with the LAST numShared sharing the most recent owner's cache (model.DeriveLayers — the
+// gemma4 E2B/E4B tail shape), bound as a real NativeTokenModel.
+func sharingFixtureTokenModel(t *testing.T, nL, numShared int) *NativeTokenModel {
+	t.Helper()
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 64, 2, 1, 32, 128, 32
 	layers := make([]DecodeLayerWeights, nL)
 	types := make([]string, nL)
 	for li := range layers {
 		layers[li] = stableLayerWeights(dModel, nHeads, nKV, headDim, dFF, (li+1)*100)
 		types[li] = "full_attention"
 	}
-	specs := model.DeriveLayers(types, 1) // the last layer SHARES the first's KV cache
+	specs := model.DeriveLayers(types, numShared)
 	for i := range specs {
 		specs[i].HeadDim, specs[i].KVHeads = headDim, nKV
 	}
@@ -340,12 +357,86 @@ func TestNewLoRATrainerPerLayer_Bad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewBF16TokenModel: %v", err)
 	}
+	return tm
+}
 
-	_, err = NewLoRATrainer(tm, inference.TrainingConfig{LoRA: inference.LoRAConfig{TargetKeys: []string{"q_proj"}}})
-	if err == nil {
-		t.Fatal("per-layer targets on a KV-sharing shape must be refused")
+// TestNewLoRATrainerSharedKV_Good: the stage-1 subset OPENS on a real KV-sharing session (#42) —
+// owner + 2 consumers, q_proj everywhere — and at B = 0 the share-aware host chain reproduces the
+// ENGINE's own captured hiddens layer by layer, consumers included: the receipt that the consumer
+// mirror carries encAttnHalfShared's exact semantics (owner-position rope'd K, value-normed V,
+// read as-is).
+func TestNewLoRATrainerSharedKV_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	tm := sharingFixtureTokenModel(t, 3, 2) // layer 0 owns; layers 1 and 2 attend its cache
+	tr, err := NewLoRATrainer(tm, inference.TrainingConfig{
+		LoRA:         inference.LoRAConfig{Rank: 4, Alpha: 8, TargetKeys: []string{"q_proj"}},
+		LearningRate: 0.02,
+	})
+	if err != nil {
+		t.Fatalf("NewLoRATrainer must accept the stage-1 subset on a sharing shape: %v", err)
 	}
-	for _, want := range []string{"q_proj", "KV-cache sharing", "lm_head"} {
+	defer func() { _ = tr.Close() }()
+	if !tr.perLayer || len(tr.adapters) != 3 {
+		t.Fatalf("expected the layers mode with q_proj on all 3 layers: perLayer=%v adapters=%d", tr.perLayer, len(tr.adapters))
+	}
+
+	// B = 0 parity anchor: the share-aware host chain must reproduce the engine's captured
+	// hiddens — the consumer layers are the ones under test (they attend layer 0's cache).
+	ids := []int32{1, 2, 3, 4, 5, 6}
+	embeds, perLayer, err := tr.sess.ForwardCaptureHiddens(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureHiddens: %v", err)
+	}
+	sets, err := tr.effectiveWeightSets()
+	if err != nil {
+		t.Fatalf("effectiveWeightSets: %v", err)
+	}
+	_, tapes, err := tr.layerChainForward(ids, embeds, sets)
+	if err != nil {
+		t.Fatalf("layerChainForward: %v", err)
+	}
+	for li := range tapes {
+		host := toBF16Bytes(tapes[li].out)
+		cos := cosineBF16(host, perLayer[li])
+		t.Logf("layer %d host-chain vs engine-capture cosine=%.6f (KVShareFrom=%d)", li, cos, tm.arch.Layer[li].KVShareFrom)
+		if cos < 0.999 {
+			t.Fatalf("layer %d: the shared-KV host chain diverges from the engine's own forward (cosine=%.6f) — the consumer mirror does not carry encAttnHalfShared's semantics", li, cos)
+		}
+	}
+
+	// and the loop trains: a few steps on a tiny batch reduce the loss through the shared stack.
+	batch := inference.Batch{TokenIDs: [][]int32{{1, 2, 3, 4, 5, 6}}}
+	loss0, err := tr.Loss(batch)
+	if err != nil {
+		t.Fatalf("initial loss: %v", err)
+	}
+	var lossLast float64
+	for s := range 20 {
+		l, serr := tr.Step(batch)
+		if serr != nil {
+			t.Fatalf("step %d: %v", s, serr)
+		}
+		lossLast = l
+	}
+	if lossLast >= loss0 {
+		t.Fatalf("shared-KV per-layer SFT did not reduce loss: first=%.4f last=%.4f", loss0, lossLast)
+	}
+	t.Logf("shared-KV per-layer SFT receipt: loss %.4f -> %.4f over 20 steps (q_proj on owner + 2 consumers)", loss0, lossLast)
+}
+
+// TestNewLoRATrainerPerLayer_Bad: the refusal boundary in both directions on a REAL model — on a
+// KV-sharing shape the stage-1 subset rule refuses an owner's k_proj (its cached rows feed the
+// consumers; the owner-routed dK/dV path is not wired), naming the missing path, while the head
+// adapter still opens on the very same model.
+func TestNewLoRATrainerPerLayer_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+	tm := sharingFixtureTokenModel(t, 2, 1) // the last layer SHARES the first's KV cache
+
+	_, err := NewLoRATrainer(tm, inference.TrainingConfig{LoRA: inference.LoRAConfig{TargetKeys: []string{"k_proj"}}})
+	if err == nil {
+		t.Fatal("an owner's k_proj on a KV-sharing shape must be refused (the owner-routed path is not wired)")
+	}
+	for _, want := range []string{"k_proj", "SHARED KV cache", "owner-routed", "lm_head"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the boundary refusal must name %q; got: %s", want, err.Error())
 		}
