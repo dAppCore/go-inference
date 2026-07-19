@@ -659,3 +659,54 @@ func (s *duckDatasetStore) Exports(datasetID string) core.Result {
 	}
 	return core.Ok(out)
 }
+
+// ---- CLI-facing entry point ----
+
+// DatasetStore is the [dataset.Store] handle [OpenDatasetStore] returns.
+// Callers close it exactly once when done (typically via defer) — the
+// interface exists purely so a caller outside this package (cli/data.go,
+// the serve/ssd capture taps) can hold and close the concrete
+// *duckDatasetStore [OpenDatasetStore] builds without naming its
+// unexported type: Go's structural typing lets an unexported
+// implementation satisfy an exported interface asserted from outside the
+// package, exactly as dataset.Store itself already does.
+type DatasetStore interface {
+	dataset.Store
+	// Close releases the underlying DuckDB connection. Safe to call on an
+	// already-closed store.
+	Close() core.Result
+}
+
+// OpenDatasetStore opens (creating the ~/.lem layout and migrating
+// datasets.duckdb if either is absent) the one dataset store every `lem
+// data` verb and the serve/ssd capture taps share — "open the DuckDB
+// store via the cli/tui dataset machinery" per the dataset loop design,
+// so no caller outside this package ever resolves the ~/.lem path
+// itself (see appPathsAt's medium-backed path contract). There is no
+// --home override: the root always resolves from $HOME via
+// defaultAppPaths, matching every other ~/.lem consumer in this binary —
+// tests redirect it with t.Setenv("HOME", ...), the same seam
+// cli/serve_test.go already uses for the admin-token path.
+//
+//	opened := tui.OpenDatasetStore()
+//	if !opened.OK { return opened }
+//	store := opened.Value.(tui.DatasetStore)
+//	defer store.Close()
+func OpenDatasetStore() core.Result {
+	pathsResult := defaultAppPaths()
+	if !pathsResult.OK {
+		return pathsResult
+	}
+	paths, ok := pathsResult.Value.(appPaths)
+	if !ok {
+		return core.Fail(core.E("tui.OpenDatasetStore", "invalid application paths result", nil))
+	}
+	// openAppFilesAt ensures the ~/.lem layout exists (root + the standard
+	// subdirectories) before the DuckDB adapter ever touches it — the same
+	// preparation loadDefaultWorkspace runs for lem.duckdb, applied here to
+	// datasets.duckdb's separate root-relative path.
+	if ensured := openAppFilesAt(paths.Root); !ensured.OK {
+		return core.Fail(core.E("tui.OpenDatasetStore", "ensure application layout", resultError(ensured)))
+	}
+	return newDuckDatasetStore(paths.Datasets)
+}

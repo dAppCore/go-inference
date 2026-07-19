@@ -82,6 +82,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runPackCommand(ctx, args[1:], stdout, stderr)
 	case "quant":
 		return runQuantCommand(ctx, args[1:], stdout, stderr)
+	case "data":
+		return runDataCommand(ctx, args[1:], stdout, stderr)
 	case "spec":
 		return runSpecCommand(ctx, args[1:], stdout, stderr)
 	case "ebook":
@@ -122,6 +124,9 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Convert\n")
 	core.WriteString(w, "  quant               quantise a dense model dir (MLX, GPTQ, FP8, NF4, or GGUF)\n")
+	core.WriteString(w, "\n")
+	core.WriteString(w, "Data\n")
+	core.WriteString(w, "  data                the training-data loop: create/list/stats/import/score/export/archive/review\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "API\n")
 	core.WriteString(w, "  spec                export the OpenAPI document for lem's HTTP surface (feeds SDK generation)\n")
