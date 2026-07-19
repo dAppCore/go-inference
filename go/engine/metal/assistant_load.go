@@ -1272,6 +1272,15 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 					return AssistantDraftBlockResult{}, herr
 				}
 				tok, headed = t, hok
+			} else if vl := fused.plainHeadLogits(); vl != nil && confProbs == nil {
+				// plain tied-embedding head (26B pair): the vocab gemv already ran
+				// in the fused CB — selection is one host argmax over its logits,
+				// replacing the separate MatVecBF16Into submit+wait per step.
+				t, gerr := pair.Assistant.draftGreedyTokenWithSuppress(vl, suppress)
+				if gerr != nil {
+					return AssistantDraftBlockResult{}, gerr
+				}
+				tok, headed = t, true
 			}
 			if !headed {
 				logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)

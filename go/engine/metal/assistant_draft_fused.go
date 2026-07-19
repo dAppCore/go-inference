@@ -230,6 +230,19 @@ func newAssistantFusedDraft(m *AssistantModel) (*assistantFusedDraft, error) {
 			return nil, core.NewError("native.assistant fused draft ordered-head scratch allocation failed")
 		}
 		f.numCentroids, f.vocab = numCentroids, vocab
+	} else if vocab := m.Arch.Vocab; vocab > 0 {
+		// Plain tied-embedding head (gemma4_unified assistants — the 26B pair's
+		// drafter): the full-vocab logits gemv rides the SAME fused command
+		// buffer, replacing draftLogitsIntoScratch's separate MatVecBF16Into
+		// submit+wait per draft step (#53: ~1-2ms of the 26B draft block was
+		// that round-trip). Arming is best-effort: a missing/quantised embed
+		// tensor leaves embedW nil and the caller keeps the host head — the
+		// fused transformer is not forfeited over the head.
+		if embedW, eerr := fusedTensorBuf(m, "model.embed_tokens.weight", vocab*hidden); eerr == nil {
+			if logits := scratchBF16(vocab); logits != nil {
+				f.embedW, f.vocabLogits, f.vocab = embedW, logits, vocab
+			}
+		}
 	}
 	f.inConcat = scratchBF16(2 * backbone)
 	f.h = scratchBF16(hidden)
@@ -340,6 +353,8 @@ func (f *assistantFusedDraft) step(tokenEmbedding, previousHidden, normedOut, hi
 		if f.centroidsW != nil {
 			emit(encGemvBF16(enc, f.centroidsW, f.outNormed, f.centroidScores, f.numCentroids, f.hidden))
 			emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
+		} else if f.embedW != nil { // plain tied-embedding head: one gemv, same CB
+			emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
 		}
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
@@ -386,4 +401,16 @@ func (f *assistantFusedDraft) headScores() ([]byte, []byte) {
 	}
 	return unsafe.Slice((*byte)(f.centroidScores.Contents()), f.numCentroids*bf16Size),
 		unsafe.Slice((*byte)(f.vocabLogits.Contents()), f.vocab*bf16Size)
+}
+
+// plainHeadLogits returns a host view of the plain tied-embedding head's
+// full-vocab logits from the last step — armed only for non-ordered assistants
+// whose embed gemv rode the fused command buffer. nil when unarmed (ordered
+// head present, or the embed tensor was not bf16-resident); the caller then
+// keeps the host-side head, byte-identically.
+func (f *assistantFusedDraft) plainHeadLogits() []byte {
+	if f == nil || f.centroidsW != nil || f.embedW == nil || f.vocabLogits == nil {
+		return nil
+	}
+	return unsafe.Slice((*byte)(f.vocabLogits.Contents()), f.vocab*bf16Size)
 }
