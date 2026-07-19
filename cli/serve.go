@@ -66,6 +66,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		core.WriteString(stderr, "  POST /api/chat               Ollama chat\n")
 		core.WriteString(stderr, "  POST /v1/embeddings          embedding vectors (chat model or --embed-model)\n")
 		core.WriteString(stderr, "  POST /v1/rerank              document reranking (chat model or --embed-model)\n")
+		core.WriteString(stderr, "  POST /v1/audio/transcriptions  ASR (multipart or JSON data-URL) — --model a Whisper checkpoint serves this INSTEAD of chat/embeddings\n")
 		core.WriteString(stderr, "  GET  /v1/models              list loaded models\n")
 		core.WriteString(stderr, "  GET  /v1/health              process health probe\n")
 	}

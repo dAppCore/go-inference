@@ -19,12 +19,16 @@ import (
 
 // DetectLanguage runs one decoder step from just <|startoftranscript|>, restricts the argmax to the
 // checkpoint's known language-token ids (generation_config.json's lang_to_id), and returns the winning
-// token id plus its bare code ("en").
+// token id plus its bare code ("en"). This is a standalone, one-off decoder pass — its own fresh
+// SelfAttnCache, discarded once DetectLanguage returns — never shared with GreedyDecode's own cache: the
+// hypothetical first content token this step evaluates is not part of the real generation (matching the
+// reference: language detection and the real decode are separate forward passes).
 func DetectLanguage(crossKV []CrossKV, tenc int, w *Weights, cfg *Config, gen *GenerationConfig) (int32, string, error) {
 	if gen == nil || len(gen.LangToID) == 0 {
 		return 0, "", core.NewError("whisper.DetectLanguage: generation config carries no language tokens")
 	}
-	logits, err := DecodeLogits([]int32{gen.DecoderStartTokenID}, crossKV, tenc, w, cfg)
+	cache := NewSelfAttnCache(len(w.DecoderLayers))
+	logits, err := DecodeLogitsStep([]int32{gen.DecoderStartTokenID}, 0, cache, crossKV, tenc, w, cfg)
 	if err != nil {
 		return 0, "", err
 	}
@@ -92,6 +96,14 @@ func maxDecodeLength(cfg *Config, gen *GenerationConfig) int {
 // generate() does, stopping at EOS or the resolved length bound. Returns the CONTENT token ids only —
 // the prompt is not echoed back (mirroring how tokenizer.Decode is about to strip every special token
 // anyway; a caller wanting the raw sequence prepends initTokens itself).
+//
+// KV CACHE: logits are sourced from DecodeLogitsStep, not DecodeLogits — one fresh SelfAttnCache for the
+// whole call, fed the entire init prompt as ONE prefill batch on the loop's first iteration (populating
+// the cache for positions [0,beginIndex)) and exactly one new token per iteration after. The surrounding
+// loop shape (the `for len(ids) < limit` guard, the suppress/beginSuppress application, the EOS-before-
+// append check) is UNCHANGED from the original whole-sequence-recompute version — only WHERE logits comes
+// from differs — so this produces bit-identical output (see decoder.go's file doc comment for why, and
+// decoder_test.go's parity test for the proof).
 func GreedyDecode(crossKV []CrossKV, tenc int, w *Weights, cfg *Config, gen *GenerationConfig, initTokens []int32) ([]int32, error) {
 	if len(initTokens) == 0 {
 		return nil, core.NewError("whisper.GreedyDecode: empty init prompt")
@@ -108,9 +120,18 @@ func GreedyDecode(crossKV []CrossKV, tenc int, w *Weights, cfg *Config, gen *Gen
 	}
 
 	limit := maxDecodeLength(cfg, gen)
+	cache := NewSelfAttnCache(len(w.DecoderLayers))
+	prefilled := false
 	var content []int32
 	for len(ids) < limit {
-		logits, err := DecodeLogits(ids, crossKV, tenc, w, cfg)
+		var logits []float32
+		var err error
+		if !prefilled {
+			logits, err = DecodeLogitsStep(initTokens, 0, cache, crossKV, tenc, w, cfg)
+			prefilled = true
+		} else {
+			logits, err = DecodeLogitsStep(ids[len(ids)-1:], len(ids)-1, cache, crossKV, tenc, w, cfg)
+		}
 		if err != nil {
 			return nil, err
 		}

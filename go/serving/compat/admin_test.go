@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	core "dappco.re/go"
@@ -120,6 +121,51 @@ func TestAdminHealthHandler_CustomCallbackError_NewMuxWithAdmin_Bad(t *testing.T
 	}
 	if !core.Contains(rec.Body.String(), "health check boom") {
 		t.Fatalf("body = %s, want the callback error", rec.Body.String())
+	}
+}
+
+// fakeTranscriber is a minimal inference.Transcriber stub — proves AdminConfig.Transcriber's wiring
+// through NewMuxWithAdmin, distinct from openai.TranscriptionHandler's own unit tests
+// (serving/provider/openai/transcription_test.go), which construct the handler directly rather than via
+// the assembled mux.
+type fakeTranscriber struct {
+	text, language string
+}
+
+func (f *fakeTranscriber) TranscribeAudio([]byte, string) (string, string, error) {
+	return f.text, f.language, nil
+}
+
+// TestTranscriptionRoute_ConfiguredTranscriber_NewMuxWithAdmin_Good proves AdminConfig.Transcriber
+// reaches POST /v1/audio/transcriptions through the assembled mux.
+func TestTranscriptionRoute_ConfiguredTranscriber_NewMuxWithAdmin_Good(t *testing.T) {
+	resolver := openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": newFakeTextModel()})
+	mux := NewMuxWithAdmin(resolver, AdminConfig{Transcriber: &fakeTranscriber{text: "hello", language: "en"}})
+	rec := httptest.NewRecorder()
+	body := `{"audio":"data:audio/wav;base64,UklGRg=="}`
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, openaicompat.DefaultTranscriptionsPath, strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /v1/audio/transcriptions = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if !core.Contains(rec.Body.String(), `"text":"hello"`) {
+		t.Fatalf("body = %s, want text=hello", rec.Body.String())
+	}
+}
+
+// TestTranscriptionRoute_NoTranscriber_NewMuxWithAdmin_Bad proves the route stays MOUNTED (not a 404)
+// when AdminConfig.Transcriber is unset — a non-whisper (or model-less) serve still answers the clean
+// capability refusal, mirroring the vision/audio 400 pattern rather than an unmounted route's 404.
+func TestTranscriptionRoute_NoTranscriber_NewMuxWithAdmin_Bad(t *testing.T) {
+	resolver := openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": newFakeTextModel()})
+	mux := NewMuxWithAdmin(resolver, AdminConfig{})
+	rec := httptest.NewRecorder()
+	body := `{"audio":"data:audio/wav;base64,UklGRg=="}`
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, openaicompat.DefaultTranscriptionsPath, strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/audio/transcriptions (no transcriber) = %d, want 400 (mounted, capability refusal — not a 404)", rec.Code)
+	}
+	if !core.Contains(rec.Body.String(), "does not support audio transcription") {
+		t.Fatalf("body = %s, want the capability refusal", rec.Body.String())
 	}
 }
 

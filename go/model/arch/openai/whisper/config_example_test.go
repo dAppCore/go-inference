@@ -23,3 +23,11 @@ func ExampleConfig_InferFromWeights() {
 	core.Println(cfg.DModel)
 	// Output: 384
 }
+
+// ExampleIsWhisperCheckpoint shows the probe serve's --model detection uses: no config.json here (this
+// package's testdata/ deliberately carries no bare "config.json" — see config_test.go's fixture naming),
+// so this predictably reports false without needing a real checkpoint on disk.
+func ExampleIsWhisperCheckpoint() {
+	core.Println(IsWhisperCheckpoint("testdata"))
+	// Output: false
+}

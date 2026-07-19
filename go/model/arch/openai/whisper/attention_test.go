@@ -105,7 +105,7 @@ func TestMHACore_Good(t *testing.T) {
 	q := make([]float32, 3*2)
 	k := make([]float32, 3*2)
 	v := []float32{1, 1, 3, 3, 5, 5}
-	out := mhaCore(q, k, v, 3, 3, 1, 2, false)
+	out := mhaCore(q, k, v, 3, 3, 1, 2, 0, false)
 	wantMean := float32(3) // mean of {1,3,5}
 	for i := 0; i < 3; i++ {
 		if math.Abs(float64(out[i*2]-wantMean)) > 1e-4 {
@@ -114,20 +114,36 @@ func TestMHACore_Good(t *testing.T) {
 	}
 }
 
-// TestMHACore_Bad proves causal masking blocks the future: at query position 0, only key 0 is visible,
-// so a uniform-score causal attention at position 0 must equal v[0] exactly — NOT the mean over all
-// three keys the non-causal case (_Good) produces.
+// TestMHACore_Bad proves causal masking blocks the future — at query position 0, only key 0 is visible,
+// so a uniform-score causal attention at position 0 must equal v[0] exactly, NOT the mean over all three
+// keys the non-causal case (_Good) produces — AND proves the offset parameter shifts that same boundary
+// the way a cached decode step needs: two queries (Tq=2) attending over a Tk=5 key/value set with
+// offset=3 means query row 0 sees keys [0,3] (limit 4, key 4 hidden) and query row 1 sees keys [0,4]
+// (limit 5, every key) — the shape selfAttentionForwardCached relies on when a new row batch is appended
+// onto a non-empty cache.
 func TestMHACore_Bad(t *testing.T) {
 	q := make([]float32, 3*2)
 	k := make([]float32, 3*2)
 	v := []float32{1, 1, 3, 3, 5, 5}
-	out := mhaCore(q, k, v, 3, 3, 1, 2, true)
+	out := mhaCore(q, k, v, 3, 3, 1, 2, 0, true)
 	if out[0] != 1 || out[1] != 1 {
 		t.Fatalf("mhaCore causal row 0 = %v, want exactly v[0]=[1,1] (only key 0 is visible)", out[0:2])
 	}
 	// row 2 (last) sees all three keys, same as the non-causal case.
 	if math.Abs(float64(out[2*2]-3)) > 1e-4 {
 		t.Fatalf("mhaCore causal row 2 = %v, want mean-of-V 3 (every key ≤2 is visible)", out[2*2])
+	}
+
+	qOff := make([]float32, 2*2) // Tq=2, headDim=2, all-zero ⇒ uniform scores within whatever's visible
+	kOff := make([]float32, 5*2) // Tk=5
+	vOff := []float32{1, 1, 2, 2, 3, 3, 4, 4, 100, 100}
+	outOff := mhaCore(qOff, kOff, vOff, 2, 5, 1, 2, 3, true)
+	if math.Abs(float64(outOff[0]-2.5)) > 1e-4 {
+		t.Fatalf("mhaCore(offset=3) row 0 = %v, want mean-of-first-4 2.5 (key 4 must stay hidden)", outOff[0])
+	}
+	wantRow1 := float32((1 + 2 + 3 + 4 + 100) / 5.0)
+	if math.Abs(float64(outOff[2]-wantRow1)) > 1e-3 {
+		t.Fatalf("mhaCore(offset=3) row 1 = %v, want mean-of-all-5 %v (every key now visible)", outOff[2], wantRow1)
 	}
 }
 
@@ -138,7 +154,7 @@ func TestMHACore_Ugly(t *testing.T) {
 	q := []float32{0, 0}
 	k := []float32{0, 0}
 	v := []float32{100, 200}
-	out := mhaCore(q, k, v, 1, 1, 2, 1, false)
+	out := mhaCore(q, k, v, 1, 1, 2, 1, 0, false)
 	if out[0] != 100 || out[1] != 200 {
 		t.Fatalf("mhaCore heads = %v, want [100,200] (heads must not mix)", out)
 	}
@@ -188,6 +204,56 @@ func TestSelfAttentionForward_Ugly(t *testing.T) {
 	}
 	if _, err := selfAttentionForward([]float32{1, 2}, 1, 2, 2, true, aw); err != nil {
 		t.Fatalf("selfAttentionForward(H=D headDim=1): %v", err)
+	}
+}
+
+// TestSelfAttentionForwardCached_Good proves a single-row call against a FRESH (empty) cache reproduces
+// selfAttentionForward's own single-token causal output bit-for-bit (offset=0, one key — itself — visible
+// either way; see attention.go's file doc comment for why this equivalence generalises to any sequence
+// length), AND that the cache actually grew by the new row's K/V.
+func TestSelfAttentionForwardCached_Good(t *testing.T) {
+	aw := AttnWeights{
+		Q:   LinearWeights{Weight: []float32{1, 0, 0, 1}, Bias: []float32{0, 0}, In: 2, Out: 2},
+		K:   LinearWeights{Weight: []float32{1, 0, 0, 1}, In: 2, Out: 2},
+		V:   LinearWeights{Weight: []float32{1, 0, 0, 1}, Bias: []float32{0, 0}, In: 2, Out: 2},
+		Out: LinearWeights{Weight: []float32{1, 0, 0, 1}, Bias: []float32{0, 0}, In: 2, Out: 2},
+	}
+	x := []float32{1, 2}
+	want, err := selfAttentionForward(x, 1, 2, 1, true, aw)
+	if err != nil {
+		t.Fatalf("selfAttentionForward: %v", err)
+	}
+	cache := &SelfAttnCache{}
+	got, err := selfAttentionForwardCached(x, 1, 2, 1, aw, cache)
+	if err != nil {
+		t.Fatalf("selfAttentionForwardCached: %v", err)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("selfAttentionForwardCached(fresh cache) = %v, want %v (bit-identical to selfAttentionForward)", got, want)
+		}
+	}
+	if len(cache.K) != 2 || len(cache.V) != 2 {
+		t.Fatalf("cache after one row = K len %d, V len %d, want 2/2 (one row of D=2)", len(cache.K), len(cache.V))
+	}
+}
+
+func TestSelfAttentionForwardCached_Bad(t *testing.T) {
+	aw := AttnWeights{Q: LinearWeights{In: 3, Out: 3}, K: LinearWeights{In: 3, Out: 3}, V: LinearWeights{In: 3, Out: 3}, Out: LinearWeights{In: 3, Out: 3}}
+	if _, err := selfAttentionForwardCached(make([]float32, 3), 1, 3, 2, aw, &SelfAttnCache{}); err == nil {
+		t.Fatal("selfAttentionForwardCached accepted D=3 not divisible by H=2")
+	}
+}
+
+// TestSelfAttentionForwardCached_Ugly proves a nil cache pointer is refused cleanly rather than panicking
+// on the nil dereference `len(cache.K)` would otherwise hit — distinct from _Bad's dimension mismatch.
+func TestSelfAttentionForwardCached_Ugly(t *testing.T) {
+	aw := AttnWeights{
+		Q: LinearWeights{Weight: []float32{1, 0, 0, 1}, In: 2, Out: 2}, K: LinearWeights{Weight: []float32{1, 0, 0, 1}, In: 2, Out: 2},
+		V: LinearWeights{Weight: []float32{1, 0, 0, 1}, In: 2, Out: 2}, Out: LinearWeights{Weight: []float32{1, 0, 0, 1}, In: 2, Out: 2},
+	}
+	if _, err := selfAttentionForwardCached([]float32{1, 2}, 1, 2, 1, aw, nil); err == nil {
+		t.Fatal("selfAttentionForwardCached accepted a nil cache")
 	}
 }
 

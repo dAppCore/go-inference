@@ -148,3 +148,107 @@ func TestDecodeLogits_Ugly(t *testing.T) {
 		t.Fatal("DecodeLogits accepted a token id outside the vocabulary")
 	}
 }
+
+// TestNewSelfAttnCache_Good proves one empty cache entry per decoder layer — mirrors PrecomputeCrossKV's
+// one-entry-per-layer shape, but empty (self-attention K/V are not known before decoding starts, unlike
+// cross-attention K/V which are fixed from the encoder output).
+func TestNewSelfAttnCache_Good(t *testing.T) {
+	cache := NewSelfAttnCache(4)
+	if len(cache) != 4 {
+		t.Fatalf("NewSelfAttnCache(4) returned %d entries, want 4", len(cache))
+	}
+	for i, c := range cache {
+		if len(c.K) != 0 || len(c.V) != 0 {
+			t.Fatalf("cache[%d] = %+v, want an empty K/V (nothing decoded yet)", i, c)
+		}
+	}
+}
+
+// TestDecodeLogitsStep_Good proves DecodeLogitsStep reproduces DecodeLogits' output BIT-FOR-BIT at every
+// position across a growing sequence, exercising the three call shapes GreedyDecode/DetectLanguage
+// actually use: (1) a single token from a fresh (empty) cache — DetectLanguage's shape; (2) a multi-token
+// PREFILL batch from a fresh cache — GreedyDecode's first iteration, the whole init prompt at once; and
+// (3) a single new token appended onto an already-populated cache — GreedyDecode's every iteration after
+// the first. See decoder.go's file doc comment for why bit-identity, not mere closeness, is the right bar
+// — this is the hermetic half of the #37-tail KV-cache gate (the live half is live_test.go's exact-
+// transcript assertion, now running through this same DecodeLogitsStep path).
+func TestDecodeLogitsStep_Good(t *testing.T) {
+	tensors, cfg := tinyWhisperTensors()
+	w, err := LoadWeights(tensors, cfg)
+	if err != nil {
+		t.Fatalf("LoadWeights: %v", err)
+	}
+	encOut := seqVals(cfg.MaxSourcePositions * cfg.DModel)
+	crossKV := PrecomputeCrossKV(encOut, cfg.MaxSourcePositions, w)
+	ids := []int32{0, 1, 2} // fills tinyWhisperTensors' MaxTargetPositions=3 exactly
+
+	// (1) single token, fresh cache — DetectLanguage's shape.
+	wantAt1, err := DecodeLogits(ids[:1], crossKV, cfg.MaxSourcePositions, w, cfg)
+	if err != nil {
+		t.Fatalf("DecodeLogits(T=1): %v", err)
+	}
+	freshCache := NewSelfAttnCache(len(w.DecoderLayers))
+	gotAt1, err := DecodeLogitsStep(ids[:1], 0, freshCache, crossKV, cfg.MaxSourcePositions, w, cfg)
+	if err != nil {
+		t.Fatalf("DecodeLogitsStep(fresh, 1 token): %v", err)
+	}
+	if d := maxAbsDiff32(t, gotAt1, wantAt1); d != 0 {
+		t.Fatalf("DecodeLogitsStep(fresh, 1 token) diverges from DecodeLogits(T=1) by %g, want bit-identical", d)
+	}
+
+	// (2) multi-token prefill batch, fresh cache — GreedyDecode's first iteration.
+	wantAt2, err := DecodeLogits(ids[:2], crossKV, cfg.MaxSourcePositions, w, cfg)
+	if err != nil {
+		t.Fatalf("DecodeLogits(T=2): %v", err)
+	}
+	cache := NewSelfAttnCache(len(w.DecoderLayers))
+	gotAt2, err := DecodeLogitsStep(ids[:2], 0, cache, crossKV, cfg.MaxSourcePositions, w, cfg)
+	if err != nil {
+		t.Fatalf("DecodeLogitsStep(fresh, 2-token prefill): %v", err)
+	}
+	if d := maxAbsDiff32(t, gotAt2, wantAt2); d != 0 {
+		t.Fatalf("DecodeLogitsStep(fresh, 2-token prefill) diverges from DecodeLogits(T=2) by %g, want bit-identical", d)
+	}
+
+	// (3) single new token appended onto the now-populated cache — GreedyDecode's every later iteration.
+	wantAt3, err := DecodeLogits(ids[:3], crossKV, cfg.MaxSourcePositions, w, cfg)
+	if err != nil {
+		t.Fatalf("DecodeLogits(T=3): %v", err)
+	}
+	gotAt3, err := DecodeLogitsStep(ids[2:3], 2, cache, crossKV, cfg.MaxSourcePositions, w, cfg)
+	if err != nil {
+		t.Fatalf("DecodeLogitsStep(continuation, 1 token): %v", err)
+	}
+	if d := maxAbsDiff32(t, gotAt3, wantAt3); d != 0 {
+		t.Fatalf("DecodeLogitsStep(continuation) diverges from DecodeLogits(T=3) by %g, want bit-identical", d)
+	}
+}
+
+// TestDecodeLogitsStep_Bad mirrors TestDecodeLogits_Bad: an empty new-token batch is refused.
+func TestDecodeLogitsStep_Bad(t *testing.T) {
+	tensors, cfg := tinyWhisperTensors()
+	w, err := LoadWeights(tensors, cfg)
+	if err != nil {
+		t.Fatalf("LoadWeights: %v", err)
+	}
+	cache := NewSelfAttnCache(len(w.DecoderLayers))
+	if _, err := DecodeLogitsStep(nil, 0, cache, nil, cfg.MaxSourcePositions, w, cfg); err == nil {
+		t.Fatal("DecodeLogitsStep accepted an empty new-token batch")
+	}
+}
+
+// TestDecodeLogitsStep_Ugly mirrors TestDecodeLogits_Ugly: a token id outside the vocab is refused with a
+// specific message rather than an out-of-range panic on the embedding lookup.
+func TestDecodeLogitsStep_Ugly(t *testing.T) {
+	tensors, cfg := tinyWhisperTensors()
+	w, err := LoadWeights(tensors, cfg)
+	if err != nil {
+		t.Fatalf("LoadWeights: %v", err)
+	}
+	encOut := seqVals(cfg.MaxSourcePositions * cfg.DModel)
+	crossKV := PrecomputeCrossKV(encOut, cfg.MaxSourcePositions, w)
+	cache := NewSelfAttnCache(len(w.DecoderLayers))
+	if _, err := DecodeLogitsStep([]int32{9999}, 0, cache, crossKV, cfg.MaxSourcePositions, w, cfg); err == nil {
+		t.Fatal("DecodeLogitsStep accepted a token id outside the vocabulary")
+	}
+}

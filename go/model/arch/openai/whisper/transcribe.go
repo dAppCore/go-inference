@@ -138,3 +138,17 @@ func (m *Model) Transcribe(wavBytes []byte, opts Options) (Result, error) {
 	text := m.Tokenizer.Decode(contentIDs)
 	return Result{Text: text, Language: langCode}, nil
 }
+
+// TranscribeAudio satisfies inference.Transcriber — serve's capability-discovery surface for
+// POST /v1/audio/transcriptions (the VisionModel/AudioModel stability-contract pattern: the interface
+// lives in the dependency-free root package, this method is the concrete implementation) — by adapting
+// Transcribe's richer Options/Result shape to the primitive strings the root package can name without
+// importing this one. A separate method rather than changing Transcribe's own signature: Transcribe's
+// Options/Result shape is the one `lem transcribe` and every test in this package already depend on.
+func (m *Model) TranscribeAudio(wavBytes []byte, language string) (text string, detectedLanguage string, err error) {
+	result, err := m.Transcribe(wavBytes, Options{Language: language})
+	if err != nil {
+		return "", "", err
+	}
+	return result.Text, result.Language, nil
+}

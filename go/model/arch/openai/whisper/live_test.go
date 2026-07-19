@@ -113,3 +113,29 @@ func TestLive_RealCheckpoint_Transcribe_LanguageOverride(t *testing.T) {
 		t.Fatalf("Transcribe(--language en) echoed language = %q, want \"en\"", result.Language)
 	}
 }
+
+// TestLive_RealCheckpoint_TranscribeAudio_Good proves the inference.Transcriber adapter (serve's
+// POST /v1/audio/transcriptions capability-discovery surface) reproduces Transcribe's own exact-golden
+// result through its (text, language, error) reshape — the success-path proof TestTranscribeAudio_Bad/
+// _Ugly's doc comment defers to this file (this package's hermetic fixtures never carry Transcribe all
+// the way to a successful Result — see ExampleModel_Transcribe).
+func TestLive_RealCheckpoint_TranscribeAudio_Good(t *testing.T) {
+	dir := resolveWhisperTinyDir(t)
+	m, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load(%s): %v", dir, err)
+	}
+	wav := readTestdata(t, "hello16k.wav")
+	golden := readE2EGolden(t)
+
+	text, language, err := m.TranscribeAudio(wav, "")
+	if err != nil {
+		t.Fatalf("TranscribeAudio: %v", err)
+	}
+	if text != golden.Text {
+		t.Fatalf("TranscribeAudio text = %q, want %q", text, golden.Text)
+	}
+	if language != golden.DetectedLanguageCode() {
+		t.Fatalf("TranscribeAudio detected language = %q, want %q", language, golden.DetectedLanguageCode())
+	}
+}

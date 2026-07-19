@@ -119,3 +119,36 @@ func TestConfig_InferFromWeights_Ugly(t *testing.T) {
 		t.Fatalf("InferFromWeights changed config on a malformed weights map: %+v", cfg)
 	}
 }
+
+// TestIsWhisperCheckpoint_Good proves the real openai/whisper-tiny config.json fixture (the same one
+// TestConfig_ParseConfig_Good parses) is recognised — serve's --model detection routes a directory like
+// this one into ASR-only serving (serving.detectAndLoadWhisper).
+func TestIsWhisperCheckpoint_Good(t *testing.T) {
+	fixture := core.ReadFile(core.PathJoin("testdata", "openai-whisper-tiny-config.json"))
+	if !fixture.OK {
+		t.Fatal("read openai/whisper-tiny config fixture")
+	}
+	dir := t.TempDir()
+	writeFile(t, dir, "config.json", string(fixture.Value.([]byte)))
+	if !IsWhisperCheckpoint(dir) {
+		t.Fatal("IsWhisperCheckpoint rejected a real openai/whisper-tiny config.json")
+	}
+}
+
+// TestIsWhisperCheckpoint_Bad proves a directory with no config.json at all reports false rather than
+// erroring — a probe, not a validator (mirrors TestLoad_Bad's directory shape).
+func TestIsWhisperCheckpoint_Bad(t *testing.T) {
+	if IsWhisperCheckpoint(t.TempDir()) {
+		t.Fatal("IsWhisperCheckpoint accepted a directory with no config.json")
+	}
+}
+
+// TestIsWhisperCheckpoint_Ugly proves a config.json declaring a DIFFERENT model_type reports false —
+// distinct from _Bad's missing-file case (mirrors TestLoad_Ugly's non-whisper checkpoint).
+func TestIsWhisperCheckpoint_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "config.json", `{"model_type":"llama","hidden_size":4096}`)
+	if IsWhisperCheckpoint(dir) {
+		t.Fatal("IsWhisperCheckpoint accepted a non-whisper checkpoint directory")
+	}
+}
