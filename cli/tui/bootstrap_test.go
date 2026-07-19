@@ -16,6 +16,7 @@ import (
 	"dappco.re/go/inference/agent/queue"
 	"dappco.re/go/inference/agent/work"
 	"dappco.re/go/inference/agent/workspace"
+	"dappco.re/go/inference/dataset"
 	coreio "dappco.re/go/io"
 )
 
@@ -93,6 +94,68 @@ func TestOpenWorkspace_Good(t *testing.T) {
 	}
 	if len(closeOrder) != 2 || closeOrder[0] != "state" || closeOrder[1] != "repository" {
 		t.Fatalf("close order = %#v, want [state repository]", closeOrder)
+	}
+}
+
+// TestOpenWorkspace_DatasetStoreOpensAndCloses proves the Data panel's
+// store attaches through openWorkspaceWithContext exactly like Repository/
+// State already do (Task 8) — its own file, datasets.duckdb, separate
+// from lem.duckdb per the design's bulk/lifecycle/blast-radius decision.
+func TestOpenWorkspace_DatasetStoreOpensAndCloses(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	opened := openWorkspaceWith(files, workspaceOpeners{})
+	if !opened.OK {
+		t.Fatalf("openWorkspaceWith: %v", opened.Value)
+	}
+	resources := opened.Value.(*workspaceResources)
+	if resources.DatasetStore == nil {
+		t.Fatal("openWorkspaceWith did not attach a DatasetStore")
+	}
+	if _, err := os.Stat(files.Paths.Datasets); err != nil {
+		t.Errorf("migrated datasets.duckdb %q: %v", files.Paths.Datasets, err)
+	}
+	if len(resources.Warnings) != 0 {
+		t.Errorf("healthy dataset store warnings = %#v, want none", resources.Warnings)
+	}
+	if files.Paths.Datasets == files.Paths.Database {
+		t.Fatal("datasets.duckdb and lem.duckdb resolved to the same path")
+	}
+
+	ds := dataset.Dataset{ID: dataset.NewID(), Slug: "bootstrap-vents", Title: "bootstrap", CreatedAt: time.Now()}
+	if result := resources.DatasetStore.DatasetCreate(ds); !result.OK {
+		t.Fatalf("write through the bootstrapped dataset store: %v", result.Value)
+	}
+
+	if result := resources.Close(); !result.OK {
+		t.Fatalf("close workspace resources: %v", result.Value)
+	}
+	if resources.DatasetStore != nil {
+		t.Fatal("Close did not clear resources.DatasetStore")
+	}
+}
+
+// TestOpenWorkspace_DatasetStoreFailureDegradesWithWarningNotFailure proves
+// the design's own rationale for a separate file: "a bloated or damaged
+// dataset file must never take the agent/TUI state down with it" — a
+// dataset store that cannot open degrades to nil + a warning, exactly
+// like State/Preferences already do, never a hard openWorkspaceWith
+// failure the way a broken Repository is.
+func TestOpenWorkspace_DatasetStoreFailureDegradesWithWarningNotFailure(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	if err := os.MkdirAll(files.Paths.Datasets, 0o755); err != nil {
+		t.Fatalf("seed a directory at the dataset path: %v", err)
+	}
+	opened := openWorkspaceWith(files, workspaceOpeners{})
+	if !opened.OK {
+		t.Fatalf("openWorkspaceWith failed instead of degrading: %v", opened.Value)
+	}
+	resources := opened.Value.(*workspaceResources)
+	if resources.DatasetStore != nil {
+		t.Fatal("resources.DatasetStore is non-nil despite the open failure")
+	}
+	assertWorkspaceWarning(t, resources.Warnings, "dataset store")
+	if result := resources.Close(); !result.OK {
+		t.Fatalf("close workspace resources: %v", result.Value)
 	}
 }
 

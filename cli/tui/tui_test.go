@@ -180,6 +180,68 @@ func TestRunWithWorkspace_CheckIsReadOnlyAndClosesResources(t *testing.T) {
 	}
 }
 
+// TestNewDataReviewApp_Good proves RunDataReview's state setup (Task 8,
+// `lem data review [slug]`) — activePanel focused on Data, the slug
+// trimmed and stashed for attachData to consume once the workspace
+// connects — without ever invoking the stored loader (newWorkspaceApp
+// only stores it; nothing here triggers workspaceBootstrap), so this
+// never touches $HOME despite newDataReviewApp's real production loader
+// closing over loadDefaultWorkspaceContext.
+func TestNewDataReviewApp_Good(t *testing.T) {
+	a := newDataReviewApp(context.Background(), "  evening-vents  ")
+	if a.activePanel != panelData {
+		t.Fatalf("activePanel = %d, want panelData", a.activePanel)
+	}
+	if a.dataInitialSlug != "evening-vents" {
+		t.Fatalf("dataInitialSlug = %q, want the trimmed slug", a.dataInitialSlug)
+	}
+	if a.boot.phase != bootLoading {
+		t.Fatalf("boot phase = %d, want bootLoading", a.boot.phase)
+	}
+}
+
+func TestNewDataReviewApp_EmptySlug(t *testing.T) {
+	a := newDataReviewApp(context.Background(), "")
+	if a.activePanel != panelData || a.dataInitialSlug != "" {
+		t.Fatalf("activePanel=%d dataInitialSlug=%q", a.activePanel, a.dataInitialSlug)
+	}
+}
+
+// TestDataReviewApp_ConnectRendersDataPanelWithInitialSlugFilter drives
+// the real connectWorkspace path headlessly (runWorkspaceCheck, the same
+// seam every other TUI bootstrap test in this file uses) to prove
+// newDataReviewApp's state actually lands: once the workspace connects,
+// the Data panel is what's on screen, and dataInitialSlug narrowed the
+// list to that one dataset.
+func TestDataReviewApp_ConnectRendersDataPanelWithInitialSlugFilter(t *testing.T) {
+	resources := openAppTestWorkspace(t)
+	if resources.DatasetStore == nil {
+		t.Fatal("test workspace resources have no DatasetStore — cannot prove the initial slug filter")
+	}
+	at := time.Now()
+	dsA := seedDataDataset(t, resources.DatasetStore, "alpha", at)
+	dsB := seedDataDataset(t, resources.DatasetStore, "beta", at)
+	seedDataItem(t, resources.DatasetStore, dsA.ID, "a", "a", at)
+	seedDataItem(t, resources.DatasetStore, dsB.ID, "b", "b", at)
+
+	a := newWorkspaceApp("", 0, 4096, func() core.Result { return core.Ok(resources) })
+	a.activePanel = panelData
+	a.dataInitialSlug = "alpha"
+
+	var stdout, stderr bytes.Buffer
+	code := runWorkspaceCheck(a, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runWorkspaceCheck code = %d, stderr=%s", code, stderr.String())
+	}
+	view := stdout.String()
+	if !strings.Contains(view, "Data") {
+		t.Fatalf("check frame did not render the Data panel:\n%s", view)
+	}
+	if !strings.Contains(view, "alpha") || strings.Contains(view, "beta") {
+		t.Fatalf("check frame did not honour the initial dataset slug filter:\n%s", view)
+	}
+}
+
 func TestShutdownProgramModel_Good(t *testing.T) {
 	initial := newApp("", 0, 64)
 	final := initial

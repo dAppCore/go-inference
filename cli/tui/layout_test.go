@@ -34,7 +34,7 @@ func TestChooseLayout_Ugly(t *testing.T) {
 }
 
 func TestPanelID_Good(t *testing.T) {
-	want := []panelID{panelChat, panelWork, panelModels, panelService}
+	want := []panelID{panelChat, panelWork, panelModels, panelService, panelData}
 	panel := panelChat
 	for i, expected := range want {
 		if panel != expected {
@@ -116,7 +116,7 @@ func TestWorkspaceFrame_Ugly(t *testing.T) {
 
 func assertFrameBasics(t *testing.T, view string, width int) {
 	t.Helper()
-	for _, text := range []string{"LEM", "Chat", "Work", "Models", "SESSIONS", "MAIN REGION", "FOOTER"} {
+	for _, text := range []string{"LEM", "Chat", "Work", "Models", "Data", "SESSIONS", "MAIN REGION", "FOOTER"} {
 		if !strings.Contains(view, text) {
 			t.Fatalf("frame missing %q\n%s", text, view)
 		}

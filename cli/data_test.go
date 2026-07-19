@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -503,15 +504,41 @@ func TestRunDataArchive_Bad(t *testing.T) {
 
 // ---- review ----
 
+// TestRunDataReview_Good drives runDataReview's own logic (slug parsing,
+// the conditional headless-fallback message) through the injected
+// runDataReviewTUI seam — never a real tui.RunDataReview/tea.NewProgram
+// call, which would hang (or open a real interactive session) whenever
+// the test process has a controlling terminal; see runDataReviewTUI's
+// doc comment in data.go.
 func TestRunDataReview_Good(t *testing.T) {
-	for _, args := range [][]string{{"review"}, {"review", "some-slug"}} {
-		code, stdout, stderr := runData(args...)
-		if code != 0 {
-			t.Fatalf("exit %d; stderr=%s", code, stderr)
-		}
-		if !core.Contains(stdout, "Task 8") {
-			t.Errorf("stdout = %q, want the honest Task 8 pointer", stdout)
-		}
+	original := runDataReviewTUI
+	defer func() { runDataReviewTUI = original }()
+
+	var gotCtx context.Context
+	var gotSlug string
+	runDataReviewTUI = func(ctx context.Context, slug string, stdout, stderr io.Writer) int {
+		gotCtx, gotSlug = ctx, slug
+		core.WriteString(stderr, "tui: could not open a new TTY (stubbed)\n")
+		return 1
+	}
+	code, stdout, stderr := runData("review", "evening-vents")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stderr=%s", code, stderr)
+	}
+	if gotCtx == nil || gotSlug != "evening-vents" {
+		t.Fatalf("runDataReviewTUI args = ctx=%v slug=%q", gotCtx, gotSlug)
+	}
+	if !core.Contains(stdout, "data list") || !core.Contains(stdout, "data stats") {
+		t.Errorf("stdout = %q, want the headless-verb fallback pointer on a TUI start failure", stdout)
+	}
+
+	runDataReviewTUI = func(context.Context, string, io.Writer, io.Writer) int { return 0 }
+	code, stdout, _ = runData("review")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 on a clean TUI exit", code)
+	}
+	if core.Contains(stdout, "could not start") {
+		t.Errorf("stdout = %q printed the fallback pointer despite a clean (code 0) TUI exit", stdout)
 	}
 }
 

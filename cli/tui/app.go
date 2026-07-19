@@ -17,6 +17,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/decode/parser"
 )
 
@@ -59,6 +60,12 @@ type app struct {
 	agent                 agentProvider
 	work                  *workPanel
 	workEditor            *workEditor
+	data                  *dataPanel
+	dataEditor            *dataItemEditor
+	dataNote              *dataNoteOverlay
+	dataBulk              *dataBulkOverlay
+	dataFilter            *dataFilterOverlay
+	dataInitialSlug       string
 	launchReview          *launchReviewOverlay
 	answerOverlay         *agentAnswerOverlay
 	changeOverlay         *changeAcceptanceOverlay
@@ -458,6 +465,38 @@ func (a *app) attachWork(repository workspaceRepository, provider agentProvider)
 	return core.Ok(a.work)
 }
 
+// attachData wires the Data panel to store — the connected workspace's
+// resources.DatasetStore (opened best-effort in openWorkspaceWithContext,
+// bootstrap.go), or nil when the dataset store could not open (a damaged
+// or missing datasets.duckdb never blocks the rest of the workspace, per
+// the design's blast-radius rationale). A nil store leaves a.data nil —
+// panelView and the palette both render that honestly rather than
+// panicking on a nil panel. When dataInitialSlug was set (RunDataReview's
+// `lem data review <slug>` seam, tui.go), it is consumed exactly once
+// here to pre-filter the panel to that one dataset.
+func (a *app) attachData(store dataset.Store) core.Result {
+	if a == nil {
+		return core.Fail(core.E("tui.app.attachData", "application is unavailable", nil))
+	}
+	if store == nil {
+		a.data = nil
+		return core.Ok(nil)
+	}
+	opened := newDataPanel(store, a.markdown, nil, nil)
+	if !opened.OK {
+		return opened
+	}
+	a.data = opened.Value.(*dataPanel)
+	if a.dataInitialSlug != "" {
+		if result := a.data.SetFilter(dataFilterState{DatasetSlug: a.dataInitialSlug}); !result.OK {
+			a.warnings = append(a.warnings, core.Concat("data: initial dataset filter: ", result.Error()))
+		}
+		a.dataInitialSlug = ""
+	}
+	a.refreshDataPalette()
+	return core.Ok(a.data)
+}
+
 func (a *app) refreshAgentPalette() {
 	if a == nil || a.palette == nil || a.agent == nil {
 		return
@@ -505,6 +544,245 @@ func (a *app) saveWorkEditor() core.Result {
 		a.workEditor.validation = result.Error()
 	}
 	return result
+}
+
+// refreshDataPalette rebuilds the "data."-prefixed palette entries from
+// the Data panel's current Capabilities() — called after every action
+// that could change availability (a selection change, a status change),
+// mirroring refreshAgentPalette's precedent. Nil-safe: a.data.Capabilities
+// on a nil *dataPanel returns the honest "not connected" catalogue.
+func (a *app) refreshDataPalette() {
+	if a == nil || a.palette == nil {
+		return
+	}
+	a.palette.SetDataContext(a.data.Capabilities())
+}
+
+// dataSelectedItemID reads the Data panel's current selection, or "" when
+// nothing is selected — the single-item note overlays' itemID.
+func dataSelectedItemID(panel *dataPanel) string {
+	selected, ok := panel.Selected()
+	if !ok {
+		return ""
+	}
+	return selected.Item.ID
+}
+
+// applyDataAction runs a no-note single-item action (Approve/Reject)
+// directly against the current selection — these need no overlay at all,
+// matching workPanel's Complete/Reopen/Archive precedent (friction should
+// scale with blast radius, and a single-item approve/reject is routine).
+func (a *app) applyDataAction(action dataAction) core.Result {
+	if a == nil || a.data == nil {
+		return core.Fail(core.E("tui.app.applyDataAction", "data panel is unavailable", nil))
+	}
+	selected, ok := a.data.Selected()
+	if !ok {
+		return core.Fail(core.E("tui.app.applyDataAction", "a selected item is required", nil))
+	}
+	var result core.Result
+	switch action {
+	case dataActionApprove:
+		result = a.data.Approve(selected.Item.ID)
+	case dataActionReject:
+		result = a.data.Reject(selected.Item.ID)
+	default:
+		return core.Fail(core.E("tui.app.applyDataAction", "this action requires its own overlay", nil))
+	}
+	if result.OK {
+		a.refreshDataPalette()
+	}
+	return result
+}
+
+// openDataEditor opens the edit-as-derived editor seam over the current
+// selection, pre-checking the ItemArchiver capability EditAsDerived will
+// need, so an unsupported store fails loudly here rather than after the
+// human has typed an edit.
+func (a *app) openDataEditor() core.Result {
+	if a == nil || a.data == nil {
+		return core.Fail(core.E("tui.app.openDataEditor", "data panel is unavailable", nil))
+	}
+	selected, ok := a.data.Selected()
+	if !ok {
+		return core.Fail(core.E("tui.app.openDataEditor", "a selected item is required", nil))
+	}
+	if _, archiver := a.data.store.(ItemArchiver); !archiver {
+		return core.Fail(core.E("tui.app.openDataEditor", "the connected dataset store cannot archive the superseded original", nil))
+	}
+	a.dataEditor = newDataItemEditor(selected.Item)
+	a.activeOverlay = overlayDataEditor
+	return core.Ok(a.dataEditor)
+}
+
+func (a *app) saveDataEditor() core.Result {
+	if a == nil || a.data == nil || a.dataEditor == nil {
+		return core.Fail(core.E("tui.app.saveDataEditor", "data editor is unavailable", nil))
+	}
+	prompt, response := a.dataEditor.values()
+	result := a.data.EditAsDerived(a.dataEditor.original, prompt, response)
+	if result.OK {
+		a.refreshDataPalette()
+	}
+	return result
+}
+
+// dataNotePrompt builds the title/prompt/placeholder for a note overlay,
+// worded for either a single item or the shared bulk note.
+func dataNotePrompt(action dataAction, bulk bool) (title, prompt, placeholder string) {
+	scope := "this item"
+	if bulk {
+		scope = "every item matching the current filter"
+	}
+	if action == dataActionTag {
+		return "Tag", core.Concat("Tag label for ", scope), "label"
+	}
+	return "Clear quarantine", core.Concat("Why is the quarantine on ", scope, " being cleared?"), "note"
+}
+
+// openDataNote opens the note overlay for action — itemID set is a
+// single-item note (Tag/QuarantineClear applied directly on submit);
+// itemID empty is a bulk action's shared note, which hands off to the
+// count-confirm overlay on submit rather than writing anything yet (see
+// submitDataNote).
+func (a *app) openDataNote(action dataAction, itemID string) core.Result {
+	if a == nil || a.data == nil {
+		return core.Fail(core.E("tui.app.openDataNote", "data panel is unavailable", nil))
+	}
+	if itemID == "" && a.data.FilteredCount() == 0 {
+		return core.Fail(core.E("tui.app.openDataNote", "no items match the current filter", nil))
+	}
+	if itemID != "" {
+		selected, ok := a.data.Selected()
+		if !ok || selected.Item.ID != itemID {
+			return core.Fail(core.E("tui.app.openDataNote", "a selected item is required", nil))
+		}
+	}
+	title, prompt, placeholder := dataNotePrompt(action, itemID == "")
+	a.dataNote = newDataNoteOverlay(action, itemID, title, prompt, placeholder)
+	a.activeOverlay = overlayDataNote
+	return core.Ok(a.dataNote)
+}
+
+// submitDataNote applies a completed single-item note (Tag/QuarantineClear
+// with itemID set) directly, or — for a bulk note (itemID empty) — hands
+// off into the count-confirm overlay rather than writing anything yet, so
+// "no confirm, no writes" holds for bulk actions that also collect a note.
+func (a *app) submitDataNote() core.Result {
+	if a == nil || a.data == nil || a.dataNote == nil {
+		return core.Fail(core.E("tui.app.submitDataNote", "data note overlay is unavailable", nil))
+	}
+	note := a.dataNote.Value()
+	if note == "" {
+		return core.Fail(core.E("tui.app.submitDataNote", "a value is required", nil))
+	}
+	if a.dataNote.Bulk() {
+		a.dataBulk = newDataBulkOverlay(a.dataNote.action, a.data.FilteredCount(), note)
+		a.dataNote = nil
+		a.activeOverlay = overlayDataBulk
+		return core.Ok(a.dataBulk)
+	}
+	action, itemID := a.dataNote.action, a.dataNote.itemID
+	var result core.Result
+	switch action {
+	case dataActionTag:
+		result = a.data.Tag(itemID, note)
+	case dataActionQuarantineClear:
+		result = a.data.QuarantineClear(itemID, note)
+	default:
+		result = core.Fail(core.E("tui.app.submitDataNote", "unknown note action", nil))
+	}
+	if !result.OK {
+		return result
+	}
+	a.dataNote, a.activeOverlay = nil, overlayNone
+	a.refreshDataPalette()
+	return result
+}
+
+// openDataBulk opens the bulk-apply-to-current-filter flow for action —
+// straight to the count-confirm overlay when action needs no note
+// (Approve/Reject), or via openDataNote first (itemID empty) to collect
+// the shared note/label when it does (QuarantineClear/Tag).
+func (a *app) openDataBulk(action dataAction) core.Result {
+	if a == nil || a.data == nil {
+		return core.Fail(core.E("tui.app.openDataBulk", "data panel is unavailable", nil))
+	}
+	if action.needsNote() {
+		return a.openDataNote(action, "")
+	}
+	count := a.data.FilteredCount()
+	if count == 0 {
+		return core.Fail(core.E("tui.app.openDataBulk", "no items match the current filter", nil))
+	}
+	a.dataBulk = newDataBulkOverlay(action, count, "")
+	a.activeOverlay = overlayDataBulk
+	return core.Ok(a.dataBulk)
+}
+
+// confirmDataBulk applies a bulk action once its two-phase overlay has
+// been explicitly confirmed (dataBulkOverlay.Confirm) — the only call
+// site that reaches dataPanel.BulkApply, so an overlay dismissed by
+// Escape (or one that never receives the second Enter) never writes
+// anything.
+func (a *app) confirmDataBulk() core.Result {
+	if a == nil || a.data == nil || a.dataBulk == nil {
+		return core.Fail(core.E("tui.app.confirmDataBulk", "bulk action overlay is unavailable", nil))
+	}
+	result := a.data.BulkApply(a.dataBulk.action, a.dataBulk.note)
+	a.dataBulk, a.activeOverlay = nil, overlayNone
+	a.refreshDataPalette()
+	return result
+}
+
+// openDataFilter opens the structural filter overlay, pre-filled from the
+// panel's current filter.
+func (a *app) openDataFilter() core.Result {
+	if a == nil || a.data == nil {
+		return core.Fail(core.E("tui.app.openDataFilter", "data panel is unavailable", nil))
+	}
+	a.dataFilter = newDataFilterOverlay(a.data.FilterExpr())
+	a.activeOverlay = overlayDataFilter
+	return core.Ok(a.dataFilter)
+}
+
+func (a *app) applyDataFilter() core.Result {
+	if a == nil || a.data == nil || a.dataFilter == nil {
+		return core.Fail(core.E("tui.app.applyDataFilter", "data filter overlay is unavailable", nil))
+	}
+	if result := a.data.SetFilterExpr(a.dataFilter.Value()); !result.OK {
+		return result
+	}
+	a.dataFilter, a.activeOverlay = nil, overlayNone
+	a.refreshDataPalette()
+	return core.Ok(nil)
+}
+
+// runDataCommand is the palette invocation path for a "data."-prefixed
+// command (dataWorkspaceCommandsForContext, palette.go) — dispatches to
+// the exact same app methods the Data panel's own hotkeys call
+// (applyDataAction/openDataEditor/openDataNote/openDataBulk), so the
+// palette mirrors every available action rather than duplicating logic,
+// and forces the Data panel into view first so the result (or the
+// overlay it opens) is immediately visible.
+func (a *app) runDataCommand(capability dataCapability) core.Result {
+	if a == nil || a.data == nil {
+		return core.Fail(core.E("tui.command.data", "data panel is unavailable", nil))
+	}
+	a.activePanel = panelData
+	if capability.Bulk {
+		return a.openDataBulk(capability.Action)
+	}
+	switch capability.Action {
+	case dataActionApprove, dataActionReject:
+		return a.applyDataAction(capability.Action)
+	case dataActionQuarantineClear, dataActionTag:
+		return a.openDataNote(capability.Action, dataSelectedItemID(a.data))
+	case dataActionEditAsDerived:
+		return a.openDataEditor()
+	default:
+		return core.Fail(core.E("tui.command.data", "unknown data action", nil))
+	}
 }
 
 func (a *app) queueAgentAction(feature agentFeature) core.Result {
@@ -1108,6 +1386,13 @@ func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
 	if a == nil || resources == nil || resources.Repository == nil || resources.State == nil || resources.Preferences == nil {
 		return core.Fail(core.E("tui.app.connectWorkspace", "workspace resources are incomplete", nil))
 	}
+	// activateManagedSession below unconditionally focuses Chat (a fresh
+	// or resumed session is always its default landing panel) — preserve
+	// an explicitly requested starting panel (e.g. RunDataReview's Data
+	// panel focus, tui.go) across that reset. Every other caller already
+	// starts on panelChat (newApp/newWorkspaceApp's own default), so this
+	// is a no-op for them.
+	requestedPanel := a.activePanel
 	managerResult := newSessionManager(resources.Repository, resources.State, nil, nil)
 	if !managerResult.OK {
 		return managerResult
@@ -1127,6 +1412,14 @@ func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
 	if result := a.attachWork(resources.Repository, resources.Agent); !result.OK {
 		return result
 	}
+	// A dataset store problem never blocks the rest of the workspace (the
+	// design's blast-radius rationale, bootstrap.go) — attachData already
+	// degrades a nil resources.DatasetStore to a nil a.data; any other
+	// failure here (e.g. the panel's own initial Refresh) is likewise a
+	// warning, not a connectWorkspace failure.
+	if result := a.attachData(resources.DatasetStore); !result.OK {
+		a.warnings = append(a.warnings, core.Concat("data: ", result.Error()))
+	}
 	values := resources.Preferences.Values()
 	a.knowledgeLimit = values.KnowledgeMaxBytes
 	a.recentSessionLimit = values.RecentSessionLimit
@@ -1140,6 +1433,9 @@ func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
 		resources.Paths.Exports,
 	)
 	a.activateManagedSession(manager.Active())
+	if requestedPanel != panelChat {
+		a.activePanel = requestedPanel
+	}
 	return core.Ok(nil)
 }
 
@@ -1560,6 +1856,13 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(msg, a.keys.CommandPalette) {
 		a.refreshAgentPalette()
+		// Mirrors refreshAgentPalette's own precedent immediately above:
+		// a selection/status change on the Data panel with no action yet
+		// (e.g. j/k navigation alone) never itself calls
+		// refreshDataPalette, so the palette must refresh availability
+		// itself right before it opens, not rely on stale state from the
+		// last write.
+		a.refreshDataPalette()
 		a.palette.Open()
 		a.activeOverlay = overlayCommands
 		return a, nil
@@ -1736,6 +2039,73 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.svc.addrIdx = (a.svc.addrIdx + 1) % len(serviceAddrs)
 			}
 			return a, nil
+		}
+	case panelData:
+		// The keyboard idiom: j/k select (bubbles list default, reached via
+		// route() below for anything not matched here); lowercase acts on
+		// the selected item; uppercase runs the same action in bulk across
+		// the current filter. Every key below has a mirrored palette entry
+		// (dataWorkspaceCommandsForContext, palette.go) — this switch is a
+		// keyboard shortcut for the same dataPanel/app methods the palette
+		// invokes, never a second code path.
+		if a.data != nil {
+			switch msg.String() {
+			case "a":
+				if result := a.applyDataAction(dataActionApprove); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "r":
+				if result := a.applyDataAction(dataActionReject); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "c":
+				if result := a.openDataNote(dataActionQuarantineClear, dataSelectedItemID(a.data)); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "e":
+				if result := a.openDataEditor(); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "t":
+				if result := a.openDataNote(dataActionTag, dataSelectedItemID(a.data)); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "A":
+				if result := a.openDataBulk(dataActionApprove); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "R":
+				if result := a.openDataBulk(dataActionReject); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "C":
+				if result := a.openDataBulk(dataActionQuarantineClear); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "T":
+				if result := a.openDataBulk(dataActionTag); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "s":
+				if result := a.data.ToggleSort(); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			case "f":
+				if result := a.openDataFilter(); !result.OK {
+					a.errText = result.Error()
+				}
+				return a, nil
+			}
 		}
 	case panelChat:
 		if msg.Type == tea.KeyEnter && msg.Alt && !a.generating {
@@ -2025,6 +2395,7 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.activeOverlay = overlayNone
 		a.workEditor, a.launchReview, a.answerOverlay, a.changeOverlay = nil, nil, nil, nil
+		a.dataEditor, a.dataNote, a.dataBulk, a.dataFilter = nil, nil, nil, nil
 		switch overlay {
 		case overlayAgentSelection, overlayProjectReview, overlayGitEnableReview, overlayLaunchReview, overlayAgentAnswer, overlayChangeReview:
 			a.abortAgentOperation()
@@ -2040,6 +2411,21 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.activeOverlay, a.workEditor = overlayNone, nil
+		return a, nil
+	}
+	if a.activeOverlay == overlayDataEditor && message.String() == "enter" {
+		// Both fields are multi-line textareas — Enter always inserts a
+		// newline in the focused one; only ctrl+s saves (unlike
+		// overlayWorkEditor, which mixes single-line and multi-line
+		// fields and so only forwards Enter for its one textarea field).
+		return a, a.dataEditor.Update(message)
+	}
+	if a.activeOverlay == overlayDataEditor && message.String() == "ctrl+s" {
+		if result := a.saveDataEditor(); !result.OK {
+			a.errText = result.Error()
+			return a, nil
+		}
+		a.activeOverlay, a.dataEditor = overlayNone, nil
 		return a, nil
 	}
 	if a.activeOverlay == overlayGitEnableReview && message.String() != "enter" {
@@ -2159,6 +2545,31 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				a.activeOverlay = overlayNone
 			}
+		case overlayDataNote:
+			if a.dataNote == nil || !a.dataNote.Update(message) {
+				a.errText = "a value is required"
+				return a, nil
+			}
+			if result := a.submitDataNote(); !result.OK {
+				a.errText = result.Error()
+			}
+		case overlayDataFilter:
+			if a.dataFilter == nil || !a.dataFilter.Update(message) {
+				return a, nil
+			}
+			if result := a.applyDataFilter(); !result.OK {
+				a.errText = result.Error()
+			}
+		case overlayDataBulk:
+			if a.dataBulk == nil || !a.dataBulk.Confirm(message.String()) {
+				// The first Enter only arms the overlay (see
+				// dataBulkOverlay.Confirm) — nothing to apply yet, and the
+				// re-rendered View() shows the "confirm again" prompt.
+				return a, nil
+			}
+			if result := a.confirmDataBulk(); !result.OK {
+				a.errText = result.Error()
+			}
 		}
 		return a, nil
 	}
@@ -2181,6 +2592,21 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.workEditor != nil {
 			command = a.workEditor.Update(message)
 		}
+	case overlayDataEditor:
+		if a.dataEditor != nil {
+			command = a.dataEditor.Update(message)
+		}
+	case overlayDataNote:
+		if a.dataNote != nil {
+			a.dataNote.Update(message)
+		}
+	case overlayDataFilter:
+		if a.dataFilter != nil {
+			a.dataFilter.Update(message)
+		}
+	case overlayDataBulk:
+		// Deliberately consumes keys until an explicit confirm or cancel —
+		// Confirm only ever fires from the "enter" branch above.
 	case overlayAgentAnswer:
 		if a.answerOverlay != nil {
 			a.answerOverlay.Update(message)
@@ -2326,6 +2752,10 @@ func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case panelWork:
 		if a.work != nil {
 			cmd = a.work.Update(msg)
+		}
+	case panelData:
+		if a.data != nil {
+			cmd = a.data.Update(msg)
 		}
 	case panelChat:
 		_, mouse := msg.(tea.MouseMsg)
@@ -2718,6 +3148,20 @@ func (a app) panelView() string {
 		}
 		metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 		return a.work.View(metrics.mainWidth, metrics.mainHeight, a.styles)
+	case panelData:
+		if a.data == nil {
+			return lipgloss.JoinVertical(lipgloss.Left,
+				a.styles.title.Render("Data"),
+				"",
+				a.styles.status.Render("○ No dataset store connected"),
+				a.styles.thought.Render("datasets.duckdb becomes available when the workspace store connects."),
+				"",
+				a.styles.attention.Render("Review actions unavailable"),
+				a.styles.thought.Render("open ~/.lem/datasets.duckdb via `lem data create`/`lem data import` first"),
+			)
+		}
+		metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+		return a.data.View(metrics.mainWidth, metrics.mainHeight, a.styles)
 	default: // chat
 		if a.model == nil && a.loading == "" {
 			return "\n  " + a.styles.status.Render("○ no model loaded — open Models and choose one")
@@ -2783,6 +3227,30 @@ func (a app) overlayView() string {
 			body = overlayEmpty("Work editor", "work editor is unavailable")
 		} else {
 			body = a.workEditor.View(bodyWidth, bodyHeight, a.styles)
+		}
+	case overlayDataEditor:
+		if a.dataEditor == nil {
+			body = overlayEmpty("Edit as derived", "data editor is unavailable")
+		} else {
+			body = a.dataEditor.View(bodyWidth, bodyHeight, a.styles)
+		}
+	case overlayDataNote:
+		if a.dataNote == nil {
+			body = overlayEmpty("Data note", "note overlay is unavailable")
+		} else {
+			body = a.dataNote.View(bodyWidth, bodyHeight, a.styles)
+		}
+	case overlayDataFilter:
+		if a.dataFilter == nil {
+			body = overlayEmpty("Filter", "filter overlay is unavailable")
+		} else {
+			body = a.dataFilter.View(bodyWidth, bodyHeight, a.styles)
+		}
+	case overlayDataBulk:
+		if a.dataBulk == nil {
+			body = overlayEmpty("Bulk action", "bulk action overlay is unavailable")
+		} else {
+			body = a.dataBulk.View(bodyWidth, bodyHeight, a.styles)
 		}
 	case overlayAgentAnswer:
 		if a.answerOverlay == nil {

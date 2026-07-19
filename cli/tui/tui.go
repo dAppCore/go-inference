@@ -119,6 +119,46 @@ func runWithWorkspace(
 	return 0
 }
 
+// newDataReviewApp builds the workspace app RunDataReview drives — focused
+// on the Data panel and, when slug is non-empty, pre-filtered to that one
+// dataset (attachData consumes dataInitialSlug once the workspace
+// connects and the dataset store opens). Split out from RunDataReview so
+// the state setup itself is unit-testable via runWorkspaceCheck without a
+// live terminal — RunDataReview's own tea.NewProgram().Run() call is,
+// like Run's own interactive branch, exercised by hand rather than by an
+// automated test: every existing tui_test.go test drives only the
+// --check headless path (see TestRunWithWorkspace_Good and neighbours),
+// which is the established, precedented boundary this mirrors.
+func newDataReviewApp(ctx context.Context, slug string) app {
+	a := newWorkspaceApp("", 0, 4096, func() core.Result { return loadDefaultWorkspaceContext(ctx) })
+	a.activePanel = panelData
+	a.dataInitialSlug = core.Trim(slug)
+	return a
+}
+
+// RunDataReview is the `lem data review [slug]` entry point (tracker #43,
+// plan Task 8) — opens the same persistent workspace program as Run, but
+// focused on the Data panel. Falls back to Run's own honest error path
+// (the "tui: <err>" stderr line, same as any other program-start
+// failure) when Bubble Tea cannot start; cli/data.go's caller adds its
+// own headless fallback pointer on a non-zero exit (see runDataReview),
+// keeping that message rather than promising a broken TUI.
+func RunDataReview(ctx context.Context, slug string, stdout, stderr io.Writer) int {
+	a := newDataReviewApp(ctx, slug)
+	program := tea.NewProgram(a, tea.WithAltScreen(), tea.WithContext(ctx))
+	finalModel, runErr := program.Run()
+	shutdownResult := shutdownProgramModel(a, finalModel)
+	if runErr != nil {
+		core.WriteString(stderr, "tui: "+runErr.Error()+"\n")
+		return 1
+	}
+	if !shutdownResult.OK {
+		core.WriteString(stderr, "tui: "+shutdownResult.Error()+"\n")
+		return 1
+	}
+	return 0
+}
+
 func shutdownProgramModel(initial app, final tea.Model) core.Result {
 	if finalApp, ok := final.(app); ok {
 		return finalApp.shutdown()

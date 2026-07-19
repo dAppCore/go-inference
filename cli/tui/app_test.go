@@ -22,6 +22,7 @@ import (
 	"dappco.re/go/inference/agent/provider"
 	"dappco.re/go/inference/agent/work"
 	"dappco.re/go/inference/agent/workspace"
+	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/decode/parser"
 )
 
@@ -2223,6 +2224,275 @@ func TestWorkEditor_CtrlSSavesAndEscapeCancels(t *testing.T) {
 	a = model.(app)
 	if a.activeOverlay != overlayNone || len(a.work.Items()) != 1 {
 		t.Fatalf("escape state = overlay=%d work=%#v", a.activeOverlay, a.work.Items())
+	}
+}
+
+// ---- Data panel wiring (Task 8) ----
+
+func assertDataReviewPending(t *testing.T, store dataset.Store, itemID string) {
+	t.Helper()
+	review := core.MustCast[dataset.Review](store.ReviewLatest(itemID))
+	if review.Status != dataset.StatusPending {
+		t.Fatalf("item %s status = %q, want still pending (no write yet)", itemID, review.Status)
+	}
+}
+
+func TestApp_AttachDataWiresPanelAndPalette(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	if a.data == nil {
+		t.Fatal("attachData left a.data nil")
+	}
+	if _, exists := a.palette.byID[dataCommandID(dataActionApprove, false)]; !exists {
+		t.Fatal("attachData did not seed the palette's data.* commands")
+	}
+}
+
+func TestApp_AttachDataNilStoreLeavesPanelHonestlyUnavailable(t *testing.T) {
+	a := newApp("", 0, 64)
+	if result := a.attachData(nil); !result.OK {
+		t.Fatalf("attachData(nil): %v", result.Value)
+	}
+	if a.data != nil {
+		t.Fatalf("attachData(nil) left a.data non-nil: %#v", a.data)
+	}
+	a.activePanel = panelData
+	view := a.panelView()
+	if !strings.Contains(view, "No dataset store connected") {
+		t.Fatalf("panelView with no data store:\n%s", view)
+	}
+}
+
+func TestApp_RoutePanelDataDispatchesToDataPanel(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	seedDataItem(t, store, ds.ID, "first", "first", at)
+	seedDataItem(t, store, ds.ID, "second", "second", at.Add(time.Second))
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel = panelData
+	before, ok := a.data.Selected()
+	if !ok {
+		t.Fatal("no initial selection")
+	}
+	model, _ := a.Update(keyMsg("j"))
+	a = model.(app)
+	after, ok := a.data.Selected()
+	if !ok || after.Item.ID == before.Item.ID {
+		t.Fatalf("j navigation did not move the selection: before=%s after=%s ok=%v", before.Item.ID, after.Item.ID, ok)
+	}
+}
+
+func TestApp_PanelViewDispatchesToDataPanel(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	seedDataItem(t, store, ds.ID, "prompt-marker", "response-marker", at)
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel, a.width, a.height = panelData, 120, 40
+	view := a.panelView()
+	if !strings.Contains(view, "DATA") {
+		t.Fatalf("panelView for panelData missing the panel's own header:\n%s", view)
+	}
+}
+
+func TestApp_DataPanelHotkeys_ApproveReject(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	item := seedDataItem(t, store, ds.ID, "p", "r", at)
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel = panelData
+
+	model, _ := a.Update(keyMsg("a"))
+	a = model.(app)
+	if a.errText != "" {
+		t.Fatalf("approve hotkey errText = %q", a.errText)
+	}
+	if review := core.MustCast[dataset.Review](store.ReviewLatest(item.ID)); review.Status != dataset.StatusApproved {
+		t.Fatalf("status after 'a' = %q", review.Status)
+	}
+
+	model, _ = a.Update(keyMsg("r"))
+	a = model.(app)
+	if review := core.MustCast[dataset.Review](store.ReviewLatest(item.ID)); review.Status != dataset.StatusRejected {
+		t.Fatalf("status after 'r' = %q", review.Status)
+	}
+}
+
+func TestApp_DataPanelHotkeys_TagOverlayFlow(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	item := seedDataItem(t, store, ds.ID, "p", "r", at)
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel = panelData
+
+	model, _ := a.Update(keyMsg("t"))
+	a = model.(app)
+	if a.activeOverlay != overlayDataNote || a.dataNote == nil {
+		t.Fatalf("t did not open the note overlay: overlay=%d note=%v", a.activeOverlay, a.dataNote)
+	}
+	for _, r := range "hand-picked" {
+		model, _ = a.Update(keyMsg(string(r)))
+		a = model.(app)
+	}
+	model, _ = a.Update(keyMsg("enter"))
+	a = model.(app)
+	if a.activeOverlay != overlayNone || a.dataNote != nil {
+		t.Fatalf("enter did not close the note overlay: overlay=%d note=%v", a.activeOverlay, a.dataNote)
+	}
+	if review := core.MustCast[dataset.Review](store.ReviewLatest(item.ID)); review.Note != "tag: hand-picked" {
+		t.Fatalf("tag review = %#v", review)
+	}
+}
+
+func TestApp_DataPanelHotkeys_QuarantineClearRequiresNote(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	item := seedDataItem(t, store, ds.ID, "p", "r", at)
+	if result := store.ReviewAppend(dataset.Review{ItemID: item.ID, Status: dataset.StatusQuarantined, Reviewer: dataset.ReviewerAutoWelfare, CreatedAt: at}); !result.OK {
+		t.Fatalf("seed quarantine: %v", result.Value)
+	}
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel = panelData
+
+	model, _ := a.Update(keyMsg("c"))
+	a = model.(app)
+	if a.activeOverlay != overlayDataNote {
+		t.Fatalf("c did not open the note overlay: overlay=%d", a.activeOverlay)
+	}
+	// An empty Enter must not submit — no write.
+	model, _ = a.Update(keyMsg("enter"))
+	a = model.(app)
+	if a.activeOverlay != overlayDataNote {
+		t.Fatalf("empty enter closed the overlay without a note: overlay=%d", a.activeOverlay)
+	}
+	if review := core.MustCast[dataset.Review](store.ReviewLatest(item.ID)); review.Status != dataset.StatusQuarantined {
+		t.Fatalf("status changed despite an empty note: %q", review.Status)
+	}
+	for _, r := range "false positive" {
+		model, _ = a.Update(keyMsg(string(r)))
+		a = model.(app)
+	}
+	model, _ = a.Update(keyMsg("enter"))
+	a = model.(app)
+	if a.activeOverlay != overlayNone {
+		t.Fatalf("non-empty enter did not close the overlay: overlay=%d", a.activeOverlay)
+	}
+	if review := core.MustCast[dataset.Review](store.ReviewLatest(item.ID)); review.Status != dataset.StatusApproved || review.Note != "false positive" {
+		t.Fatalf("cleared review = %#v", review)
+	}
+}
+
+func TestApp_DataPanelHotkeys_EditAsDerivedFlow(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	original := seedDataItem(t, store, ds.ID, "original", "original response", at)
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel = panelData
+
+	model, _ := a.Update(keyMsg("e"))
+	a = model.(app)
+	if a.activeOverlay != overlayDataEditor || a.dataEditor == nil {
+		t.Fatalf("e did not open the editor: overlay=%d editor=%v", a.activeOverlay, a.dataEditor)
+	}
+	a.dataEditor.focus = 1
+	a.dataEditor.applyFocus()
+	a.dataEditor.response.SetValue("edited response")
+
+	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	a = model.(app)
+	if a.activeOverlay != overlayNone || a.dataEditor != nil {
+		t.Fatalf("ctrl+s did not close the editor: overlay=%d editor=%v", a.activeOverlay, a.dataEditor)
+	}
+	if reread := core.MustCast[dataset.Item](store.Item(original.ID)); !reread.Archived {
+		t.Fatal("ctrl+s did not archive the original")
+	}
+}
+
+// TestApp_DataPanelBulkConfirmGate is the explicit "no confirm, no writes"
+// proof the task requires, driven end-to-end through real key messages:
+// opening the bulk overlay writes nothing; Escape cancels and still
+// writes nothing; a single Enter only arms (still nothing written); only
+// the SECOND Enter applies the action.
+func TestApp_DataPanelBulkConfirmGate(t *testing.T) {
+	store := newTestDataPanelStore(t)
+	at := time.Now()
+	ds := seedDataDataset(t, store, "vents", at)
+	itemA := seedDataItem(t, store, ds.ID, "a", "a", at)
+	itemB := seedDataItem(t, store, ds.ID, "b", "b", at.Add(time.Second))
+
+	a := newApp("", 0, 64)
+	if result := a.attachData(store); !result.OK {
+		t.Fatalf("attachData: %v", result.Value)
+	}
+	a.activePanel = panelData
+
+	model, _ := a.Update(keyMsg("A"))
+	a = model.(app)
+	if a.activeOverlay != overlayDataBulk || a.dataBulk == nil {
+		t.Fatalf("A did not open the bulk overlay: overlay=%d bulk=%v", a.activeOverlay, a.dataBulk)
+	}
+	assertDataReviewPending(t, store, itemA.ID)
+	assertDataReviewPending(t, store, itemB.ID)
+
+	model, _ = a.Update(keyMsg("esc"))
+	a = model.(app)
+	if a.activeOverlay != overlayNone || a.dataBulk != nil {
+		t.Fatalf("esc did not clear the bulk overlay: overlay=%d bulk=%v", a.activeOverlay, a.dataBulk)
+	}
+	assertDataReviewPending(t, store, itemA.ID)
+	assertDataReviewPending(t, store, itemB.ID)
+
+	model, _ = a.Update(keyMsg("A"))
+	a = model.(app)
+	model, _ = a.Update(keyMsg("enter"))
+	a = model.(app)
+	if a.activeOverlay != overlayDataBulk || a.dataBulk == nil || !a.dataBulk.armed {
+		t.Fatalf("first enter did not arm: overlay=%d bulk=%#v", a.activeOverlay, a.dataBulk)
+	}
+	assertDataReviewPending(t, store, itemA.ID)
+	assertDataReviewPending(t, store, itemB.ID)
+
+	model, _ = a.Update(keyMsg("enter"))
+	a = model.(app)
+	if a.activeOverlay != overlayNone || a.dataBulk != nil {
+		t.Fatalf("second enter did not close the overlay: overlay=%d bulk=%v", a.activeOverlay, a.dataBulk)
+	}
+	for _, id := range []string{itemA.ID, itemB.ID} {
+		if review := core.MustCast[dataset.Review](store.ReviewLatest(id)); review.Status != dataset.StatusApproved {
+			t.Fatalf("item %s status = %q after confirm, want approved", id, review.Status)
+		}
 	}
 }
 

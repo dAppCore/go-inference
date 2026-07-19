@@ -31,7 +31,17 @@ type workspaceResources struct {
 	State       reactiveState
 	Preferences preferenceStore
 	Agent       agentProvider
-	Warnings    []string
+	// DatasetStore backs the Data panel — datasets.duckdb, a separate file
+	// from Database (lem.duckdb) per the dataset loop design's
+	// bulk/lifecycle/blast-radius decision (docs/superpowers/specs/
+	// 2026-07-19-lem-dataset-loop-design.md, "Storage"). Opened
+	// best-effort in openWorkspaceWithContext: a damaged or missing
+	// dataset file degrades to a nil DatasetStore + a warning, exactly
+	// like State/Preferences already do, never a fatal workspace-open
+	// failure — "a bloated or damaged dataset file must never take the
+	// agent/TUI state down with it" is the design's own words.
+	DatasetStore DatasetStore
+	Warnings     []string
 }
 
 type workspaceOpeners struct {
@@ -214,14 +224,26 @@ func openWorkspaceWithContext(ctx context.Context, files appFiles, openers works
 		agent = newUnavailableAgentProvider(defaultAgentUnavailableReason)
 	}
 
+	datasetResult := newDuckDatasetStore(files.Paths.Datasets)
+	var datasets DatasetStore
+	if !datasetResult.OK {
+		reason := workspaceOpenError(datasetResult, "open dataset store")
+		warnings = append(warnings, core.Concat("dataset store: ", reason.Error()))
+	} else if store, ok := datasetResult.Value.(*duckDatasetStore); ok {
+		datasets = store
+	} else {
+		warnings = append(warnings, "dataset store: invalid dataset store result")
+	}
+
 	return core.Ok(&workspaceResources{
-		Paths:       files.Paths,
-		Files:       files.Medium,
-		Repository:  repository,
-		State:       state,
-		Preferences: preferences,
-		Agent:       agent,
-		Warnings:    warnings,
+		Paths:        files.Paths,
+		Files:        files.Medium,
+		Repository:   repository,
+		State:        state,
+		Preferences:  preferences,
+		Agent:        agent,
+		DatasetStore: datasets,
+		Warnings:     warnings,
 	})
 }
 
@@ -232,7 +254,7 @@ func (resources *workspaceResources) Close() core.Result {
 	if closeResult := resources.closeAgent(); !closeResult.OK {
 		return core.Fail(core.E("tui.workspaceResources.Close", closeResult.Error(), closeResult.Err()))
 	}
-	failures := make([]string, 0, 2)
+	failures := make([]string, 0, 3)
 	if resources.State != nil {
 		if closeResult := resources.State.Close(); !closeResult.OK {
 			failures = append(failures, closeResult.Error())
@@ -244,6 +266,12 @@ func (resources *workspaceResources) Close() core.Result {
 			failures = append(failures, closeResult.Error())
 		}
 		resources.Repository = nil
+	}
+	if resources.DatasetStore != nil {
+		if closeResult := resources.DatasetStore.Close(); !closeResult.OK {
+			failures = append(failures, closeResult.Error())
+		}
+		resources.DatasetStore = nil
 	}
 	if len(failures) > 0 {
 		return core.Fail(core.E("tui.workspaceResources.Close", core.Join("; ", failures...), nil))

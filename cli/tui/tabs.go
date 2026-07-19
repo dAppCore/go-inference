@@ -15,11 +15,12 @@ const (
 	panelWork
 	panelModels
 	panelService
+	panelData
 	panelCount
 )
 
-var panelNames = [panelCount]string{"Chat", "Work", "Models", "Service"}
-var compactPanelNames = [panelCount]string{"Chat", "Work", "Models", "API"}
+var panelNames = [panelCount]string{"Chat", "Work", "Models", "Service", "Data"}
+var compactPanelNames = [panelCount]string{"Chat", "Work", "Models", "API", "Data"}
 
 func (panel panelID) next() panelID { return (panel + 1) % panelCount }
 func (panel panelID) prev() panelID { return (panel + panelCount - 1) % panelCount }

@@ -48,7 +48,7 @@ func runDataCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 	case "archive":
 		return runDataArchive(args[1:], stdout, stderr)
 	case "review":
-		return runDataReview(args[1:], stdout, stderr)
+		return runDataReview(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printDataUsage(stdout)
 		return 0
@@ -828,22 +828,41 @@ func runDataArchive(args []string, stdout, stderr io.Writer) int {
 
 // ---- review ----
 
-// runDataReview points at the TUI Data panel. The panel itself is Task 8 of
-// docs/superpowers/plans/2026-07-19-lem-dataset-loop.md, not this verb's —
-// cli/tui/tabs.go and the panel files are out of scope here, and as of this
-// writing that task has not landed, so this prints the honest state rather
-// than a broken promise.
-func runDataReview(args []string, stdout, stderr io.Writer) int {
+// runDataReviewTUI is tui.RunDataReview by default — a package-level seam
+// tests substitute so runDataReview's own logic (slug/help parsing, the
+// headless-fallback message) can be proven without ever constructing a
+// real Bubble Tea program: tea.NewProgram's WithAltScreen opens /dev/tty
+// directly for raw terminal control regardless of the stdout/stderr
+// io.Writer passed in, so calling the real tui.RunDataReview from an
+// automated test would hang — or, on a box with a real controlling
+// terminal, open an actual interactive session — exactly the hazard
+// runWithWorkspace's --check mode exists to avoid for `lem tui` itself
+// (see cli/tui/tui_test.go; every existing TUI test drives only that
+// headless path).
+var runDataReviewTUI = tui.RunDataReview
+
+// runDataReview opens the TUI focused on the Data panel (Task 8, tracker
+// #43) — optionally pre-filtered to one dataset slug. runDataReviewTUI
+// drives the real interactive Bubble Tea program; when it cannot start
+// (e.g. no TTY — the same "tui: <err>" failure Run itself can hit) this
+// keeps a human-usable fallback message pointing at the headless verbs,
+// rather than leaving the caller with only Bubble Tea's raw stderr line.
+func runDataReview(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	slug := ""
 	if len(args) > 0 {
 		switch args[0] {
 		case "-h", "--help", "help":
 			core.WriteString(stdout, core.Sprintf("Usage: %s data review [slug]\n\n", cliName()))
-			core.WriteString(stdout, "Print how to open the TUI Data panel for interactive review.\n")
+			core.WriteString(stdout, "Open the TUI focused on the Data panel. With a slug, the panel opens\n")
+			core.WriteString(stdout, "pre-filtered to that one dataset.\n")
 			return 0
+		default:
+			slug = args[0]
 		}
 	}
-	core.Print(stdout, "the Data review panel lands with Task 8 (tracker #43) — not available yet.")
-	core.Print(stdout, "see docs/superpowers/plans/2026-07-19-lem-dataset-loop.md (Task 8) for status.")
-	core.Print(stdout, "for now: `%s data list` / `%s data stats <slug>` inspect a dataset headlessly.", cliName(), cliName())
-	return 0
+	code := runDataReviewTUI(ctx, slug, stdout, stderr)
+	if code != 0 {
+		core.Print(stdout, "the TUI could not start — for now: `%s data list` / `%s data stats <slug>` inspect a dataset headlessly.", cliName(), cliName())
+	}
+	return code
 }
