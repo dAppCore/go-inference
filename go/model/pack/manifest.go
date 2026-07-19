@@ -76,7 +76,7 @@ type VindexRef struct {
 	Embedded bool `json:"embedded"`
 
 	// Offset is the byte offset (within the Trix payload) at which the
-	// vindex blob starts.
+	// vindex blob starts. The bytes before Offset are the pack tar.
 	Offset uint64 `json:"offset"`
 
 	// Length is the vindex blob length in bytes.
@@ -85,6 +85,13 @@ type VindexRef struct {
 	// Format names the vindex serialisation. "msgpack" is the LARQL
 	// .larql.bin form.
 	Format string `json:"format,omitempty"`
+
+	// Hash is the hex-encoded SHA-256 of the vindex blob bytes, mirroring
+	// the Hash convention used elsewhere (Manifest.Model.Hash,
+	// state.StateRef.Hash). Pack computes it; ExtractVindex verifies
+	// against it so a corrupted or truncated blob fails loud rather than
+	// handing callers silently-wrong bytes.
+	Hash string `json:"hash,omitempty"`
 }
 
 // Producer records the tool that emitted the .model.
@@ -108,10 +115,15 @@ type PackOptions struct {
 	// UTC RFC3339 timestamp.
 	Manifest Manifest
 
-	// VindexBlob, when non-nil, requests an embedded vindex. NOT yet
-	// implemented — passing a non-nil value causes Pack to return an
-	// explicit "vindex embedding not yet implemented" Result so the seam
-	// is honest rather than silently dropping the blob.
+	// VindexBlob, when non-nil, is embedded verbatim as a trailing section
+	// of the Trix payload, appended immediately after the pack tar. Pack
+	// derives Manifest.Vindex (Embedded/Offset/Length/Hash) from the tar
+	// size and blob bytes — it is a computed field, not caller-authored.
+	// A caller-set Manifest.Vindex.Format is preserved (pack treats the
+	// blob as opaque and never inspects it); any other caller-set
+	// Manifest.Vindex.* value is overwritten. Setting Manifest.Vindex
+	// while leaving VindexBlob nil is an error — there would be nothing
+	// to embed. See ExtractVindex for the read side.
 	VindexBlob []byte
 }
 
@@ -150,12 +162,17 @@ type IdentityFingerprint struct {
 //	id := manifest.Identity()
 //	_ = id.Model.Architecture
 func (m Manifest) Identity() IdentityFingerprint {
-	return IdentityFingerprint{
+	fp := IdentityFingerprint{
 		Model:        m.Model,
 		Tokenizer:    m.Tokenizer,
 		SourceFormat: m.SourceFormat,
 		Capabilities: m.Capabilities,
-		// VindexHash left empty until vindex embedding lands and the
-		// hash of the embedded blob is known at fingerprint time.
 	}
+	if m.Vindex != nil {
+		// Two .model files built from identical weights but different
+		// vindexes are a different logical artefact — the vindex is part
+		// of what LARQL operations see, so identity must track it.
+		fp.VindexHash = m.Vindex.Hash
+	}
+	return fp
 }
