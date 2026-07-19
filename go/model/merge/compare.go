@@ -100,6 +100,9 @@ func ComparePacks(ctx context.Context, opts CompareOptions) (*CompareResult, err
 		return nil, core.E("ComparePacks", "index fine-tuned weights", err)
 	}
 
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+
 	// Pre-size result.Tensors: it grows to at most len(baseIndex.Names)
 	// entries (every base tensor either appears in tuned or not).
 	expectedTensors := len(baseIndex.Names)
@@ -131,7 +134,7 @@ func ComparePacks(ctx context.Context, opts CompareOptions) (*CompareResult, err
 			})
 			continue
 		}
-		delta, err := compareTensorEntries(name, baseEntry, tunedEntry)
+		delta, err := compareTensorEntries(cache, name, baseEntry, tunedEntry)
 		if err != nil {
 			return nil, core.E("ComparePacks", "compare tensor "+name, err)
 		}
@@ -181,8 +184,11 @@ func validateComparePack(label string, source Source) error {
 }
 
 // compareTensorEntries decodes base and tuned to float32 (when shape and
-// dtype agree) and computes per-tensor distance statistics.
-func compareTensorEntries(name string, base, tuned tensorEntry) (TensorDelta, error) {
+// dtype agree) and computes per-tensor distance statistics. Both tensors are
+// read from their own shard on demand, over cache — the ShardCache shared
+// across the whole ComparePacks call — so a multi-GB sharded pack is never
+// resident beyond the pair of tensors currently being compared.
+func compareTensorEntries(cache *safetensors.ShardCache, name string, base, tuned tensorEntry) (TensorDelta, error) {
 	shapeMatch := core.SliceEqual(base.Shape, tuned.Shape)
 	baseShapeClone := cloneIntSlice(base.Shape)
 	tunedShapeClone := cloneIntSlice(tuned.Shape)
@@ -206,11 +212,11 @@ func compareTensorEntries(name string, base, tuned tensorEntry) (TensorDelta, er
 		return delta, nil
 	}
 
-	baseValues, err := safetensors.DecodeFloat32(base.DType, base.Raw, delta.Elements)
+	baseValues, err := cache.ReadRefValues(base.Ref)
 	if err != nil {
 		return TensorDelta{}, err
 	}
-	tunedValues, err := safetensors.DecodeFloat32(tuned.DType, tuned.Raw, delta.Elements)
+	tunedValues, err := cache.ReadRefValues(tuned.Ref)
 	if err != nil {
 		return TensorDelta{}, err
 	}
