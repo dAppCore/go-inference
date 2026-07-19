@@ -11,6 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
+	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
@@ -29,13 +30,15 @@ type gatedDeltaLayer struct {
 	sc          *attn.GatedDeltaScratch
 	conv, delta []float32 // the conv ring + delta state, advanced each decode token (host path)
 
-	// fused device lane (arch_qwen_fused.go): the whole layer through gatedDeltaQuantLayerRun.
-	// fusedDense latches weight-side eligibility at bind (dense FFN, packed projections);
+	// fused device lane (arch_qwen_fused.go): the whole layer through gatedDeltaQuantLayerRun (dense)
+	// or the chain's gated-delta + MoE-tail walk (fusedMoE; ffNorm then holds the pre-FF norm and moe
+	// the chain's MoEMLP view). fusedDense/fusedMoE latch weight-side eligibility at bind;
 	// devChecked/devOK latch device-side usability on first use. y is the reused layer output row.
 	inNorm, ffNorm       []float32
 	ffGate, ffUp, ffDown *model.QuantWeight
 	dff                  int
-	fusedDense           bool
+	moe                  *composed.MoEMLP
+	fusedDense, fusedMoE bool
 	devChecked, devOK    bool
 	y                    []float32
 }

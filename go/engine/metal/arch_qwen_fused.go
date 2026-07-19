@@ -11,6 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
+	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
@@ -37,14 +38,117 @@ func archQuantToModel(w QuantWeight, outDim, inDim int) *model.QuantWeight {
 	}
 }
 
+// qwenChainMoE builds the minimal composed.MoEMLP view the chain's MoE tail resolves its weights
+// from, out of the factory's native MoE holder — batched switch_mlp experts, softmax top-k router
+// (dequantised to f32 once), the shared expert trio and its σ gate. Dims are DERIVED from the packed
+// byte strides (the don't-guess rule). nil when the layer is not a chain-servable qwen MoE.
+func qwenChainMoE(moe *MoEQuantLayerWeights, D int) *composed.MoEMLP {
+	if moe == nil || len(moe.SharedGate.Packed) == 0 || moe.NumExperts <= 0 || moe.TopK <= 0 || moe.ExpertDFF <= 0 {
+		return nil
+	}
+	var router []float32
+	if moe.Router.Bits > 0 {
+		r, err := dequantizeAffineRowsF32(moe.Router.Packed, moe.Router.Scales, moe.Router.Biases, moe.NumExperts, D, moe.Router.GroupSize, moe.Router.Bits)
+		if err != nil {
+			return nil
+		}
+		router = r
+	} else {
+		router = bf16VecToF32(moe.Router.Packed)
+	}
+	if len(router) != moe.NumExperts*D {
+		return nil
+	}
+	gate := archQuantToModel(moe.ExpGate, moe.ExpertDFF, D)
+	up := archQuantToModel(moe.ExpUp, moe.ExpertDFF, D)
+	down := archQuantToModel(moe.ExpDown, D, moe.ExpertDFF)
+	if gate == nil || up == nil || down == nil {
+		return nil
+	}
+	// shared expert FF from the packed row stride of its gate ([FF, D] at Bits): rowBytes = D·Bits/8.
+	sg := moe.SharedGate
+	if sg.Bits <= 0 || D*sg.Bits%8 != 0 {
+		return nil
+	}
+	sharedFF := len(sg.Packed) / (D * sg.Bits / 8)
+	sGate := archQuantToModel(moe.SharedGate, sharedFF, D)
+	sUp := archQuantToModel(moe.SharedUp, sharedFF, D)
+	sDown := archQuantToModel(moe.SharedDown, D, sharedFF)
+	if sGate == nil || sUp == nil || sDown == nil || sharedFF <= 0 {
+		return nil
+	}
+	var sharedGate []float32
+	if len(moe.SharedSigmoid.Packed) > 0 {
+		if moe.SharedSigmoid.Bits > 0 {
+			gg, err := dequantizeAffineRowsF32(moe.SharedSigmoid.Packed, moe.SharedSigmoid.Scales, moe.SharedSigmoid.Biases, 1, D, moe.SharedSigmoid.GroupSize, moe.SharedSigmoid.Bits)
+			if err != nil {
+				return nil
+			}
+			sharedGate = gg
+		} else {
+			sharedGate = bf16VecToF32(moe.SharedSigmoid.Packed)
+		}
+		if len(sharedGate) != D {
+			return nil
+		}
+	}
+	return &composed.MoEMLP{
+		Router: router, Experts: make([]composed.MoEExpert, moe.NumExperts), TopK: moe.TopK,
+		NormTopKProb: true, Gating: model.MoEGatingSoftmax,
+		GateBatchedQ: gate, UpBatchedQ: up, DownBatchedQ: down,
+		Shared:     &composed.MoEExpert{GateQ: sGate, UpQ: sUp, DownQ: sDown},
+		SharedGate: sharedGate,
+		MoEBits:    moe.ExpGate.Bits, MoEGroupSize: moe.ExpGate.GroupSize,
+	}
+}
+
 // bindQwenFusedDense captures the fused-lane weight views on the two Qwen holder kinds after the
-// host-path binds have run — dense-FFN layers only (a MoE layer's FFN half stays with its own
-// encoder path). Weight-side eligibility latches here; device-side usability latches on first use
+// host-path binds have run. Dense-FFN layers latch fusedDense (the whole-layer seams carry the SiLU
+// tail); qwen MoE layers latch fusedMoE with the chain's MoEMLP view (the chain MoE tail owns the
+// FFN half there). Weight-side eligibility latches here; device-side usability latches on first use
 // (the metallib is not loaded yet at bind time).
 func (s *archDecodeState) bindQwenFusedDense(layers []QuantizedLayerWeights) {
 	for i := range layers {
 		L := &layers[i]
-		if L.MoE != nil || len(L.AttnNormW) == 0 || len(L.MLPNormW) == 0 {
+		if len(L.AttnNormW) == 0 {
+			continue
+		}
+		if L.MoE != nil {
+			mm := qwenChainMoE(L.MoE, s.dModel)
+			if mm == nil || len(L.MoE.PreFFNormW) == 0 {
+				continue
+			}
+			preFF := bf16VecToF32(L.MoE.PreFFNormW)
+			if gd := s.layerGatedDelta(i); gd != nil {
+				gd.inNorm = bf16VecToF32(L.AttnNormW)
+				gd.ffNorm = preFF
+				gd.moe = mm
+				gd.fusedMoE = true
+				continue
+			}
+			if s.gatedAttn == nil || s.gatedAttn[i] == nil {
+				continue
+			}
+			ga := s.gatedAttn[i]
+			if ga.bq != nil || ga.bk != nil || ga.bv != nil {
+				continue
+			}
+			lhd, lkv := headDimOf(s.specs[i], s.headDim), kvHeadsOf(s.specs[i], s.nKVHeads)
+			mq := archQuantToModel(ga.q, 2*s.nHeads*lhd, s.dModel)
+			mk := archQuantToModel(ga.k, lkv*lhd, s.dModel)
+			mv := archQuantToModel(ga.v, lkv*lhd, s.dModel)
+			mo := archQuantToModel(ga.o, s.dModel, s.nHeads*lhd)
+			if mq == nil || mk == nil || mv == nil || mo == nil {
+				continue
+			}
+			ga.inNorm = bf16VecToF32(L.AttnNormW)
+			ga.ffNorm = preFF
+			ga.mq, ga.mk, ga.mv, ga.mo = mq, mk, mv, mo
+			ga.moe = mm
+			ga.fusedMoE = true
+			continue
+		}
+		if len(L.MLPNormW) == 0 {
 			continue
 		}
 		ff := s.dFF
@@ -207,7 +311,13 @@ func (s *archDecodeState) qwenChainReady() bool {
 	}
 	for li := range s.specs {
 		if gd := s.layerGatedDelta(li); gd != nil {
-			if !gd.fusedDense || !gatedDeltaBlockUsable(gd.cfg.HeadDim, gd.cfg.HeadDim, gd.cfg.KeyHeads, gd.cfg.ValueHeads, gd.cfg.ConvKernel) {
+			if !gd.fusedDense && !gd.fusedMoE {
+				return false
+			}
+			if !gatedDeltaBlockUsable(gd.cfg.HeadDim, gd.cfg.HeadDim, gd.cfg.KeyHeads, gd.cfg.ValueHeads, gd.cfg.ConvKernel) {
+				return false
+			}
+			if gd.fusedMoE && !moeChainRecordable(gd.moe) {
 				return false
 			}
 			continue
@@ -218,7 +328,13 @@ func (s *archDecodeState) qwenChainReady() bool {
 		ga := s.gatedAttn[li]
 		lhd := headDimOf(s.specs[li], s.headDim)
 		lkv := kvHeadsOf(s.specs[li], s.nKVHeads)
-		if !ga.fusedDense || !attnCoreUsable(s.nHeads, lkv, lhd, s.rotaryDim) {
+		if !ga.fusedDense && !ga.fusedMoE {
+			return false
+		}
+		if !attnCoreUsable(s.nHeads, lkv, lhd, s.rotaryDim) {
+			return false
+		}
+		if ga.fusedMoE && !moeChainRecordable(ga.moe) {
 			return false
 		}
 	}
@@ -226,25 +342,20 @@ func (s *archDecodeState) qwenChainReady() bool {
 	return true
 }
 
-// stepTokenQwenChain decodes ONE token through the composed chain walk: the whole layer stack
-// encodes into a single command buffer (ComposedChainBeginDevice → per-layer chain calls with
-// resident state → ComposedChainEndDevice), replacing the per-layer submit+wait of the fused
-// seams. Writes the final hidden (bf16) into `out` and returns it. The caller skips the
-// per-layer loop entirely.
-func (s *archDecodeState) stepTokenQwenChain(inputBuf, out metal.MTLBuffer, pos int) (metal.MTLBuffer, error) {
-	D := s.dModel
-	x := bf16BufToF32(inputBuf, 0, D)
-	ctx, err := ComposedChainBeginDevice(x, 1, D)
-	if err != nil {
-		return nil, err
-	}
+// qwenChainWalk drives every layer's chain call against a live or recording chain context — the
+// one walk both the record pass and the live encode share (mirroring composed.chainWalk).
+func (s *archDecodeState) qwenChainWalk(ctx any, pos int) error {
 	for li := range s.specs {
 		if gd := s.layerGatedDelta(li); gd != nil {
 			if gd.sc == nil {
 				gd.sc = &attn.GatedDeltaScratch{}
 			}
-			if err := gatedDeltaQuantChainLayerDevice(ctx, gd.sc, gd.inNorm, gd.w, gd.cfg, gd.ffNorm, gd.ffGate, gd.ffUp, gd.ffDown, gd.conv, gd.delta, gd.dff, s.eps); err != nil {
-				return nil, err
+			if gd.fusedMoE {
+				if err := gatedDeltaQuantChainMoELayerDevice(ctx, gd.sc, gd.inNorm, gd.w, gd.cfg, gd.ffNorm, gd.moe, gd.conv, gd.delta, s.eps); err != nil {
+					return err
+				}
+			} else if err := gatedDeltaQuantChainLayerDevice(ctx, gd.sc, gd.inNorm, gd.w, gd.cfg, gd.ffNorm, gd.ffGate, gd.ffUp, gd.ffDown, gd.conv, gd.delta, gd.dff, s.eps); err != nil {
+				return err
 			}
 			continue
 		}
@@ -259,13 +370,71 @@ func (s *archDecodeState) stepTokenQwenChain(inputBuf, out metal.MTLBuffer, pos 
 		if len(ga.qNorm) > 0 || len(ga.kNorm) > 0 {
 			qkNorm = 1
 		}
-		dev, aerr := attnQuantChainLayerDevice(ctx, ga.dev, ga.inNorm, ga.mq, ga.mk, ga.mv, ga.mo,
-			ga.qNorm, ga.kNorm, ga.ffNorm, ga.ffGate, ga.ffUp, ga.ffDown,
-			nil, nil, s.nHeads, lkv, lhd, rotDim, pos, slideW, 1, qkNorm, ga.dff, s.eps, rbase)
+		var dev any
+		var aerr error
+		if ga.fusedMoE {
+			dev, aerr = attnQuantChainMoELayerDevice(ctx, ga.dev, ga.inNorm, ga.mq, ga.mk, ga.mv, ga.mo,
+				ga.qNorm, ga.kNorm, ga.ffNorm, ga.moe,
+				nil, nil, s.nHeads, lkv, lhd, rotDim, pos, slideW, 1, qkNorm, s.eps, rbase)
+		} else {
+			dev, aerr = attnQuantChainLayerDevice(ctx, ga.dev, ga.inNorm, ga.mq, ga.mk, ga.mv, ga.mo,
+				ga.qNorm, ga.kNorm, ga.ffNorm, ga.ffGate, ga.ffUp, ga.ffDown,
+				nil, nil, s.nHeads, lkv, lhd, rotDim, pos, slideW, 1, qkNorm, ga.dff, s.eps, rbase)
+		}
 		if aerr != nil {
-			return nil, aerr
+			return aerr
 		}
 		ga.dev = dev
+	}
+	return nil
+}
+
+// stepTokenQwenChain decodes ONE token through the composed chain machinery: replay the recorded
+// command stream when one is valid (one executeCommandsInBuffer, no re-encode — mirroring
+// composed.forwardChain), else record once and run the live walk (one command buffer for the whole
+// layer stack, resident state). Writes the final hidden (bf16) into `out` and returns it. The
+// caller skips the per-layer loop entirely.
+func (s *archDecodeState) stepTokenQwenChain(inputBuf, out metal.MTLBuffer, pos int) (metal.MTLBuffer, error) {
+	D := s.dModel
+	x := bf16BufToF32(inputBuf, 0, D)
+
+	if s.qwenChainRec != nil {
+		y, _, ok, rerr := ComposedChainReplayDevice(s.qwenChainRec, x)
+		if rerr == nil && ok {
+			// composedChainReplay advanced ALL the state itself — the device KV rows, ring and delta
+			// through the executed commands, and the attnKVDeviceState.n counters host-side (these ARE
+			// the factory's ga.dev handles; bumping them again here double-advances the position and
+			// silently corrupts the KV slot addressing — the debugged-in-anger receipt).
+			bf16WriteBuf(out, y)
+			return out, nil
+		}
+		ComposedChainRecordingRelease(s.qwenChainRec)
+		s.qwenChainRec = nil // stale (cache grew/realloc'd) — re-encode this token, re-record later
+	}
+
+	// Record BEFORE the live encode (states not yet advanced, so the recorded desync checks see the
+	// same position the live pass uses). A recording failure latches off — the stack won't change
+	// shape mid-session.
+	if s.qwenChainRec == nil && !s.qwenChainRecFailed {
+		if rctx, rerr := ComposedChainRecordBegin(1, D, len(s.specs)); rerr == nil {
+			if recErr := s.qwenChainWalk(rctx, pos); recErr == nil {
+				if rec, eerr := ComposedChainRecordEnd(rctx); eerr == nil {
+					s.qwenChainRec = rec
+				} else {
+					s.qwenChainRecFailed = true
+				}
+			} else {
+				s.qwenChainRecFailed = true
+			}
+		}
+	}
+
+	ctx, err := ComposedChainBeginDevice(x, 1, D)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.qwenChainWalk(ctx, pos); err != nil {
+		return nil, err
 	}
 	y, err := ComposedChainEndDevice(ctx)
 	if err != nil {

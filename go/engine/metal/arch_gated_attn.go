@@ -11,6 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
+	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
@@ -33,13 +34,15 @@ type gatedAttnLayer struct {
 	n              int       // cached positions (host path)
 
 	// fused device lane (arch_qwen_fused.go): the whole layer through AttnQuantFullLayerDevice with
-	// resident device KV on dev. fusedDense latches weight-side eligibility at bind; devChecked/devOK
-	// latch device-side usability on first use.
+	// resident device KV on dev (dense), or the chain's gated-attention + MoE-tail walk (fusedMoE;
+	// ffNorm then holds the pre-FF norm and moe the chain's MoEMLP view). fusedDense/fusedMoE latch
+	// weight-side eligibility at bind; devChecked/devOK latch device-side usability on first use.
 	inNorm, ffNorm       []float32
 	mq, mk, mv, mo       *model.QuantWeight
 	ffGate, ffUp, ffDown *model.QuantWeight
 	dff                  int
-	fusedDense           bool
+	moe                  *composed.MoEMLP
+	fusedDense, fusedMoE bool
 	devChecked, devOK    bool
 	dev                  any
 }

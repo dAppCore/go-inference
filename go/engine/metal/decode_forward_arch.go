@@ -232,16 +232,20 @@ type archDecodeState struct {
 	attnOutputGate bool               // the Arch declares attn_output_gate → attention layers gate their output on the host path
 	// qwenChainChecked/qwenChainAll: the whole-token chain-walk latch (arch_qwen_fused.go) — every
 	// layer fused-eligible AND device-servable, pre-flighted once before the first walk.
+	// qwenChainRec/qwenChainRecFailed: the walk's recorded command stream (replayed per token) and
+	// its don't-retry latch, mirroring composed's chainRec/chainRecFailed.
 	qwenChainChecked, qwenChainAll bool
-	moeWeights     []*MoELayerWeights
-	pagedKV        []*devicePagedKVCache
-	asc            attnScratch
-	msc            mlpScratch
-	coreScratch    *archDecodeCoreScratch
-	hBuf, xA, xB   metal.MTLBuffer
-	denseBatch     denseBatchScratch
-	offBuf         metal.MTLBuffer
-	offPtr         *int32
+	qwenChainRec                   any
+	qwenChainRecFailed             bool
+	moeWeights                     []*MoELayerWeights
+	pagedKV                        []*devicePagedKVCache
+	asc                            attnScratch
+	msc                            mlpScratch
+	coreScratch                    *archDecodeCoreScratch
+	hBuf, xA, xB                   metal.MTLBuffer
+	denseBatch                     denseBatchScratch
+	offBuf                         metal.MTLBuffer
+	offPtr                         *int32
 	// offRing rotates the position buffer across step encodes. offBuf holds
 	// ONE int32 the kernels read at EXECUTION time (RoPE position, KV append
 	// row); the submit-ahead chained decode keeps a committed-not-waited link
