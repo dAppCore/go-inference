@@ -16,16 +16,17 @@ import (
 )
 
 // runDataCommand wires go/dataset's root domain package (Dataset/Item/Score/
-// Review/Export, the Store contract, ingest normalisation, heuristic scoring,
-// export writers) as the `lem data` verb family: create, list, stats, import,
-// score, export, and archive datasets under ~/.lem/datasets.duckdb, plus
-// `review` — a pointer at the TUI Data panel (Task 8, not this verb's job).
-// Every verb opens the store through tui.OpenDatasetStore, never hand-rolling
-// the ~/.lem path itself.
+// Review/Export, the Store contract, ingest normalisation, heuristic +
+// judge-tier scoring, export writers) as the `lem data` verb family: create,
+// list, stats, import, score, export, and archive datasets under
+// ~/.lem/datasets.duckdb, plus `review` — a pointer at the TUI Data panel
+// (Task 8, not this verb's job). Every verb opens the store through
+// tui.OpenDatasetStore, never hand-rolling the ~/.lem path itself.
 //
 //	lem data create evening-vents --title "Evening vents"
 //	lem data import evening-vents --jsonl captures.jsonl
 //	lem data score evening-vents --auto-approve 'lek>=80'
+//	lem data score evening-vents --kind judge:quality --model ~/models/judge-4b
 //	lem data export evening-vents --format sft-jsonl --out train.jsonl
 func runDataCommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -42,7 +43,7 @@ func runDataCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 	case "import":
 		return runDataImport(args[1:], stdout, stderr)
 	case "score":
-		return runDataScore(args[1:], stdout, stderr)
+		return runDataScore(ctx, args[1:], stdout, stderr)
 	case "export":
 		return runDataExport(args[1:], stdout, stderr)
 	case "archive":
@@ -71,7 +72,7 @@ func printDataUsage(w io.Writer) {
 	core.WriteString(w, "  list              list datasets\n")
 	core.WriteString(w, "  stats    <slug>   item counts by kind / source / review status\n")
 	core.WriteString(w, "  import   <slug>   ingest rows from --jsonl or --chats\n")
-	core.WriteString(w, "  score    <slug>   run the heuristic lek scorer, optionally auto-review by threshold\n")
+	core.WriteString(w, "  score    <slug>   run the heuristic lek scorer or a judge:<name> template, optionally auto-review by threshold\n")
 	core.WriteString(w, "  export   <slug>   write JSONL + a manifest receipt for training\n")
 	core.WriteString(w, "  archive  <slug>   flag a dataset archived (never a hard delete)\n")
 	core.WriteString(w, "  review   [slug]   how to open the TUI Data panel\n")
@@ -571,16 +572,18 @@ type dataScoreReport struct {
 	AutoRejected int    `json:"auto_rejected"`
 }
 
-func runDataScore(args []string, stdout, stderr io.Writer) int {
+func runDataScore(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(cliCommandName("data score"), flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	kind := fs.String("kind", "lek", "score kind: 'lek' (the heuristic tier available now) — judge:<name> lands with Task 9")
+	kind := fs.String("kind", "lek", "score kind: 'lek' (the heuristic tier) or judge:<name> (a named judge template — requires --model)")
+	modelPath := fs.String("model", "", "judge model checkpoint path (required for --kind judge:<name>; unused for lek)")
 	filterExpr := fs.String("filter", "", "which items to score — comma-separated status=/kind=/source=/archived= clauses and/or a score expression (default: every non-archived item)")
 	autoApprove := fs.String("auto-approve", "", "auto-approve items whose fresh score satisfies this expression, e.g. lek>=80 (explicit only, never implicit)")
 	autoReject := fs.String("auto-reject", "", "auto-reject items whose fresh score satisfies this expression (checked before --auto-approve)")
 	jsonOut := fs.Bool("json", false, "print the score report as JSON")
 	fs.Usage = dataSubUsage(fs, stderr, "data score [flags] <slug>",
-		"Score every matching item with the heuristic lek tier (lek.ScorePair),\n"+
+		"Score every matching item with the heuristic lek tier (lek.ScorePair) or a\n"+
+			"named judge template (--kind judge:<name> --model <checkpoint path>),\n"+
 			"optionally auto-reviewing by an explicit threshold expression.")
 	slug, err := parseWithPositional(fs, args)
 	if err != nil {
@@ -596,12 +599,14 @@ func runDataScore(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	if dataset.ScoreKind(*kind) != dataset.ScoreKindLEK {
-		if dataset.ScoreKind(*kind).IsJudge() {
-			core.Print(stderr, "%s data score: judge-tier scoring (%s) lands with Task 9 — the heuristic 'lek' tier is available now", cliName(), *kind)
-			return 2
-		}
-		core.Print(stderr, "%s data score: unknown --kind %q (want 'lek')", cliName(), *kind)
+	scoreKind := dataset.ScoreKind(*kind)
+	isJudge := scoreKind.IsJudge()
+	if !isJudge && scoreKind != dataset.ScoreKindLEK {
+		core.Print(stderr, "%s data score: unknown --kind %q (want 'lek' or 'judge:<name>')", cliName(), *kind)
+		return 2
+	}
+	if isJudge && core.Trim(*modelPath) == "" {
+		core.Print(stderr, "%s data score: --kind %s requires --model <judge checkpoint path>", cliName(), *kind)
 		return 2
 	}
 
@@ -649,19 +654,54 @@ func runDataScore(args []string, stdout, stderr io.Writer) int {
 	}
 	items := itemsResult.Value.([]dataset.Item)
 
+	// The judge model is loaded ONCE, only when there is actually something
+	// to score — never per item, and never merely because --model was set
+	// on an empty result set.
+	var driver dataset.JudgeDispatcher
+	if isJudge && len(items) > 0 {
+		d, closeJudge, jerr := newJudgeDispatcher(*modelPath, judgeDefaultMaxTokens)
+		if jerr != nil {
+			core.Print(stderr, "%s data score: %s", cliName(), jerr.Error())
+			return 1
+		}
+		defer closeJudge()
+		driver = d
+	}
+
 	report := dataScoreReport{Dataset: slug}
+	judgeName := scoreKind.JudgeName()
 	for _, item := range items {
-		scoreResult := dataset.ScoreHeuristicAppend(store, item)
-		if !scoreResult.OK {
-			report.Failed++
-			continue
+		var scores []dataset.Score
+		if isJudge {
+			scoreResult := dataset.ScoreJudge(ctx, store, driver, item, judgeName)
+			if !scoreResult.OK {
+				// Malformed judge output (a non-bare-number or out-of-range
+				// reply) is a loud per-item error, never a silent 0 — print
+				// it and keep scoring the rest of the batch.
+				report.Failed++
+				core.Print(stderr, "%s data score: item %s: %s", cliName(), item.ID, scoreResult.Error())
+				continue
+			}
+			score, ok := scoreResult.Value.(dataset.Score)
+			if !ok {
+				report.Failed++
+				continue
+			}
+			scores = []dataset.Score{score}
+		} else {
+			scoreResult := dataset.ScoreHeuristicAppend(store, item)
+			if !scoreResult.OK {
+				report.Failed++
+				continue
+			}
+			var ok bool
+			scores, ok = scoreResult.Value.([]dataset.Score)
+			if !ok {
+				continue
+			}
 		}
 		report.Scored++
 		if approveExpr == nil && rejectExpr == nil {
-			continue
-		}
-		scores, ok := scoreResult.Value.([]dataset.Score)
-		if !ok {
 			continue
 		}
 		thresholdResult := dataset.ApplyAutoThreshold(store, item, scores, approveExpr, rejectExpr)

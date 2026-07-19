@@ -79,9 +79,9 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 9: Judge tier driver
 
-- [ ] In-repo default templates under `judges/` + `~/.lem/judges/` overrides (medium-backed); the driver renders, runs through the shared serial model lane (queued jobs, TUI stays live), parses, stores with the judge model fingerprint.
-- [ ] `lem data score --kind judge:<name>` wired end-to-end.
-- [ ] Tests: template resolution order (override wins), driver against a stub lane, malformed judge output is a loud per-item error.
+- [x] In-repo default templates under `judges/` + `~/.lem/judges/` overrides (medium-backed); the driver renders, runs through the shared serial model lane (queued jobs, TUI stays live), parses, stores with the judge model fingerprint.
+- [x] `lem data score --kind judge:<name>` wired end-to-end.
+- [x] Tests: template resolution order (override wins), driver against a stub lane, malformed judge output is a loud per-item error.
 
 ### Task 10: Docs + plan completion
 

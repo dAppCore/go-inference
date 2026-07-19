@@ -368,7 +368,7 @@ func TestRunDataScore_Bad(t *testing.T) {
 	}{
 		{"no positional", []string{"score"}, 2},
 		{"unknown kind", []string{"score", "score-bad-ds", "--kind", "nonsense"}, 2},
-		{"judge kind not yet available", []string{"score", "score-bad-ds", "--kind", "judge:helpfulness"}, 2},
+		{"judge kind without --model", []string{"score", "score-bad-ds", "--kind", "judge:helpfulness"}, 2},
 		{"bad auto-approve expression", []string{"score", "score-bad-ds", "--auto-approve", "not-an-expression"}, 2},
 		{"bad filter expression", []string{"score", "score-bad-ds", "--filter", "nonsense-field=x"}, 2},
 		{"unknown dataset", []string{"score", "does-not-exist"}, 1},
@@ -380,6 +380,41 @@ func TestRunDataScore_Bad(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunDataScore_Judge covers the judge:<name> verb wiring itself — flag
+// validation and model-load failure. A real judge verdict end-to-end
+// (template resolve -> render -> generate -> parse -> store) is covered
+// against a stub model in TestNewJudgeDispatcherFromModel_Good; a real GPU
+// model run is the orchestrator's merge gate, not a unit test's job.
+func TestRunDataScore_Judge(t *testing.T) {
+	dataTestHome(t)
+	mustCreate(t, "judge-empty-ds")
+	mustCreate(t, "judge-item-ds")
+	path := writeJSONLFixture(t, `{"prompt":"hi","response":"hello there"}`)
+	if code, _, stderr := runData("import", "judge-item-ds", "--jsonl", path); code != 0 {
+		t.Fatalf("import setup failed: %s", stderr)
+	}
+
+	t.Run("no items means no load is attempted, even with a bogus --model", func(t *testing.T) {
+		code, stdout, stderr := runData("score", "judge-empty-ds", "--kind", "judge:quality", "--model", "/does/not/exist")
+		if code != 0 {
+			t.Fatalf("exit %d; stderr=%s", code, stderr)
+		}
+		if !core.Contains(stdout, "scored=0") {
+			t.Errorf("stdout = %q, want scored=0", stdout)
+		}
+	})
+
+	t.Run("a real item forces the load, and a bogus --model fails honestly", func(t *testing.T) {
+		code, _, stderr := runData("score", "judge-item-ds", "--kind", "judge:quality", "--model", "/does/not/exist")
+		if code != 1 {
+			t.Fatalf("exit %d, want 1; stderr=%s", code, stderr)
+		}
+		if core.Trim(stderr) == "" {
+			t.Errorf("stderr is empty, want an honest load-failure message")
+		}
+	})
 }
 
 // ---- export ----
