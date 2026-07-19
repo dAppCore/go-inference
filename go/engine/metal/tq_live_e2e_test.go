@@ -26,11 +26,11 @@ import (
 // Measured (this box, 2026-07-19, greedy, 64 teacher-forced steps, real
 // e2b-4bit): top-1 agreement 62/64 with max |logit Δ| 6.31 on the 2-pass lane
 // (maxLen 2048) and 62/64 with 6.76 on the single-pass lane (maxLen 512) —
-// the two lanes sit in the same codec band. The disagreeing steps were
-// near-tie punctuation/formatting picks; the text stays coherent. Asserted
-// floors: agreement ≥ 52/64 and max |logit Δ| ≤ 12 — roughly 2× margin over
-// the observed band, still collapsing on a structural break (stale codes,
-// wrong γ addressing, a dropped bind — the bring-up bug read 30/64 at Δ 32).
+// the two lanes sit in the same codec band, and the continuation stays
+// coherent. Asserted floors: agreement ≥ 52/64 and max |logit Δ| ≤ 12 —
+// roughly 2× margin over the observed band, still collapsing on a structural
+// break (stale codes, wrong γ addressing, a dropped bind — the bring-up bug
+// read 30/64 at Δ 32 here before the pass-1 ABI repack).
 
 // TestRealE2BTurboQuantLive_Good is the live decode gate: turboquant:4 vs
 // mode-off on real weights, teacher-forced.
