@@ -249,7 +249,7 @@ func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
 		if !res.OK {
 			return nil, res.Err()
 		}
-		return res.Value.([]byte), nil
+		return res.Bytes(), nil
 	}
 	// Exact upper bound on the no-escape path — both branches emit the
 	// fixed key envelope plus the raw value bytes. AppendJSONString may

@@ -642,7 +642,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 		_, _ = w.Write([]byte(`{}`))
 		return
 	}
-	_, _ = w.Write(result.Value.([]byte))
+	_, _ = w.Write(result.Bytes())
 }
 
 func writeError(w http.ResponseWriter, status int, message, param string) {

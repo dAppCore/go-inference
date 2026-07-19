@@ -224,7 +224,7 @@ func (h *History) ExportJSONL(dest string) error {
 		if !marshalled.OK {
 			return core.E("chathistory.ExportJSONL", "marshal conversation", marshalled.Value.(error))
 		}
-		line := marshalled.Value.([]byte)
+		line := marshalled.Bytes()
 		if _, err := f.Write(line); err != nil {
 			return core.E("chathistory.ExportJSONL", "write line", err)
 		}
