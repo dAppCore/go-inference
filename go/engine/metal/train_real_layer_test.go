@@ -227,6 +227,76 @@ func TestRealLayerProjLoRABackwardF32_KEqV(t *testing.T) {
 	})
 }
 
+// TestRealLayerProjLoRABackwardF32_PLE is the rung-5 FD gate: the gemma4 per-layer-input gate
+// (E2B/E4B) is the layer's LAST station — out = h + rms(WProj·(gelu(WGate·h)·pli), postNorm) —
+// with FROZEN tower weights and a CONSTANT per-layer input. Every target's gradient now rides the
+// gate branch's extra path into the layer output; the FD gate differentiates through the full
+// tower. Run on the full E2B-shaped stack (QK-norms + sandwich norms + value-norm + PLE together).
+func TestRealLayerProjLoRABackwardF32_PLE(t *testing.T) {
+	mk := func() *RealTrainLayerF32 {
+		L := tinyRealLayer()
+		const pliDim = 4
+		near1 := func(salt, n int) []float32 {
+			w := syntheticFloat32(n, salt)
+			for i := range w {
+				w[i] = 1 + 0.3*w[i]
+			}
+			return w
+		}
+		L.QNormW, L.KNormW = near1(41, L.HeadDim), near1(43, L.HeadDim)
+		L.PostAttnNormW, L.PostFFNormW = near1(47, L.DModel), near1(51, L.DModel)
+		L.ValueNorm = true
+		L.PLIDim = pliDim
+		L.PLEGateW = scaleSlice(syntheticFloat32(pliDim*L.DModel, 61), 0.3)
+		L.PLEProjW = scaleSlice(syntheticFloat32(L.DModel*pliDim, 62), 0.3)
+		L.PLEPostNormW = near1(63, L.DModel)
+		L.PLEInput = scaleSlice(syntheticFloat32(L.T*pliDim, 64), 0.5)
+		return L
+	}
+	for _, target := range realLayerTargets {
+		t.Run(target, func(t *testing.T) {
+			realLayerFDCheck(t, mk(), target)
+		})
+	}
+	// the per-layer input is a CONSTANT of the layer: the FD gate above differentiates every
+	// TRAINABLE path; this pin proves the forward actually consumes pli (a zeroed pli changes
+	// the output), so the constant is genuinely in the chain rather than dead.
+	t.Run("pli-is-consumed", func(t *testing.T) {
+		L := mk()
+		h := scaleSlice(syntheticFloat32(L.T*L.DModel, 21), 0.5)
+		y1, err := RealLayerForwardF32(h, L)
+		if err != nil {
+			t.Fatalf("forward: %v", err)
+		}
+		L.PLEInput = make([]float32, L.T*L.PLIDim)
+		y2, err := RealLayerForwardF32(h, L)
+		if err != nil {
+			t.Fatalf("zero-pli forward: %v", err)
+		}
+		same := true
+		for i := range y1 {
+			if y1[i] != y2[i] {
+				same = false
+				break
+			}
+		}
+		if same {
+			t.Fatal("zeroing the per-layer input did not change the forward — the PLE tower is not wired")
+		}
+	})
+	// a partial tower is a caller bug, refused loudly.
+	t.Run("partial-tower-refused", func(t *testing.T) {
+		L := mk()
+		L.PLEProjW = nil
+		dout := make([]float32, L.T*L.DModel)
+		h := make([]float32, L.T*L.DModel)
+		out, in, _ := tinyRealLayer().projDims(ProjDown)
+		if _, _, _, err := RealLayerProjLoRABackwardF32(dout, h, L, ProjDown, make([]float32, in), make([]float32, out), 1, 1); err == nil {
+			t.Fatal("a partial PLE tower must be refused")
+		}
+	})
+}
+
 // TestRealLayerProjLoRABackwardF32_Bad: an unknown target, a nil layer, a wrong-shaped upstream
 // gradient, and a broken geometry are refused before any work.
 func TestRealLayerProjLoRABackwardF32_Bad(t *testing.T) {

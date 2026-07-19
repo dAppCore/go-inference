@@ -61,6 +61,21 @@ type RealTrainLayerF32 struct {
 	// output (Wdown·…) before its residual add. nil = plain residual (LayerSpec.PostFFNorm false).
 	PostFFNormW []float32
 
+	// The gemma4 per-layer-input (PLE) tower (E2B/E4B — PerLayerInputGateBF16's maths), applied
+	// to the layer output after the MLP residual:
+	//
+	//	gate = WGate_pli·h ; mult = gelu(gate)·pli ; h = h + rms(WProj_pli·mult, postNorm)
+	//
+	// PLEInput is the layer's slice of the PerLayerInputs tensor ([T, PLIDim]) — a FROZEN
+	// function of the token id + main embedding (per_layer_input.go), so it is a CONSTANT of the
+	// layer backward (no gradient path from any layer parameter reaches it). All five fields are
+	// set together or all absent (a dense layer / a PLE-free model).
+	PLEGateW     []float32 // [PLIDim, DModel]
+	PLEProjW     []float32 // [DModel, PLIDim]
+	PLEPostNormW []float32 // [DModel]
+	PLEInput     []float32 // [T, PLIDim]
+	PLIDim       int
+
 	T, DModel, DFF          int // rows (tokens), hidden, feed-forward width
 	Heads, KVHeads, HeadDim int // GQA head geometry (Heads % KVHeads == 0)
 
@@ -120,7 +135,20 @@ func (L *RealTrainLayerF32) validate() error {
 	if (len(L.PostAttnNormW) != 0 && len(L.PostAttnNormW) != L.DModel) || (len(L.PostFFNormW) != 0 && len(L.PostFFNormW) != L.DModel) {
 		return core.NewError("native.RealTrainLayerF32: PostAttnNormW/PostFFNormW must be [DModel] when set")
 	}
+	if L.hasPLE() {
+		if L.PLIDim <= 0 || len(L.PLEGateW) != L.PLIDim*L.DModel || len(L.PLEProjW) != L.DModel*L.PLIDim ||
+			len(L.PLEPostNormW) != L.DModel || len(L.PLEInput) != L.T*L.PLIDim {
+			return core.NewError("native.RealTrainLayerF32: the PLE tower needs PLEGateW [PLIDim,DModel], PLEProjW [DModel,PLIDim], PLEPostNormW [DModel] and PLEInput [T,PLIDim] together")
+		}
+	} else if len(L.PLEGateW) != 0 || len(L.PLEProjW) != 0 || len(L.PLEPostNormW) != 0 || len(L.PLEInput) != 0 || L.PLIDim != 0 {
+		return core.NewError("native.RealTrainLayerF32: a partial PLE tower — set all of PLEGateW/PLEProjW/PLEPostNormW/PLEInput/PLIDim or none")
+	}
 	return nil
+}
+
+// hasPLE reports whether this layer carries the per-layer-input tower (every field set).
+func (L *RealTrainLayerF32) hasPLE() bool {
+	return L.PLIDim > 0 && len(L.PLEGateW) > 0 && len(L.PLEProjW) > 0 && len(L.PLEPostNormW) > 0 && len(L.PLEInput) > 0
 }
 
 // projDims returns the [out,in] dimensions of a canonical projection target within L, or an error
@@ -349,6 +377,9 @@ type realLayerTape struct {
 	gated          []float32
 	mlpBranch      []float32 // the branch added to the residual (post post-ff-norm when present)
 	mlpBranchPre   []float32
+	h2             []float32 // [T,DModel] residual after the MLP half (the PLE gate's input)
+	pleGate        []float32 // [T,PLIDim] the PLE gate pre-activations (nil without the tower)
+	pleProj        []float32 // [T,DModel] the PLE projection output, pre-post-norm
 	out            []float32 // [T,DModel] layer output
 }
 
@@ -443,9 +474,26 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 	if len(L.PostFFNormW) > 0 {
 		tp.mlpBranch = rmsNormForwardF32(tp.mlpBranchPre, L.PostFFNormW, T, D, L.Eps)
 	}
-	tp.out = make([]float32, T*D)
-	for i := range tp.out {
-		tp.out[i] = tp.h1[i] + tp.mlpBranch[i]
+	tp.h2 = make([]float32, T*D)
+	for i := range tp.h2 {
+		tp.h2[i] = tp.h1[i] + tp.mlpBranch[i]
+	}
+	tp.out = tp.h2
+
+	// PLE gate (E2B/E4B): h = h + rms(WProj·(gelu(WGate·h)·pli), postNorm) — the
+	// PerLayerInputGateBF16 chain with the layer's frozen per-layer-input rows.
+	if L.hasPLE() {
+		tp.pleGate = hostLinearF32(tp.h2, L.PLEGateW, T, D, L.PLIDim)
+		mult := make([]float32, T*L.PLIDim)
+		for i := range mult {
+			mult[i] = float32(geluTanh(float64(tp.pleGate[i])) * float64(L.PLEInput[i]))
+		}
+		tp.pleProj = hostLinearF32(mult, L.PLEProjW, T, L.PLIDim, D)
+		pleBranch := rmsNormForwardF32(tp.pleProj, L.PLEPostNormW, T, D, L.Eps)
+		tp.out = make([]float32, T*D)
+		for i := range tp.out {
+			tp.out[i] = tp.h2[i] + pleBranch[i]
+		}
 	}
 	return tp, nil
 }
@@ -477,12 +525,51 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 	qDim, kvDim := L.Heads*d, L.KVHeads*d
 	g := &realLayerGrads{}
 
+	// PLE gate backward first (the gate is the layer's LAST station): out = h2 + rms(proj(mult)),
+	// so dH2 = dout + the gate-branch VJP. The PLE weights and the per-layer input are FROZEN —
+	// only the flow back to h2 matters (dPli is discarded: the input is a constant of the layer).
+	dH2 := dout
+	if L.hasPLE() {
+		dPleProj, _, perr := RMSNormBackwardF32(dout, tp.pleProj, L.PLEPostNormW, T, D, L.Eps)
+		if perr != nil {
+			return nil, perr
+		}
+		// proj forward was mult[T,PLIDim]·WProj[D,PLIDim]ᵀ: M=T, K=PLIDim, N=D → dMult = dy·WProj.
+		dMult := make([]float32, T*L.PLIDim)
+		for m := range T {
+			dyr := dPleProj[m*D : (m+1)*D]
+			for k := range L.PLIDim {
+				var acc float64
+				for n := range D {
+					acc += float64(dyr[n]) * float64(L.PLEProjW[n*L.PLIDim+k])
+				}
+				dMult[m*L.PLIDim+k] = float32(acc)
+			}
+		}
+		dPleGate, _, gerr := GeluGateMulBackwardF32(dMult, tp.pleGate, L.PLEInput, T*L.PLIDim)
+		if gerr != nil {
+			return nil, gerr
+		}
+		// gate forward was h2[T,D]·WGate[PLIDim,D]ᵀ: M=T, K=D, N=PLIDim → dH2gate = dy·WGate.
+		dH2 = make([]float32, T*D)
+		for m := range T {
+			dyr := dPleGate[m*L.PLIDim : (m+1)*L.PLIDim]
+			for k := range D {
+				var acc float64
+				for n := range L.PLIDim {
+					acc += float64(dyr[n]) * float64(L.PLEGateW[n*D+k])
+				}
+				dH2[m*D+k] = dout[m*D+k] + float32(acc) // residual + gate branch
+			}
+		}
+	}
+
 	// MLP half backward: residual → (post-FF sandwich norm) → down → gelu·up → gate/up projections
 	// → pre-FF norm → residual join.
-	dMlpBranchPre := dout // out = h1 + mlpBranch
+	dMlpBranchPre := dH2 // h2 = h1 + mlpBranch
 	if len(L.PostFFNormW) > 0 {
 		var err error
-		dMlpBranchPre, _, err = RMSNormBackwardF32(dout, tp.mlpBranchPre, L.PostFFNormW, T, D, L.Eps)
+		dMlpBranchPre, _, err = RMSNormBackwardF32(dH2, tp.mlpBranchPre, L.PostFFNormW, T, D, L.Eps)
 		if err != nil {
 			return nil, err
 		}
@@ -507,7 +594,7 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 	}
 	dH1 := make([]float32, T*D)
 	for i := range dH1 {
-		dH1[i] = dout[i] + dH1Norm[i]
+		dH1[i] = dH2[i] + dH1Norm[i]
 	}
 
 	// attention half backward: residual → (post-attention sandwich norm) → o-proj → SDPA core
