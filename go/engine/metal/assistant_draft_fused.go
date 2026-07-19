@@ -78,14 +78,18 @@ type assistantFusedDraft struct {
 	centroidsW, embedW          metal.MTLBuffer
 	centroidScores, vocabLogits metal.MTLBuffer
 	numCentroids, vocab         int
-	kv                          map[string]*fusedDraftKV
-	inConcat                    metal.MTLBuffer // [2*backbone] bf16 — concat(emb, hidden)
-	h, resid, normed, ffIn      metal.MTLBuffer // [hidden]
-	q, qr, attn                 metal.MTLBuffer // [nHeads*maxHeadDim]
-	gate, up, gated             metal.MTLBuffer // [dFF]
-	ff                          metal.MTLBuffer // [hidden]
-	outNormed                   metal.MTLBuffer // [hidden]
-	outHidden                   metal.MTLBuffer // [backbone]
+	// quantised plain head (#53): the tied embedding affine-4-quantised at
+	// build so each step's logits qmv reads ~134MB instead of the 537MB bf16
+	// scan. Non-nil only for non-ordered assistants with the lane armed.
+	qheadPacked, qheadScales, qheadBiases metal.MTLBuffer
+	kv                                    map[string]*fusedDraftKV
+	inConcat                              metal.MTLBuffer // [2*backbone] bf16 — concat(emb, hidden)
+	h, resid, normed, ffIn                metal.MTLBuffer // [hidden]
+	q, qr, attn                           metal.MTLBuffer // [nHeads*maxHeadDim]
+	gate, up, gated                       metal.MTLBuffer // [dFF]
+	ff                                    metal.MTLBuffer // [hidden]
+	outNormed                             metal.MTLBuffer // [hidden]
+	outHidden                             metal.MTLBuffer // [backbone]
 }
 
 // fusedTensorBuf resolves a named bf16 tensor to a resident buffer, failing
@@ -241,6 +245,19 @@ func newAssistantFusedDraft(m *AssistantModel) (*assistantFusedDraft, error) {
 		if embedW, eerr := fusedTensorBuf(m, "model.embed_tokens.weight", vocab*hidden); eerr == nil {
 			if logits := scratchBF16(vocab); logits != nil {
 				f.embedW, f.vocabLogits, f.vocab = embedW, logits, vocab
+				// Quantise the head scan (assistant_draft_qhead.go): 4-bit
+				// affine group 64 — the qat target head's own class. Best
+				// effort: any failure keeps the bf16 gemv.
+				if !mtpDraftQHeadDisabled && hidden%assistantQHeadGroupSize == 0 {
+					if t, ok := m.Tensors["model.embed_tokens.weight"]; ok {
+						if packed, scales, biases, qerr := quantiseAffine4RowsBF16(t.Data, vocab, hidden); qerr == nil {
+							pb, sb, bb := residentBytes(packed), residentBytes(scales), residentBytes(biases)
+							if pb != nil && sb != nil && bb != nil {
+								f.qheadPacked, f.qheadScales, f.qheadBiases = pb, sb, bb
+							}
+						}
+					}
+				}
 			}
 		}
 	}
@@ -353,6 +370,8 @@ func (f *assistantFusedDraft) step(tokenEmbedding, previousHidden, normedOut, hi
 		if f.centroidsW != nil {
 			emit(encGemvBF16(enc, f.centroidsW, f.outNormed, f.centroidScores, f.numCentroids, f.hidden))
 			emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
+		} else if f.qheadPacked != nil { // quantised plain head: one affine qmv, same CB (#53)
+			emit(encQMVBF16(enc, f.qheadPacked, f.qheadScales, f.qheadBiases, f.outNormed, f.vocabLogits, 0, 0, 0, 0, f.vocab, f.hidden, assistantQHeadGroupSize, 4))
 		} else if f.embedW != nil { // plain tied-embedding head: one gemv, same CB
 			emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
 		}
