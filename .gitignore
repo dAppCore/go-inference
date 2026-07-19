@@ -18,3 +18,6 @@ go/lem
 # task build:embed output
 /bin/
 bench/last-run.json
+
+# generated at build:embed time — never commit compiled metallibs
+cli/*.metallib.gz
