@@ -148,7 +148,7 @@ func Unpack(src, destDir string, opts UnpackOptions) core.Result {
 	if !rr.OK {
 		return rr
 	}
-	data := rr.Value.([]byte)
+	data := rr.Bytes()
 
 	container, err := trix.Decode(data, Magic, nil)
 	if err != nil {
@@ -187,7 +187,7 @@ func ExtractVindex(src string) ([]byte, core.Result) {
 	if !rr.OK {
 		return nil, rr
 	}
-	data := rr.Value.([]byte)
+	data := rr.Bytes()
 
 	container, err := trix.Decode(data, Magic, nil)
 	if err != nil {
@@ -238,7 +238,7 @@ func List(src string) ([]Entry, *Manifest, core.Result) {
 	if !rr.OK {
 		return nil, nil, rr
 	}
-	data := rr.Value.([]byte)
+	data := rr.Bytes()
 
 	container, err := trix.Decode(data, Magic, nil)
 	if err != nil {
@@ -287,7 +287,7 @@ func Inspect(src string) (*Manifest, *inference.ModelPackInspection, core.Result
 	if !rr.OK {
 		return nil, nil, rr
 	}
-	data := rr.Value.([]byte)
+	data := rr.Bytes()
 
 	container, err := trix.Decode(data, Magic, nil)
 	if err != nil {
@@ -353,7 +353,7 @@ func Hash(srcDir string) (string, core.Result) {
 		if !rr.OK {
 			return "", rr
 		}
-		metas = append(metas, metaFile{name: name, content: rr.Value.([]byte)})
+		metas = append(metas, metaFile{name: name, content: rr.Bytes()})
 	}
 	sort.Slice(metas, func(i, j int) bool { return metas[i].name < metas[j].name })
 
@@ -411,7 +411,7 @@ func Fingerprint(m Manifest) string {
 	if !r.OK {
 		return ""
 	}
-	sum := sha256.Sum256(r.Value.([]byte))
+	sum := sha256.Sum256(r.Bytes())
 	return hex.EncodeToString(sum[:])
 }
 
@@ -450,7 +450,7 @@ func buildTar(srcDir string) ([]byte, core.Result) {
 		if !rr.OK {
 			return nil, rr
 		}
-		content := rr.Value.([]byte)
+		content := rr.Bytes()
 
 		hdr := &tar.Header{
 			Name:     e.rel,
@@ -527,7 +527,7 @@ func manifestToHeaderMap(m Manifest) (map[string]any, core.Result) {
 	if !jr.OK {
 		return nil, jr
 	}
-	data := jr.Value.([]byte)
+	data := jr.Bytes()
 	var out map[string]any
 	if ur := core.JSONUnmarshal(data, &out); !ur.OK {
 		return nil, ur
@@ -542,7 +542,7 @@ func headerMapToManifest(h map[string]any) (*Manifest, core.Result) {
 	if !jr.OK {
 		return nil, jr
 	}
-	data := jr.Value.([]byte)
+	data := jr.Bytes()
 	var out Manifest
 	if ur := core.JSONUnmarshal(data, &out); !ur.OK {
 		return nil, ur

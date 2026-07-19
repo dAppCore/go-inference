@@ -359,10 +359,10 @@ func quotaWindowFor(rate RateConfig, at time.Time) quotaWindow {
 	minute := 0
 	if len(parts) == 2 {
 		if hourResult := core.Atoi(parts[0]); hourResult.OK {
-			hour = hourResult.Value.(int)
+			hour = hourResult.Int()
 		}
 		if minuteResult := core.Atoi(parts[1]); minuteResult.OK {
-			minute = minuteResult.Value.(int)
+			minute = minuteResult.Int()
 		}
 	}
 	now := at.UTC()

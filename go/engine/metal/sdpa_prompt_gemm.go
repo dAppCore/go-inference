@@ -56,7 +56,7 @@ const sdpaPromptGEMMMinKV = 2048
 func sdpaPromptGEMMKnee() int {
 	if v := os.Getenv("LTHN_SDPA_GEMM_MINKV"); v != "" {
 		if r := core.Atoi(v); r.OK {
-			if n := r.Value.(int); n > 0 {
+			if n := r.Int(); n > 0 {
 				return n
 			}
 		}

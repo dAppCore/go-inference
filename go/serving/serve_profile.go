@@ -64,10 +64,7 @@ func loadTunedDraftBlock(dir, modelPath, machineHash string) (int, string) {
 		if !data.OK {
 			continue
 		}
-		raw, ok := data.Value.([]byte)
-		if !ok {
-			continue
-		}
+		raw := data.Bytes()
 		var profile inference.TuningProfile
 		if result := core.JSONUnmarshal(raw, &profile); !result.OK {
 			continue
@@ -137,10 +134,7 @@ func WriteTunedDraftBlockProfile(dir, modelPath, machineHash string, workload in
 	if !data.OK {
 		return "", core.E("serving.WriteTunedDraftBlockProfile", "marshal profile", data.Value.(error))
 	}
-	raw, ok := data.Value.([]byte)
-	if !ok {
-		return "", core.NewError("serving.WriteTunedDraftBlockProfile: marshal returned a non-[]byte value")
-	}
+	raw := data.Bytes()
 	name := core.Sprintf("mtp-%s-block%d-%d.json", string(workload), block, time.Now().UnixNano())
 	path := core.PathJoin(dir, name)
 	if r := core.WriteFile(path, raw, 0o644); !r.OK {

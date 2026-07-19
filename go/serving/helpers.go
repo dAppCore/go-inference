@@ -49,7 +49,7 @@ func indexSubstr(s, substr string) int {
 //
 //	r := readAll(resp.Body)
 //	if !r.OK { return r }
-//	data := r.Value.([]byte)
+//	data := r.Bytes()
 func readAll(r any) core.Result {
 	result := core.ReadAll(r)
 	if !result.OK {
@@ -59,5 +59,5 @@ func readAll(r any) core.Result {
 	// AsBytes returns a read-only view of it rather than copying the whole
 	// response body again. The only consumers (JSONUnmarshal, Sprintf) treat
 	// the bytes as read-only, so the zero-copy view is safe.
-	return core.Ok(core.AsBytes(result.Value.(string)))
+	return core.Ok(core.AsBytes(result.String()))
 }

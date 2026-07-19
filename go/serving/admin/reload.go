@@ -158,7 +158,7 @@ func pathWithinDir(rootResolved, resolved string) bool {
 	if !rel.OK {
 		return false
 	}
-	r, _ := rel.Value.(string)
+	r := rel.String()
 	if r == "" || r == "." {
 		return true
 	}
@@ -177,11 +177,11 @@ func bindModelPathToStandardDir(path string) (string, error) {
 	root := standardModelDir()
 	rootResolved := root
 	if r := core.PathEvalSymlinks(root); r.OK {
-		rootResolved = r.Value.(string)
+		rootResolved = r.String()
 	}
 	resolved := path
 	if r := core.PathEvalSymlinks(path); r.OK {
-		resolved = r.Value.(string)
+		resolved = r.String()
 	} else {
 		return "", core.NewError("model dir not found: " + path)
 	}
@@ -208,11 +208,11 @@ func resolveModelNameToPath(name string) (string, error) {
 	candidate := core.PathJoin(root, name)
 	rootResolved := root
 	if r := core.PathEvalSymlinks(root); r.OK {
-		rootResolved = r.Value.(string)
+		rootResolved = r.String()
 	}
 	resolved := candidate
 	if r := core.PathEvalSymlinks(candidate); r.OK {
-		resolved = r.Value.(string)
+		resolved = r.String()
 	} else {
 		return "", core.NewError("model dir not found: " + name)
 	}

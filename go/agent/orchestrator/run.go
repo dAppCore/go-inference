@@ -141,8 +141,8 @@ func (orchestrator *Orchestrator) reviewDispatch(ctx context.Context, request wo
 	if !numberResult.OK {
 		return numberResult
 	}
-	number, ok := numberResult.Value.(int)
-	if !ok || number <= 0 {
+	number := numberResult.Int()
+	if number <= 0 {
 		return core.Fail(core.Errorf("agent store returned invalid next run number %v", numberResult.Value))
 	}
 	worktreePath := core.PathJoin(core.PathDir(project.ClonePath), "runs", "pending-run", "worktree")
@@ -152,7 +152,7 @@ func (orchestrator *Orchestrator) reviewDispatch(ctx context.Context, request wo
 	}
 	commandResult := adapter.Build(provider.Launch{
 		WorkID: request.Work.ID, RunID: "pending-run", Title: request.Work.Title, Task: request.Work.Task,
-		Worktree: worktreePath, Branch: branchResult.Value.(string), Model: request.Model,
+		Worktree: worktreePath, Branch: branchResult.String(), Model: request.Model,
 		UnsafeFlags: request.UnsafeFlags,
 	})
 	if !commandResult.OK {
@@ -217,8 +217,8 @@ func (orchestrator *Orchestrator) Dispatch(ctx context.Context, review DispatchR
 	if !numberResult.OK {
 		return numberResult
 	}
-	number, ok := numberResult.Value.(int)
-	if !ok || number <= 0 {
+	number := numberResult.Int()
+	if number <= 0 {
 		return core.Fail(core.Errorf("agent store returned invalid next run number %v", numberResult.Value))
 	}
 	runIDResult := orchestrator.nextID("run")
@@ -231,7 +231,7 @@ func (orchestrator *Orchestrator) Dispatch(ctx context.Context, review DispatchR
 	}
 	at := atResult.Value.(time.Time)
 	run := work.Run{
-		ID: runIDResult.Value.(string), WorkID: fresh.Request.Work.ID, ProjectID: project.ID,
+		ID: runIDResult.String(), WorkID: fresh.Request.Work.ID, ProjectID: project.ID,
 		Provider: fresh.Request.Provider, Model: fresh.Request.Model, SourceRevision: fresh.Source.Revision,
 		CommandReceipt: fresh.Command.Receipt, Status: work.RunQueued, Number: number, Attempt: 1,
 		QueuedAt: at, UpdatedAt: at,
@@ -300,8 +300,8 @@ func (orchestrator *Orchestrator) Answer(ctx context.Context, runID, text string
 		return atResult
 	}
 	answer := work.Answer{
-		ID: answerIDResult.Value.(string), QuestionID: continuation.Question.ID,
-		ResumeRunID: resumeRunIDResult.Value.(string), Text: text, CreatedAt: atResult.Value.(time.Time),
+		ID: answerIDResult.String(), QuestionID: continuation.Question.ID,
+		ResumeRunID: resumeRunIDResult.String(), Text: text, CreatedAt: atResult.Value.(time.Time),
 	}
 	if committed := commitStore(orchestrator.store, Commit{Answer: &answer}); !committed.OK {
 		return committed
@@ -350,7 +350,7 @@ func (orchestrator *Orchestrator) ReviewRetry(ctx context.Context, item work.Ite
 	}
 	orchestrator.queueMu.Lock()
 	defer orchestrator.queueMu.Unlock()
-	return orchestrator.reviewChild(ctx, "retry", item, parentRunID, "", "", "", runIDResult.Value.(string))
+	return orchestrator.reviewChild(ctx, "retry", item, parentRunID, "", "", "", runIDResult.String())
 }
 
 // ConfirmRetry queues only the exact retry launch that was explicitly reviewed.
@@ -892,8 +892,7 @@ func (orchestrator *Orchestrator) drainQueue() time.Time {
 			}
 			break
 		}
-		leftQueue, leftQueueOK := started.Value.(bool)
-		if !leftQueueOK || !leftQueue {
+		if !started.Bool() {
 			break
 		}
 		for index := range queued {
@@ -1482,7 +1481,7 @@ func (orchestrator *Orchestrator) finishExecution(execution *runExecution, waite
 					execution.failure = "failed to create durable provider question"
 					title = execution.failure
 				} else {
-					question = &work.Question{ID: questionID.Value.(string), RunID: run.ID, Text: final.Question, CreatedAt: atResult.Value.(time.Time)}
+					question = &work.Question{ID: questionID.String(), RunID: run.ID, Text: final.Question, CreatedAt: atResult.Value.(time.Time)}
 				}
 			case "failed":
 				status = work.RunFailed
@@ -1723,7 +1722,7 @@ func (orchestrator *Orchestrator) flushPendingCleanupRecoveryLocked(key string, 
 			return idResult
 		}
 		pending.Event = work.Event{
-			ID: idResult.Value.(string), RunID: pending.Run.ID, WorkID: pending.Run.WorkID,
+			ID: idResult.String(), RunID: pending.Run.ID, WorkID: pending.Run.WorkID,
 			Kind: pending.Kind, Title: "provisional workspace cleanup retained",
 			Detail: pending.Receipt.Worktree, DetailJSON: core.JSONMarshalString(pending.Receipt),
 			CreatedAt: atResult.Value.(time.Time),
@@ -1922,7 +1921,7 @@ func (orchestrator *Orchestrator) newEvent(run work.Run, kind, title, detail str
 		return core.Fail(core.NewError("agent event kind is required"))
 	}
 	return core.Ok(work.Event{
-		ID: idResult.Value.(string), RunID: run.ID, WorkID: run.WorkID, Kind: kind,
+		ID: idResult.String(), RunID: run.ID, WorkID: run.WorkID, Kind: kind,
 		Title: core.Trim(title), Detail: core.Trim(detail), CreatedAt: atResult.Value.(time.Time),
 	})
 }

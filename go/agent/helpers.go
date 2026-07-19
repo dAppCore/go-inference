@@ -27,11 +27,11 @@ func hostname() core.Result { return core.Hostname() }
 //
 //	r := readAll(resp.Body)
 //	if !r.OK { return r }
-//	data := r.Value.([]byte)
+//	data := r.Bytes()
 func readAll(r any) core.Result {
 	result := core.ReadAll(r)
 	if !result.OK {
 		return result
 	}
-	return core.Ok([]byte(result.Value.(string)))
+	return core.Ok([]byte(result.String()))
 }

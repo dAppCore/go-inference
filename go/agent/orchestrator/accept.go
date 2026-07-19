@@ -81,7 +81,7 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 	if !reviewJSONResult.OK {
 		return reviewJSONResult
 	}
-	reviewJSON := reviewJSONResult.Value.(string)
+	reviewJSON := reviewJSONResult.String()
 	atResult := orchestrator.acceptanceTime()
 	if !atResult.OK {
 		return atResult
@@ -97,14 +97,14 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 	}
 	status := preparedReviewStatus(review)
 	receipt := work.Acceptance{
-		ID: idResult.Value.(string), WorkID: run.WorkID, RunID: run.ID,
+		ID: idResult.String(), WorkID: run.WorkID, RunID: run.ID,
 		SourceBase: review.SourceRevision, AgentBase: review.AgentBase, AgentTip: review.AgentTip,
 		IntegrationBranch: review.IntegrationBranch, IntegrationWorktree: review.IntegrationPath,
 		ResultRevision: review.ResultRevision, Status: status, ValidationJSON: reviewJSON,
 		CreatedAt: at, UpdatedAt: at,
 	}
 	event := work.Event{
-		ID: eventIDResult.Value.(string), RunID: run.ID, WorkID: run.WorkID, Kind: "changes_reviewed",
+		ID: eventIDResult.String(), RunID: run.ID, WorkID: run.WorkID, Kind: "changes_reviewed",
 		Title: core.Concat("agent changes review ", status), Detail: review.ResultRevision,
 		DetailJSON: reviewJSON, CreatedAt: at,
 	}
@@ -275,7 +275,7 @@ func (orchestrator *Orchestrator) Accept(ctx context.Context, request workspace.
 	if !idResult.OK {
 		return idResult
 	}
-	id := idResult.Value.(string)
+	id := idResult.String()
 	validationJSON := durableReceipt.ValidationJSON
 	receipt := work.Acceptance{
 		ID: id, WorkID: run.WorkID, RunID: run.ID, SourceBase: review.SourceRevision,
@@ -293,7 +293,7 @@ func (orchestrator *Orchestrator) Accept(ctx context.Context, request workspace.
 		return eventIDResult
 	}
 	event := work.Event{
-		ID: eventIDResult.Value.(string), RunID: run.ID, WorkID: run.WorkID, Kind: "accepted",
+		ID: eventIDResult.String(), RunID: run.ID, WorkID: run.WorkID, Kind: "accepted",
 		Title: "agent changes accepted", Detail: review.ResultRevision, DetailJSON: validationJSON, CreatedAt: at,
 	}
 	commit := Commit{Run: &run, ExpectedStatus: &expected, Event: &event, Acceptance: &receipt}
@@ -398,8 +398,8 @@ func (orchestrator *Orchestrator) Reject(ctx context.Context, runID string) core
 	if !eventIDResult.OK {
 		return eventIDResult
 	}
-	id := idResult.Value.(string)
-	eventID := eventIDResult.Value.(string)
+	id := idResult.String()
+	eventID := eventIDResult.String()
 	receipt := work.Acceptance{
 		ID: id, WorkID: run.WorkID, RunID: run.ID, SourceBase: review.SourceRevision,
 		AgentBase: review.AgentBase, AgentTip: review.AgentTip,
@@ -482,7 +482,7 @@ func encodeChangeReview(review workspace.ChangeReview) core.Result {
 	if !encoded.OK {
 		return core.Fail(core.E("orchestrator.encodeChangeReview", "failed to encode durable change review", encoded.Err()))
 	}
-	return core.Ok(string(encoded.Value.([]byte)))
+	return core.Ok(string(encoded.Bytes()))
 }
 
 func decodeChangeReview(encoded string) core.Result {

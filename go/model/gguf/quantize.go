@@ -181,7 +181,7 @@ func QuantizeModelPack(ctx context.Context, opts QuantizeOptions) (*QuantizeResu
 
 	output := opts.OutputPath
 	if abs := core.PathAbs(output); abs.OK {
-		output = abs.Value.(string)
+		output = abs.String()
 	}
 	if samePath(source.Root, output) {
 		return nil, core.NewError("gguf: GGUF output path must differ from source model path")
@@ -213,12 +213,12 @@ func QuantizeModelPack(ctx context.Context, opts QuantizeOptions) (*QuantizeResu
 	var lane QuantizeLane
 	var laneMatched bool
 	if configRead := core.ReadFile(core.PathJoin(source.Root, "config.json")); configRead.OK {
-		lane, laneMatched = lookupQuantizeLane(configRead.Value.([]byte))
+		lane, laneMatched = lookupQuantizeLane(configRead.Bytes())
 		if laneMatched {
 			if !lane.SupportsFormat(requested) {
 				return nil, lane.UnsupportedFormatError(requested)
 			}
-			quantized, metadata, err = lane.Quantize(source, configRead.Value.([]byte), tensors, requested)
+			quantized, metadata, err = lane.Quantize(source, configRead.Bytes(), tensors, requested)
 			if err != nil {
 				return nil, err
 			}
@@ -478,11 +478,11 @@ func ValidationSummary(issues []ValidationIssue) string {
 func samePath(a, b string) bool {
 	absA := a
 	if resolved := core.PathAbs(a); resolved.OK {
-		absA = resolved.Value.(string)
+		absA = resolved.String()
 	}
 	absB := b
 	if resolved := core.PathAbs(b); resolved.OK {
-		absB = resolved.Value.(string)
+		absB = resolved.String()
 	}
 	return absA == absB
 }
@@ -542,7 +542,7 @@ func copyLocalFile(sourcePath, destinationPath string) error {
 	if !read.OK {
 		return read.Err()
 	}
-	if result := core.WriteFile(destinationPath, read.Value.([]byte), 0o644); !result.OK {
+	if result := core.WriteFile(destinationPath, read.Bytes(), 0o644); !result.OK {
 		return result.Err()
 	}
 	return nil

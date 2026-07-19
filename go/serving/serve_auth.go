@@ -48,11 +48,7 @@ func loadAdminToken(path string) (token string, exists bool, err error) {
 	if !res.OK {
 		return "", false, nil
 	}
-	data, ok := res.Value.([]byte)
-	if !ok {
-		return "", false, nil
-	}
-	tok := core.Trim(string(data))
+	tok := core.Trim(string(res.Bytes()))
 	if tok == "" {
 		return "", false, nil
 	}

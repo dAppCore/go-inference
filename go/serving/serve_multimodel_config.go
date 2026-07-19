@@ -52,10 +52,7 @@ func LoadModelsConfig(path string) ([]ModelSpec, MultiModelOptions, error) {
 	if !read.OK {
 		return nil, MultiModelOptions{}, core.E("serving.LoadModelsConfig", core.Sprintf("read %q", path), read.Err())
 	}
-	raw, ok := read.Value.([]byte)
-	if !ok {
-		return nil, MultiModelOptions{}, core.E("serving.LoadModelsConfig", "config bytes unavailable", nil)
-	}
+	raw := read.Bytes()
 	var cfg ModelsConfig
 	if r := core.JSONUnmarshal(raw, &cfg); !r.OK {
 		return nil, MultiModelOptions{}, core.E("serving.LoadModelsConfig", core.Sprintf("parse %q", path), r.Err())

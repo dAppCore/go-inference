@@ -293,7 +293,7 @@ func lqlLimit(tokens []string) int {
 		}
 		result := core.Atoi(tokens[i+1])
 		if result.OK {
-			return result.Value.(int)
+			return result.Int()
 		}
 	}
 	return 0

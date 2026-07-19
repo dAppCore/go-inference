@@ -2217,7 +2217,7 @@ func prefillChunkWindows() int {
 func prefillChunkWindowsFor(slidingWindow int) int {
 	if v := os.Getenv("LTHN_PREFILL_WINDOWS"); v != "" {
 		if r := core.Atoi(v); r.OK {
-			if n, ok := r.Value.(int); ok && n >= 1 && n <= 8 {
+			if n := r.Int(); n >= 1 && n <= 8 {
 				return n
 			}
 		}
