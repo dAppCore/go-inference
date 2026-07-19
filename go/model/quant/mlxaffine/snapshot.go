@@ -316,7 +316,7 @@ func writeConfig(srcDir, outDir string, opts Options) error {
 	if !marshalled.OK {
 		return core.E("mlxaffine.config", "marshal config.json", marshalled.Err())
 	}
-	if r := core.WriteFile(core.PathJoin(outDir, "config.json"), marshalled.Value.([]byte), 0o644); !r.OK {
+	if r := core.WriteFile(core.PathJoin(outDir, "config.json"), marshalled.Bytes(), 0o644); !r.OK {
 		return core.E("mlxaffine.config", "write config.json", r.Err())
 	}
 	return nil
@@ -335,7 +335,7 @@ func copySidecars(srcDir, outDir string) error {
 		if !read.OK {
 			continue // a directory or unreadable entry — skip, not fatal
 		}
-		if r := core.WriteFile(core.PathJoin(outDir, name), read.Value.([]byte), 0o644); !r.OK {
+		if r := core.WriteFile(core.PathJoin(outDir, name), read.Bytes(), 0o644); !r.OK {
 			return core.E("mlxaffine.sidecar", "copy "+name, r.Err())
 		}
 	}
@@ -358,7 +358,7 @@ func isFloatDType(dtype string) bool {
 func samePath(a, b string) bool {
 	ra, rb := core.PathAbs(a), core.PathAbs(b)
 	if ra.OK && rb.OK {
-		return ra.Value.(string) == rb.Value.(string)
+		return ra.String() == rb.String()
 	}
 	return a == b
 }

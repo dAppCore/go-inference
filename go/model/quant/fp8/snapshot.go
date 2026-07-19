@@ -124,7 +124,7 @@ func copySidecars(src, out string) error {
 		}
 		read := core.ReadFile(path)
 		if read.OK {
-			if write := core.WriteFile(core.PathJoin(out, name), read.Value.([]byte), 0o644); !write.OK {
+			if write := core.WriteFile(core.PathJoin(out, name), read.Bytes(), 0o644); !write.OK {
 				return write.Err()
 			}
 		}
@@ -136,7 +136,7 @@ func writeModelConfig(path string, quantConfig map[string]any) error {
 	config := make(map[string]any)
 	read := core.ReadFile(path)
 	if read.OK {
-		if decoded := core.JSONUnmarshal(read.Value.([]byte), &config); !decoded.OK {
+		if decoded := core.JSONUnmarshal(read.Bytes(), &config); !decoded.OK {
 			return decoded.Err()
 		}
 	}
@@ -145,7 +145,7 @@ func writeModelConfig(path string, quantConfig map[string]any) error {
 	if !encoded.OK {
 		return encoded.Err()
 	}
-	write := core.WriteFile(path, encoded.Value.([]byte), 0o644)
+	write := core.WriteFile(path, encoded.Bytes(), 0o644)
 	if !write.OK {
 		return write.Err()
 	}

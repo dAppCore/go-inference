@@ -166,7 +166,7 @@ func writeSnapshot(ctx context.Context, path string, items []item, opts Options,
 	file := created.Value.(*core.OSFile)
 	defer file.Close()
 	var length [8]byte
-	headerBytes := encoded.Value.([]byte)
+	headerBytes := encoded.Bytes()
 	binary.LittleEndian.PutUint64(length[:], uint64(len(headerBytes)))
 	if err := writeAll(file, length[:]); err != nil {
 		return err
@@ -227,7 +227,7 @@ func writeQuantizeConfig(path string, opts Options) error {
 	if !encoded.OK {
 		return core.E("gptq.config", "encode quantize_config.json", encoded.Err())
 	}
-	if result := core.WriteFile(path, encoded.Value.([]byte), 0o644); !result.OK {
+	if result := core.WriteFile(path, encoded.Bytes(), 0o644); !result.OK {
 		return core.E("gptq.config", "write quantize_config.json", result.Err())
 	}
 	return nil
@@ -243,7 +243,7 @@ func copyFiles(srcDir, outDir string) error {
 		if !read.OK {
 			continue
 		}
-		if write := core.WriteFile(core.PathJoin(outDir, name), read.Value.([]byte), 0o644); !write.OK {
+		if write := core.WriteFile(core.PathJoin(outDir, name), read.Bytes(), 0o644); !write.OK {
 			return core.E("gptq.sidecar", "copy "+name, write.Err())
 		}
 	}
@@ -303,7 +303,7 @@ func isFloat(dtype string) bool {
 
 func samePath(left, right string) bool {
 	a, b := core.PathAbs(left), core.PathAbs(right)
-	return a.OK && b.OK && a.Value.(string) == b.Value.(string)
+	return a.OK && b.OK && a.String() == b.String()
 }
 
 func writeAll(file *core.OSFile, data []byte) error {
