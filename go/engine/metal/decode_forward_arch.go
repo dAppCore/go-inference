@@ -8,6 +8,9 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -893,6 +896,61 @@ func (s *archDecodeState) reloadDevicePagedKVDeltaLayer(li int, cache *devicePag
 	return true, nil
 }
 
+// forEachPagedOwnerLayerDelta fans deltaFn over every owner layer's paged
+// cache in parallel — each layer's cache, lb twin, and scratch are
+// independent, and the per-layer work is host memcpy/quantise (the q8 26B
+// pays ~30 layers × K rows of scalar quant per verify round; serial it was
+// ~3-4ms of the round, #53). Layers deltaFn declines (handled=false) are
+// returned for the caller's serial full-path pass. Metal calls inside
+// (bufferLength / Contents / page allocation) are device-level thread-safe.
+func (s *archDecodeState) forEachPagedOwnerLayerDelta(deltaFn func(li int, cache *devicePagedKVCache) (bool, error)) (unhandled []int, err error) {
+	type layerRef struct {
+		li    int
+		cache *devicePagedKVCache
+	}
+	var refs []layerRef
+	for li, spec := range s.specs {
+		cache := s.layerPagedKV(li)
+		if cache == nil || !spec.OwnsCache() {
+			continue
+		}
+		refs = append(refs, layerRef{li, cache})
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	handled := make([]bool, len(refs))
+	errs := make([]error, len(refs))
+	// stride-1 fan-out: parallelRows' 64-wide batches would hand all ~30
+	// layers to one worker; here each unit is a whole layer's copy loop.
+	workers := min(runtime.GOMAXPROCS(0), len(refs))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(refs) {
+					return
+				}
+				handled[i], errs[i] = deltaFn(refs[i].li, refs[i].cache)
+			}
+		}()
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+		if !handled[i] {
+			unhandled = append(unhandled, refs[i].li)
+		}
+	}
+	return unhandled, nil
+}
+
 func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if s == nil || !s.hasDevicePagedKV() {
 		return nil
@@ -900,17 +958,26 @@ func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy source
 		return err
 	}
+	var deltaUnhandled []int
+	if !kvSyncDeltaDisabled {
+		unhandled, err := s.forEachPagedOwnerLayerDelta(func(li int, cache *devicePagedKVCache) (bool, error) {
+			return s.reloadDevicePagedKVDeltaLayer(li, cache, position)
+		})
+		if err != nil {
+			return err
+		}
+		if unhandled == nil {
+			return nil
+		}
+		deltaUnhandled = unhandled
+	}
 	for li, spec := range s.specs {
+		if deltaUnhandled != nil && !slices.Contains(deltaUnhandled, li) {
+			continue
+		}
 		cache := s.layerPagedKV(li)
 		if cache == nil || !spec.OwnsCache() {
 			continue
-		}
-		if !kvSyncDeltaDisabled {
-			if handled, err := s.reloadDevicePagedKVDeltaLayer(li, cache, position); err != nil {
-				return err
-			} else if handled {
-				continue
-			}
 		}
 		if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
 			return core.NewError("native.archDecodeState.reloadDevicePagedKVFromLinear: missing linear cache")
@@ -949,7 +1016,28 @@ func (s *archDecodeState) syncLinearKVFromDevicePaged(position int) error {
 	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy target
 		return err
 	}
+	var deltaUnhandled []int
+	if !kvSyncDeltaDisabled {
+		unhandled, err := s.forEachPagedOwnerLayerDelta(func(li int, cache *devicePagedKVCache) (bool, error) {
+			if position < cache.length {
+				if terr := cache.truncate(position); terr != nil {
+					return false, terr
+				}
+			}
+			return s.syncLinearKVDeltaLayer(li, cache, position)
+		})
+		if err != nil {
+			return err
+		}
+		if unhandled == nil {
+			return nil
+		}
+		deltaUnhandled = unhandled
+	}
 	for li, spec := range s.specs {
+		if deltaUnhandled != nil && !slices.Contains(deltaUnhandled, li) {
+			continue
+		}
 		cache := s.layerPagedKV(li)
 		if cache == nil || !spec.OwnsCache() {
 			continue
@@ -957,13 +1045,6 @@ func (s *archDecodeState) syncLinearKVFromDevicePaged(position int) error {
 		if position < cache.length {
 			if err := cache.truncate(position); err != nil {
 				return err
-			}
-		}
-		if !kvSyncDeltaDisabled {
-			if handled, err := s.syncLinearKVDeltaLayer(li, cache, position); err != nil {
-				return err
-			} else if handled {
-				continue
 			}
 		}
 		if cache.ring {
