@@ -29,29 +29,29 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 1: Domain types, content shapes, hashing (`go/dataset` core)
 
-- [ ] Dataset/Item/Score/Review/Export types with kinds (`pair`/`messages`/`trace`), sources, statuses, reviewer identities per the design; content-shape validation per kind (a `pair` item must carry prompt+response; `messages` must carry role-alternating turns; `trace` opaque-but-nonempty).
-- [ ] `content_hash` (canonicalised content) + manifest hash (sha256 over ordered item hashes); deterministic across runs.
-- [ ] Tests: shape validation Good/Bad/Ugly per kind; hash determinism + inequality cases; Examples.
+- [x] Dataset/Item/Score/Review/Export types with kinds (`pair`/`messages`/`trace`), sources, statuses, reviewer identities per the design; content-shape validation per kind (a `pair` item must carry prompt+response; `messages` must carry role-alternating turns; `trace` opaque-but-nonempty).
+- [x] `content_hash` (canonicalised content) + manifest hash (sha256 over ordered item hashes); deterministic across runs.
+- [x] Tests: shape validation Good/Bad/Ugly per kind; hash determinism + inequality cases; Examples.
 
 ### Task 2: Store contract + ingest normalisation
 
-- [ ] `Store` interface: dataset CRUD-by-flag, item append/get/list with filters (dataset, status, kind, source, score expressions, archived), score append, review append (latest-wins reads), export record append. An in-memory fake Store for root-module tests.
-- [ ] Ingest: `{messages}` JSONL, `{prompt,response}` JSONL, `CaptureRow` JSONL (`{step,prompt,text,at_unix}`), and chathistory session/turn rows → normalised Items with source refs + fingerprints; dedupe by content_hash within a dataset (a duplicate ingest is a counted no-op, not an error).
-- [ ] Tests: each shape round-trips; malformed rows are loud per-row errors with honest counts (ingested/skipped/dedup); Examples.
+- [x] `Store` interface: dataset CRUD-by-flag, item append/get/list with filters (dataset, status, kind, source, score expressions, archived), score append, review append (latest-wins reads), export record append. An in-memory fake Store for root-module tests.
+- [x] Ingest: `{messages}` JSONL, `{prompt,response}` JSONL, `CaptureRow` JSONL (`{step,prompt,text,at_unix}`), and chathistory session/turn rows → normalised Items with source refs + fingerprints; dedupe by content_hash within a dataset (a duplicate ingest is a counted no-op, not an error).
+- [x] Tests: each shape round-trips; malformed rows are loud per-row errors with honest counts (ingested/skipped/dedup); Examples.
 
 ### Task 3: Welfare screen + scoring orchestration
 
-- [ ] Every ingest path routes through the welfare screen; a hit writes `quarantined` review (`auto:welfare`) and the item still lands (visible, reviewable).
-- [ ] Heuristic tier: `lek.ScorePair` per item → `lek` score row (composite value + full payload) + derived `hostility`/`sycophancy` rows; scorer identity = scorer name + version.
-- [ ] Auto-threshold expressions (`lek>=80`, `hostility>=0.7`): a tiny explicit parser (field, op, number — nothing more), applied ONLY when flags are passed; review rows carry `auto:threshold` + the expression text.
-- [ ] Judge contract: the interface a CLI-side driver implements (template name → prompt render → generation → parsed score); root defines + tests the contract with a fake judge, drivers live CLI-side.
-- [ ] Tests: quarantine visibility, score append-only (re-score adds), threshold parser Good/Bad/Ugly (reject anything beyond the grammar), fake-judge round-trip; Examples.
+- [x] Every ingest path routes through the welfare screen; a hit writes `quarantined` review (`auto:welfare`) and the item still lands (visible, reviewable).
+- [x] Heuristic tier: `lek.ScorePair` per item → `lek` score row (composite value + full payload) + derived `hostility`/`sycophancy` rows; scorer identity = scorer name + version.
+- [x] Auto-threshold expressions (`lek>=80`, `hostility>=0.7`): a tiny explicit parser (field, op, number — nothing more), applied ONLY when flags are passed; review rows carry `auto:threshold` + the expression text.
+- [x] Judge contract: the interface a CLI-side driver implements (template name → prompt render → generation → parsed score); root defines + tests the contract with a fake judge, drivers live CLI-side.
+- [x] Tests: quarantine visibility, score append-only (re-score adds), threshold parser Good/Bad/Ugly (reject anything beyond the grammar), fake-judge round-trip; Examples.
 
 ### Task 4: Export writers + manifests
 
-- [ ] `sft-jsonl` (`{messages}` — pairs converted via the standard user/assistant wrap), `pairs-jsonl`, `capture-jsonl` writers; default filter `status=approved`, anything else requires the explicit filter.
-- [ ] Deterministic ordering (created_at, id); manifest row + sidecar JSON (counts, filter expression, per-item hashes, manifest hash).
-- [ ] Tests: each format golden-checked; the approved-only default proven; manifest hash stability; Examples. Root-module gate: `go build ./... && go vet ./dataset/ && go test -count=1 ./dataset/` clean, coverage ≥95%.
+- [x] `sft-jsonl` (`{messages}` — pairs converted via the standard user/assistant wrap), `pairs-jsonl`, `capture-jsonl` writers; default filter `status=approved`, anything else requires the explicit filter.
+- [x] Deterministic ordering (created_at, id); manifest row + sidecar JSON (counts, filter expression, per-item hashes, manifest hash).
+- [x] Tests: each format golden-checked; the approved-only default proven; manifest hash stability; Examples. Root-module gate: `go build ./... && go vet ./dataset/ && go test -count=1 ./dataset/` clean, coverage ≥95%.
 
 ### Task 5: DuckDB store + paths (CLI)
 
