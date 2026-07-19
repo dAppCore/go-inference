@@ -68,20 +68,24 @@ func sdpaVectorRTDimPipeline() (metal.MTLComputePipelineState, error) {
 	sdpaRTDimMu.Lock()
 	defer sdpaRTDimMu.Unlock()
 	if sdpaRTDimPSOBuilt {
-		return sdpaRTDimPSO, sdpaRTDimPSOErr
+		return sdpaRTDimPSO, nil
 	}
-	sdpaRTDimPSOBuilt = true
+	// Cache SUCCESS only. A nil/torn-down customLibrary is a transient state some
+	// test suites pass through — latching the error here poisoned every later
+	// caller in the process (the 199-failure suite cascade, 2026-07-19).
 	if customLibrary == nil || customLibrary.GetID() == 0 {
-		sdpaRTDimPSOErr = core.NewError("native.sdpaVectorRTDimPipeline: custom library unavailable")
-		return nil, sdpaRTDimPSOErr
+		return nil, core.NewError("native.sdpaVectorRTDimPipeline: custom library unavailable")
 	}
 	fn := customLibrary.NewFunctionWithName("lthn_sdpa_vector_rtdim_bf16")
 	if fn == nil || fn.GetID() == 0 {
-		sdpaRTDimPSOErr = core.NewError("native.sdpaVectorRTDimPipeline: kernel lthn_sdpa_vector_rtdim_bf16 not found")
-		return nil, sdpaRTDimPSOErr
+		return nil, core.NewError("native.sdpaVectorRTDimPipeline: kernel lthn_sdpa_vector_rtdim_bf16 not found")
 	}
-	sdpaRTDimPSO, sdpaRTDimPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
-	return sdpaRTDimPSO, sdpaRTDimPSOErr
+	pso, err := device.NewComputePipelineStateWithFunctionError(fn)
+	if err != nil {
+		return nil, err
+	}
+	sdpaRTDimPSO, sdpaRTDimPSOBuilt = pso, true
+	return sdpaRTDimPSO, nil
 }
 
 // sdpaVector2Pass1RTDimPipeline resolves (and caches) the 2-pass pass-1 runtime-dim decode SDPA —
@@ -92,20 +96,22 @@ func sdpaVector2Pass1RTDimPipeline() (metal.MTLComputePipelineState, error) {
 	sdpaRTDimMu.Lock()
 	defer sdpaRTDimMu.Unlock()
 	if sdpaRTDim2Pass1PSOBuilt {
-		return sdpaRTDim2Pass1PSO, sdpaRTDim2Pass1PSOErr
+		return sdpaRTDim2Pass1PSO, nil
 	}
-	sdpaRTDim2Pass1PSOBuilt = true
+	// Cache SUCCESS only — see sdpaVectorRTDimPipeline's latch note.
 	if customLibrary == nil || customLibrary.GetID() == 0 {
-		sdpaRTDim2Pass1PSOErr = core.NewError("native.sdpaVector2Pass1RTDimPipeline: custom library unavailable")
-		return nil, sdpaRTDim2Pass1PSOErr
+		return nil, core.NewError("native.sdpaVector2Pass1RTDimPipeline: custom library unavailable")
 	}
 	fn := customLibrary.NewFunctionWithName("lthn_sdpa_vector_2pass_1_rtdim_bf16")
 	if fn == nil || fn.GetID() == 0 {
-		sdpaRTDim2Pass1PSOErr = core.NewError("native.sdpaVector2Pass1RTDimPipeline: kernel lthn_sdpa_vector_2pass_1_rtdim_bf16 not found")
-		return nil, sdpaRTDim2Pass1PSOErr
+		return nil, core.NewError("native.sdpaVector2Pass1RTDimPipeline: kernel lthn_sdpa_vector_2pass_1_rtdim_bf16 not found")
 	}
-	sdpaRTDim2Pass1PSO, sdpaRTDim2Pass1PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
-	return sdpaRTDim2Pass1PSO, sdpaRTDim2Pass1PSOErr
+	pso, err := device.NewComputePipelineStateWithFunctionError(fn)
+	if err != nil {
+		return nil, err
+	}
+	sdpaRTDim2Pass1PSO, sdpaRTDim2Pass1PSOBuilt = pso, true
+	return sdpaRTDim2Pass1PSO, nil
 }
 
 // sdpaRTDimNotice fires the ONE-TIME (per kind+headDim, via the caller's missing-map gate)
@@ -124,20 +130,19 @@ func sdpaRTDimNotice(kind string, headDim int) {
 // rtDim: false uses emitSDPA/emitSDPAAt (the existing 0..10 ABI, unchanged); true uses
 // emitSDPARTDim/emitSDPARTDimAt (the same ABI plus headDim at buffer(11)).
 func sdpaVectorDispatchForHeadDim(headDim int) (pso metal.MTLComputePipelineState, rtDim bool, err error) {
+	// ALWAYS try the fixed pipeline first — the missing-map gates only the
+	// one-time notice, never the routing. Latching the route poisoned every
+	// later caller at that width when the fixed lookup failed once during a
+	// transient library-teardown window (the 199-failure suite cascade).
+	if fixed, ferr := sdpaVectorPipelineForHeadDim(headDim); ferr == nil {
+		return fixed, false, nil
+	}
 	sdpaRTDimMu.Lock()
-	missing := sdpaVectorHeadDimMissing[headDim]
+	first := !sdpaVectorHeadDimMissing[headDim]
+	sdpaVectorHeadDimMissing[headDim] = true
 	sdpaRTDimMu.Unlock()
-	if !missing {
-		if fixed, ferr := sdpaVectorPipelineForHeadDim(headDim); ferr == nil {
-			return fixed, false, nil
-		}
-		sdpaRTDimMu.Lock()
-		first := !sdpaVectorHeadDimMissing[headDim]
-		sdpaVectorHeadDimMissing[headDim] = true
-		sdpaRTDimMu.Unlock()
-		if first {
-			sdpaRTDimNotice("sdpa_vector", headDim)
-		}
+	if first {
+		sdpaRTDimNotice("sdpa_vector", headDim)
 	}
 	if !sdpaVectorRTDimValidHeadDim(headDim) {
 		return nil, true, core.NewError(core.Sprintf(
