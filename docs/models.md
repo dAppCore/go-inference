@@ -22,7 +22,7 @@ lane; sampled (temp>0) serves at greedy parity since `574c85bc`.
 | `e2b` | E2B | `mlx-community/gemma-4-e2b-it-4bit` | 128K | 3.6 GB | 170.0 | **223.9 (+32%)** | fast sub-agent · Lemma v2 base |
 | `e4b` | E4B | `mlx-community/gemma-4-e4b-it-4bit` | 128K | 5.1 GB | 117.5 | 135.7 (+47% w/ matched QAT draft) | sub-agent worker |
 | `12b` | 12B dense (unified vision) | `mlx-community/gemma-4-12B-it-4bit` | 256K | 6.7 GB | 71.2 | 87.1 (+22%) | mid-weight generalist |
-| `26b` | 26B-A4B MoE | `mlx-community/gemma-4-26b-a4b-it-4bit` | 256K | 15.3 GB | 138.9 | ✗ −73% (#372) — serve plain | big-context orchestrator (efficient MoE) |
+| `26b` | 26B-A4B MoE | `mlx-community/gemma-4-26b-a4b-it-4bit` | 256K | 15.3 GB | 138.9 | ~−7% at 400 tok (#372/#53 — was −73%) | big-context orchestrator (efficient MoE) |
 | `31b` | 31B dense | `mlx-community/gemma-4-31B-it-4bit` | 256K | 18.4 GB | 33.1 | **46.0 (+39%)** | orchestrator (dense) |
 
 Cross-engine anchor (E2B, tg-512, same machine): lem 168.5 · mlx-lm 158.4 · llama.cpp 144.9.
@@ -39,8 +39,15 @@ auto-arms a detected drafter). Two rules, both measured:
 - **MTP gain is workload-dependent.** The grid's counting prompt reads acceptance at its CEILING
   (60%+); creative prose measures 8–20% (roughly break-even). MTP pays on structured output —
   lists, code, tool-JSON — the agent workloads.
-- The 26B MoE pair currently LOSES (−73%, the MoE verify cost — #372's open campaign). Serve the
-  26B plain until that closes.
+- The 26B MoE pair closed from −73% to ~−7% (400-token greedy medians, loaded box — #53: the
+  O(position) paged↔linear KV round-trip at the verify seam, the per-block drafter KV export,
+  and the bf16 drafter head were the indicted costs; all three are O(delta)/quantised now).
+  The remaining gap is verify-forward engineering, not physics — the expert traffic at K=6 is
+  ~10.5ms/round against a ~19ms round floor that clears plain. Next levers, in order: the
+  boundary-greedy carry (skip the per-round BoundaryLogits head — needs a careful invalidation
+  surface), rows-head device-direct (skip the K-hidden host round-trip), M>4 register-tiled
+  qmv rows (the M=5 occupancy collapse is the wall). Serve the 26B plain for long generations
+  until the pair clears parity on a quiet box.
 
 ### Quant guidance
 
