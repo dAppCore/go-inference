@@ -245,6 +245,47 @@ func TestForwardCaptureHiddensICBUsesEmbedInto(t *testing.T) {
 	}
 }
 
+// TestForwardCaptureHiddensHonoursICBDisabledForTest is the #44-investigation regression: before
+// this fix, ForwardCaptureHiddens picked its route by `s.state.icb != nil` ALONE, ignoring
+// icbDisabledForTest — the one caller of the flag that DIDN'T honour it (every other capture-ish
+// call site, e.g. captureBoundaryLayerHiddens in assistant_dflash_livetap.go, already checked
+// `s.state.icb != nil && !icbDisabledForTest`). That asymmetry meant the lever couldn't force
+// ForwardCaptureHiddens onto the plain re-encode "truth arm" the way TestForwardCaptureHiddens2PassBoundaries
+// forces it by nulling state.icb directly — the only difference from production (icbDisabledForTest
+// is always false there) is this flag, so a session with icbDisabledForTest=true must now produce
+// byte-identical captured hiddens to the same session with state.icb forced nil outright.
+func TestForwardCaptureHiddensHonoursICBDisabledForTest(t *testing.T) {
+	requireNativeRuntime(t)
+	g, arch, maxLen := icbSessionStateFixture(t)
+	ids := []int32{1, 5, 3, 2}
+
+	plain := newICBSessionStateFixture(t, g, arch, maxLen)
+	plain.state.icb = nil // the truth arm (TestForwardCaptureHiddens2PassBoundaries's pattern)
+	_, wantLayers, err := plain.ForwardCaptureHiddens(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureHiddens(plain): %v", err)
+	}
+
+	icb := newICBSessionStateFixture(t, g, arch, maxLen)
+	if icb.state.icb == nil {
+		t.Skip("fixture did not record an ICB — the flag has nothing to disable here")
+	}
+	prev := icbDisabledForTest
+	icbDisabledForTest = true
+	defer func() { icbDisabledForTest = prev }()
+	_, gotLayers, err := icb.ForwardCaptureHiddens(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureHiddens(icb, disabled-for-test): %v", err)
+	}
+
+	if len(gotLayers) != len(wantLayers) {
+		t.Fatalf("got %d layer tensors, want %d", len(gotLayers), len(wantLayers))
+	}
+	for i := range wantLayers {
+		eqBytes(t, "ForwardCaptureHiddens under icbDisabledForTest vs the plain truth arm", gotLayers[i], wantLayers[i])
+	}
+}
+
 // TestForwardCaptureFinalHidden verifies the batched training forward on a real (synthetic)
 // dense ArchSession: the final residual rows it returns are BYTE-IDENTICAL to the serial
 // per-token capture's last layer, the batched route actually ENGAGED (identity alone can't

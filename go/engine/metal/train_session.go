@@ -46,7 +46,7 @@ func (s *ArchSession) ForwardCaptureHiddens(ids []int32) (embeds [][]byte, perLa
 	if s.pos+T > s.maxLen {
 		return nil, nil, core.NewError("native.ForwardCaptureHiddens: sequence exceeds maxLen")
 	}
-	if s.state.icb != nil {
+	if s.state.icb != nil && !icbDisabledForTest {
 		return s.forwardCaptureHiddensICB(ids, T, N)
 	}
 

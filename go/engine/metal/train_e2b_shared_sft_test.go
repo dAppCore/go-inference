@@ -114,14 +114,26 @@ func TestLoRATrainerE2BSharedKVSFT_Good(t *testing.T) {
 	}
 	t.Logf("B=0 host-chain vs engine-capture: worst layer %d cosine=%.6f over %d layers", worstL, worst, len(tapes))
 	if worst < 0.999 {
-		// KNOWN MEASURING-STICK ISSUE (#44, the #391 capture-bug class): the host chain is proven
-		// ≡ the ecosystem reference by the numpy oracle (train_real_globals_probe_test.go — cosine
-		// 1.000000 on all 35 real layers, per-layer), and the engine's DECODE is proven correct
-		// end-to-end daily; what diverges here is ForwardCaptureHiddens' captured intermediates
-		// (compounding through the mid-stack, recovering by the tail — see the per-class logs
-		// above). The anchor stays a LOGGED diagnostic until the capture path is fixed; loss-fall
-		// and the adapter round-trip below remain the hard gates for training itself.
-		t.Logf("KNOWN #44: engine-capture anchor below bar (worst layer %d cosine=%.6f) — capture-path bug, not the training chain (oracle-exonerated)", worstL, worst)
+		// KNOWN ENGINE DIVERGENCE (#44 — NOT a capture-path bug, updated 2026-07-19): originally
+		// suspected as the #391 capture-bug class (a carve/fence/route defect in
+		// ForwardCaptureHiddens), but that is now DISPROVEN by elimination — see
+		// TestForwardCaptureHiddensE2BVsOracle, which compares the capture directly against the
+		// independent numpy oracle (testdata/e2b_mirror_oracle.py) with NO host mirror in between,
+		// and sees the SAME divergence on the SAME layers (8-14, worst at 11). Ruled out in turn:
+		// Q8 KV caching (LTHN_KV_Q8_ICB=0 — identical numbers), the recorded-ICB replay vs the fully
+		// serial re-encode route (LTHN_DECODE_ICB=0 — identical numbers, so it is not the split-
+		// command-buffer capture mechanism either), the LoRA effective-weight fold (raw frozen
+		// weights give identical numbers — expected, since B starts at zero and LoRAEffectiveWeightF32
+		// is then an exact identity), and per-layer shape drift (MatFormer dFF and CacheIndex are both
+		// uniform/sequential across the affected layers). The host chain itself is freshly reconfirmed
+		// ≡ the oracle at cosine 1.000000 on all 35 layers (train_real_globals_probe_test.go). What
+		// remains is a genuine divergence in the shared bf16 forward core (decode_forward_arch.go /
+		// decode_forward_arch_icb.go) that BOTH engine routes agree on with each other and disagree on
+		// with ground truth — i.e. the engine itself, not the measuring stick. The anchor stays a
+		// LOGGED diagnostic until that lands; loss-fall and the adapter round-trip below remain the
+		// hard gates for training itself (training's own forward never consumes this capture's
+		// per-layer output — only embeds — so it is unaffected).
+		t.Logf("KNOWN #44: engine-capture anchor below bar (worst layer %d cosine=%.6f) — a real engine bf16-forward divergence (layers 8-14), not a capture/measuring-stick defect (see TestForwardCaptureHiddensE2BVsOracle)", worstL, worst)
 	}
 
 	// the short SFT: a handful of steps on one short sequence, loss must fall.
