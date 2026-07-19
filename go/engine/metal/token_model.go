@@ -95,6 +95,9 @@ type NativeTokenModel struct {
 type archSessionConfig struct {
 	pagedKVPageSize int
 	pagedKVPrealloc bool
+	// kvCacheMode is the load-requested LIVE cache mode ("" = native;
+	// "turboquant[:N]" = TurboQuant codes on qualifying global owners).
+	kvCacheMode string
 }
 
 // Close releases a directory-loaded model's memory-mapped checkpoint (no-op when the weights are
@@ -884,7 +887,7 @@ func NewBF16TokenModel(g *BF16Model, arch model.Arch, maxLen int, opts ...Backen
 	if err != nil {
 		return nil, err
 	}
-	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc}
+	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc, kvCacheMode: b.kvCacheMode}
 	scale := embedScaleOf(arch)
 	vocab, dModel, eps, softCap := arch.Vocab, arch.Hidden, arch.Eps, arch.SoftCap
 	tm := &NativeTokenModel{
@@ -925,7 +928,7 @@ func NewQuantTokenModel(g *QuantModel, arch model.Arch, maxLen int, opts ...Back
 	if err != nil {
 		return nil, err
 	}
-	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc}
+	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc, kvCacheMode: b.kvCacheMode}
 	scale := embedScaleOf(arch)
 	vocab, dModel, eps, softCap := arch.Vocab, arch.Hidden, arch.Eps, arch.SoftCap
 	gs, bits := g.GroupSize, g.Bits

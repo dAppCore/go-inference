@@ -77,6 +77,7 @@ func (r *archICBReplay) releaseKVCaches() {
 		}
 		r.releaseQ8Mirrors()
 	}
+	r.releaseTQPlanes() // TurboQuant γ planes (#41 S3) — the code caches are kCaches/vCaches above
 }
 
 // archICBKVQ8 carries the per-layer q8 KV state threaded from the session

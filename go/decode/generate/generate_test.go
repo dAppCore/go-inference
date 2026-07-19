@@ -46,6 +46,23 @@ func TestNoteCacheKnobs_HonouredMode_Bad(t *testing.T) {
 	}
 }
 
+// TestNoteCacheKnobs_ParameterisedFamily_Good pins the family matching: a
+// parameterised mode request ("turboquant:3.5") is honoured by its declared
+// base family ("turboquant") — no false "ignored" note for the bit-width
+// spellings the engine's load seam parses itself.
+func TestNoteCacheKnobs_ParameterisedFamily_Good(t *testing.T) {
+	log := core.NewBuffer()
+	tm := capModel{report: inference.CapabilityReport{CacheModes: []string{"native", "turboquant"}}}
+	noteCacheKnobs(Config{KVCacheMode: "turboquant:3.5", Log: log}, tm)
+	if out := log.String(); out != "" {
+		t.Fatalf("parameterised family mode noted %q, want silence", out)
+	}
+	noteCacheKnobs(Config{KVCacheMode: "kq8vq4:2", Log: log}, tm)
+	if out := log.String(); out == "" {
+		t.Fatal("an unknown parameterised family must still note")
+	}
+}
+
 // TestNoteCacheKnobs_IgnoresStorage_Ugly pins that noteCacheKnobs is now
 // -kv-cache-only: -kv-storage is the snapshot-encoding knob resolved elsewhere,
 // so noteCacheKnobs stays silent about it even when set.

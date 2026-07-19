@@ -259,6 +259,7 @@ type LoadConfig struct {
 	GPULayers     int    // Number of layers to offload to GPU (-1 = all, 0 = none)
 	ParallelSlots int    // Number of concurrent inference slots (0 = server default)
 	AdapterPath   string // Path to LoRA adapter directory (empty = no adapter)
+	CacheMode     string // Live KV cache mode ("" or "native" = engine default; e.g. "turboquant:4") — engines report theirs via CapabilityReport.CacheModes
 }
 
 // Used by LoadModel and LoadTrainable.
@@ -305,6 +306,17 @@ func WithParallelSlots(n int) LoadOption {
 //	inference.WithAdapterPath("/models/lora/domain-v2") // load fine-tuned adapter
 func WithAdapterPath(path string) LoadOption {
 	return func(c *LoadConfig) { c.AdapterPath = path }
+}
+
+// WithCacheMode selects the engine's LIVE KV cache mode for this load. "" (and
+// "native") keep the engine default; other values are engine-defined — the
+// metal engine serves the TurboQuant family ("turboquant", "turboquant:4",
+// "turboquant:3.5", "turboquant:3", "turboquant:2") and refuses unknown modes
+// at load rather than running silently native.
+//
+//	inference.WithCacheMode("turboquant:3.5") // K 4-bit / V 3-bit live KV codes
+func WithCacheMode(mode string) LoadOption {
+	return func(c *LoadConfig) { c.CacheMode = mode }
 }
 
 // cfg := inference.ApplyLoadOpts(opts) // used internally by LoadModel

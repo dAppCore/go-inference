@@ -60,15 +60,15 @@ func (m *NativeTokenModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	return tmpl, true
 }
 
-// SupportedCacheModes reports the one KV cache mode this no-cgo engine runs: its
-// own built-in cache, selected automatically (engine.CacheModeReporter). It
-// exposes no runtime selector for the go-mlx-era alternatives (fp16 / q8 /
-// kq8vq4 / turboquant) — those were pkg/metal load options that did not port —
-// so a -kv-cache override naming any other mode is not honoured. Reporting the
-// single real mode lets callers print an accurate note, and future engines that
-// do honour a selector list theirs here through the same seam.
+// SupportedCacheModes reports the KV cache modes this no-cgo engine honours
+// through the load seam (engine.CacheModeReporter): its built-in bf16 cache
+// ("native", the default) and the TurboQuant live-code cache family
+// ("turboquant" — bare = 3.5; ":4", ":3.5", ":3", ":2" select the bit widths,
+// K/V 4/3 for the mixed 3.5). TurboQuant engages on qualifying dense
+// global-attention layers via WithCacheMode / -kv-cache (#41 S3); the
+// go-mlx-era fp16 / q8 / kq8vq4 selectors did not port and remain unhonoured.
 func (m *NativeTokenModel) SupportedCacheModes() []string {
-	return []string{"native"}
+	return []string{"native", tqCacheModeName}
 }
 
 // newNativeTextModel wraps a loaded no-cgo token model as the shared

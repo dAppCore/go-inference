@@ -24,6 +24,10 @@ type NativeBackend struct {
 	maxLen          int
 	pagedKVPageSize int
 	pagedKVPrealloc bool
+	// kvCacheMode is the load-requested LIVE cache mode ("" = native). Parsed
+	// (parseTurboQuantCacheMode) and honoured by the ArchSession constructors;
+	// an unknown or unservable mode was already refused at load.
+	kvCacheMode string
 }
 
 var _ model.Backend = (*NativeBackend)(nil)
@@ -41,6 +45,12 @@ func withPagedKVPageSize(n int) BackendOption {
 
 func withPagedKVPrealloc(enabled bool) BackendOption {
 	return func(b *NativeBackend) { b.pagedKVPrealloc = enabled }
+}
+
+// withKVCacheMode threads the load-requested live KV cache mode (e.g.
+// "turboquant:3.5") to the session constructors. "" keeps the native default.
+func withKVCacheMode(mode string) BackendOption {
+	return func(b *NativeBackend) { b.kvCacheMode = mode }
 }
 
 // NewBF16Backend binds a bf16-weight gemma4 model behind model.Backend; len(layers)

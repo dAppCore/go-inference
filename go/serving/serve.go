@@ -52,7 +52,7 @@ type ServeConfig struct {
 	ProfileDir    string // tuned-profile directory (default ~/Lethean/lem/tuning)
 	MachineHash   string // machine identity for profile matching; "" accepts hash-less profiles
 
-	KVCacheMode string // requested KV cache mode; wired when the engine exposes it
+	KVCacheMode string // requested LIVE KV cache mode, passed to the engine load (metal: native / turboquant[:N])
 	Native      bool   // no-cgo native path (the default go-inference metal engine already is)
 
 	// Scheduler routes requests through a mode-selected request scheduler
@@ -198,6 +198,9 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	if cfg.ContextLen > 0 {
 		loadOpts = append(loadOpts, inference.WithContextLen(cfg.ContextLen))
 	}
+	if mode := core.Trim(cfg.KVCacheMode); mode != "" {
+		loadOpts = append(loadOpts, inference.WithCacheMode(mode))
+	}
 	hotSwap := newHotSwapResolver(cfg.ModelPath, draftPathForResolver, resolvedBlock, loadOpts)
 	hotSwap.setLoader(cfg.Loader) // nil-safe: keeps the registered-metal default
 	hotSwap.setSpeculativeLoader(cfg.SpeculativeLoader)
@@ -209,7 +212,7 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		printServe(log, "serve: native no-cgo engine (the default go-inference metal path)")
 	}
 	if core.Trim(cfg.KVCacheMode) != "" {
-		printServe(log, "serve: -kv-cache %s requested; the registered engine loads its default cache mode (per-engine cache-mode selection lands with the engine load-config surface)", cfg.KVCacheMode)
+		printServe(log, "serve: -kv-cache %s requested — passed to the engine load (the metal engine honours the turboquant family; an unknown or unservable mode fails the load loudly)", cfg.KVCacheMode)
 	}
 	if cfg.ModelPath == "" {
 		printServe(log, "serve: starting model-less — POST /v1/admin/serve/reload to load a model")
@@ -485,6 +488,9 @@ func modelLoadOptions(cfg ServeConfig) []inference.LoadOption {
 	opts := append([]inference.LoadOption(nil), cfg.LoadOptions...)
 	if cfg.ContextLen > 0 {
 		opts = append(opts, inference.WithContextLen(cfg.ContextLen))
+	}
+	if mode := core.Trim(cfg.KVCacheMode); mode != "" {
+		opts = append(opts, inference.WithCacheMode(mode))
 	}
 	return opts
 }

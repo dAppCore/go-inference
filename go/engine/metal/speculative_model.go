@@ -89,6 +89,14 @@ func (m *speculativeModel) SerialGeneration() bool { return true }
 func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...inference.LoadOption) (inference.TextModel, error) {
 	cfg := inference.ApplyLoadOpts(opts)
 	maxLen := cfg.ContextLen
+	// TurboQuant live KV declines the MTP drafter pairing (v1): the verify
+	// forward and the drafter's target-KV export both read the target cache as
+	// bf16 rows. Refuse the combination loudly (never a silently-native pair).
+	if tqMode, tqErr := parseTurboQuantCacheMode(cfg.CacheMode); tqErr != nil {
+		return nil, tqErr
+	} else if tqMode != nil {
+		return nil, core.NewError("native.LoadSpeculativePair: -kv-cache turboquant declines the MTP drafter pairing (v1) — drop -draft or -kv-cache")
+	}
 	// maxLen <= 0 defers to the loader's checkpoint-window default.
 	if draftBlock <= 0 {
 		draftBlock = 5

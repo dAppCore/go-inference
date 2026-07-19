@@ -116,6 +116,12 @@ type TokenModelLoadConfig struct {
 	// adapter_config.json) applied at load so `serve --adapter <path>` generates through the adapted
 	// model. Honoured for the bf16 head adapter (LoRATrainer.Save); see lora_apply.go.
 	AdapterPath string
+	// KVCacheMode is the requested LIVE cache mode ("" / "native" = the built-in
+	// bf16 cache; "turboquant[:N]" = TurboQuant codes on qualifying GLOBAL
+	// attention owners — #41 S3). Unknown modes and unservable combinations
+	// (paged KV, MoE/sinks archs, hybrid/recurrent archs) refuse at load rather
+	// than running silently native.
+	KVCacheMode string
 }
 
 // LoadTokenModelDir loads any registered architecture's checkpoint directory as a model.TokenModel —
@@ -150,6 +156,16 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	if loadCfg.PagedKVPageSize < 0 {
 		return nil, core.NewError("native.LoadTokenModelDir: paged KV page size must be >= 0")
 	}
+	// TurboQuant live KV (#41 S3): parse the requested mode up front — an
+	// unknown string refuses here — and refuse the combinations the v1 lane
+	// declares out of scope, loudly, before any weights load.
+	tqMode, tqErr := parseTurboQuantCacheMode(loadCfg.KVCacheMode)
+	if tqErr != nil {
+		return nil, tqErr
+	}
+	if tqMode != nil && loadCfg.PagedKVPageSize != 0 {
+		return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines paged KV (v1) — drop one of the two")
+	}
 	usedDefaultContext := maxLen <= 0
 	if usedDefaultContext {
 		// Serve/generate without -context used to cap every session at 4096 —
@@ -164,6 +180,9 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	// transformer KV plan the RAM-aware clamp below budgets.)
 	if mt, cfg, perr := model.ProbeDirArch(dir); perr == nil {
 		if mt == "mamba2" {
+			if tqMode != nil {
+				return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines recurrent archs (mamba2 holds SSM state, not a KV cache) — reload without -kv-cache")
+			}
 			// mamba2 is a standalone recurrent SSM with its own loader — it registers no
 			// ArchSpec, so it is reached by name here rather than through the composed registry.
 			return loadMamba2TokenModel(dir, cfg)
@@ -187,6 +206,12 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 			if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
 				return nil, cerr
 			} else if ok {
+				if tqMode != nil {
+					// The composed lane (hybrids, arch zoo) holds its own state
+					// shapes the TQ lane never touches — refusing beats a
+					// silently-native "turboquant" session.
+					return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines composed/hybrid archs (v1: dense global-attention layers on the recorded decode lane) — reload without -kv-cache")
+				}
 				return tm, nil
 			}
 		}
@@ -194,6 +219,12 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
 		return nil, err
+	}
+	if tqMode != nil {
+		if terr := tqKVArchServable(lm.Arch, lm.Layers, tqMode); terr != nil {
+			_ = dm.Close()
+			return nil, terr
+		}
 	}
 	sb, err := buildShardBuffers(dm)
 	if err != nil {
@@ -303,6 +334,9 @@ func nativeTokenModelBackendOptions(cfg TokenModelLoadConfig) []BackendOption {
 	}
 	if cfg.PagedKVPrealloc {
 		opts = append(opts, withPagedKVPrealloc(true))
+	}
+	if core.Trim(cfg.KVCacheMode) != "" {
+		opts = append(opts, withKVCacheMode(cfg.KVCacheMode))
 	}
 	return opts
 }

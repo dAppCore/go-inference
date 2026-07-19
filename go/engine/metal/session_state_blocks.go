@@ -596,6 +596,13 @@ func (s *ArchSession) stateLayerViews() ([]sessionStateLayerView, error) {
 // leave other views' snapshot bytes stale, which is safe because every reader
 // refreshes through this entry first.
 func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionStateLayerView, error) {
+	// TurboQuant sessions decline every KV-view consumer (v1): snapshot capture
+	// / restore, -state sleep-wake, and the drafter export all read bf16-shaped
+	// cache bytes the packed code caches do not hold (unlike q8, which keeps
+	// bf16 mirrors). This is THE choke point every such path funnels through.
+	if s.state.icb.hasKVTQ() {
+		return nil, core.NewError("native.ArchSession: -kv-cache turboquant declines KV snapshot / conversation-state sleep (v1) — serve stateless or drop -kv-cache")
+	}
 	ownerCount := s.ownedStateCacheLayers()
 	icb := s.state.icb != nil
 	if len(s.stateBlockViews) == ownerCount && s.stateBlockViewsICB == icb {
