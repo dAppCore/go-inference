@@ -667,7 +667,7 @@ func SDPAInto(out []byte, qb, kb, vb []byte, b, nHeads, nKVHeads, headDim, kvLen
 	if nKVHeads == 0 || nHeads%nKVHeads != 0 {
 		return nil, core.NewError("native.SDPA: nHeads must be a multiple of nKVHeads")
 	}
-	pso, err := sdpaVectorPipelineForHeadDim(headDim)
+	pso, rtDim, err := sdpaVectorDispatchForHeadDim(headDim)
 	if err != nil {
 		return nil, err
 	}
@@ -703,7 +703,11 @@ func SDPAInto(out []byte, qb, kb, vb []byte, b, nHeads, nKVHeads, headDim, kvLen
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		emitSDPA(encSink{enc}, pso, qBuf, kBuf, vBuf, outBuf, 0, nil, b*nHeads, b*nKVHeads, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		if rtDim {
+			emitSDPARTDim(encSink{enc}, pso, qBuf, kBuf, vBuf, outBuf, 0, nil, b*nHeads, b*nKVHeads, headDim, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		} else {
+			emitSDPA(encSink{enc}, pso, qBuf, kBuf, vBuf, outBuf, 0, nil, b*nHeads, b*nKVHeads, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		}
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
 		waitUntilCompletedFast(cb)
