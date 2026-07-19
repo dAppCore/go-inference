@@ -29,9 +29,9 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 1: Domain types, content shapes, hashing (`go/dataset` core)
 
-- [ ] Dataset/Item/Score/Review/Export types with kinds (`pair`/`messages`/`trace`), sources, statuses, reviewer identities per the design; content-shape validation per kind (a `pair` item must carry prompt+response; `messages` must carry role-alternating turns; `trace` opaque-but-nonempty).
-- [ ] `content_hash` (canonicalised content) + manifest hash (sha256 over ordered item hashes); deterministic across runs.
-- [ ] Tests: shape validation Good/Bad/Ugly per kind; hash determinism + inequality cases; Examples.
+- [x] Dataset/Item/Score/Review/Export types with kinds (`pair`/`messages`/`trace`), sources, statuses, reviewer identities per the design; content-shape validation per kind (a `pair` item must carry prompt+response; `messages` must carry role-alternating turns; `trace` opaque-but-nonempty).
+- [x] `content_hash` (canonicalised content) + manifest hash (sha256 over ordered item hashes); deterministic across runs.
+- [x] Tests: shape validation Good/Bad/Ugly per kind; hash determinism + inequality cases; Examples.
 
 ### Task 2: Store contract + ingest normalisation
 
