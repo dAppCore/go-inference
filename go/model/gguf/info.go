@@ -237,7 +237,7 @@ func ReadInfo(modelPath string) (Info, error) {
 
 	absolutePath := ggufPath
 	if abs := core.PathAbs(ggufPath); abs.OK {
-		absolutePath = abs.Value.(string)
+		absolutePath = abs.String()
 	}
 
 	config, _ := readModelConfig(core.PathDir(ggufPath))
@@ -345,7 +345,7 @@ func readModelConfig(dir string) (*modelConfigProbe, error) {
 		return nil, read.Value.(error)
 	}
 	var config modelConfigProbe
-	if result := core.JSONUnmarshal(read.Value.([]byte), &config); !result.OK {
+	if result := core.JSONUnmarshal(read.Bytes(), &config); !result.OK {
 		return nil, result.Value.(error)
 	}
 	return &config, nil

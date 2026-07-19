@@ -263,7 +263,7 @@ func (b *Bundle) Save(path string) error {
 	if !data.OK {
 		return core.E("bundle.Save", "marshal bundle", data.Err())
 	}
-	if result := core.WriteFile(path, data.Value.([]byte), 0o600); !result.OK {
+	if result := core.WriteFile(path, data.Bytes(), 0o600); !result.OK {
 		return core.E("bundle.Save", "write bundle", result.Err())
 	}
 	return nil
@@ -288,7 +288,7 @@ func (b *Bundle) SaveCompact(path string) error {
 	if !data.OK {
 		return core.E("bundle.SaveCompact", "marshal bundle", data.Err())
 	}
-	if result := core.WriteFile(path, data.Value.([]byte), 0o600); !result.OK {
+	if result := core.WriteFile(path, data.Bytes(), 0o600); !result.OK {
 		return core.E("bundle.SaveCompact", "write bundle", result.Err())
 	}
 	return nil
@@ -302,10 +302,7 @@ func Load(path string) (*Bundle, error) {
 	if !read.OK {
 		return nil, core.E("bundle.Load", "read bundle", read.Err())
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return nil, core.E("bundle.Load", "read bundle returned non-byte data", nil)
-	}
+	data := read.Bytes()
 	var b Bundle
 	if result := core.JSONUnmarshal(data, &b); !result.OK {
 		return nil, core.E("bundle.Load", "parse bundle", result.Err())

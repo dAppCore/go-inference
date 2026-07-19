@@ -82,7 +82,7 @@ func gemma3Tokenizer(root string) ([]basegguf.MetadataEntry, error) {
 	// are ignored, matching the converter.
 	if read := core.ReadFile(core.PathJoin(root, "added_tokens.json")); read.OK {
 		added := map[string]int{}
-		if r := core.JSONUnmarshal(read.Value.([]byte), &added); r.OK {
+		if r := core.JSONUnmarshal(read.Bytes(), &added); r.OK {
 			for name, id := range added {
 				if id >= 0 && id < vocabSize {
 					tokens[id] = name
@@ -104,7 +104,7 @@ func gemma3Tokenizer(root string) ([]basegguf.MetadataEntry, error) {
 		if !parsed.OK {
 			continue
 		}
-		id := parsed.Value.(int)
+		id := parsed.Int()
 		if id < 0 || id >= vocabSize {
 			continue
 		}
@@ -143,7 +143,7 @@ func gemma3Tokenizer(root string) ([]basegguf.MetadataEntry, error) {
 func gemma3SpecialTokenEntries(root string, tokenType []int32) []basegguf.MetadataEntry {
 	var ids gemma3SpecialIDs
 	if read := core.ReadFile(core.PathJoin(root, "config.json")); read.OK {
-		_ = core.JSONUnmarshal(read.Value.([]byte), &ids).OK
+		_ = core.JSONUnmarshal(read.Bytes(), &ids).OK
 	}
 	entries := make([]basegguf.MetadataEntry, 0, 4)
 	add := func(key string, value any, ok bool) {
@@ -172,7 +172,7 @@ func gemma3ReadTokenizerConfig(root string) (gemma3TokenizerConfig, error) {
 	if !read.OK {
 		return config, nil
 	}
-	if r := core.JSONUnmarshal(read.Value.([]byte), &config); !r.OK {
+	if r := core.JSONUnmarshal(read.Bytes(), &config); !r.OK {
 		return config, core.E("gemma3ReadTokenizerConfig", "parse tokenizer_config.json", r.Err())
 	}
 	return config, nil
