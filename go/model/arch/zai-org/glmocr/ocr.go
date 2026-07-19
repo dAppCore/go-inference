@@ -219,3 +219,9 @@ func (m *Model) OCRWithOptions(imageBytes []byte, prompt string, opts GenerateOp
 	}
 	return m.Tokenizer.Decode(genIDs), nil
 }
+
+// OCRImage adapts OCR to the engine-neutral inference.OCRModel shape — satisfied
+// structurally, never by import.
+func (m *Model) OCRImage(imageBytes []byte, prompt string) (string, error) {
+	return m.OCR(imageBytes, prompt)
+}
