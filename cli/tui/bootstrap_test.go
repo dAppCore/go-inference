@@ -96,6 +96,32 @@ func TestOpenWorkspace_Good(t *testing.T) {
 	}
 }
 
+func TestOpenWorkspaceNativePreflightRunsBeforeStateMutation(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	calls := 0
+	result := openWorkspaceWith(files, workspaceOpeners{
+		Preflight: func(context.Context) core.Result {
+			return core.Fail(core.NewError("linked native runtime requires release/update"))
+		},
+		Repository: func(string) core.Result {
+			calls++
+			return core.Fail(core.NewError("repository must not open"))
+		},
+		State: func(appPaths) core.Result {
+			calls++
+			return core.Fail(core.NewError("state must not open"))
+		},
+		Agent: func(context.Context, appFiles, workspaceRepository) core.Result {
+			calls++
+			return core.Fail(core.NewError("agent must not open"))
+		},
+	})
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "release/update")
+	core.AssertEqual(t, 0, calls)
+	core.AssertFalse(t, files.Medium.IsDir(appWorkspacesPath))
+}
+
 func TestAgentBootstrap_ValidPolicy_Good(t *testing.T) {
 	files := testWorkspaceFiles(t)
 	if err := files.Medium.Write(files.Paths.Agents, "version: 1\ndispatch:\n  default_agent: codex\n  global_concurrency: 2\nproviders:\n  codex:\n    executable: custom-codex\n    default_model: gpt-5\n    credential_env: [OPENAI_API_KEY]\n    flags: [--search]\n"); err != nil {
@@ -199,6 +225,11 @@ func TestAgentBootstrapPropagatesDispatchAttemptTimeout(t *testing.T) {
 	}
 	factories.LoadPolicy = func(coreio.Medium, string) core.Result { return core.Ok(policy) }
 	var captured orchestrator.Options
+	var capturedWorkspace workspace.ManagerOptions
+	factories.NewWorkspaces = func(options workspace.ManagerOptions) core.Result {
+		capturedWorkspace = options
+		return core.Ok(&workspace.Manager{})
+	}
 	factories.NewOrchestrator = func(options orchestrator.Options) core.Result {
 		captured = options
 		return core.Ok(nativeAgentEngine(engine))
@@ -207,10 +238,70 @@ func TestAgentBootstrapPropagatesDispatchAttemptTimeout(t *testing.T) {
 	core.AssertTrue(t, result.OK, result.Error())
 	defer result.Value.(agentBootstrapResult).Provider.Close()
 	duration, available := agentOrchestratorDurationOption(captured, "AttemptTimeout")
-	if !available {
-		t.Skip("published standalone orchestrator contract predates attempt timeout")
-	}
+	core.AssertTrue(t, available)
 	core.AssertEqual(t, 7*time.Minute, duration)
+	cleanup, cleanupAvailable := agentOrchestratorDurationOption(captured, "CleanupTimeout")
+	core.AssertTrue(t, cleanupAvailable)
+	core.AssertEqual(t, defaultAgentCleanupTimeout, cleanup)
+	managerCleanup, managerCleanupAvailable := agentWorkspaceDurationOption(capturedWorkspace, "CleanupTimeout")
+	core.AssertTrue(t, managerCleanupAvailable)
+	core.AssertEqual(t, defaultAgentCleanupTimeout, managerCleanup)
+}
+
+func TestAgentBootstrapRejectsUnhardenedRuntimeBeforeCompositionMutation(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	factories := agentBootstrapFactories{}
+	mutations := 0
+	factories.RuntimeContract = func(context.Context) core.Result {
+		return core.Fail(core.NewError("linked inference runtime has no hardened contract"))
+	}
+	factories.LoadPolicy = func(coreio.Medium, string) core.Result {
+		mutations++
+		return core.Fail(core.NewError("policy loader must not run"))
+	}
+
+	result := composeNativeAgent(context.Background(), agentBootstrapInput{Files: files, Repository: repository}, factories)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "release/update")
+	core.AssertEqual(t, 0, mutations)
+}
+
+func TestAgentBootstrapContractCancellationDoesNotMasqueradeAsReleaseMismatch(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	ctx, cancel := context.WithCancel(context.Background())
+	mutations := 0
+	factories := agentBootstrapFactories{
+		RuntimeContract: func(context.Context) core.Result {
+			cancel()
+			return core.Fail(core.NewError("contract interrupted"))
+		},
+		LoadPolicy: func(coreio.Medium, string) core.Result {
+			mutations++
+			return core.Fail(core.NewError("policy loader must not run"))
+		},
+	}
+
+	result := composeNativeAgent(ctx, agentBootstrapInput{Files: files, Repository: repository}, factories)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "context is done")
+	core.AssertFalse(t, strings.Contains(result.Error(), "release/update"))
+	core.AssertEqual(t, 0, mutations)
+}
+
+func TestAgentBootstrapLinkedRuntimeContractBoundary(t *testing.T) {
+	result := linkedAgentRuntimeContract(context.Background())
+	_, hardened := any(orchestrator.Options{}).(agentHardenedRuntime)
+	if hardened {
+		core.AssertTrue(t, result.OK, result.Error())
+		core.AssertEqual(t, agentHardenedRuntimeContract, result.Value.(string))
+		return
+	}
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "does not expose the hardened native runtime contract")
 }
 
 func TestAgentBootstrap_DurableSnapshotFailure_Bad(t *testing.T) {
@@ -617,6 +708,9 @@ func assertWorkspaceWarning(t *testing.T, warnings []string, want string) {
 
 func fixtureAgentBootstrapFactories(t *testing.T, repository workspaceRepository, engine nativeAgentEngine, server *fixtureGitServer) agentBootstrapFactories {
 	t.Helper()
+	if contract := linkedAgentRuntimeContract(context.Background()); !contract.OK {
+		t.Skipf("native bootstrap is unavailable with the linked inference module: %s", contract.Error())
+	}
 	return agentBootstrapFactories{
 		OpenWorkspaceMedium: func(string) core.Result { return core.Ok(coreio.Medium(coreio.NewMockMedium())) },
 		NewStore:            func(workspaceRepository) core.Result { return newDuckAgentStore(repository) },

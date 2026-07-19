@@ -390,6 +390,52 @@ func TestAcceptManagerReviewChangesPostAddFailureCleansProvisionalWorktreeAndBra
 	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", integrationBranch))
 }
 
+func TestAcceptManagerReviewChangesCancellationAfterAddUsesOwnedCleanup(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "cancelled-cleanup.txt", "cleanup\n", "agent cancelled cleanup")
+	fixture.capture(t)
+	integrationPath := core.PathJoin(fixture.root, fixture.project.ID, "reviews", fixture.run.ID, "review-id", "worktree")
+	integrationBranch := core.Concat("lem/integration/", branchComponent(fixture.run.ID), "/", branchComponent("review-id"))
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.runner.setAfterOK(func(command Command) {
+		if workspaceCommandContains(command, "worktree\x00add") && command.Dir == fixture.root {
+			cancel()
+			fixture.runner.setAfterOK(nil)
+		}
+	})
+
+	result := fixture.manager.ReviewChanges(ctx, fixture.project, fixture.run, nil)
+	core.AssertFalse(t, result.OK)
+	core.AssertFalse(t, core.Stat(integrationPath).OK)
+	worktrees := workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "worktree", "list", "--porcelain")
+	core.AssertFalse(t, core.Contains(worktrees, integrationPath))
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", integrationBranch))
+	_, retained := fixture.manager.reviews[integrationPath]
+	core.AssertFalse(t, retained)
+	recoveries := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveries.OK, recoveries.Error())
+	core.AssertEqual(t, 0, len(recoveries.Value.([]RecoveryReceipt)))
+}
+
+func TestAcceptManagerReviewChangesRejectsAnotherReviewWhileCleanupRetained(t *testing.T) {
+	fixture := workspaceRetainedReviewRecovery(t)
+	fixture.manager.ids = func() string { return "second-review" }
+	fixture.runner.mu.Lock()
+	commandsBefore := len(fixture.runner.commands)
+	fixture.runner.mu.Unlock()
+
+	result := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "retained review cleanup")
+	fixture.runner.mu.Lock()
+	commandsAfter := len(fixture.runner.commands)
+	fixture.runner.mu.Unlock()
+	core.AssertEqual(t, commandsBefore, commandsAfter)
+	recoveries := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveries.OK, recoveries.Error())
+	core.AssertEqual(t, 1, len(recoveries.Value.([]RecoveryReceipt)))
+}
+
 func TestAcceptReviewReplaysDivergedMultiCommitRangeInOrder(t *testing.T) {
 	fixture := newAcceptanceFixture(t)
 	fixture.agentCommit(t, "ordered.txt", "one\n", "ordered one")

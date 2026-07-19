@@ -1781,6 +1781,56 @@ func TestApp_AgentRunReplacementDropsOldPreparedReview(t *testing.T) {
 	}
 }
 
+func TestAppRecoveryAbandonUsesReviewConfirmationAndRefreshesLedger(t *testing.T) {
+	at := time.Date(2026, time.July, 19, 14, 0, 0, 0, time.UTC)
+	recovery := agentPendingRecovery{EventID: "recovery-event-11", Receipt: agentRecoveryReceipt{
+		Kind: "run", ProjectID: "project-1", WorkID: "work-1", RunID: "attempt-11",
+		RunNumber: 11, WorkspaceRunID: "lineage-root", Branch: "lem/work/work-1/run-11",
+		Worktree: "/private/workspaces/project-1/runs/lineage-root/worktree",
+	}}
+	engine := &fixtureNativeAgentEngine{
+		capabilities: append(nativeFixtureCapabilities(), work.Capability{Name: "recovery.abandon", Available: true}),
+		snapshot: work.Snapshot{
+			Runs: []work.Run{{ID: recovery.Receipt.RunID, WorkID: recovery.Receipt.WorkID, ProjectID: recovery.Receipt.ProjectID, Number: recovery.Receipt.RunNumber, Status: work.RunFailed}},
+			Events: []work.Event{{
+				ID: recovery.EventID, RunID: recovery.Receipt.RunID, WorkID: recovery.Receipt.WorkID,
+				Kind: "workspace_cleanup_retained", Detail: recovery.Receipt.Worktree,
+				DetailJSON: core.JSONMarshalString(recovery.Receipt), CreatedAt: at,
+			}},
+		},
+	}
+	a := testNativeAgentApp(t, requireAgentAdapter(t, engine))
+	driveCorrectiveCommand(t, &a, a.requestAgentSnapshot())
+	if result := a.queueAgentAction(agentFeatureRecoveryAbandon); !result.OK {
+		t.Fatalf("queue recovery abandon: %s", result.Error())
+	}
+	driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+	if a.activeOverlay != overlayLaunchReview || engine.abandonRecoveryCalls != 0 {
+		t.Fatalf("recovery review = overlay %d calls %d err %q", a.activeOverlay, engine.abandonRecoveryCalls, a.errText)
+	}
+
+	model, confirmation := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = model.(app)
+	next := driveCorrectiveCommand(t, &a, confirmation)
+	if engine.abandonRecoveryCalls != 1 || engine.abandonRecoveryRunID != recovery.Receipt.RunID || engine.abandonRecoveryEventID != recovery.EventID {
+		t.Fatalf("recovery action = calls %d run %q event %q", engine.abandonRecoveryCalls, engine.abandonRecoveryRunID, engine.abandonRecoveryEventID)
+	}
+	engine.snapshot.Events = append(engine.snapshot.Events, work.Event{
+		ID: "recovery-success-11", RunID: recovery.Receipt.RunID, WorkID: recovery.Receipt.WorkID,
+		Kind: "cleanup_recovery_succeeded", Detail: recovery.Receipt.Worktree,
+		DetailJSON: core.JSONMarshalString(agentRecoveryOutcome{RecoveryEventID: recovery.EventID, Receipt: recovery.Receipt}), CreatedAt: at.Add(time.Second),
+	})
+	driveCorrectiveCommand(t, &a, next)
+	state := a.work.AgentState(a.work.Items()[0])
+	if state.RecoveryCount != 0 || state.Recovery.EventID != "" {
+		t.Fatalf("recovery remained after success refresh: %#v", state)
+	}
+	a.refreshAgentPalette()
+	if command := a.palette.byID[agentCommandID(agentFeatureRecoveryAbandon)]; command.Available {
+		t.Fatalf("recovery action remained available after success: %#v", command)
+	}
+}
+
 func TestApp_AgentReviewPreparedSnapshotAndRejectPreserveLocalWork(t *testing.T) {
 	review := correctiveChangeReview(true)
 	engine := &fixtureNativeAgentEngine{

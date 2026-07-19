@@ -15,7 +15,7 @@ func TestAgentFeatureCatalog_Good(t *testing.T) {
 	reason := "agent runtime is not installed"
 	want := []agentFeature{
 		agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry,
-		agentFeatureResume, agentFeatureQueueStart, agentFeatureQueueStop, agentFeatureSetup,
+		agentFeatureResume, agentFeatureRecoveryAbandon, agentFeatureQueueStart, agentFeatureQueueStop, agentFeatureSetup,
 		agentFeatureProvider, agentFeatureTemplate, agentFeaturePlan, agentFeatureSession,
 		agentFeatureHandoff, agentFeatureScan, agentFeatureAudit, agentFeaturePipeline,
 		agentFeatureMonitor, agentFeatureHarvest, agentFeatureBrainRecall, agentFeatureBrainRemember,

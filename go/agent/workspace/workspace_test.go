@@ -26,6 +26,8 @@ type workspaceTestRunner struct {
 	failPush  bool
 	failWhen  func(Command) bool
 	valueWhen func(Command) (any, bool)
+	afterOK   func(Command)
+	blockWhen func(Command) bool
 }
 
 type workspaceRunOnly struct {
@@ -60,7 +62,16 @@ func (runner *workspaceTestRunner) Run(ctx context.Context, command Command) cor
 	failPush := runner.failPush && workspaceContainsArgument(command.Args, "push")
 	failWhen := runner.failWhen
 	valueWhen := runner.valueWhen
+	afterOK := runner.afterOK
+	blockWhen := runner.blockWhen
 	runner.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return core.Fail(core.E("workspaceTestRunner.Run", "command context is done", err))
+	}
+	if blockWhen != nil && blockWhen(copyCommand) {
+		<-ctx.Done()
+		return core.Fail(core.E("workspaceTestRunner.Run", "blocked command context is done", ctx.Err()))
+	}
 	if failPush || failWhen != nil && failWhen(copyCommand) {
 		return core.Fail(core.NewError("injected push failure"))
 	}
@@ -80,6 +91,9 @@ func (runner *workspaceTestRunner) Run(ctx context.Context, command Command) cor
 		CombinedOutput()
 	if !result.OK {
 		return result
+	}
+	if afterOK != nil {
+		afterOK(copyCommand)
 	}
 	return core.Ok(string(result.Value.([]byte)))
 }
@@ -130,10 +144,23 @@ func (runner *workspaceTestRunner) setValue(provider func(Command) (any, bool)) 
 	runner.mu.Unlock()
 }
 
+func (runner *workspaceTestRunner) setAfterOK(callback func(Command)) {
+	runner.mu.Lock()
+	runner.afterOK = callback
+	runner.mu.Unlock()
+}
+
+func (runner *workspaceTestRunner) setBlock(predicate func(Command) bool) {
+	runner.mu.Lock()
+	runner.blockWhen = predicate
+	runner.mu.Unlock()
+}
+
 type workspaceFaultMedium struct {
 	coreio.Medium
 	failEnsure string
 	failDelete string
+	failStat   string
 }
 
 func (medium *workspaceFaultMedium) EnsureDir(path string) error {
@@ -148,6 +175,20 @@ func (medium *workspaceFaultMedium) DeleteAll(path string) error {
 		return core.NewError("injected delete directory failure")
 	}
 	return medium.Medium.DeleteAll(path)
+}
+
+func (medium *workspaceFaultMedium) Stat(path string) (core.FsFileInfo, error) {
+	if path == medium.failStat {
+		return nil, core.NewError("injected stat failure")
+	}
+	return medium.Medium.Stat(path)
+}
+
+func (medium *workspaceFaultMedium) Exists(path string) bool {
+	if path == medium.failStat || path == core.PathDir(medium.failStat) {
+		return false
+	}
+	return medium.Medium.Exists(path)
 }
 
 func workspaceContainsArgument(arguments []string, expected string) bool {
@@ -428,12 +469,14 @@ func TestWorkspace_NewManager_Good(t *testing.T) {
 	core.AssertEqual(t, fixture.root, manager.root)
 	core.AssertTrue(t, manager.files == fixture.files)
 	core.AssertEqual(t, 0, len(manager.leases))
+	core.AssertEqual(t, 5*time.Second, manager.cleanupTimeout)
 }
 
 func TestWorkspace_NewManager_Bad(t *testing.T) {
 	valid := workspaceNewFixture(t)
 	tests := []ManagerOptions{
 		{},
+		{Root: valid.root, Files: valid.files, Git: valid.runner, Server: valid.server, IDs: func() string { return "id" }, Now: time.Now, CleanupTimeout: -time.Second},
 		{Root: "relative", Files: valid.files, Git: valid.runner, Server: valid.server, IDs: func() string { return "id" }, Now: time.Now},
 		{Root: valid.root, Git: valid.runner, Server: valid.server, IDs: func() string { return "id" }, Now: time.Now},
 		{Root: valid.root, Files: valid.files, Server: valid.server, IDs: func() string { return "id" }, Now: time.Now},
@@ -456,10 +499,11 @@ func TestWorkspace_NewManager_Ugly(t *testing.T) {
 	rootWithDots := core.PathJoin(fixture.root, "child", "..")
 	result := NewManager(ManagerOptions{
 		Root: rootWithDots, Files: fixture.files, Git: fixture.runner, Server: fixture.server,
-		IDs: func() string { return "id" }, Now: time.Now,
+		IDs: func() string { return "id" }, Now: time.Now, CleanupTimeout: 2 * time.Second,
 	})
 	core.AssertTrue(t, result.OK, result.Error())
 	core.AssertEqual(t, fixture.root, result.Value.(*Manager).root)
+	core.AssertEqual(t, 2*time.Second, result.Value.(*Manager).cleanupTimeout)
 }
 
 func TestWorkspace_Manager_ReviewSource_Good(t *testing.T) {
@@ -958,6 +1002,452 @@ func TestWorkspacePrepareRunPostAddFailureCleansProvisionalWorktreeAndBranch(t *
 	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", branch))
 	_, leased := fixture.manager.leases[fixture.run.ID]
 	core.AssertFalse(t, leased)
+	recoveries := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveries.OK, recoveries.Error())
+	core.AssertEqual(t, 0, len(recoveries.Value.([]RecoveryReceipt)))
+}
+
+func TestWorkspacePrepareRunCancellationAfterAddUsesOwnedCleanup(t *testing.T) {
+	fixture := workspaceNewRegisteredRunFixture(t)
+	branch := runBranch(fixture.run.WorkID, fixture.run.Number).Value.(string)
+	path := core.PathJoin(fixture.root, fixture.project.ID, "runs", fixture.run.ID, "worktree")
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.runner.setAfterOK(func(command Command) {
+		if workspaceCommandContains(command, "worktree\x00add") {
+			cancel()
+			fixture.runner.setAfterOK(nil)
+		}
+	})
+
+	result := fixture.manager.PrepareRun(ctx, fixture.project, fixture.run)
+	core.AssertFalse(t, result.OK)
+	core.AssertFalse(t, core.Stat(path).OK)
+	worktrees := workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "worktree", "list", "--porcelain")
+	core.AssertFalse(t, core.Contains(worktrees, path))
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", branch))
+	_, leased := fixture.manager.leases[fixture.run.ID]
+	core.AssertFalse(t, leased)
+	recoveries := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveries.OK, recoveries.Error())
+	core.AssertEqual(t, 0, len(recoveries.Value.([]RecoveryReceipt)))
+}
+
+func TestWorkspaceReconstructRunCancellationAfterAddUsesOwnedCleanup(t *testing.T) {
+	fixture := workspaceNewDurableRunFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.runner.setAfterOK(func(command Command) {
+		if workspaceCommandContains(command, "worktree\x00add") {
+			cancel()
+			fixture.runner.setAfterOK(nil)
+		}
+	})
+
+	result := fixture.manager.ReconstructRun(ctx, fixture.project, fixture.run)
+	core.AssertFalse(t, result.OK)
+	core.AssertFalse(t, core.Stat(fixture.run.Worktree).OK)
+	worktrees := workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "worktree", "list", "--porcelain")
+	core.AssertFalse(t, core.Contains(worktrees, fixture.run.Worktree))
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", fixture.run.Branch))
+	_, leased := fixture.manager.leases[fixture.run.ID]
+	core.AssertFalse(t, leased)
+	recoveries := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveries.OK, recoveries.Error())
+	core.AssertEqual(t, 0, len(recoveries.Value.([]RecoveryReceipt)))
+}
+
+func workspaceRetainedRunRecovery(t *testing.T, workIDs ...string) workspaceRunFixture {
+	t.Helper()
+	fixture := workspaceNewRegisteredRunFixture(t)
+	if len(workIDs) > 0 {
+		fixture.run.WorkID = workIDs[0]
+	}
+	fixture.manager.cleanupTimeout = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.runner.setAfterOK(func(command Command) {
+		if workspaceCommandContains(command, "worktree\x00add") {
+			fixture.runner.setBlock(func(candidate Command) bool {
+				return workspaceCommandContains(candidate, "worktree\x00remove")
+			})
+			cancel()
+			fixture.runner.setAfterOK(nil)
+		}
+	})
+	result := fixture.manager.PrepareRun(ctx, fixture.project, fixture.run)
+	core.AssertFalse(t, result.OK)
+	fixture.runner.setBlock(nil)
+	fixture.manager.cleanupTimeout = defaultWorktreeCleanupTimeout
+	return fixture
+}
+
+func workspaceRetainedReviewRecovery(t *testing.T, workIDs ...string) acceptanceFixture {
+	t.Helper()
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "retained-cleanup.txt", "cleanup\n", "agent retained cleanup")
+	fixture.capture(t)
+	if len(workIDs) > 0 {
+		fixture.run.WorkID = workIDs[0]
+	}
+	fixture.manager.cleanupTimeout = 20 * time.Millisecond
+	integrationPath := core.PathJoin(fixture.root, fixture.project.ID, "reviews", fixture.run.ID, "review-id", "worktree")
+	ctx, cancel := context.WithCancel(context.Background())
+	fixture.runner.setAfterOK(func(command Command) {
+		if workspaceCommandContains(command, "worktree\x00add") && command.Dir == fixture.root {
+			fixture.runner.setBlock(func(candidate Command) bool {
+				return candidate.Dir == fixture.root && workspaceCommandContains(candidate, "worktree\x00remove")
+			})
+			cancel()
+			fixture.runner.setAfterOK(nil)
+		}
+	})
+
+	result := fixture.manager.ReviewChanges(ctx, fixture.project, fixture.run, nil)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), integrationPath)
+	fixture.runner.setBlock(nil)
+	fixture.manager.cleanupTimeout = defaultWorktreeCleanupTimeout
+	return fixture
+}
+
+func TestWorkspace_RecoveryReceipt_Good(t *testing.T) {
+	receipt := RecoveryReceipt{Kind: "review", ProjectID: "project", WorkID: "work", RunID: "run", RunNumber: 2, ReviewID: "review", Branch: "branch", Worktree: "/tmp/worktree"}
+	core.AssertEqual(t, "review", receipt.Kind)
+	core.AssertEqual(t, "review", receipt.ReviewID)
+	core.AssertEqual(t, 2, receipt.RunNumber)
+}
+
+func TestWorkspace_RecoveryReceipt_Bad(t *testing.T) {
+	receipt := RecoveryReceipt{Kind: "run", RunID: "run"}
+	core.AssertEqual(t, "", receipt.ReviewID)
+	core.AssertEqual(t, "run", receipt.RunID)
+}
+
+func TestWorkspace_RecoveryReceipt_Ugly(t *testing.T) {
+	receipt := RecoveryReceipt{}
+	core.AssertEqual(t, "", receipt.Kind)
+	core.AssertEqual(t, "", receipt.Worktree)
+}
+
+func TestWorkspace_Manager_Recovery_Good(t *testing.T) {
+	fixture := workspaceRetainedReviewRecovery(t)
+	recoveryResult := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	recoveries := recoveryResult.Value.([]RecoveryReceipt)
+	core.AssertEqual(t, 1, len(recoveries))
+	receipt := recoveries[0]
+	core.AssertEqual(t, "review", receipt.Kind)
+	core.AssertEqual(t, fixture.project.ID, receipt.ProjectID)
+	core.AssertEqual(t, fixture.run.WorkID, receipt.WorkID)
+	core.AssertEqual(t, fixture.run.ID, receipt.RunID)
+	core.AssertEqual(t, "review-id", receipt.ReviewID)
+	core.AssertTrue(t, receipt.Branch != "")
+	core.AssertTrue(t, receipt.Worktree != "")
+}
+
+func TestWorkspace_Manager_Recovery_Bad(t *testing.T) {
+	var manager *Manager
+	result := manager.Recovery("run")
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "manager is required")
+}
+
+func TestWorkspace_Manager_Recovery_Ugly(t *testing.T) {
+	fixture := workspaceNewFixture(t)
+	core.AssertFalse(t, fixture.manager.Recovery(" ").OK)
+	result := fixture.manager.Recovery("missing")
+	core.AssertTrue(t, result.OK, result.Error())
+	core.AssertEqual(t, 0, len(result.Value.([]RecoveryReceipt)))
+}
+
+func TestWorkspace_Manager_AbandonRecovery_Good(t *testing.T) {
+	fixture := workspaceRetainedReviewRecovery(t)
+	recoveryResult := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	receipts := recoveryResult.Value.([]RecoveryReceipt)
+	core.AssertEqual(t, 1, len(receipts))
+	receipt := receipts[0]
+	result := fixture.manager.AbandonRecovery(context.Background(), receipt)
+	core.AssertTrue(t, result.OK, result.Error())
+	remaining := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, remaining.OK, remaining.Error())
+	core.AssertEqual(t, 0, len(remaining.Value.([]RecoveryReceipt)))
+	core.AssertFalse(t, core.Stat(receipt.Worktree).OK)
+	worktrees := workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "worktree", "list", "--porcelain")
+	core.AssertFalse(t, core.Contains(worktrees, receipt.Worktree))
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", receipt.Branch))
+
+	restartedFixture := workspaceRetainedReviewRecovery(t, "Work / Alpha")
+	recoveryResult = restartedFixture.manager.Recovery(restartedFixture.run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	receipts = recoveryResult.Value.([]RecoveryReceipt)
+	core.AssertEqual(t, 1, len(receipts))
+	restartedReceipt := receipts[0]
+	restartedResult := NewManager(ManagerOptions{
+		Root: restartedFixture.root, Files: restartedFixture.files, Git: restartedFixture.runner, Server: restartedFixture.server,
+		IDs: func() string { return "restart-review" }, Now: time.Now,
+	})
+	core.AssertTrue(t, restartedResult.OK, restartedResult.Error())
+	restarted := restartedResult.Value.(*Manager)
+	core.AssertEqual(t, 0, len(restarted.recoveries))
+	result = restarted.AbandonRecovery(context.Background(), restartedReceipt)
+	core.AssertTrue(t, result.OK, result.Error())
+	core.AssertFalse(t, core.Stat(restartedReceipt.Worktree).OK)
+	worktrees = workspaceRunGit(t, restartedFixture.runner, restartedFixture.root, "--git-dir", restartedFixture.project.ClonePath, "worktree", "list", "--porcelain")
+	core.AssertFalse(t, core.Contains(worktrees, restartedReceipt.Worktree))
+	core.AssertEqual(t, "", workspaceRunGit(t, restartedFixture.runner, restartedFixture.root, "--git-dir", restartedFixture.project.ClonePath, "branch", "--list", restartedReceipt.Branch))
+
+	restartedRunFixture := workspaceRetainedRunRecovery(t, "Run / Alpha")
+	recoveryResult = restartedRunFixture.manager.Recovery(restartedRunFixture.run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	receipts = recoveryResult.Value.([]RecoveryReceipt)
+	core.AssertEqual(t, 1, len(receipts))
+	restartedRunReceipt := receipts[0]
+	core.AssertEqual(t, restartedRunFixture.run.Number, restartedRunReceipt.RunNumber)
+	core.AssertEqual(t, restartedRunFixture.run.ID, restartedRunReceipt.WorkspaceRunID)
+	restartedResult = NewManager(ManagerOptions{
+		Root: restartedRunFixture.root, Files: restartedRunFixture.files, Git: restartedRunFixture.runner, Server: restartedRunFixture.server,
+		IDs: func() string { return "restart-run" }, Now: time.Now,
+	})
+	core.AssertTrue(t, restartedResult.OK, restartedResult.Error())
+	restarted = restartedResult.Value.(*Manager)
+	result = restarted.AbandonRecovery(context.Background(), restartedRunReceipt)
+	core.AssertTrue(t, result.OK, result.Error())
+	core.AssertFalse(t, core.Stat(restartedRunReceipt.Worktree).OK)
+	worktrees = workspaceRunGit(t, restartedRunFixture.runner, restartedRunFixture.root, "--git-dir", restartedRunFixture.project.ClonePath, "worktree", "list", "--porcelain")
+	core.AssertFalse(t, core.Contains(worktrees, restartedRunReceipt.Worktree))
+	core.AssertEqual(t, "", workspaceRunGit(t, restartedRunFixture.runner, restartedRunFixture.root, "--git-dir", restartedRunFixture.project.ClonePath, "branch", "--list", restartedRunReceipt.Branch))
+}
+
+func TestWorkspace_Manager_AbandonRecovery_Bad(t *testing.T) {
+	fixture := workspaceRetainedReviewRecovery(t)
+	recoveryResult := fixture.manager.Recovery(fixture.run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	receipts := recoveryResult.Value.([]RecoveryReceipt)
+	core.AssertEqual(t, 1, len(receipts))
+	receipt := receipts[0]
+	receipt.Branch = "tampered"
+	core.AssertFalse(t, fixture.manager.AbandonRecovery(context.Background(), receipt).OK)
+
+	runFixture := workspaceRetainedRunRecovery(t)
+	recoveryResult = runFixture.manager.Recovery(runFixture.run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	receipts = recoveryResult.Value.([]RecoveryReceipt)
+	core.AssertEqual(t, 1, len(receipts))
+	runReceipt := receipts[0]
+	restartedResult := NewManager(ManagerOptions{
+		Root: runFixture.root, Files: runFixture.files, Git: runFixture.runner, Server: runFixture.server,
+		IDs: func() string { return "restart-run-bad" }, Now: time.Now,
+	})
+	core.AssertTrue(t, restartedResult.OK, restartedResult.Error())
+	restarted := restartedResult.Value.(*Manager)
+	runReceipt.Branch = core.Concat("lem/work/", branchComponent(runReceipt.WorkID), "/run-999")
+	core.AssertFalse(t, restarted.AbandonRecovery(context.Background(), runReceipt).OK)
+}
+
+func TestWorkspace_Manager_AbandonRecovery_Ugly(t *testing.T) {
+	var manager *Manager
+	core.AssertFalse(t, manager.AbandonRecovery(context.Background(), RecoveryReceipt{}).OK)
+	fixture := workspaceNewFixture(t)
+	core.AssertFalse(t, fixture.manager.AbandonRecovery(nil, RecoveryReceipt{}).OK)
+	core.AssertFalse(t, fixture.manager.AbandonRecovery(context.Background(), RecoveryReceipt{}).OK)
+}
+
+func TestWorkspaceManagerRecoverySortsExactRetainedIdentities(t *testing.T) {
+	assertSorted := func(t *testing.T, receipts []RecoveryReceipt, first RecoveryReceipt) {
+		t.Helper()
+		fixture := workspaceNewFixture(t)
+		for _, receipt := range receipts {
+			fixture.manager.registerRecovery(recoveryOwnership{receipt: receipt})
+		}
+		result := fixture.manager.Recovery("run")
+		core.AssertTrue(t, result.OK, result.Error())
+		ordered := result.Value.([]RecoveryReceipt)
+		core.AssertEqual(t, len(receipts), len(ordered))
+		core.AssertEqual(t, first, ordered[0])
+	}
+
+	t.Run("kind", func(t *testing.T) {
+		review := RecoveryReceipt{Kind: "review", RunID: "run", ReviewID: "review", Worktree: "/review"}
+		run := RecoveryReceipt{Kind: "run", RunID: "run", Worktree: "/run"}
+		assertSorted(t, []RecoveryReceipt{run, review}, review)
+	})
+	t.Run("review ID", func(t *testing.T) {
+		first := RecoveryReceipt{Kind: "review", RunID: "run", ReviewID: "a", Worktree: "/z"}
+		second := RecoveryReceipt{Kind: "review", RunID: "run", ReviewID: "b", Worktree: "/a"}
+		assertSorted(t, []RecoveryReceipt{second, first}, first)
+	})
+	t.Run("worktree", func(t *testing.T) {
+		first := RecoveryReceipt{Kind: "review", RunID: "run", ReviewID: "same", Worktree: "/a"}
+		second := RecoveryReceipt{Kind: "review", RunID: "run", ReviewID: "same", Worktree: "/b"}
+		assertSorted(t, []RecoveryReceipt{second, first}, first)
+	})
+}
+
+func TestWorkspaceManagerAbandonRecoveryRejectsForgedRestartReceipt(t *testing.T) {
+	fixture := workspaceNewFixture(t)
+	runReceipt := RecoveryReceipt{
+		Kind: "run", ProjectID: "project", WorkID: "Work / Alpha", RunID: "run", RunNumber: 1,
+		WorkspaceRunID: "run", Branch: "lem/work/Work-Alpha/run-1",
+	}
+	runPath := fixture.manager.internalPath(runReceipt.ProjectID, "runs", runReceipt.WorkspaceRunID, "worktree")
+	core.AssertTrue(t, runPath.OK, runPath.Error())
+	runReceipt.Worktree = runPath.Value.(string)
+	reviewReceipt := RecoveryReceipt{
+		Kind: "review", ProjectID: "project", WorkID: "Work / Alpha", RunID: "run", RunNumber: 1,
+		ReviewID: "review", Branch: "lem/integration/run/review",
+	}
+	reviewPath := fixture.manager.internalPath(reviewReceipt.ProjectID, "reviews", reviewReceipt.RunID, reviewReceipt.ReviewID, "worktree")
+	core.AssertTrue(t, reviewPath.OK, reviewPath.Error())
+	reviewReceipt.Worktree = reviewPath.Value.(string)
+
+	tests := []struct {
+		name    string
+		receipt RecoveryReceipt
+		error   string
+	}{
+		{name: "unsafe project", receipt: func() RecoveryReceipt { forged := runReceipt; forged.ProjectID = "../project"; return forged }(), error: "project ID"},
+		{name: "unbranchable work", receipt: func() RecoveryReceipt { forged := runReceipt; forged.WorkID = "///"; return forged }(), error: "cannot form a Git branch"},
+		{name: "nonpositive run number", receipt: func() RecoveryReceipt { forged := runReceipt; forged.RunNumber = 0; return forged }(), error: "positive run number"},
+		{name: "review names workspace owner", receipt: func() RecoveryReceipt { forged := reviewReceipt; forged.WorkspaceRunID = "run"; return forged }(), error: "cannot name a run workspace owner"},
+		{name: "unsafe review ID", receipt: func() RecoveryReceipt { forged := reviewReceipt; forged.ReviewID = "../review"; return forged }(), error: "review ID"},
+		{name: "forged review branch", receipt: func() RecoveryReceipt {
+			forged := reviewReceipt
+			forged.Branch = "lem/integration/run/other"
+			return forged
+		}(), error: "review recovery branch differs"},
+		{name: "run names review", receipt: func() RecoveryReceipt { forged := runReceipt; forged.ReviewID = "review"; return forged }(), error: "run recovery branch differs"},
+		{name: "unsafe workspace owner", receipt: func() RecoveryReceipt { forged := runReceipt; forged.WorkspaceRunID = "../run"; return forged }(), error: "workspace run ID"},
+		{name: "forged worktree", receipt: func() RecoveryReceipt {
+			forged := runReceipt
+			forged.Worktree = core.PathJoin(fixture.root, "other")
+			return forged
+		}(), error: "worktree differs"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := fixture.manager.AbandonRecovery(context.Background(), test.receipt)
+			core.AssertFalse(t, result.OK)
+			core.AssertContains(t, result.Error(), test.error)
+		})
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := fixture.manager.AbandonRecovery(cancelled, runReceipt)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "context is done")
+}
+
+func TestWorkspaceManagerAbandonRecoveryRetainsAmbiguousGitOwnership(t *testing.T) {
+	t.Run("attached branch mismatch", func(t *testing.T) {
+		fixture := workspaceRetainedRunRecovery(t)
+		recovery := fixture.manager.Recovery(fixture.run.ID)
+		core.AssertTrue(t, recovery.OK, recovery.Error())
+		receipt := recovery.Value.([]RecoveryReceipt)[0]
+		fixture.runner.setValue(func(command Command) (any, bool) {
+			if workspaceCommandContains(command, "worktree\x00list\x00--porcelain") {
+				return core.Concat("worktree ", receipt.Worktree, "\nbranch refs/heads/forged-branch\n\n"), true
+			}
+			return nil, false
+		})
+		result := fixture.manager.AbandonRecovery(context.Background(), receipt)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "attached branch differs")
+		remaining := fixture.manager.Recovery(fixture.run.ID)
+		core.AssertTrue(t, remaining.OK, remaining.Error())
+		core.AssertEqual(t, 1, len(remaining.Value.([]RecoveryReceipt)))
+	})
+
+	t.Run("branch delete failure", func(t *testing.T) {
+		fixture := workspaceRetainedRunRecovery(t)
+		recovery := fixture.manager.Recovery(fixture.run.ID)
+		core.AssertTrue(t, recovery.OK, recovery.Error())
+		receipt := recovery.Value.([]RecoveryReceipt)[0]
+		fixture.runner.setFailure(func(command Command) bool {
+			return workspaceCommandContains(command, "branch\x00--delete\x00--force")
+		})
+		result := fixture.manager.AbandonRecovery(context.Background(), receipt)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "branch remove")
+		core.AssertContains(t, result.Error(), "generated branch remains")
+		remaining := fixture.manager.Recovery(fixture.run.ID)
+		core.AssertTrue(t, remaining.OK, remaining.Error())
+		core.AssertEqual(t, 1, len(remaining.Value.([]RecoveryReceipt)))
+	})
+
+	t.Run("retained worktree metadata", func(t *testing.T) {
+		fixture := workspaceRetainedRunRecovery(t)
+		recovery := fixture.manager.Recovery(fixture.run.ID)
+		core.AssertTrue(t, recovery.OK, recovery.Error())
+		receipt := recovery.Value.([]RecoveryReceipt)[0]
+		worktreeLists := 0
+		fixture.runner.setValue(func(command Command) (any, bool) {
+			if workspaceCommandContains(command, "worktree\x00list\x00--porcelain") {
+				worktreeLists++
+				if worktreeLists == 2 {
+					return core.Concat("worktree ", receipt.Worktree, "\nbranch refs/heads/", receipt.Branch, "\n\n"), true
+				}
+			}
+			return nil, false
+		})
+		result := fixture.manager.AbandonRecovery(context.Background(), receipt)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "retained Git worktree metadata")
+		remaining := fixture.manager.Recovery(fixture.run.ID)
+		core.AssertTrue(t, remaining.OK, remaining.Error())
+		core.AssertEqual(t, 1, len(remaining.Value.([]RecoveryReceipt)))
+	})
+}
+
+func TestWorkspaceManagerAbandonRecoveryRejectsUnretainedLiveOwners(t *testing.T) {
+	t.Run("run lease", func(t *testing.T) {
+		fixture := workspaceNewRunFixture(t)
+		receipt := RecoveryReceipt{
+			Kind: "run", ProjectID: fixture.project.ID, WorkID: fixture.run.WorkID, RunID: fixture.run.ID,
+			RunNumber: fixture.run.Number, WorkspaceRunID: fixture.run.ID,
+			Branch: fixture.prepared.Branch, Worktree: fixture.prepared.Path,
+		}
+		fixture.runner.mu.Lock()
+		commandsBefore := len(fixture.runner.commands)
+		fixture.runner.mu.Unlock()
+
+		result := fixture.manager.AbandonRecovery(context.Background(), receipt)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "active workspace")
+		core.AssertTrue(t, core.Stat(fixture.prepared.Path).OK)
+		core.AssertEqual(t, fixture.prepared, fixture.manager.leases[fixture.run.ID])
+		fixture.runner.mu.Lock()
+		commandsAfter := len(fixture.runner.commands)
+		fixture.runner.mu.Unlock()
+		core.AssertEqual(t, commandsBefore, commandsAfter)
+	})
+
+	t.Run("review", func(t *testing.T) {
+		fixture := newAcceptanceFixture(t)
+		fixture.agentCommit(t, "live-review.txt", "live\n", "live review")
+		fixture.capture(t)
+		reviewResult := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil)
+		core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+		review := reviewResult.Value.(ChangeReview)
+		provisional := fixture.manager.reviews[review.IntegrationPath]
+		receipt := RecoveryReceipt{
+			Kind: "review", ProjectID: provisional.projectID, WorkID: provisional.workID,
+			RunID: provisional.runID, RunNumber: provisional.runNumber, ReviewID: provisional.reviewID,
+			Branch: provisional.branch, Worktree: provisional.path,
+		}
+		fixture.runner.mu.Lock()
+		commandsBefore := len(fixture.runner.commands)
+		fixture.runner.mu.Unlock()
+
+		result := fixture.manager.AbandonRecovery(context.Background(), receipt)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "active workspace")
+		core.AssertTrue(t, core.Stat(review.IntegrationPath).OK)
+		core.AssertEqual(t, provisional, fixture.manager.reviews[review.IntegrationPath])
+		fixture.runner.mu.Lock()
+		commandsAfter := len(fixture.runner.commands)
+		fixture.runner.mu.Unlock()
+		core.AssertEqual(t, commandsBefore, commandsAfter)
+	})
 }
 
 func TestWorkspaceRunValidationEdges(t *testing.T) {
@@ -1050,6 +1540,18 @@ func TestWorkspace_Manager_CaptureRun_Bad(t *testing.T) {
 	fixture := workspaceNewFixture(t)
 	core.AssertFalse(t, fixture.manager.CaptureRun(nil, RunWorkspace{}).OK)
 	core.AssertFalse(t, fixture.manager.CaptureRun(context.Background(), RunWorkspace{RunID: "unknown", Path: fixture.root}).OK)
+	retained := workspaceRetainedRunRecovery(t)
+	lease := retained.manager.leases[retained.run.ID]
+	retained.runner.mu.Lock()
+	commandsBefore := len(retained.runner.commands)
+	retained.runner.mu.Unlock()
+	result := retained.manager.CaptureRun(context.Background(), lease)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "retained provisional cleanup")
+	retained.runner.mu.Lock()
+	commandsAfter := len(retained.runner.commands)
+	retained.runner.mu.Unlock()
+	core.AssertEqual(t, commandsBefore, commandsAfter)
 }
 
 func TestWorkspace_Manager_CaptureRun_Ugly(t *testing.T) {
@@ -1607,7 +2109,7 @@ func TestWorkspace_Manager_ReleaseRun_Ugly(t *testing.T) {
 }
 
 func TestWorkspaceReleaseRunFailures(t *testing.T) {
-	stages := []string{"cancelled", "dirty", "status", "remove", "delete"}
+	stages := []string{"cancelled", "dirty", "status", "remove", "stat"}
 	for _, stage := range stages {
 		t.Run(stage, func(t *testing.T) {
 			fixture := workspaceNewRunFixture(t)
@@ -1625,8 +2127,8 @@ func TestWorkspaceReleaseRunFailures(t *testing.T) {
 				fixture.runner.setFailure(func(command Command) bool { return workspaceCommandContains(command, "status\x00--porcelain=v1") })
 			case "remove":
 				fixture.runner.setFailure(func(command Command) bool { return workspaceCommandContains(command, "worktree\x00remove") })
-			case "delete":
-				fixture.manager.files = &workspaceFaultMedium{Medium: fixture.files, failDelete: core.PathJoin("project", "runs", "run")}
+			case "stat":
+				fixture.manager.files = &workspaceFaultMedium{Medium: fixture.files, failStat: core.PathJoin("project", "runs", "run", "worktree")}
 			}
 			result := fixture.manager.ReleaseRun(ctx, fixture.prepared)
 			core.AssertFalse(t, result.OK)
@@ -1715,11 +2217,31 @@ func TestWorkspaceLeaseValidationAndCleanup(t *testing.T) {
 	core.AssertTrue(t, fixture.files.EnsureDir(worktreeRelative) == nil)
 	cleaned := fixture.manager.cleanupFailedWorktree(context.Background(), lease.Project.ClonePath, core.PathJoin(fixture.root, worktreeRelative), worktreeRelative, "", false)
 	core.AssertFalse(t, cleaned.OK)
-	core.AssertFalse(t, fixture.files.Exists(core.PathDir(worktreeRelative)))
+	core.AssertTrue(t, fixture.files.Exists(worktreeRelative))
 
 	fault := &workspaceFaultMedium{Medium: fixture.files, failDelete: core.PathDir(worktreeRelative)}
 	fixture.manager.files = fault
 	core.AssertFalse(t, fixture.manager.cleanupFailedWorktree(context.Background(), lease.Project.ClonePath, core.PathJoin(fixture.root, worktreeRelative), worktreeRelative, "", false).OK)
+
+	ambiguousRelative := core.PathJoin("project", "runs", "ambiguous", "worktree")
+	ambiguousPath := core.PathJoin(fixture.root, ambiguousRelative)
+	core.AssertNoError(t, fixture.files.EnsureDir(ambiguousRelative))
+	ambiguousLease := lease
+	ambiguousLease.RunID = "ambiguous"
+	ambiguousLease.Path = ambiguousPath
+	fixture.manager.leases[ambiguousLease.RunID] = ambiguousLease
+	fixture.manager.durable[ambiguousLease.RunID] = false
+	ownership := recoveryOwnership{receipt: RecoveryReceipt{Kind: "run", ProjectID: "project", WorkID: "work", RunID: ambiguousLease.RunID, Branch: ambiguousLease.Branch, Worktree: ambiguousPath}, clone: lease.Project.ClonePath, relative: ambiguousRelative}
+	fixture.manager.registerRecovery(ownership)
+	fixture.runner.setValue(func(Command) (any, bool) { return "", true })
+	ambiguousMedium := &workspaceFaultMedium{Medium: fixture.files, failDelete: core.PathDir(ambiguousRelative), failStat: ambiguousRelative}
+	fixture.manager.files = ambiguousMedium
+	ambiguousCleanup := fixture.manager.cleanupFailedWorktree(context.Background(), lease.Project.ClonePath, ambiguousPath, ambiguousRelative, "", false)
+	core.AssertFalse(t, ambiguousCleanup.OK)
+	core.AssertTrue(t, fixture.files.Exists(ambiguousRelative))
+	_, ambiguousLeased := fixture.manager.leases[ambiguousLease.RunID]
+	core.AssertTrue(t, ambiguousLeased)
+	core.AssertTrue(t, fixture.manager.hasRecovery(ambiguousLease.RunID))
 
 	fixture.manager.files = fixture.files
 	branchRelative := core.PathJoin("project", "runs", "branch-failure", "worktree")
@@ -1734,7 +2256,7 @@ func TestWorkspaceLeaseValidationAndCleanup(t *testing.T) {
 	)
 	core.AssertFalse(t, branchCleanup.OK)
 	core.AssertContains(t, branchCleanup.Error(), "branch inspect")
-	core.AssertFalse(t, fixture.files.Exists(core.PathDir(branchRelative)))
+	core.AssertTrue(t, fixture.files.Exists(branchRelative))
 }
 
 func TestWorkspaceGitOutputShape(t *testing.T) {

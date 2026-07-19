@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	lemIdentityName  = "LEM Agent"
-	lemIdentityEmail = "lem@localhost"
+	lemIdentityName               = "LEM Agent"
+	lemIdentityEmail              = "lem@localhost"
+	defaultWorktreeCleanupTimeout = 5 * time.Second
 )
 
 // SourceReview is a mutation-free description of a selected source directory.
@@ -67,44 +68,76 @@ type Capture struct {
 	Summary         string
 }
 
+// RecoveryReceipt identifies one retained provisional worktree that can be queried and abandoned safely.
+type RecoveryReceipt struct {
+	Kind           string
+	ProjectID      string
+	WorkID         string
+	RunID          string
+	RunNumber      int
+	WorkspaceRunID string
+	ReviewID       string
+	Branch         string
+	Worktree       string
+}
+
 // ManagerOptions injects the local medium, Git runner, and private Git service.
 type ManagerOptions struct {
-	Root   string
-	Files  coreio.Medium
-	Git    Runner
-	Server gitserver.Service
-	IDs    func() string
-	Now    func() time.Time
+	Root           string
+	Files          coreio.Medium
+	Git            Runner
+	Server         gitserver.Service
+	IDs            func() string
+	Now            func() time.Time
+	CleanupTimeout time.Duration
 }
 
 // Manager owns cached repositories and per-run worktree leases.
 type Manager struct {
-	root   string
-	files  coreio.Medium
-	git    Runner
-	server gitserver.Service
-	ids    func() string
-	now    func() time.Time
+	root           string
+	files          coreio.Medium
+	git            Runner
+	server         gitserver.Service
+	ids            func() string
+	now            func() time.Time
+	cleanupTimeout time.Duration
 
-	mu      sync.Mutex
-	leases  map[string]RunWorkspace
-	durable map[string]bool
-	reviews map[string]provisionalReview
+	mu         sync.Mutex
+	leases     map[string]RunWorkspace
+	durable    map[string]bool
+	reviews    map[string]provisionalReview
+	recoveries map[string]recoveryOwnership
 }
 
 type provisionalReview struct {
-	workID   string
-	runID    string
-	branch   string
-	path     string
-	clone    string
-	relative string
+	projectID string
+	workID    string
+	runID     string
+	runNumber int
+	reviewID  string
+	branch    string
+	path      string
+	clone     string
+	relative  string
+}
+
+type recoveryOwnership struct {
+	receipt      RecoveryReceipt
+	clone        string
+	relative     string
+	removeBranch bool
 }
 
 // NewManager validates the internal workspace boundary and its dependencies.
 func NewManager(options ManagerOptions) core.Result {
 	if options.Files == nil || options.Git == nil || options.Server == nil || options.IDs == nil || options.Now == nil {
 		return core.Fail(core.NewError("agent workspace manager requires files, Git, server, IDs, and clock dependencies"))
+	}
+	if options.CleanupTimeout < 0 {
+		return core.Fail(core.NewError("agent workspace manager cleanup timeout cannot be negative"))
+	}
+	if options.CleanupTimeout == 0 {
+		options.CleanupTimeout = defaultWorktreeCleanupTimeout
 	}
 	rootResult := canonicalDirectory(options.Root)
 	if !rootResult.OK {
@@ -115,15 +148,194 @@ func NewManager(options ManagerOptions) core.Result {
 		return core.Fail(core.E("workspace.NewManager", "failed to open internal workspace medium", ensureErr))
 	}
 	return core.Ok(&Manager{
-		root:    root,
-		files:   options.Files,
-		git:     options.Git,
-		server:  options.Server,
-		ids:     options.IDs,
-		now:     options.Now,
-		leases:  make(map[string]RunWorkspace),
-		durable: make(map[string]bool),
-		reviews: make(map[string]provisionalReview),
+		root:           root,
+		files:          options.Files,
+		git:            options.Git,
+		server:         options.Server,
+		ids:            options.IDs,
+		now:            options.Now,
+		cleanupTimeout: options.CleanupTimeout,
+		leases:         make(map[string]RunWorkspace),
+		durable:        make(map[string]bool),
+		reviews:        make(map[string]provisionalReview),
+		recoveries:     make(map[string]recoveryOwnership),
+	})
+}
+
+// Recovery returns detached cleanup identities retained for one run.
+func (manager *Manager) Recovery(runID string) core.Result {
+	if manager == nil {
+		return core.Fail(core.NewError("agent workspace manager is required"))
+	}
+	runID = core.Trim(runID)
+	if runID == "" {
+		return core.Fail(core.NewError("agent workspace recovery query requires a run ID"))
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	receipts := make([]RecoveryReceipt, 0)
+	for _, ownership := range manager.recoveries {
+		if ownership.receipt.RunID == runID {
+			receipts = append(receipts, ownership.receipt)
+		}
+	}
+	core.SliceSortFunc(receipts, func(left, right RecoveryReceipt) bool {
+		if left.Kind != right.Kind {
+			return left.Kind < right.Kind
+		}
+		if left.ReviewID != right.ReviewID {
+			return left.ReviewID < right.ReviewID
+		}
+		return left.Worktree < right.Worktree
+	})
+	return core.Ok(receipts)
+}
+
+// AbandonRecovery retries verified cleanup for one exact retained identity.
+func (manager *Manager) AbandonRecovery(ctx context.Context, receipt RecoveryReceipt) core.Result {
+	if manager == nil {
+		return core.Fail(core.NewError("agent workspace manager is required"))
+	}
+	if ctx == nil {
+		return core.Fail(core.NewError("agent workspace recovery cleanup context is required"))
+	}
+	if err := ctx.Err(); err != nil {
+		return core.Fail(core.E("workspace.Manager.AbandonRecovery", "recovery cleanup context is done", err))
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	ownership, exists := manager.recoveries[recoveryKey(receipt)]
+	if exists && !sameRecoveryReceipt(ownership.receipt, receipt) {
+		return core.Fail(core.NewError("agent workspace recovery receipt differs from retained ownership"))
+	}
+	if validated := manager.validateRecoveryLiveOwner(receipt, exists); !validated.OK {
+		return validated
+	}
+	if !exists {
+		resolved := manager.resolveRecovery(receipt)
+		if !resolved.OK {
+			return resolved
+		}
+		ownership = resolved.Value.(recoveryOwnership)
+		manager.registerRecovery(ownership)
+	}
+	return manager.cleanupRecovery(ownership)
+}
+
+func recoveryKey(receipt RecoveryReceipt) string {
+	return core.Join("\x00", receipt.Kind, receipt.RunID, receipt.ReviewID, receipt.Worktree)
+}
+
+func sameRecoveryReceipt(left, right RecoveryReceipt) bool {
+	return left.Kind == right.Kind && left.ProjectID == right.ProjectID && left.WorkID == right.WorkID &&
+		left.RunID == right.RunID && left.RunNumber == right.RunNumber && left.WorkspaceRunID == right.WorkspaceRunID &&
+		left.ReviewID == right.ReviewID && left.Branch == right.Branch && left.Worktree == right.Worktree
+}
+
+func (manager *Manager) validateRecoveryLiveOwner(receipt RecoveryReceipt, retained bool) core.Result {
+	for _, lease := range manager.leases {
+		if lease.Path != receipt.Worktree {
+			continue
+		}
+		if !retained || receipt.Kind != "run" || lease.RunID != receipt.RunID || lease.Project.ID != receipt.ProjectID ||
+			lease.Branch != receipt.Branch {
+			return core.Fail(core.NewError("agent workspace recovery receipt targets an active workspace without exact retained ownership"))
+		}
+	}
+	if review, exists := manager.reviews[receipt.Worktree]; exists {
+		if !retained || receipt.Kind != "review" || review.projectID != receipt.ProjectID || review.workID != receipt.WorkID ||
+			review.runID != receipt.RunID || review.runNumber != receipt.RunNumber || review.reviewID != receipt.ReviewID ||
+			review.branch != receipt.Branch || review.path != receipt.Worktree {
+			return core.Fail(core.NewError("agent workspace recovery receipt targets an active workspace without exact retained ownership"))
+		}
+	}
+	return core.Ok(nil)
+}
+
+func (manager *Manager) registerRecovery(ownership recoveryOwnership) {
+	manager.recoveries[recoveryKey(ownership.receipt)] = ownership
+}
+
+func (manager *Manager) clearRecoveryPath(path string) {
+	for key, ownership := range manager.recoveries {
+		if ownership.receipt.Worktree == path {
+			delete(manager.recoveries, key)
+		}
+	}
+}
+
+func (manager *Manager) hasRecovery(runID string) bool {
+	for _, ownership := range manager.recoveries {
+		if ownership.receipt.RunID == runID {
+			return true
+		}
+	}
+	return false
+}
+
+func (manager *Manager) hasRecoveryKind(runID, kind string) bool {
+	for _, ownership := range manager.recoveries {
+		if ownership.receipt.RunID == runID && ownership.receipt.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
+func (manager *Manager) resolveRecovery(receipt RecoveryReceipt) core.Result {
+	if receipt.Kind != "run" && receipt.Kind != "review" {
+		return core.Fail(core.NewError("agent workspace recovery kind must be run or review"))
+	}
+	for label, value := range map[string]string{
+		"project ID": receipt.ProjectID, "run ID": receipt.RunID,
+	} {
+		if validated := pathSegment(label, value); !validated.OK {
+			return validated
+		}
+	}
+	if core.Trim(receipt.WorkID) == "" || branchComponent(receipt.WorkID) == "" {
+		return core.Fail(core.NewError("agent workspace recovery Work ID cannot form a Git branch"))
+	}
+	if receipt.RunNumber <= 0 {
+		return core.Fail(core.NewError("agent workspace recovery requires a positive run number"))
+	}
+	expectedPath := core.Result{}
+	if receipt.Kind == "review" {
+		if receipt.WorkspaceRunID != "" {
+			return core.Fail(core.NewError("agent workspace review recovery cannot name a run workspace owner"))
+		}
+		if validated := pathSegment("review ID", receipt.ReviewID); !validated.OK {
+			return validated
+		}
+		expectedBranch := core.Concat("lem/integration/", branchComponent(receipt.RunID), "/", branchComponent(receipt.ReviewID))
+		if receipt.Branch != expectedBranch {
+			return core.Fail(core.NewError("agent workspace review recovery branch differs from its identity"))
+		}
+		expectedPath = manager.internalPath(receipt.ProjectID, "reviews", receipt.RunID, receipt.ReviewID, "worktree")
+	} else {
+		if receipt.ReviewID != "" {
+			return core.Fail(core.NewError("agent workspace run recovery branch differs from its identity"))
+		}
+		workspaceRunID := pathSegment("workspace run ID", receipt.WorkspaceRunID)
+		if !workspaceRunID.OK {
+			return workspaceRunID
+		}
+		expectedBranch := runBranch(receipt.WorkID, receipt.RunNumber)
+		if !expectedBranch.OK || receipt.Branch != expectedBranch.Value.(string) {
+			return core.Fail(core.NewError("agent workspace run recovery branch differs from its identity"))
+		}
+		expectedPath = manager.internalPath(receipt.ProjectID, "runs", receipt.WorkspaceRunID, "worktree")
+	}
+	if !expectedPath.OK || expectedPath.Value.(string) != receipt.Worktree {
+		return core.Fail(core.NewError("agent workspace recovery worktree differs from its identity"))
+	}
+	cloneResult := manager.internalPath(receipt.ProjectID, "repo.git")
+	relativeResult := manager.internalRelative(receipt.Worktree)
+	if !cloneResult.OK || !relativeResult.OK {
+		return core.Fail(core.NewError("agent workspace recovery paths are outside the internal root"))
+	}
+	return core.Ok(recoveryOwnership{
+		receipt: receipt, clone: cloneResult.Value.(string), relative: relativeResult.Value.(string), removeBranch: true,
 	})
 }
 
@@ -342,22 +554,30 @@ func (manager *Manager) PrepareRun(ctx context.Context, project work.Project, ru
 	if ensureErr := manager.files.EnsureDir(core.PathDir(worktreeRelative)); ensureErr != nil {
 		return core.Fail(core.E("workspace.Manager.PrepareRun", "failed to create run directory", ensureErr))
 	}
+	ownership := recoveryOwnership{
+		receipt: RecoveryReceipt{
+			Kind: "run", ProjectID: project.ID, WorkID: run.WorkID, RunID: run.ID,
+			RunNumber: run.Number, WorkspaceRunID: run.ID, Branch: prepared.Branch, Worktree: prepared.Path,
+		},
+		clone: project.ClonePath, relative: worktreeRelative, removeBranch: true,
+	}
+	manager.leases[prepared.RunID] = prepared
+	manager.durable[prepared.RunID] = false
+	manager.registerRecovery(ownership)
 	added := manager.gitOutput(ctx, manager.root, environment,
 		"--git-dir", project.ClonePath, "worktree", "add", "-b", prepared.Branch,
 		prepared.Path, project.SourceRevision,
 	)
 	if !added.OK {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, prepared.Path, worktreeRelative, prepared.Branch, true)
+		cleanup := manager.cleanupRecovery(ownership)
 		if !cleanup.OK {
 			return core.Fail(core.E("workspace.Manager.PrepareRun", added.Error(), cleanup.Err()))
 		}
 		return core.Fail(core.E("workspace.Manager.PrepareRun", "failed to create isolated worktree", added.Err()))
 	}
-	manager.leases[prepared.RunID] = prepared
-	manager.durable[prepared.RunID] = false
 	base := manager.gitOutput(ctx, prepared.Path, nil, "rev-parse", "HEAD")
 	if !base.OK {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, prepared.Path, worktreeRelative, prepared.Branch, true)
+		cleanup := manager.cleanupRecovery(ownership)
 		if !cleanup.OK {
 			return core.Fail(core.E("workspace.Manager.PrepareRun", base.Error(), cleanup.Err()))
 		}
@@ -365,13 +585,14 @@ func (manager *Manager) PrepareRun(ctx context.Context, project work.Project, ru
 	}
 	prepared.BaseRevision = core.Trim(base.Value.(string))
 	if prepared.BaseRevision != project.SourceRevision {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, prepared.Path, worktreeRelative, prepared.Branch, true)
+		cleanup := manager.cleanupRecovery(ownership)
 		if !cleanup.OK {
 			return core.Fail(core.E("workspace.Manager.PrepareRun", "prepared revision differs from the reviewed source", cleanup.Err()))
 		}
 		return core.Fail(core.NewError("agent workspace prepared revision differs from the reviewed source"))
 	}
 	manager.leases[prepared.RunID] = prepared
+	manager.clearRecoveryPath(prepared.Path)
 	return core.Ok(prepared)
 }
 
@@ -487,6 +708,9 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 	}
 	reconstructed := validated.Value.(RunWorkspace)
 	if existing, exists := manager.leases[reconstructed.RunID]; exists {
+		if manager.hasRecovery(reconstructed.RunID) {
+			return core.Fail(core.Errorf("agent workspace run %s has retained provisional cleanup", reconstructed.RunID))
+		}
 		if existing.Path != reconstructed.Path || existing.Branch != reconstructed.Branch || existing.DurableRevision != reconstructed.DurableRevision {
 			return core.Fail(core.NewError("agent workspace run lease differs from its durable record"))
 		}
@@ -526,31 +750,52 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 	if tracked := manager.recoverRunTracking(ctx, project, reconstructed.Branch, reconstructed.DurableRevision); !tracked.OK {
 		return tracked
 	}
+	workspaceRunID := manager.runWorkspaceOwnerID(project.ID, reconstructed.Path)
+	if workspaceRunID == "" {
+		return core.Fail(core.NewError("agent workspace reconstructed worktree has no deterministic run owner"))
+	}
+	ownership := recoveryOwnership{
+		receipt: RecoveryReceipt{
+			Kind: "run", ProjectID: project.ID, WorkID: run.WorkID, RunID: run.ID,
+			RunNumber: run.Number, WorkspaceRunID: workspaceRunID,
+			Branch: reconstructed.Branch, Worktree: reconstructed.Path,
+		},
+		clone: project.ClonePath, relative: worktreeRelative, removeBranch: true,
+	}
+	manager.leases[reconstructed.RunID] = reconstructed
+	manager.durable[reconstructed.RunID] = false
+	manager.registerRecovery(ownership)
 	remoteReference := core.Concat("refs/remotes/lem/", reconstructed.Branch)
 	branched := manager.gitOutput(ctx, manager.root, nil,
 		"--git-dir", project.ClonePath, "branch", "--force", reconstructed.Branch, remoteReference,
 	)
 	if !branched.OK {
+		cleanup := manager.cleanupRecovery(ownership)
+		if !cleanup.OK {
+			return core.Fail(core.E("workspace.Manager.ReconstructRun", branched.Error(), cleanup.Err()))
+		}
 		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to restore local run branch", branched.Err()))
 	}
 	if ensureErr := manager.files.EnsureDir(core.PathDir(worktreeRelative)); ensureErr != nil {
+		cleanup := manager.cleanupRecovery(ownership)
+		if !cleanup.OK {
+			return core.Fail(core.E("workspace.Manager.ReconstructRun", ensureErr.Error(), cleanup.Err()))
+		}
 		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to create reconstructed run directory", ensureErr))
 	}
 	added := manager.gitOutput(ctx, manager.root, nil,
 		"--git-dir", project.ClonePath, "worktree", "add", reconstructed.Path, reconstructed.Branch,
 	)
 	if !added.OK {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, reconstructed.Path, worktreeRelative, reconstructed.Branch, false)
+		cleanup := manager.cleanupRecovery(ownership)
 		if !cleanup.OK {
 			return core.Fail(core.E("workspace.Manager.ReconstructRun", added.Error(), cleanup.Err()))
 		}
 		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to reconstruct run worktree", added.Err()))
 	}
-	manager.leases[reconstructed.RunID] = reconstructed
-	manager.durable[reconstructed.RunID] = false
 	revision := manager.gitOutput(ctx, reconstructed.Path, nil, "rev-parse", "HEAD")
 	if !revision.OK {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, reconstructed.Path, worktreeRelative, reconstructed.Branch, false)
+		cleanup := manager.cleanupRecovery(ownership)
 		if !cleanup.OK {
 			return core.Fail(core.E("workspace.Manager.ReconstructRun", revision.Error(), cleanup.Err()))
 		}
@@ -558,6 +803,7 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 	}
 	reconstructed.BaseRevision = core.Trim(revision.Value.(string))
 	manager.leases[reconstructed.RunID] = reconstructed
+	manager.clearRecoveryPath(reconstructed.Path)
 	return core.Ok(reconstructed)
 }
 
@@ -684,9 +930,10 @@ func (manager *Manager) ReleaseRun(ctx context.Context, workspace RunWorkspace) 
 	if !relativeResult.OK {
 		return relativeResult
 	}
-	runRelative := core.PathDir(relativeResult.Value.(string))
-	if deleteErr := manager.files.DeleteAll(runRelative); deleteErr != nil {
-		return core.Fail(core.E("workspace.Manager.ReleaseRun", "failed to clean run directory", deleteErr))
+	if _, statErr := manager.files.Stat(relativeResult.Value.(string)); statErr == nil {
+		return core.Fail(core.NewError("agent workspace removed worktree path is still present"))
+	} else if !core.Is(statErr, core.ErrNotExist) {
+		return core.Fail(core.E("workspace.Manager.ReleaseRun", "failed to verify removed worktree path", statErr))
 	}
 	for runID, lease := range manager.leases {
 		if lease.Path == workspace.Path {
@@ -1021,6 +1268,9 @@ func (manager *Manager) validLease(workspace RunWorkspace) core.Result {
 	if !exists {
 		return core.Fail(core.Errorf("agent workspace run %s has no active worktree lease", workspace.RunID))
 	}
+	if manager.hasRecoveryKind(workspace.RunID, "run") {
+		return core.Fail(core.Errorf("agent workspace run %s has retained provisional cleanup", workspace.RunID))
+	}
 	if lease.Path != workspace.Path || lease.Branch != workspace.Branch || lease.Project.ID != workspace.Project.ID {
 		return core.Fail(core.NewError("agent workspace supplied lease differs from the active worktree"))
 	}
@@ -1031,18 +1281,28 @@ func (manager *Manager) validLease(workspace RunWorkspace) core.Result {
 }
 
 func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, worktreePath, worktreeRelative, branch string, removeBranch bool) core.Result {
-	failures := make([]string, 0, 4)
-	removed := manager.gitOutput(ctx, manager.root, nil,
-		"--git-dir", clonePath, "worktree", "remove", "--force", worktreePath,
-	)
-	if !removed.OK {
-		failures = append(failures, core.Concat("worktree remove: ", removed.Error()))
+	failures := make([]string, 0, 8)
+	initialWorktrees := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "worktree", "list", "--porcelain")
+	if !initialWorktrees.OK {
+		return core.Fail(core.E("workspace.cleanupFailedWorktree", core.Concat("recovery worktree ", worktreePath, ": worktree inspect: ", initialWorktrees.Error()), nil))
+	}
+	attachedBranch, attached := worktreeBranchAtPath(initialWorktrees.Value.(string), worktreePath)
+	if attached && core.Trim(branch) != "" && attachedBranch != branch {
+		return core.Fail(core.E("workspace.cleanupFailedWorktree", core.Concat("recovery worktree ", worktreePath, ": attached branch differs from retained ownership"), nil))
+	}
+	if attached {
+		removed := manager.gitOutput(ctx, manager.root, nil,
+			"--git-dir", clonePath, "worktree", "remove", "--force", worktreePath,
+		)
+		if !removed.OK {
+			failures = append(failures, core.Concat("worktree remove: ", removed.Error()))
+		}
 	}
 	pruned := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "worktree", "prune")
 	if !pruned.OK {
 		failures = append(failures, core.Concat("worktree prune: ", pruned.Error()))
 	}
-	if removeBranch && removed.OK && core.Trim(branch) != "" {
+	if removeBranch && core.Trim(branch) != "" {
 		listed := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "branch", "--list", branch)
 		if !listed.OK {
 			failures = append(failures, core.Concat("branch inspect: ", listed.Error()))
@@ -1053,11 +1313,34 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 			}
 		}
 	}
-	if deleteErr := manager.files.DeleteAll(core.PathDir(worktreeRelative)); deleteErr != nil {
-		failures = append(failures, core.Concat("filesystem remove: ", deleteErr.Error()))
+	verified := true
+	worktrees := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "worktree", "list", "--porcelain")
+	if !worktrees.OK {
+		verified = false
+		failures = append(failures, core.Concat("worktree verify: ", worktrees.Error()))
+	} else if _, retained := worktreeBranchAtPath(worktrees.Value.(string), worktreePath); retained {
+		verified = false
+		failures = append(failures, "worktree verify: retained Git worktree metadata")
 	}
-	if len(failures) > 0 {
-		return core.Fail(core.E("workspace.cleanupFailedWorktree", core.Join("; ", failures...), nil))
+	if removeBranch && core.Trim(branch) != "" {
+		listed := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "branch", "--list", branch)
+		if !listed.OK {
+			verified = false
+			failures = append(failures, core.Concat("branch verify: ", listed.Error()))
+		} else if core.Trim(listed.Value.(string)) != "" {
+			verified = false
+			failures = append(failures, "branch verify: generated branch remains")
+		}
+	}
+	if _, statErr := manager.files.Stat(worktreeRelative); statErr == nil {
+		verified = false
+		failures = append(failures, "filesystem verify: retained worktree directory")
+	} else if !core.Is(statErr, core.ErrNotExist) {
+		verified = false
+		failures = append(failures, core.Concat("filesystem verify: ", statErr.Error()))
+	}
+	if !verified {
+		return core.Fail(core.E("workspace.cleanupFailedWorktree", core.Concat("recovery worktree ", worktreePath, ": ", core.Join("; ", failures...)), nil))
 	}
 	for runID, lease := range manager.leases {
 		if lease.Path == worktreePath {
@@ -1066,7 +1349,52 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 		}
 	}
 	delete(manager.reviews, worktreePath)
+	manager.clearRecoveryPath(worktreePath)
 	return core.Ok(nil)
+}
+
+func worktreeBranchAtPath(output, path string) (string, bool) {
+	currentPath := ""
+	found := false
+	for _, line := range core.Split(output, "\n") {
+		line = core.Trim(line)
+		if found && line == "" {
+			return "", true
+		}
+		if core.HasPrefix(line, "worktree ") {
+			if found {
+				return "", true
+			}
+			currentPath = core.TrimPrefix(line, "worktree ")
+			found = currentPath == path
+			continue
+		}
+		if found && core.HasPrefix(line, "branch refs/heads/") {
+			return core.TrimPrefix(line, "branch refs/heads/"), true
+		}
+	}
+	return "", found
+}
+
+func (manager *Manager) runWorkspaceOwnerID(projectID, worktreePath string) string {
+	relative := manager.internalRelative(worktreePath)
+	if !relative.OK {
+		return ""
+	}
+	parts := core.Split(core.PathToSlash(relative.Value.(string)), "/")
+	if len(parts) != 4 || parts[0] != projectID || parts[1] != "runs" || parts[3] != "worktree" {
+		return ""
+	}
+	if validated := pathSegment("workspace run ID", parts[2]); !validated.OK {
+		return ""
+	}
+	return parts[2]
+}
+
+func (manager *Manager) cleanupRecovery(ownership recoveryOwnership) core.Result {
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), manager.cleanupTimeout)
+	defer cancelCleanup()
+	return manager.cleanupFailedWorktree(cleanupContext, ownership.clone, ownership.receipt.Worktree, ownership.relative, ownership.receipt.Branch, ownership.removeBranch)
 }
 
 func (manager *Manager) gitOutput(ctx context.Context, directory string, environment []string, arguments ...string) core.Result {

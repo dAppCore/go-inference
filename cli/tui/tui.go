@@ -31,6 +31,9 @@ func loadDefaultWorkspace() core.Result {
 }
 
 func loadDefaultWorkspaceContext(ctx context.Context) core.Result {
+	if preflight := nativeWorkspacePreflight(ctx); !preflight.OK {
+		return preflight
+	}
 	pathsResult := defaultAppPaths()
 	if !pathsResult.OK {
 		return pathsResult

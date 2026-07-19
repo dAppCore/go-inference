@@ -78,6 +78,9 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	if run.ProjectID != project.ID || run.SourceRevision == "" || core.Trim(run.Branch) == "" {
 		return core.Fail(core.NewError("agent workspace change review run identity is incomplete"))
 	}
+	if manager.hasRecoveryKind(run.ID, "review") {
+		return core.Fail(core.NewError("agent workspace run has retained review cleanup that must be resolved before another review"))
+	}
 	if validated := manager.validateReviewProject(project); !validated.OK {
 		return validated
 	}
@@ -149,26 +152,26 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	if !fetchedSource.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to fetch reviewed source revision", fetchedSource.Err()))
 	}
-	added := manager.gitOutput(ctx, manager.root, nil,
-		"--git-dir", project.ClonePath, "worktree", "add", "-b", integrationBranch, integrationPath, sourceReference,
-	)
-	if !added.OK {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, integrationPath, integrationRelativeResult.Value.(string), integrationBranch, true)
-		if !cleanup.OK {
-			return core.Fail(core.E("workspace.Manager.ReviewChanges", added.Error(), cleanup.Err()))
-		}
-		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to create integration worktree", added.Err()))
+	registeredReview := provisionalReview{
+		projectID: project.ID, workID: run.WorkID, runID: run.ID, runNumber: run.Number, reviewID: reviewID,
+		branch: integrationBranch, path: integrationPath, clone: project.ClonePath,
+		relative: integrationRelativeResult.Value.(string),
 	}
-	manager.reviews[integrationPath] = provisionalReview{
-		workID: run.WorkID, runID: run.ID, branch: integrationBranch, path: integrationPath,
-		clone: project.ClonePath, relative: integrationRelativeResult.Value.(string),
+	ownership := recoveryOwnership{
+		receipt: RecoveryReceipt{
+			Kind: "review", ProjectID: project.ID, WorkID: run.WorkID, RunID: run.ID, ReviewID: reviewID,
+			RunNumber: run.Number, Branch: integrationBranch, Worktree: integrationPath,
+		},
+		clone: project.ClonePath, relative: integrationRelativeResult.Value.(string), removeBranch: true,
 	}
+	manager.reviews[integrationPath] = registeredReview
+	manager.registerRecovery(ownership)
 	provisional := true
 	defer func() {
 		if !provisional {
 			return
 		}
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, integrationPath, integrationRelativeResult.Value.(string), integrationBranch, true)
+		cleanup := manager.cleanupRecovery(ownership)
 		if cleanup.OK {
 			return
 		}
@@ -178,6 +181,12 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 		}
 		result = core.Fail(core.E("workspace.Manager.ReviewChanges", result.Error(), cleanup.Err()))
 	}()
+	added := manager.gitOutput(ctx, manager.root, nil,
+		"--git-dir", project.ClonePath, "worktree", "add", "-b", integrationBranch, integrationPath, sourceReference,
+	)
+	if !added.OK {
+		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to create integration worktree", added.Err()))
+	}
 
 	review := ChangeReview{
 		WorkID: run.WorkID, RunID: run.ID, SourceBranch: source.Branch, SourceRevision: source.Revision,
@@ -214,6 +223,7 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 				if len(review.Conflicts) == 0 {
 					return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to replay exact agent range", integrated.Err()))
 				}
+				manager.clearRecoveryPath(integrationPath)
 				provisional = false
 				return core.Ok(cloneChangeReview(review))
 			}
@@ -230,6 +240,7 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	}
 	review.Diff = diff.Value.(string)
 	review.Validation = runValidation(ctx, integrationPath, validation)
+	manager.clearRecoveryPath(integrationPath)
 	provisional = false
 	return core.Ok(cloneChangeReview(review))
 }
@@ -246,6 +257,7 @@ func (manager *Manager) RetainReview(review ChangeReview) core.Result {
 		return core.Fail(core.NewError("agent workspace review does not match a provisional integration"))
 	}
 	delete(manager.reviews, review.IntegrationPath)
+	manager.clearRecoveryPath(review.IntegrationPath)
 	return core.Ok(cloneChangeReview(review))
 }
 
@@ -266,7 +278,15 @@ func (manager *Manager) AbandonReview(ctx context.Context, review ChangeReview) 
 	if !exists || !matchesProvisionalReview(provisional, review) {
 		return core.Fail(core.NewError("agent workspace review does not match a provisional integration"))
 	}
-	return manager.cleanupFailedWorktree(ctx, provisional.clone, provisional.path, provisional.relative, provisional.branch, true)
+	ownership := recoveryOwnership{
+		receipt: RecoveryReceipt{
+			Kind: "review", ProjectID: provisional.projectID, WorkID: provisional.workID, RunID: provisional.runID,
+			RunNumber: provisional.runNumber, ReviewID: provisional.reviewID, Branch: provisional.branch, Worktree: provisional.path,
+		},
+		clone: provisional.clone, relative: provisional.relative, removeBranch: true,
+	}
+	manager.registerRecovery(ownership)
+	return manager.cleanupRecovery(ownership)
 }
 
 func matchesProvisionalReview(provisional provisionalReview, review ChangeReview) bool {

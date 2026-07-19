@@ -51,7 +51,20 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 	}
 	reviewResult := orchestrator.workspaces.ReviewChanges(ctx, project, run, orchestrator.queue.Validation())
 	if !reviewResult.OK {
-		return reviewResult
+		recoveryResult := orchestrator.workspaceRecovery(run.ID, "review")
+		if !recoveryResult.OK {
+			return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", reviewResult.Error(), recoveryResult.Err()))
+		}
+		if recoveryResult.Value == nil {
+			return reviewResult
+		}
+		receipt := recoveryResult.Value.(workspace.RecoveryReceipt)
+		receiptJSON := core.JSONMarshalString(receipt)
+		message := core.Join("; ", reviewResult.Error(), core.Concat("review cleanup recovery: ", receiptJSON))
+		if persisted := orchestrator.persistCleanupRecovery(run, receipt, "review_cleanup_retained", false); !persisted.OK {
+			message = core.Join("; ", message, persisted.Error())
+		}
+		return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", message, reviewResult.Err()))
 	}
 	review, ok := reviewResult.Value.(workspace.ChangeReview)
 	if !ok {

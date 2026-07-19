@@ -44,6 +44,10 @@ type nativeChildReviewEngine interface {
 	ConfirmResume(context.Context, any) core.Result
 }
 
+type nativeRecoveryEngine interface {
+	AbandonRecovery(context.Context, string, string) core.Result
+}
+
 type agentChildReviewProjection struct {
 	Action       string
 	RunID        string
@@ -109,6 +113,12 @@ func (adapter *nativeAgentAdapter) Capabilities() []agentCapability {
 		if capability, ok := reported[feature]; ok {
 			catalog[index].Available = capability.Available
 			catalog[index].Reason = core.Trim(capability.Reason)
+			if feature == agentFeatureRecoveryAbandon {
+				if _, supported := adapter.engine.(nativeRecoveryEngine); !supported {
+					catalog[index].Available = false
+					catalog[index].Reason = "native agent engine does not support retained recovery cleanup"
+				}
+			}
 			if !catalog[index].Available && catalog[index].Reason == "" {
 				catalog[index].Reason = "native agent engine reports this capability unavailable"
 			}
@@ -131,7 +141,7 @@ func isNativeAgentFeature(feature agentFeature) bool {
 	switch feature {
 	case agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry,
 		agentFeatureResume, agentFeatureQueueStart, agentFeatureQueueStop,
-		agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject:
+		agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject, agentFeatureRecoveryAbandon:
 		return true
 	default:
 		return false
@@ -195,8 +205,10 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		projects[project.ID] = project
 	}
 	runWork := make(map[string]string, len(snapshot.Runs))
+	runs := make(map[string]work.Run, len(snapshot.Runs))
 	for _, run := range snapshot.Runs {
 		runWork[run.ID] = run.WorkID
+		runs[run.ID] = run
 		index, exists := workIndex[run.WorkID]
 		if !exists {
 			index = len(mapped.Work)
@@ -219,6 +231,7 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		item.Agent = run.Provider
 		item.Runtime = run.Model
 	}
+	pendingRecoveries := make(map[string]agentPendingRecovery)
 	for _, event := range snapshot.Events {
 		workID := event.WorkID
 		if workID == "" {
@@ -233,10 +246,41 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 				mapped.Work[index].ResumeRunID = projection.ResumeRunID
 			}
 		}
+		if recovery, available := mapRetainedAgentRecovery(event, runs); available {
+			pendingRecoveries[recovery.EventID] = recovery
+		}
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
 			ExternalID: event.ID, WorkID: workID, RunID: event.RunID, Kind: event.Kind,
 			Title: event.Title, Detail: event.Detail, CreatedAt: event.CreatedAt,
 		})
+	}
+	for _, event := range snapshot.Events {
+		outcome, succeeded, available := mapAgentRecoveryOutcome(event)
+		if !available {
+			continue
+		}
+		pending, exists := pendingRecoveries[outcome.RecoveryEventID]
+		if !exists || pending.Receipt != outcome.Receipt || event.RunID != outcome.Receipt.RunID || event.WorkID != outcome.Receipt.WorkID {
+			continue
+		}
+		if succeeded {
+			delete(pendingRecoveries, outcome.RecoveryEventID)
+		}
+	}
+	orderedRecoveries := make([]agentPendingRecovery, 0, len(pendingRecoveries))
+	for _, recovery := range pendingRecoveries {
+		orderedRecoveries = append(orderedRecoveries, recovery)
+	}
+	core.SliceSortFunc(orderedRecoveries, func(left, right agentPendingRecovery) bool {
+		return left.EventID < right.EventID
+	})
+	for _, recovery := range orderedRecoveries {
+		if index, exists := workIndex[recovery.Receipt.WorkID]; exists {
+			mapped.Work[index].RecoveryCount++
+			if mapped.Work[index].Recovery.EventID == "" {
+				mapped.Work[index].Recovery = recovery
+			}
+		}
 	}
 	for _, log := range snapshot.Logs {
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
@@ -278,6 +322,47 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 	}
 	sortAgentEvents(mapped.Events)
 	return mapped
+}
+
+func mapRetainedAgentRecovery(event work.Event, runs map[string]work.Run) (agentPendingRecovery, bool) {
+	if event.Kind != "workspace_cleanup_retained" && event.Kind != "review_cleanup_retained" {
+		return agentPendingRecovery{}, false
+	}
+	var receipt agentRecoveryReceipt
+	decoded := core.JSONUnmarshalString(event.DetailJSON, &receipt)
+	if !decoded.OK || core.Trim(event.ID) == "" || receipt.RunID != event.RunID || receipt.WorkID != event.WorkID ||
+		core.Trim(receipt.ProjectID) == "" || core.Trim(receipt.Branch) == "" || core.Trim(receipt.Worktree) == "" {
+		return agentPendingRecovery{}, false
+	}
+	run, exists := runs[receipt.RunID]
+	if !exists || run.WorkID != receipt.WorkID || run.ProjectID != receipt.ProjectID || run.Number != receipt.RunNumber {
+		return agentPendingRecovery{}, false
+	}
+	if receipt.Kind == "run" {
+		if event.Kind != "workspace_cleanup_retained" || receipt.ReviewID != "" || core.Trim(receipt.WorkspaceRunID) == "" {
+			return agentPendingRecovery{}, false
+		}
+	} else if receipt.Kind == "review" {
+		if event.Kind != "review_cleanup_retained" || core.Trim(receipt.ReviewID) == "" || receipt.WorkspaceRunID != "" {
+			return agentPendingRecovery{}, false
+		}
+	} else {
+		return agentPendingRecovery{}, false
+	}
+	return agentPendingRecovery{EventID: event.ID, Receipt: receipt}, true
+}
+
+func mapAgentRecoveryOutcome(event work.Event) (agentRecoveryOutcome, bool, bool) {
+	succeeded := event.Kind == "cleanup_recovery_succeeded"
+	if !succeeded && event.Kind != "cleanup_recovery_failed" {
+		return agentRecoveryOutcome{}, false, false
+	}
+	var outcome agentRecoveryOutcome
+	decoded := core.JSONUnmarshalString(event.DetailJSON, &outcome)
+	if !decoded.OK || core.Trim(outcome.RecoveryEventID) == "" {
+		return agentRecoveryOutcome{}, false, false
+	}
+	return outcome, succeeded, true
 }
 
 func mapChangeReview(review workspace.ChangeReview, allowed bool) agentReview {
@@ -371,6 +456,19 @@ func (adapter *nativeAgentAdapter) Review(ctx context.Context, request agentRevi
 			return reviewed
 		}
 		return mapChildLaunchReview(request.Feature, action, reviewed.Value)
+	case agentFeatureRecoveryAbandon:
+		recovery := request.Recovery
+		if recovery.EventID == "" || recovery.Receipt.RunID == "" || recovery.Receipt.WorkID != request.WorkID {
+			return core.Fail(core.E("tui.agentAdapter.Review", "retained recovery receipt is incomplete", nil))
+		}
+		return core.Ok(agentReview{
+			Feature: agentFeatureRecoveryAbandon, Title: "Abandon retained recovery",
+			Body: core.Sprintf("Recovery event: %s\nRun: %s (#%d)\nWorkspace owner: %s\nKind: %s\nBranch: %s\nWorktree: %s",
+				recovery.EventID, recovery.Receipt.RunID, recovery.Receipt.RunNumber, recovery.Receipt.WorkspaceRunID,
+				recovery.Receipt.Kind, recovery.Receipt.Branch, recovery.Receipt.Worktree),
+			Warning:         "Confirmation retries verified cleanup of only this retained internal worktree and generated branch.",
+			ConfirmRequired: true, Payload: recovery,
+		})
 	default:
 		return core.Fail(core.E("tui.agentAdapter.Review", core.Concat("agent feature does not support review: ", string(request.Feature)), nil))
 	}
@@ -444,6 +542,14 @@ func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest
 		result = adapter.engine.Accept(ctx, workspace.AcceptRequest{Review: review, Confirmed: request.Confirmed})
 	case agentFeatureReject:
 		result = adapter.engine.Reject(ctx, runID)
+	case agentFeatureRecoveryAbandon:
+		recoveryEngine, supported := adapter.engine.(nativeRecoveryEngine)
+		recovery, payloadOK := request.Review.Payload.(agentPendingRecovery)
+		if !supported || !payloadOK || !request.Confirmed || request.Review.Feature != agentFeatureRecoveryAbandon ||
+			recovery != request.Recovery || recovery.EventID == "" || recovery.Receipt.RunID != runID {
+			return core.Fail(core.E("tui.agentAdapter.Run", "retained recovery cleanup requires an explicitly confirmed current receipt", nil))
+		}
+		result = recoveryEngine.AbandonRecovery(ctx, recovery.Receipt.RunID, recovery.EventID)
 	default:
 		return core.Fail(core.E("tui.agentAdapter.Run", core.Concat("unsupported native agent action: ", string(request.Feature)), nil))
 	}
@@ -559,6 +665,10 @@ func privateAgentReceipt(request agentRequest, result core.Result) core.Result {
 		receipt.WorkID = value.WorkID
 		receipt.RunID = value.RunID
 		receipt.Status = value.Status
+	case work.Event:
+		receipt.RunID = value.RunID
+		receipt.Status = value.Kind
+		receipt.Detail = value.Detail
 	case nil:
 		receipt.Status = "completed"
 	default:

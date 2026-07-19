@@ -348,6 +348,67 @@ func TestAcceptOrchestratorAcceptRequiresExistingIdempotentReceipt(t *testing.T)
 	fixture.store.clearSnapshotOverride()
 }
 
+func TestAcceptOrchestratorReviewCleanupFailurePersistsRecoveryEvent(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		return orchestratorWorkspaceCommandHasArgument(command, "log") ||
+			orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+				(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+
+	result := fixture.orchestrator.ReviewChanges(context.Background(), run.ID)
+	core.AssertFalse(t, result.OK)
+	found := false
+	fixture.store.mu.Lock()
+	for _, event := range fixture.store.events {
+		if event.RunID != run.ID || event.Kind != "review_cleanup_retained" {
+			continue
+		}
+		var receipt workspace.RecoveryReceipt
+		decoded := core.JSONUnmarshalString(event.DetailJSON, &receipt)
+		core.AssertTrue(t, decoded.OK, decoded.Error())
+		core.AssertEqual(t, "review", receipt.Kind)
+		core.AssertEqual(t, run.ID, receipt.RunID)
+		core.AssertTrue(t, receipt.ReviewID != "")
+		core.AssertTrue(t, receipt.Branch != "")
+		core.AssertTrue(t, receipt.Worktree != "")
+		core.AssertEqual(t, receipt.Worktree, event.Detail)
+		core.AssertContains(t, result.Error(), receipt.Worktree)
+		found = true
+	}
+	fixture.store.mu.Unlock()
+	core.AssertTrue(t, found)
+}
+
+func TestAcceptOrchestratorReviewCleanupEventStoreFailureReturnsExactRecovery(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		return orchestratorWorkspaceCommandHasArgument(command, "log") ||
+			orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+				(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+	attempted := false
+	fixture.store.failNext(func(commit Commit) bool {
+		if commit.Event != nil && commit.Event.Kind == "review_cleanup_retained" {
+			attempted = true
+			return true
+		}
+		return false
+	})
+
+	result := fixture.orchestrator.ReviewChanges(context.Background(), run.ID)
+	core.AssertFalse(t, result.OK)
+	core.AssertTrue(t, attempted)
+	recoveryResult := fixture.manager.Recovery(run.ID)
+	core.AssertTrue(t, recoveryResult.OK, recoveryResult.Error())
+	recoveries := recoveryResult.Value.([]workspace.RecoveryReceipt)
+	core.AssertEqual(t, 1, len(recoveries))
+	core.AssertContains(t, result.Error(), recoveries[0].Worktree)
+	core.AssertContains(t, result.Error(), core.JSONMarshalString(recoveries[0]))
+}
+
 func TestAcceptStoreFailureRetainsAuthorizedSourceForReceiptReconciliation(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	project, run := orchestratorCompletedAcceptanceRun(t, fixture)

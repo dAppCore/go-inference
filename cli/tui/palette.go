@@ -434,6 +434,11 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 			return false, "no durable review-ready state is exposed yet"
 		}
 		return selectedState.ReviewID != "" && selectedState.ReviewStatus != "accepted" && selectedState.ReviewStatus != "rejected", "review changes first before rejecting a native run"
+	case agentFeatureRecoveryAbandon:
+		if !hasSnapshotState {
+			return false, "no retained recovery is exposed for the selected Work"
+		}
+		return selectedState.Recovery.EventID != "", "selected Work has no retained recovery"
 	}
 	if !allowed {
 		return false, reason
@@ -444,7 +449,7 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 func agentFeatureNeedsWork(feature agentFeature) bool {
 	switch feature {
 	case agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry,
-		agentFeatureResume, agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject:
+		agentFeatureResume, agentFeatureChangesReview, agentFeatureAccept, agentFeatureReject, agentFeatureRecoveryAbandon:
 		return true
 	default:
 		return false

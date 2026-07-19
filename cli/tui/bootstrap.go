@@ -19,6 +19,11 @@ import (
 	coreprocess "dappco.re/go/process"
 )
 
+const (
+	agentHardenedRuntimeContract = "go-inference/native-runtime/v1;softserve-fail-closed;bounded-cleanup;attempt-timeout;reviewed-retry-resume"
+	defaultAgentCleanupTimeout   = 5 * time.Second
+)
+
 type workspaceResources struct {
 	Paths       appPaths
 	Files       coreio.Medium
@@ -30,6 +35,7 @@ type workspaceResources struct {
 }
 
 type workspaceOpeners struct {
+	Preflight   func(context.Context) core.Result
 	Repository  func(path string) core.Result
 	State       func(paths appPaths) core.Result
 	Preferences func(files coreio.Medium, path string) core.Result
@@ -63,6 +69,7 @@ type observedGitService struct {
 }
 
 type agentBootstrapFactories struct {
+	RuntimeContract     func(context.Context) core.Result
 	LoadPolicy          func(coreio.Medium, string) core.Result
 	OpenWorkspaceMedium func(string) core.Result
 	NewStore            func(workspaceRepository) core.Result
@@ -87,6 +94,12 @@ func openWorkspaceContext(ctx context.Context, root string, openers workspaceOpe
 	if ctx == nil {
 		return core.Fail(core.E("tui.openWorkspace", "workspace context is required", nil))
 	}
+	if openers.Preflight != nil {
+		if preflight := openers.Preflight(ctx); !preflight.OK {
+			return core.Fail(core.E("tui.openWorkspace", "native workspace preflight failed", preflight.Err()))
+		}
+		openers.Preflight = nil
+	}
 	opened := openAppFilesAt(root)
 	if !opened.OK {
 		return core.Fail(core.E("tui.openWorkspace", "open application files", resultError(opened)))
@@ -108,6 +121,12 @@ func openWorkspaceWithContext(ctx context.Context, files appFiles, openers works
 	}
 	if files.Medium == nil {
 		return core.Fail(core.E("tui.openWorkspaceWith", "application file medium is required", nil))
+	}
+	if openers.Preflight != nil {
+		if preflight := openers.Preflight(ctx); !preflight.OK {
+			return core.Fail(core.E("tui.openWorkspaceWith", "native workspace preflight failed", preflight.Err()))
+		}
+		openers.Preflight = nil
 	}
 	if result := ensureAppFiles(files.Medium, files.Paths); !result.OK {
 		return core.Fail(core.E("tui.openWorkspaceWith", "ensure application files", resultError(result)))
@@ -275,10 +294,20 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 	if ctx == nil {
 		return core.Fail(core.E("tui.composeNativeAgent", "agent bootstrap context is required", nil))
 	}
+	if err := ctx.Err(); err != nil {
+		return core.Fail(core.E("tui.composeNativeAgent", "agent bootstrap context is done", err))
+	}
 	if input.Files.Medium == nil || input.Repository == nil {
 		return core.Fail(core.E("tui.composeNativeAgent", "agent bootstrap files and repository are required", nil))
 	}
 	factories = factories.withDefaults()
+	contractResult := factories.RuntimeContract(ctx)
+	if !contractResult.OK {
+		if err := ctx.Err(); err != nil {
+			return core.Fail(core.E("tui.composeNativeAgent", "agent bootstrap context is done", err))
+		}
+		return core.Fail(core.E("tui.composeNativeAgent", "native execution requires a hardened dappco.re/go/inference release/update before composition", contractResult.Err()))
+	}
 
 	policyResult := factories.LoadPolicy(input.Files.Medium, input.Files.Paths.Agents)
 	if !policyResult.OK {
@@ -293,6 +322,15 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 		return core.Fail(core.E("tui.composeNativeAgent", "agent dispatch timeout exceeds the supported duration; queue is frozen", nil))
 	}
 	attemptTimeout := time.Duration(policy.Dispatch.TimeoutMinutes) * time.Minute
+	engineOptions := orchestrator.Options{}
+	if !setAgentOrchestratorDurationOption(&engineOptions, "AttemptTimeout", attemptTimeout) ||
+		!setAgentOrchestratorDurationOption(&engineOptions, "CleanupTimeout", defaultAgentCleanupTimeout) {
+		return core.Fail(core.E("tui.composeNativeAgent", "native execution requires a hardened dappco.re/go/inference release/update with attempt and cleanup timeout options", nil))
+	}
+	managerOptions := workspace.ManagerOptions{}
+	if !setAgentWorkspaceDurationOption(&managerOptions, "CleanupTimeout", defaultAgentCleanupTimeout) {
+		return core.Fail(core.E("tui.composeNativeAgent", "native execution requires a hardened dappco.re/go/inference release/update with bounded workspace cleanup", nil))
+	}
 
 	workspaceMediumResult := factories.OpenWorkspaceMedium(input.Files.Paths.Workspaces)
 	if !workspaceMediumResult.OK {
@@ -347,10 +385,13 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 	availability := &agentAvailability{unavailable: make(map[agentFeature]string)}
 	server = &observedGitService{Service: server, availability: availability}
 
-	workspacesResult := factories.NewWorkspaces(workspace.ManagerOptions{
-		Root: input.Files.Paths.Workspaces, Files: workspaceMedium, Git: workspace.ProcessRunner{}, Server: server,
-		IDs: factories.IDs.New, Now: factories.Now,
-	})
+	managerOptions.Root = input.Files.Paths.Workspaces
+	managerOptions.Files = workspaceMedium
+	managerOptions.Git = workspace.ProcessRunner{}
+	managerOptions.Server = server
+	managerOptions.IDs = factories.IDs.New
+	managerOptions.Now = factories.Now
+	workspacesResult := factories.NewWorkspaces(managerOptions)
 	if !workspacesResult.OK {
 		return agentCompositionFailure("construct workspace manager", workspacesResult, server, nil)
 	}
@@ -402,11 +443,14 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 		return agentCompositionFailure("construct native launcher", core.Fail(core.E("tui.composeNativeAgent", "launcher constructor returned an invalid launcher", nil)), server, nil)
 	}
 
-	engineOptions := orchestrator.Options{
-		Store: store, GitServer: server, Workspaces: workspaces, Providers: providers,
-		Queue: controller, Launcher: launcher, Clock: agentClock{now: factories.Now}, IDs: factories.IDs,
-	}
-	setAgentOrchestratorDurationOption(&engineOptions, "AttemptTimeout", attemptTimeout)
+	engineOptions.Store = store
+	engineOptions.GitServer = server
+	engineOptions.Workspaces = workspaces
+	engineOptions.Providers = providers
+	engineOptions.Queue = controller
+	engineOptions.Launcher = launcher
+	engineOptions.Clock = agentClock{now: factories.Now}
+	engineOptions.IDs = factories.IDs
 	engineResult := factories.NewOrchestrator(engineOptions)
 	if !engineResult.OK {
 		return agentCompositionFailure("construct native orchestrator", engineResult, server, launcher)
@@ -425,24 +469,97 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 	return core.Ok(agentBootstrapResult{Provider: adapterResult.Value.(agentProvider), Warnings: detection.Warnings})
 }
 
-func setAgentOrchestratorDurationOption(options *orchestrator.Options, name string, duration time.Duration) bool {
-	if options == nil {
+func nativeWorkspacePreflight(ctx context.Context) core.Result {
+	if ctx == nil {
+		return core.Fail(core.NewError("native workspace preflight context is required"))
+	}
+	if err := ctx.Err(); err != nil {
+		return core.Fail(core.E("tui.nativeWorkspacePreflight", "preflight context is done", err))
+	}
+	result := linkedAgentRuntimeContract(ctx)
+	if !result.OK {
+		if err := ctx.Err(); err != nil {
+			return core.Fail(core.E("tui.nativeWorkspacePreflight", "preflight context is done", err))
+		}
+		return core.Fail(core.E("tui.nativeWorkspacePreflight", "native execution requires a hardened dappco.re/go/inference release/update", result.Err()))
+	}
+	return result
+}
+
+var agentDurationType = reflect.TypeOf(time.Duration(0))
+
+func setAgentDurationOption(options any, name string, duration time.Duration) bool {
+	container := reflect.ValueOf(options)
+	if !container.IsValid() || container.Kind() != reflect.Pointer || container.IsNil() {
 		return false
 	}
-	value := reflect.ValueOf(options).Elem().FieldByName(name)
-	if !value.IsValid() || !value.CanSet() || value.Kind() != reflect.Int64 {
+	container = container.Elem()
+	if container.Kind() != reflect.Struct {
+		return false
+	}
+	value := container.FieldByName(name)
+	if !value.IsValid() || !value.CanSet() || value.Type() != agentDurationType {
 		return false
 	}
 	value.SetInt(int64(duration))
 	return true
 }
 
-func agentOrchestratorDurationOption(options orchestrator.Options, name string) (time.Duration, bool) {
-	value := reflect.ValueOf(options).FieldByName(name)
-	if !value.IsValid() || value.Kind() != reflect.Int64 {
+func agentDurationOption(options any, name string) (time.Duration, bool) {
+	container := reflect.ValueOf(options)
+	if !container.IsValid() || container.Kind() != reflect.Struct {
+		return 0, false
+	}
+	value := container.FieldByName(name)
+	if !value.IsValid() || value.Type() != agentDurationType {
 		return 0, false
 	}
 	return time.Duration(value.Int()), true
+}
+
+func setAgentOrchestratorDurationOption(options *orchestrator.Options, name string, duration time.Duration) bool {
+	return setAgentDurationOption(options, name, duration)
+}
+
+func agentOrchestratorDurationOption(options orchestrator.Options, name string) (time.Duration, bool) {
+	return agentDurationOption(options, name)
+}
+
+func setAgentWorkspaceDurationOption(options *workspace.ManagerOptions, name string, duration time.Duration) bool {
+	return setAgentDurationOption(options, name, duration)
+}
+
+func agentWorkspaceDurationOption(options workspace.ManagerOptions, name string) (time.Duration, bool) {
+	return agentDurationOption(options, name)
+}
+
+type agentHardenedRuntime interface {
+	HardenedRuntimeContract(context.Context) core.Result
+}
+
+func linkedAgentRuntimeContract(ctx context.Context) core.Result {
+	options := orchestrator.Options{}
+	contract, ok := any(options).(agentHardenedRuntime)
+	if !ok {
+		return core.Fail(core.NewError("linked inference module does not expose the hardened native runtime contract"))
+	}
+	result := contract.HardenedRuntimeContract(ctx)
+	if !result.OK {
+		return result
+	}
+	receipt, ok := result.Value.(string)
+	if !ok || receipt != agentHardenedRuntimeContract {
+		return core.Fail(core.NewError("linked inference module returned an unsupported hardened native runtime contract"))
+	}
+	for _, name := range []string{"AttemptTimeout", "CleanupTimeout"} {
+		if _, available := agentOrchestratorDurationOption(options, name); !available {
+			return core.Fail(core.Errorf("linked inference module hardened runtime is missing %s", name))
+		}
+	}
+	if _, available := agentWorkspaceDurationOption(workspace.ManagerOptions{}, "CleanupTimeout"); !available {
+		return core.Fail(core.NewError("linked inference module hardened runtime is missing workspace CleanupTimeout"))
+	}
+	return core.Ok(receipt)
 }
 
 func (availability *agentAvailability) reason(feature agentFeature) string {
@@ -489,6 +606,9 @@ func (service *observedGitService) EnsureRepository(ctx context.Context, name st
 }
 
 func (factories agentBootstrapFactories) withDefaults() agentBootstrapFactories {
+	if factories.RuntimeContract == nil {
+		factories.RuntimeContract = linkedAgentRuntimeContract
+	}
 	if factories.LoadPolicy == nil {
 		factories.LoadPolicy = queue.LoadPolicy
 	}

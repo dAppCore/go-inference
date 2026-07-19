@@ -1018,7 +1018,21 @@ func (orchestrator *Orchestrator) startPreparingRun(preparation queuedPreparatio
 		preparedResult = orchestrator.workspaces.ReconstructRun(orchestrator.ctx, review.Project, run)
 	}
 	if !preparedResult.OK {
-		orchestrator.finishWithoutProcess(run, work.RunPreparing, workspace.RunWorkspace{}, preparedResult.Error())
+		reason := preparedResult.Error()
+		recoveryResult := orchestrator.workspaceRecovery(run.ID, "run")
+		if recoveryResult.OK && recoveryResult.Value != nil {
+			receipt := recoveryResult.Value.(workspace.RecoveryReceipt)
+			run.Branch = receipt.Branch
+			run.Worktree = receipt.Worktree
+			receiptJSON := core.JSONMarshalString(receipt)
+			reason = core.Join("; ", reason, core.Concat("workspace cleanup recovery: ", receiptJSON))
+			if persisted := orchestrator.persistCleanupRecovery(run, receipt, "workspace_cleanup_retained", true); !persisted.OK {
+				reason = core.Join("; ", reason, persisted.Error())
+			}
+		} else if !recoveryResult.OK {
+			reason = core.Join("; ", reason, recoveryResult.Error())
+		}
+		orchestrator.finishWithoutProcess(run, work.RunPreparing, workspace.RunWorkspace{}, reason)
 		return core.Ok(true)
 	}
 	prepared, ok := preparedResult.Value.(workspace.RunWorkspace)
@@ -1616,6 +1630,43 @@ func (orchestrator *Orchestrator) persistWorkspaceRetained(run work.Run, reason 
 			return
 		}
 	}
+}
+
+func (orchestrator *Orchestrator) workspaceRecovery(runID, kind string) core.Result {
+	result := orchestrator.workspaces.Recovery(runID)
+	if !result.OK {
+		return result
+	}
+	receipts, ok := result.Value.([]workspace.RecoveryReceipt)
+	if !ok {
+		return core.Fail(core.Errorf("agent workspace returned %T instead of recovery receipts", result.Value))
+	}
+	for _, receipt := range receipts {
+		if receipt.Kind == kind {
+			return core.Ok(receipt)
+		}
+	}
+	return core.Ok(nil)
+}
+
+func (orchestrator *Orchestrator) persistCleanupRecovery(run work.Run, receipt workspace.RecoveryReceipt, kind string, updateRun bool) core.Result {
+	receiptJSON := core.JSONMarshalString(receipt)
+	eventResult := orchestrator.newEvent(run, kind, "provisional workspace cleanup retained", receipt.Worktree)
+	if !eventResult.OK {
+		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), eventResult.Err()))
+	}
+	event := eventResult.Value.(work.Event)
+	event.DetailJSON = receiptJSON
+	commit := Commit{Event: &event}
+	if updateRun {
+		expected := run.Status
+		commit.Run = &run
+		commit.ExpectedStatus = &expected
+	}
+	if committed := commitStore(orchestrator.store, commit); !committed.OK {
+		return core.Fail(core.E("orchestrator.persistCleanupRecovery", core.Concat("cleanup recovery ", receiptJSON), committed.Err()))
+	}
+	return core.Ok(event)
 }
 
 func (orchestrator *Orchestrator) finishDrainingQueue() {

@@ -94,6 +94,30 @@ func TestAgentBootstrap_CheckModeDoesNotConstructNormalAgent(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultWorkspaceContext_UnhardenedRuntimeFailsBeforeStateMutation(t *testing.T) {
+	if contract := linkedAgentRuntimeContract(context.Background()); contract.OK {
+		t.Skip("linked inference module exposes the hardened runtime contract")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	result := loadDefaultWorkspaceContext(context.Background())
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "release/update")
+	if _, err := os.Stat(core.PathJoin(home, ".lem")); !os.IsNotExist(err) {
+		t.Fatalf("normal loader mutated ~/.lem before rejecting the linked runtime: %v", err)
+	}
+}
+
+func TestLoadDefaultCheckWorkspaceContext_BypassesNativeRuntimeContract(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	result := loadDefaultCheckWorkspaceContext(context.Background())
+	core.AssertTrue(t, result.OK, result.Error())
+	resources, ok := result.Value.(*workspaceResources)
+	core.AssertTrue(t, ok)
+	core.AssertTrue(t, resources.Close().OK)
+}
+
 func TestRunWithWorkspace_CheckIsReadOnlyAndClosesResources(t *testing.T) {
 	resources := openAppTestWorkspace(t)
 	databasePath := resources.Paths.Database

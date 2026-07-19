@@ -49,6 +49,26 @@ func ExampleNewManager() {
 	// Output: true
 }
 
+func ExampleRecoveryReceipt() {
+	receipt := RecoveryReceipt{Kind: "review", ReviewID: "review-1", Worktree: "/tmp/review-1"}
+	core.Println(receipt.Kind, receipt.ReviewID, receipt.Worktree)
+	// Output: review review-1 /tmp/review-1
+}
+
+func ExampleManager_Recovery() {
+	var manager *Manager
+	result := manager.Recovery("run-1")
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleManager_AbandonRecovery() {
+	var manager *Manager
+	result := manager.AbandonRecovery(context.Background(), RecoveryReceipt{})
+	core.Println(result.OK)
+	// Output: false
+}
+
 func ExampleManager_ReviewSource() {
 	var manager *Manager
 	result := manager.ReviewSource(context.Background(), "/tmp/project")

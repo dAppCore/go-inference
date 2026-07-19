@@ -319,6 +319,93 @@ func TestAgentStore_UglyRecoveryAndReopen(t *testing.T) {
 	}
 }
 
+type agentStoreCleanupRecoveryReceipt struct {
+	Kind           string
+	ProjectID      string
+	WorkID         string
+	RunID          string
+	RunNumber      int
+	WorkspaceRunID string
+	ReviewID       string
+	Branch         string
+	Worktree       string
+}
+
+type agentStoreCleanupRecoveryOutcome struct {
+	RecoveryEventID string
+	Receipt         agentStoreCleanupRecoveryReceipt
+	Error           string
+}
+
+func TestAgentStoreCleanupRecoveryReceiptsSurviveReopen(t *testing.T) {
+	root, repository, agentStore := openTestAgentStore(t)
+	at := time.Date(2026, time.July, 19, 12, 0, 0, 0, time.UTC)
+	project := testAgentProject(at)
+	run := testAgentRun("cleanup-recovery-run", work.RunPreparing, at)
+	workspaceRoot := core.PathJoin(root, "workspaces")
+	run.Branch = "lem/work/work-agent/run-1"
+	run.Worktree = core.PathJoin(workspaceRoot, project.ID, "runs", run.ID, "worktree")
+	runReceipt := agentStoreCleanupRecoveryReceipt{
+		Kind: "run", ProjectID: project.ID, WorkID: run.WorkID, RunID: run.ID,
+		RunNumber: run.Number, WorkspaceRunID: run.ID, Branch: run.Branch, Worktree: run.Worktree,
+	}
+	reviewReceipt := agentStoreCleanupRecoveryReceipt{
+		Kind: "review", ProjectID: project.ID, WorkID: run.WorkID, RunID: run.ID, ReviewID: "cleanup-review",
+		RunNumber: run.Number,
+		Branch:    "lem/integration/cleanup-recovery-run/cleanup-review",
+		Worktree:  core.PathJoin(workspaceRoot, project.ID, "reviews", run.ID, "cleanup-review", "worktree"),
+	}
+	runFailure := agentStoreCleanupRecoveryOutcome{RecoveryEventID: "cleanup-recovery-run-event", Receipt: runReceipt, Error: "worktree remove failed"}
+	reviewSuccess := agentStoreCleanupRecoveryOutcome{RecoveryEventID: "cleanup-recovery-review-event", Receipt: reviewReceipt}
+	events := []work.Event{
+		{ID: "cleanup-recovery-run-event", RunID: run.ID, WorkID: run.WorkID, Kind: "workspace_cleanup_retained", Title: "provisional workspace cleanup retained", Detail: runReceipt.Worktree, DetailJSON: core.JSONMarshalString(runReceipt), CreatedAt: at},
+		{ID: "cleanup-recovery-review-event", RunID: run.ID, WorkID: run.WorkID, Kind: "review_cleanup_retained", Title: "provisional workspace cleanup retained", Detail: reviewReceipt.Worktree, DetailJSON: core.JSONMarshalString(reviewReceipt), CreatedAt: at.Add(time.Second)},
+		{ID: "cleanup-recovery-run-failed", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_failed", Title: "retained cleanup failed", Detail: runReceipt.Worktree, DetailJSON: core.JSONMarshalString(runFailure), CreatedAt: at.Add(2 * time.Second)},
+		{ID: "cleanup-recovery-review-succeeded", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_succeeded", Title: "retained cleanup succeeded", Detail: reviewReceipt.Worktree, DetailJSON: core.JSONMarshalString(reviewSuccess), CreatedAt: at.Add(3 * time.Second)},
+	}
+	if result := agentStore.Commit(orchestrator.Commit{Project: &project, Run: &run, CreateRun: true, Event: &events[0]}); !result.OK {
+		t.Fatalf("commit run cleanup recovery: %s", result.Error())
+	}
+	for index := 1; index < len(events); index++ {
+		if result := agentStore.Commit(orchestrator.Commit{Event: &events[index]}); !result.OK {
+			t.Fatalf("commit cleanup recovery event %d: %s", index, result.Error())
+		}
+	}
+	if result := repository.Close(); !result.OK {
+		t.Fatalf("close repository: %s", result.Error())
+	}
+
+	reopenedResult := openDuckRepository(core.PathJoin(root, "lem.duckdb"))
+	core.AssertTrue(t, reopenedResult.OK, reopenedResult.Error())
+	reopened := reopenedResult.Value.(workspaceRepository)
+	defer closeTestDuckRepository(t, reopened)
+	reopenedStore := requireAgentValue[*duckAgentStore](t, "newDuckAgentStore reopened cleanup recovery", newDuckAgentStore(reopened))
+	snapshot := requireAgentValue[work.Snapshot](t, "reopened cleanup recovery Snapshot", reopenedStore.Snapshot(run.WorkID))
+	core.AssertEqual(t, 1, len(snapshot.Runs))
+	core.AssertEqual(t, run.Branch, snapshot.Runs[0].Branch)
+	core.AssertEqual(t, run.Worktree, snapshot.Runs[0].Worktree)
+
+	wantJSON := map[string]string{
+		"workspace_cleanup_retained": core.JSONMarshalString(runReceipt),
+		"review_cleanup_retained":    core.JSONMarshalString(reviewReceipt),
+		"cleanup_recovery_failed":    core.JSONMarshalString(runFailure),
+		"cleanup_recovery_succeeded": core.JSONMarshalString(reviewSuccess),
+	}
+	for _, event := range snapshot.Events {
+		want, exists := wantJSON[event.Kind]
+		if !exists {
+			continue
+		}
+		core.AssertEqual(t, want, event.DetailJSON)
+		delete(wantJSON, event.Kind)
+	}
+	core.AssertEqual(t, 0, len(wantJSON))
+	mapped := mapAgentSnapshot(snapshot)
+	core.AssertEqual(t, 1, len(mapped.Work))
+	core.AssertEqual(t, 1, mapped.Work[0].RecoveryCount)
+	core.AssertEqual(t, events[0].ID, mapped.Work[0].Recovery.EventID)
+}
+
 func TestAgentStore_ConcurrentWriterSerialization(t *testing.T) {
 	_, repository, agentStore := openTestAgentStore(t)
 	defer closeTestDuckRepository(t, repository)

@@ -14,37 +14,38 @@ const defaultAgentUnavailableReason = "agent capability not installed; the go/ag
 type agentFeature string
 
 const (
-	agentFeatureDispatch      agentFeature = "dispatch"
-	agentFeatureCancel        agentFeature = "cancel"
-	agentFeatureAnswer        agentFeature = "answer"
-	agentFeatureRetry         agentFeature = "retry"
-	agentFeatureResume        agentFeature = "resume"
-	agentFeatureQueueStart    agentFeature = "queue.start"
-	agentFeatureQueueStop     agentFeature = "queue.stop"
-	agentFeatureSetup         agentFeature = "setup"
-	agentFeatureProvider      agentFeature = "provider"
-	agentFeatureTemplate      agentFeature = "template"
-	agentFeaturePlan          agentFeature = "plan"
-	agentFeatureSession       agentFeature = "session"
-	agentFeatureHandoff       agentFeature = "handoff"
-	agentFeatureScan          agentFeature = "scan"
-	agentFeatureAudit         agentFeature = "audit"
-	agentFeaturePipeline      agentFeature = "pipeline"
-	agentFeatureMonitor       agentFeature = "monitor"
-	agentFeatureHarvest       agentFeature = "harvest"
-	agentFeatureBrainRecall   agentFeature = "brain.recall"
-	agentFeatureBrainRemember agentFeature = "brain.remember"
-	agentFeatureMessage       agentFeature = "message"
-	agentFeatureFleet         agentFeature = "fleet"
-	agentFeatureForge         agentFeature = "forge"
-	agentFeatureRemote        agentFeature = "remote"
-	agentFeatureQA            agentFeature = "qa"
-	agentFeatureReview        agentFeature = "review"
-	agentFeatureChangesReview agentFeature = "changes.review"
-	agentFeatureAccept        agentFeature = "accept"
-	agentFeatureReject        agentFeature = "reject"
-	agentFeaturePRCreate      agentFeature = "pr.create"
-	agentFeaturePRMerge       agentFeature = "pr.merge"
+	agentFeatureDispatch        agentFeature = "dispatch"
+	agentFeatureCancel          agentFeature = "cancel"
+	agentFeatureAnswer          agentFeature = "answer"
+	agentFeatureRetry           agentFeature = "retry"
+	agentFeatureResume          agentFeature = "resume"
+	agentFeatureRecoveryAbandon agentFeature = "recovery.abandon"
+	agentFeatureQueueStart      agentFeature = "queue.start"
+	agentFeatureQueueStop       agentFeature = "queue.stop"
+	agentFeatureSetup           agentFeature = "setup"
+	agentFeatureProvider        agentFeature = "provider"
+	agentFeatureTemplate        agentFeature = "template"
+	agentFeaturePlan            agentFeature = "plan"
+	agentFeatureSession         agentFeature = "session"
+	agentFeatureHandoff         agentFeature = "handoff"
+	agentFeatureScan            agentFeature = "scan"
+	agentFeatureAudit           agentFeature = "audit"
+	agentFeaturePipeline        agentFeature = "pipeline"
+	agentFeatureMonitor         agentFeature = "monitor"
+	agentFeatureHarvest         agentFeature = "harvest"
+	agentFeatureBrainRecall     agentFeature = "brain.recall"
+	agentFeatureBrainRemember   agentFeature = "brain.remember"
+	agentFeatureMessage         agentFeature = "message"
+	agentFeatureFleet           agentFeature = "fleet"
+	agentFeatureForge           agentFeature = "forge"
+	agentFeatureRemote          agentFeature = "remote"
+	agentFeatureQA              agentFeature = "qa"
+	agentFeatureReview          agentFeature = "review"
+	agentFeatureChangesReview   agentFeature = "changes.review"
+	agentFeatureAccept          agentFeature = "accept"
+	agentFeatureReject          agentFeature = "reject"
+	agentFeaturePRCreate        agentFeature = "pr.create"
+	agentFeaturePRMerge         agentFeature = "pr.merge"
 )
 
 type agentCapability struct {
@@ -54,24 +55,49 @@ type agentCapability struct {
 }
 
 type agentWorkSnapshot struct {
-	ExternalID   string
-	NativeRunID  string
-	QuestionID   string
-	AnswerID     string
-	ResumeRunID  string
-	QueueStatus  string
-	QueueReason  string
-	ReviewID     string
-	ReviewStatus string
-	Review       agentReview
-	Title        string
-	Status       string
-	Agent        string
-	Repo         string
-	Branch       string
-	Runtime      string
-	Question     string
-	PRURL        string
+	ExternalID    string
+	NativeRunID   string
+	QuestionID    string
+	AnswerID      string
+	ResumeRunID   string
+	QueueStatus   string
+	QueueReason   string
+	ReviewID      string
+	ReviewStatus  string
+	Review        agentReview
+	Title         string
+	Status        string
+	Agent         string
+	Repo          string
+	Branch        string
+	Runtime       string
+	Question      string
+	PRURL         string
+	Recovery      agentPendingRecovery
+	RecoveryCount int
+}
+
+type agentRecoveryReceipt struct {
+	Kind           string
+	ProjectID      string
+	WorkID         string
+	RunID          string
+	RunNumber      int
+	WorkspaceRunID string
+	ReviewID       string
+	Branch         string
+	Worktree       string
+}
+
+type agentPendingRecovery struct {
+	EventID string
+	Receipt agentRecoveryReceipt
+}
+
+type agentRecoveryOutcome struct {
+	RecoveryEventID string
+	Receipt         agentRecoveryReceipt
+	Error           string
 }
 
 type agentEventSnapshot struct {
@@ -103,6 +129,7 @@ type agentRequest struct {
 	Input      string
 	Work       agentWorkRequest
 	Review     agentReview
+	Recovery   agentPendingRecovery
 	Confirmed  bool
 	EnableGit  bool
 }
@@ -122,6 +149,7 @@ type agentReviewRequest struct {
 	Model    string
 	Input    string
 	Work     agentWorkRequest
+	Recovery agentPendingRecovery
 }
 
 type agentReview struct {
@@ -158,7 +186,7 @@ type agentFeatureGroup struct {
 }
 
 var agentFeatureGroups = []agentFeatureGroup{
-	{Title: "EXECUTION", Features: []agentFeature{agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry, agentFeatureResume}},
+	{Title: "EXECUTION", Features: []agentFeature{agentFeatureDispatch, agentFeatureCancel, agentFeatureAnswer, agentFeatureRetry, agentFeatureResume, agentFeatureRecoveryAbandon}},
 	{Title: "QUEUE + SETUP", Features: []agentFeature{agentFeatureQueueStart, agentFeatureQueueStop, agentFeatureSetup, agentFeatureProvider, agentFeatureTemplate}},
 	{Title: "PLANS + SESSIONS", Features: []agentFeature{agentFeaturePlan, agentFeatureSession, agentFeatureHandoff}},
 	{Title: "SCAN + MONITOR", Features: []agentFeature{agentFeatureScan, agentFeatureAudit, agentFeaturePipeline, agentFeatureMonitor, agentFeatureHarvest}},
@@ -168,7 +196,7 @@ var agentFeatureGroups = []agentFeatureGroup{
 }
 
 func agentFeatureCatalog(reason string) []agentCapability {
-	catalog := make([]agentCapability, 0, 31)
+	catalog := make([]agentCapability, 0, 32)
 	for _, group := range agentFeatureGroups {
 		for _, feature := range group.Features {
 			catalog = append(catalog, agentCapability{Feature: feature, Reason: reason})
@@ -193,6 +221,8 @@ func agentFeatureTitle(feature agentFeature) string {
 		return "Merge pull request"
 	case agentFeatureChangesReview:
 		return "Review changes"
+	case agentFeatureRecoveryAbandon:
+		return "Abandon retained recovery"
 	case agentFeatureQA:
 		return "Run QA"
 	default:

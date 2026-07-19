@@ -1370,6 +1370,43 @@ func TestRunOrchestratorCloseBoundsCaptureAndRetainsRecoveryReceipt(t *testing.T
 	core.AssertTrue(t, core.Stat(running.Worktree).OK)
 }
 
+func TestRunOrchestratorPreparationCleanupFailurePersistsRecoveryIdentity(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	worktreePath := core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", run.ID, "worktree")
+	fixture.git.setFailure(func(command workspace.Command) bool {
+		if command.Dir == worktreePath && orchestratorWorkspaceCommandHasArgument(command, "HEAD") {
+			return true
+		}
+		return orchestratorWorkspaceCommandHasArgument(command, "worktree") &&
+			(orchestratorWorkspaceCommandHasArgument(command, "remove") || orchestratorWorkspaceCommandHasArgument(command, "list"))
+	})
+
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	failed := orchestratorWaitRunStatus(t, fixture.store, run.ID, work.RunFailed)
+	core.AssertTrue(t, failed.Branch != "")
+	core.AssertEqual(t, worktreePath, failed.Worktree)
+	core.AssertContains(t, failed.FailureReason, worktreePath)
+	found := false
+	fixture.store.mu.Lock()
+	for _, event := range fixture.store.events {
+		if event.RunID != run.ID || event.Kind != "workspace_cleanup_retained" {
+			continue
+		}
+		var receipt workspace.RecoveryReceipt
+		decoded := core.JSONUnmarshalString(event.DetailJSON, &receipt)
+		core.AssertTrue(t, decoded.OK, decoded.Error())
+		core.AssertEqual(t, "run", receipt.Kind)
+		core.AssertEqual(t, run.ID, receipt.RunID)
+		core.AssertEqual(t, failed.Branch, receipt.Branch)
+		core.AssertEqual(t, failed.Worktree, receipt.Worktree)
+		found = true
+	}
+	fixture.store.mu.Unlock()
+	core.AssertTrue(t, found)
+}
+
 func TestRun_Orchestrator_StartQueue_Bad(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.StartQueue(nil).OK)

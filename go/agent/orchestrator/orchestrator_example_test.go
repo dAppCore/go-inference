@@ -15,16 +15,29 @@ func ExampleNew() {
 	// Output: false
 }
 
+func ExampleOptions_HardenedRuntimeContract() {
+	result := (Options{}).HardenedRuntimeContract(context.Background())
+	core.Println(result.OK)
+	// Output: true
+}
+
 func ExampleOrchestrator_Capabilities() {
 	var orchestrator *Orchestrator
 	capabilities := orchestrator.Capabilities()
 	core.Println(len(capabilities), capabilities[0].Available)
-	// Output: 10 false
+	// Output: 11 false
 }
 
 func ExampleOrchestrator_Snapshot() {
 	var orchestrator *Orchestrator
 	result := orchestrator.Snapshot(context.Background(), "work-1")
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleOrchestrator_AbandonRecovery() {
+	var orchestrator *Orchestrator
+	result := orchestrator.AbandonRecovery(context.Background(), "run-1", "recovery-event-1")
 	core.Println(result.OK)
 	// Output: false
 }

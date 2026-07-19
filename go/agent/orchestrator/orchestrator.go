@@ -17,10 +17,11 @@ import (
 )
 
 const (
-	defaultLogBatchBytes  = 32 * 1024
-	defaultLogBatchDelay  = 250 * time.Millisecond
-	defaultAttemptTimeout = 60 * time.Minute
-	defaultCleanupTimeout = 5 * time.Second
+	defaultLogBatchBytes    = 32 * 1024
+	defaultLogBatchDelay    = 250 * time.Millisecond
+	defaultAttemptTimeout   = 60 * time.Minute
+	defaultCleanupTimeout   = 5 * time.Second
+	hardenedRuntimeContract = "go-inference/native-runtime/v1;softserve-fail-closed;bounded-cleanup;attempt-timeout;reviewed-retry-resume"
 )
 
 // Options supplies every durable and native dependency owned by an Orchestrator.
@@ -39,12 +40,29 @@ type Options struct {
 	CleanupTimeout time.Duration
 }
 
+// HardenedRuntimeContract identifies the fail-closed native runtime guarantees linked into this module.
+func (Options) HardenedRuntimeContract(ctx context.Context) core.Result {
+	if ctx == nil {
+		return core.Fail(core.NewError("agent hardened runtime contract context is required"))
+	}
+	if err := ctx.Err(); err != nil {
+		return core.Fail(core.E("orchestrator.Options.HardenedRuntimeContract", "contract context is done", err))
+	}
+	return core.Ok(hardenedRuntimeContract)
+}
+
 // ProjectReview is a mutation-free source review awaiting registration consent.
 type ProjectReview struct {
 	Work              work.Item
 	Source            workspace.SourceReview
 	RepositoryName    string
 	RequiresGitEnable bool
+}
+
+type cleanupRecoveryOutcome struct {
+	RecoveryEventID string
+	Receipt         workspace.RecoveryReceipt
+	Error           string
 }
 
 // DispatchReview is the exact source, provider, command, and queue review awaiting dispatch consent.
@@ -190,6 +208,7 @@ func (orchestrator *Orchestrator) Capabilities() []work.Capability {
 		{Name: "changes.review", Available: !closed, Reason: reason},
 		{Name: "accept", Available: !closed, Reason: reason},
 		{Name: "reject", Available: !closed, Reason: reason},
+		{Name: "recovery.abandon", Available: !closed, Reason: reason},
 	}
 	return capabilities
 }
@@ -213,6 +232,270 @@ func (orchestrator *Orchestrator) Snapshot(ctx context.Context, workID string) c
 		return core.Fail(core.Errorf("agent store returned %T instead of snapshot", result.Value))
 	}
 	return core.Ok(cloneSnapshot(snapshot))
+}
+
+// AbandonRecovery explicitly retries verified cleanup for one exact durable recovery event.
+func (orchestrator *Orchestrator) AbandonRecovery(ctx context.Context, runID, recoveryEventID string) core.Result {
+	if orchestrator == nil {
+		return core.Fail(core.NewError("agent orchestrator is required"))
+	}
+	orchestrator.lifecycle.RLock()
+	defer orchestrator.lifecycle.RUnlock()
+	if contextResult := validateContext(ctx, "recovery abandonment"); !contextResult.OK {
+		return contextResult
+	}
+	if orchestrator.isClosed() {
+		return core.Fail(core.NewError("agent orchestrator is closed"))
+	}
+	runID = core.Trim(runID)
+	recoveryEventID = core.Trim(recoveryEventID)
+	if runID == "" || recoveryEventID == "" {
+		return core.Fail(core.NewError("agent recovery abandonment requires run and recovery event IDs"))
+	}
+
+	orchestrator.decisionMu.Lock()
+	defer orchestrator.decisionMu.Unlock()
+	runResult := orchestrator.store.Run(runID)
+	if !runResult.OK {
+		return runResult
+	}
+	run, ok := runResult.Value.(work.Run)
+	if !ok {
+		return core.Fail(core.Errorf("agent store returned %T instead of run", runResult.Value))
+	}
+	if run.ID != runID {
+		return core.Fail(core.NewError("agent store returned a different recovery run identity"))
+	}
+	switch run.Status {
+	case work.RunCancelled, work.RunFailed, work.RunCompleted, work.RunInterrupted, work.RunAccepted, work.RunRejected:
+	default:
+		return core.Fail(core.NewError("agent cleanup recovery requires a terminal durable run before workspace mutation"))
+	}
+	snapshotResult := orchestrator.store.Snapshot(run.WorkID)
+	if !snapshotResult.OK {
+		return snapshotResult
+	}
+	snapshot, ok := snapshotResult.Value.(work.Snapshot)
+	if !ok {
+		return core.Fail(core.Errorf("agent store returned %T instead of snapshot", snapshotResult.Value))
+	}
+	retainedResult := cleanupRecoveryEvent(snapshot.Events, run, recoveryEventID)
+	if !retainedResult.OK {
+		return retainedResult
+	}
+	retained := retainedResult.Value.(work.Event)
+	var receipt workspace.RecoveryReceipt
+	if decoded := core.JSONUnmarshalString(retained.DetailJSON, &receipt); !decoded.OK {
+		return core.Fail(core.E("orchestrator.Orchestrator.AbandonRecovery", "durable cleanup recovery receipt is invalid", decoded.Err()))
+	}
+	if validated := validateCleanupRecoveryIdentity(snapshot, run, retained, receipt); !validated.OK {
+		return orchestrator.recordCleanupRecoveryFailure(run, retained.ID, receipt, validated)
+	}
+	terminalResult := terminalCleanupRecovery(snapshot.Events, run, retained.ID, receipt)
+	if !terminalResult.OK {
+		return orchestrator.recordCleanupRecoveryFailure(run, retained.ID, receipt, terminalResult)
+	}
+	if terminalResult.Value != nil {
+		if receipt.Kind == "run" && (run.Branch != "" || run.Worktree != "") {
+			return core.Fail(core.NewError("agent cleanup recovery success did not clear the durable run workspace projection"))
+		}
+		return core.Ok(terminalResult.Value.(work.Event))
+	}
+	if validated := validatePendingCleanupRecovery(snapshot.Runs, run, receipt); !validated.OK {
+		return orchestrator.recordCleanupRecoveryFailure(run, retained.ID, receipt, validated)
+	}
+
+	cleaned := orchestrator.workspaces.AbandonRecovery(ctx, receipt)
+	if !cleaned.OK {
+		return orchestrator.recordCleanupRecoveryFailure(run, retained.ID, receipt, cleaned)
+	}
+	return orchestrator.persistCleanupRecoveryOutcome(run, retained.ID, receipt, "")
+}
+
+func cleanupRecoveryEvent(events []work.Event, run work.Run, recoveryEventID string) core.Result {
+	var retained *work.Event
+	for index := range events {
+		event := events[index]
+		if event.ID != recoveryEventID {
+			continue
+		}
+		if retained != nil {
+			return core.Fail(core.NewError("agent cleanup recovery event identity is duplicated"))
+		}
+		retained = &event
+	}
+	if retained == nil {
+		return core.Fail(core.NewError("agent cleanup recovery event was not found"))
+	}
+	if retained.RunID != run.ID || retained.WorkID != run.WorkID ||
+		(retained.Kind != "workspace_cleanup_retained" && retained.Kind != "review_cleanup_retained") {
+		return core.Fail(core.NewError("agent cleanup recovery event does not belong to the requested run"))
+	}
+	return core.Ok(*retained)
+}
+
+func validateCleanupRecoveryIdentity(snapshot work.Snapshot, run work.Run, retained work.Event, receipt workspace.RecoveryReceipt) core.Result {
+	expectedKind := "run"
+	if retained.Kind == "review_cleanup_retained" {
+		expectedKind = "review"
+	}
+	if receipt.Kind != expectedKind || receipt.ProjectID != run.ProjectID || receipt.WorkID != run.WorkID ||
+		receipt.RunID != run.ID || receipt.RunNumber != run.Number || retained.Detail != receipt.Worktree {
+		return core.Fail(core.NewError("agent cleanup recovery receipt differs from its durable event or run"))
+	}
+	if receipt.Kind == "review" {
+		if receipt.WorkspaceRunID != "" {
+			return core.Fail(core.NewError("agent cleanup recovery review cannot name a run workspace lineage"))
+		}
+	} else if receipt.ReviewID != "" {
+		return core.Fail(core.NewError("agent cleanup recovery run cannot name a review"))
+	}
+	for _, snapshotRun := range snapshot.Runs {
+		if snapshotRun.ID == run.ID {
+			if snapshotRun != run {
+				return core.Fail(core.NewError("agent cleanup recovery run differs from its durable snapshot"))
+			}
+			return core.Ok(nil)
+		}
+	}
+	return core.Fail(core.NewError("agent cleanup recovery run is missing from its durable snapshot"))
+}
+
+func validatePendingCleanupRecovery(runs []work.Run, run work.Run, receipt workspace.RecoveryReceipt) core.Result {
+	if receipt.Kind == "review" {
+		return core.Ok(nil)
+	}
+	if run.Branch != receipt.Branch || run.Worktree != receipt.Worktree {
+		return core.Fail(core.NewError("agent cleanup recovery run differs from its durable workspace lineage"))
+	}
+	return validateCleanupRecoveryLineage(runs, run, receipt)
+}
+
+func validateCleanupRecoveryLineage(runs []work.Run, run work.Run, receipt workspace.RecoveryReceipt) core.Result {
+	byID := make(map[string]work.Run, len(runs))
+	for _, candidate := range runs {
+		if _, exists := byID[candidate.ID]; exists {
+			return core.Fail(core.NewError("agent cleanup recovery durable run lineage contains duplicate IDs"))
+		}
+		byID[candidate.ID] = candidate
+	}
+	snapshotRun, exists := byID[run.ID]
+	if !exists || snapshotRun != run {
+		return core.Fail(core.NewError("agent cleanup recovery run differs from its durable snapshot"))
+	}
+	visited := make(map[string]bool)
+	current := run
+	for {
+		if current.ID == "" || visited[current.ID] {
+			return core.Fail(core.NewError("agent cleanup recovery durable run lineage is cyclic"))
+		}
+		visited[current.ID] = true
+		if current.ProjectID != receipt.ProjectID || current.WorkID != receipt.WorkID || current.Number != receipt.RunNumber ||
+			current.Branch != receipt.Branch || current.Worktree != receipt.Worktree {
+			return core.Fail(core.NewError("agent cleanup recovery durable run lineage differs from the receipt"))
+		}
+		if current.ParentRunID == "" {
+			if current.ID != receipt.WorkspaceRunID {
+				return core.Fail(core.NewError("agent cleanup recovery durable run lineage root differs from the workspace owner"))
+			}
+			return core.Ok(nil)
+		}
+		parent, exists := byID[current.ParentRunID]
+		if !exists {
+			return core.Fail(core.NewError("agent cleanup recovery durable run lineage is incomplete"))
+		}
+		current = parent
+	}
+}
+
+func terminalCleanupRecovery(events []work.Event, run work.Run, recoveryEventID string, receipt workspace.RecoveryReceipt) core.Result {
+	var terminal *work.Event
+	for _, event := range events {
+		if event.Kind != "cleanup_recovery_succeeded" && event.Kind != "cleanup_recovery_failed" {
+			continue
+		}
+		var outcome cleanupRecoveryOutcome
+		decoded := core.JSONUnmarshalString(event.DetailJSON, &outcome)
+		if !decoded.OK {
+			if event.RunID == run.ID && event.WorkID == run.WorkID && event.Detail == receipt.Worktree {
+				return core.Fail(core.E("orchestrator.terminalCleanupRecovery", "agent cleanup recovery outcome is invalid", decoded.Err()))
+			}
+			continue
+		}
+		if outcome.RecoveryEventID != recoveryEventID {
+			continue
+		}
+		if event.RunID != run.ID || event.WorkID != run.WorkID || event.Detail != receipt.Worktree ||
+			!sameCleanupRecoveryReceipt(outcome.Receipt, receipt) {
+			return core.Fail(core.NewError("agent cleanup recovery outcome differs from its durable receipt"))
+		}
+		if event.Kind == "cleanup_recovery_succeeded" {
+			if outcome.Error != "" {
+				return core.Fail(core.NewError("agent cleanup recovery success outcome contains a failure"))
+			}
+			if terminal == nil {
+				copy := event
+				terminal = &copy
+			}
+			continue
+		}
+		if core.Trim(outcome.Error) == "" {
+			return core.Fail(core.NewError("agent cleanup recovery failure outcome has no error"))
+		}
+	}
+	if terminal != nil {
+		return core.Ok(*terminal)
+	}
+	return core.Ok(nil)
+}
+
+func sameCleanupRecoveryReceipt(left, right workspace.RecoveryReceipt) bool {
+	return left.Kind == right.Kind && left.ProjectID == right.ProjectID && left.WorkID == right.WorkID &&
+		left.RunID == right.RunID && left.RunNumber == right.RunNumber && left.WorkspaceRunID == right.WorkspaceRunID &&
+		left.ReviewID == right.ReviewID && left.Branch == right.Branch && left.Worktree == right.Worktree
+}
+
+func (orchestrator *Orchestrator) recordCleanupRecoveryFailure(run work.Run, recoveryEventID string, receipt workspace.RecoveryReceipt, failure core.Result) core.Result {
+	persisted := orchestrator.persistCleanupRecoveryOutcome(run, recoveryEventID, receipt, failure.Error())
+	if persisted.OK {
+		return failure
+	}
+	return core.Fail(core.E(
+		"orchestrator.Orchestrator.AbandonRecovery",
+		core.Concat(failure.Error(), "; cleanup recovery audit failed for exact receipt ", core.JSONMarshalString(receipt)),
+		persisted.Err(),
+	))
+}
+
+func (orchestrator *Orchestrator) persistCleanupRecoveryOutcome(run work.Run, recoveryEventID string, receipt workspace.RecoveryReceipt, failure string) core.Result {
+	kind := "cleanup_recovery_succeeded"
+	title := "cleanup recovery succeeded"
+	if core.Trim(failure) != "" {
+		kind = "cleanup_recovery_failed"
+		title = "cleanup recovery failed"
+	}
+	receiptJSON := core.JSONMarshalString(receipt)
+	eventResult := orchestrator.newEvent(run, kind, title, receipt.Worktree)
+	if !eventResult.OK {
+		return core.Fail(core.E("orchestrator.persistCleanupRecoveryOutcome", core.Concat("cleanup recovery audit failed for exact receipt ", receiptJSON), eventResult.Err()))
+	}
+	event := eventResult.Value.(work.Event)
+	event.DetailJSON = core.JSONMarshalString(cleanupRecoveryOutcome{
+		RecoveryEventID: recoveryEventID, Receipt: receipt, Error: core.Trim(failure),
+	})
+	commit := Commit{Event: &event}
+	if kind == "cleanup_recovery_succeeded" && receipt.Kind == "run" {
+		cleared := run
+		cleared.Branch = ""
+		cleared.Worktree = ""
+		expected := run.Status
+		commit.Run = &cleared
+		commit.ExpectedStatus = &expected
+	}
+	if committed := commitStore(orchestrator.store, commit); !committed.OK {
+		return core.Fail(core.E("orchestrator.persistCleanupRecoveryOutcome", core.Concat("cleanup recovery audit failed for exact receipt ", receiptJSON), committed.Err()))
+	}
+	return core.Ok(event)
 }
 
 // ReviewProject inspects a Work source without changing Git, the source, or durable state.

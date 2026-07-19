@@ -553,6 +553,10 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 		request.WorkID = selected.ID
 		state := a.work.AgentState(selected)
 		request.RunID, request.QuestionID = state.NativeRunID, state.QuestionID
+		if feature == agentFeatureRecoveryAbandon {
+			request.Recovery = state.Recovery
+			request.RunID = state.Recovery.Receipt.RunID
+		}
 		if feature == agentFeatureResume {
 			request.Input = state.AnswerID
 			request.Provider, request.Model = state.Agent, state.Runtime
@@ -573,7 +577,7 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 		a.activeOverlay = overlayChangeReview
 		return core.Ok(nil)
 	}
-	if feature == agentFeatureDispatch || feature == agentFeatureRetry || feature == agentFeatureResume || feature == agentFeatureChangesReview {
+	if feature == agentFeatureDispatch || feature == agentFeatureRetry || feature == agentFeatureResume || feature == agentFeatureChangesReview || feature == agentFeatureRecoveryAbandon {
 		if feature == agentFeatureDispatch {
 			a.agentStage = agentReviewProject
 			a.launchReview = newAgentSelectionOverlay(request.Provider, request.Model)
@@ -630,7 +634,7 @@ func (a *app) agentReviewCommand(operationID uint64, request agentRequest, stage
 		}
 		result := a.agent.Review(a.lifecycle.context, agentReviewRequest{
 			Feature: request.Feature, WorkID: workID, Provider: request.Provider,
-			Model: request.Model, Input: request.Input, Work: request.Work,
+			Model: request.Model, Input: request.Input, Work: request.Work, Recovery: request.Recovery,
 		})
 		return agentActionMsg{operationID: operationID, feature: request.Feature, stage: stage, request: request, result: result}
 	}

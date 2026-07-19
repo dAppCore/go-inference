@@ -156,6 +156,26 @@ func TestCommandPaletteAnsweredWaitingDisablesAnswerAndEnablesResume(t *testing.
 	}
 }
 
+func TestCommandPaletteRecoveryAbandonRequiresPendingReceipt(t *testing.T) {
+	capabilities := []agentCapability{{Feature: agentFeatureRecoveryAbandon, Available: true}}
+	selected := workItemRecord{ID: "work-1", Status: workStatusFailed}
+	palette := newCommandPalette(newUIStyles(midnightTheme()))
+	palette.SetAgentContext(capabilities, &selected, agentWorkSnapshot{NativeRunID: "attempt-9"})
+	command := palette.byID[agentCommandID(agentFeatureRecoveryAbandon)]
+	if command.Available || !strings.Contains(command.Reason, "retained recovery") {
+		t.Fatalf("recovery action without receipt = %#v", command)
+	}
+
+	state := agentWorkSnapshot{Recovery: agentPendingRecovery{EventID: "recovery-event-9", Receipt: agentRecoveryReceipt{
+		Kind: "run", WorkID: selected.ID, RunID: "attempt-9", RunNumber: 9, WorkspaceRunID: "lineage-root",
+	}}}
+	palette.SetAgentContext(capabilities, &selected, state)
+	command = palette.byID[agentCommandID(agentFeatureRecoveryAbandon)]
+	if !command.Available {
+		t.Fatalf("recovery action with receipt = %#v", command)
+	}
+}
+
 func TestCommandPalette_AgentNativeRunAndReviewState(t *testing.T) {
 	caps := []agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureChangesReview, Available: true}, {Feature: agentFeatureAccept, Available: true}, {Feature: agentFeatureReject, Available: true}}
 	selected := workItemRecord{ID: "local", Status: "completed"}

@@ -110,6 +110,120 @@ func TestAgentAdapterSnapshotMapsAnsweredWaitingResumeIdentity(t *testing.T) {
 	core.AssertEqual(t, projection.ResumeRunID, mapped.Work[0].ResumeRunID)
 }
 
+func TestAgentAdapterSnapshotMapsRetainedCleanupRecovery(t *testing.T) {
+	at := time.Date(2026, time.July, 19, 13, 0, 0, 0, time.UTC)
+	receipt := agentRecoveryReceipt{
+		Kind: "run", ProjectID: "project-1", WorkID: "work-1", RunID: "attempt-7",
+		RunNumber: 7, WorkspaceRunID: "lineage-root", Branch: "lem/work/work-1/run-7",
+		Worktree: "/private/workspaces/project-1/runs/lineage-root/worktree",
+	}
+	adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{
+		Runs: []work.Run{{ID: receipt.RunID, WorkID: receipt.WorkID, ProjectID: receipt.ProjectID, Number: receipt.RunNumber, Status: work.RunFailed}},
+		Events: []work.Event{{
+			ID: "recovery-event-1", RunID: receipt.RunID, WorkID: receipt.WorkID,
+			Kind: "workspace_cleanup_retained", Detail: receipt.Worktree,
+			DetailJSON: core.JSONMarshalString(receipt), CreatedAt: at,
+		}},
+	}})
+
+	result := adapter.Snapshot(context.Background())
+	core.AssertTrue(t, result.OK, result.Error())
+	snapshot := result.Value.(agentSnapshot)
+	core.AssertEqual(t, 1, len(snapshot.Work))
+	core.AssertEqual(t, 1, snapshot.Work[0].RecoveryCount)
+	core.AssertEqual(t, "recovery-event-1", snapshot.Work[0].Recovery.EventID)
+	core.AssertEqual(t, receipt, snapshot.Work[0].Recovery.Receipt)
+}
+
+func TestAgentAdapterSnapshotFoldsCleanupRecoveryOutcomes(t *testing.T) {
+	at := time.Date(2026, time.July, 19, 13, 30, 0, 0, time.UTC)
+	receipt := agentRecoveryReceipt{
+		Kind: "review", ProjectID: "project-1", WorkID: "work-1", RunID: "attempt-8",
+		RunNumber: 8, ReviewID: "review-2",
+		Branch:   "lem/integration/attempt-8/review-2",
+		Worktree: "/private/workspaces/project-1/reviews/lineage-root/review-2/worktree",
+	}
+	retained := work.Event{
+		ID: "recovery-event-2", RunID: receipt.RunID, WorkID: receipt.WorkID,
+		Kind: "review_cleanup_retained", Detail: receipt.Worktree,
+		DetailJSON: core.JSONMarshalString(receipt), CreatedAt: at,
+	}
+	for _, test := range []struct {
+		name      string
+		kind      string
+		wantCount int
+	}{{name: "failed remains pending", kind: "cleanup_recovery_failed", wantCount: 1}, {name: "succeeded resolves pending", kind: "cleanup_recovery_succeeded", wantCount: 0}} {
+		t.Run(test.name, func(t *testing.T) {
+			outcome := agentRecoveryOutcome{RecoveryEventID: retained.ID, Receipt: receipt}
+			if test.kind == "cleanup_recovery_failed" {
+				outcome.Error = "worktree remove failed"
+			}
+			adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{
+				Runs: []work.Run{{ID: receipt.RunID, WorkID: receipt.WorkID, ProjectID: receipt.ProjectID, Number: receipt.RunNumber, Status: work.RunCompleted}},
+				Events: []work.Event{retained, {
+					ID: "recovery-outcome-2", RunID: receipt.RunID, WorkID: receipt.WorkID,
+					Kind: test.kind, Detail: receipt.Worktree,
+					DetailJSON: core.JSONMarshalString(outcome), CreatedAt: at.Add(time.Second),
+				}},
+			}})
+
+			result := adapter.Snapshot(context.Background())
+			core.AssertTrue(t, result.OK, result.Error())
+			state := result.Value.(agentSnapshot).Work[0]
+			core.AssertEqual(t, test.wantCount, state.RecoveryCount)
+			if test.wantCount == 0 {
+				core.AssertEqual(t, "", state.Recovery.EventID)
+			} else {
+				core.AssertEqual(t, retained.ID, state.Recovery.EventID)
+			}
+		})
+	}
+}
+
+func TestAgentAdapterRecoveryAbandonRequiresReviewedConfirmation(t *testing.T) {
+	recovery := agentPendingRecovery{EventID: "recovery-event-9", Receipt: agentRecoveryReceipt{
+		Kind: "run", ProjectID: "project-1", WorkID: "work-1", RunID: "attempt-9",
+		RunNumber: 9, WorkspaceRunID: "lineage-root", Branch: "lem/work/work-1/run-9",
+		Worktree: "/private/workspaces/project-1/runs/lineage-root/worktree",
+	}}
+	engine := &fixtureNativeAgentEngine{capabilities: []work.Capability{{Name: "recovery.abandon", Available: true}}}
+	adapter := requireAgentAdapter(t, engine)
+
+	reviewed := adapter.Review(context.Background(), agentReviewRequest{Feature: agentFeatureRecoveryAbandon, WorkID: recovery.Receipt.WorkID, Recovery: recovery})
+	core.AssertTrue(t, reviewed.OK, reviewed.Error())
+	review := reviewed.Value.(agentReview)
+	core.AssertTrue(t, review.ConfirmRequired)
+	for _, want := range []string{recovery.EventID, recovery.Receipt.RunID, recovery.Receipt.Branch, recovery.Receipt.Worktree} {
+		core.AssertContains(t, review.Body, want)
+	}
+
+	unconfirmed := adapter.Run(context.Background(), agentRequest{Feature: agentFeatureRecoveryAbandon, WorkID: recovery.Receipt.WorkID, RunID: recovery.Receipt.RunID, Recovery: recovery, Review: review})
+	core.AssertFalse(t, unconfirmed.OK)
+	core.AssertEqual(t, 0, engine.abandonRecoveryCalls)
+
+	confirmed := adapter.Run(context.Background(), agentRequest{Feature: agentFeatureRecoveryAbandon, WorkID: recovery.Receipt.WorkID, RunID: recovery.Receipt.RunID, Recovery: recovery, Review: review, Confirmed: true})
+	core.AssertTrue(t, confirmed.OK, confirmed.Error())
+	receipt := confirmed.Value.(agentActionReceipt)
+	core.AssertEqual(t, agentFeatureRecoveryAbandon, receipt.Feature)
+	core.AssertEqual(t, recovery.Receipt.RunID, engine.abandonRecoveryRunID)
+	core.AssertEqual(t, recovery.EventID, engine.abandonRecoveryEventID)
+	core.AssertEqual(t, 1, engine.abandonRecoveryCalls)
+}
+
+func TestAgentAdapterRecoveryCapabilityRequiresOptionalEngine(t *testing.T) {
+	base := &fixtureNativeAgentEngine{capabilities: []work.Capability{{Name: "recovery.abandon", Available: true}}}
+	adapter := requireAgentAdapter(t, &nativeEngineWithoutRecovery{nativeAgentEngine: base})
+	for _, capability := range adapter.Capabilities() {
+		if capability.Feature != agentFeatureRecoveryAbandon {
+			continue
+		}
+		core.AssertFalse(t, capability.Available)
+		core.AssertContains(t, capability.Reason, "does not support retained recovery cleanup")
+		return
+	}
+	t.Fatal("recovery.abandon capability is missing")
+}
+
 func TestAgentAdapter_SnapshotProjectWithoutRunDoesNotCreateWork(t *testing.T) {
 	adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{Projects: []work.Project{{ID: "project-only", RepositoryName: "private-project"}}}})
 	result := adapter.Snapshot(context.Background())
@@ -736,35 +850,40 @@ func requireAgentAdapter(t *testing.T, engine nativeAgentEngine) agentProvider {
 	return result.Value.(agentProvider)
 }
 
+type nativeEngineWithoutRecovery struct{ nativeAgentEngine }
+
 type fixtureNativeAgentEngine struct {
-	capabilities        []work.Capability
-	snapshot            work.Snapshot
-	projectReview       orchestrator.ProjectReview
-	registeredProject   work.Project
-	dispatchReview      orchestrator.DispatchReview
-	changeReview        workspace.ChangeReview
-	snapshotWorkID      string
-	reviewedProject     work.Item
-	registeredReview    orchestrator.ProjectReview
-	registerProject     func(context.Context, orchestrator.ProjectReview, bool) core.Result
-	reviewedDispatch    work.DispatchRequest
-	dispatchedReview    orchestrator.DispatchReview
-	cancelRunID         string
-	answerRunID         string
-	answerText          string
-	retryItem           work.Item
-	retryParent         string
-	resumeRequest       work.ResumeRequest
-	reviewChangesRunID  string
-	acceptRequest       workspace.AcceptRequest
-	rejectRunID         string
-	calls               []string
-	registerCalls       int
-	registerConfirmed   bool
-	reviewDispatchCalls int
-	dispatchCalls       int
-	closeCalls          int
-	closeFailures       int
+	capabilities           []work.Capability
+	snapshot               work.Snapshot
+	projectReview          orchestrator.ProjectReview
+	registeredProject      work.Project
+	dispatchReview         orchestrator.DispatchReview
+	changeReview           workspace.ChangeReview
+	snapshotWorkID         string
+	reviewedProject        work.Item
+	registeredReview       orchestrator.ProjectReview
+	registerProject        func(context.Context, orchestrator.ProjectReview, bool) core.Result
+	reviewedDispatch       work.DispatchRequest
+	dispatchedReview       orchestrator.DispatchReview
+	cancelRunID            string
+	answerRunID            string
+	answerText             string
+	retryItem              work.Item
+	retryParent            string
+	resumeRequest          work.ResumeRequest
+	reviewChangesRunID     string
+	acceptRequest          workspace.AcceptRequest
+	rejectRunID            string
+	calls                  []string
+	registerCalls          int
+	registerConfirmed      bool
+	reviewDispatchCalls    int
+	dispatchCalls          int
+	closeCalls             int
+	closeFailures          int
+	abandonRecoveryRunID   string
+	abandonRecoveryEventID string
+	abandonRecoveryCalls   int
 }
 
 func (engine *fixtureNativeAgentEngine) Capabilities() []work.Capability {
@@ -891,6 +1010,14 @@ func (engine *fixtureNativeAgentEngine) Reject(_ context.Context, runID string) 
 	engine.calls = append(engine.calls, "reject")
 	engine.rejectRunID = runID
 	return core.Ok(work.Acceptance{ID: "reject-1", WorkID: "work-1", RunID: "run-1", Status: "rejected"})
+}
+
+func (engine *fixtureNativeAgentEngine) AbandonRecovery(_ context.Context, runID, eventID string) core.Result {
+	engine.calls = append(engine.calls, "recovery.abandon")
+	engine.abandonRecoveryRunID = runID
+	engine.abandonRecoveryEventID = eventID
+	engine.abandonRecoveryCalls++
+	return core.Ok(work.Event{ID: "cleanup-success", RunID: runID, Kind: "cleanup_recovery_succeeded"})
 }
 
 func (engine *fixtureNativeAgentEngine) Close() core.Result {

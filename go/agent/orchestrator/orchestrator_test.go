@@ -966,6 +966,26 @@ func TestOrchestrator_New_Ugly(t *testing.T) {
 	core.AssertFalse(t, New(options).OK)
 }
 
+func TestOrchestrator_Options_HardenedRuntimeContract_Good(t *testing.T) {
+	result := (Options{}).HardenedRuntimeContract(context.Background())
+	core.AssertTrue(t, result.OK, result.Error())
+	core.AssertEqual(t, "go-inference/native-runtime/v1;softserve-fail-closed;bounded-cleanup;attempt-timeout;reviewed-retry-resume", result.Value.(string))
+}
+
+func TestOrchestrator_Options_HardenedRuntimeContract_Bad(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := (Options{}).HardenedRuntimeContract(ctx)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "context is done")
+}
+
+func TestOrchestrator_Options_HardenedRuntimeContract_Ugly(t *testing.T) {
+	result := (Options{}).HardenedRuntimeContract(nil)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "context is required")
+}
+
 func TestOrchestratorRecoveryInterruptsUnsafeRuns(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	core.AssertTrue(t, fixture.orchestrator.Close().OK)
@@ -997,19 +1017,21 @@ func TestOrchestratorRecoveryInterruptsUnsafeRuns(t *testing.T) {
 func TestOrchestrator_Orchestrator_Capabilities_Good(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	capabilities := fixture.orchestrator.Capabilities()
-	core.AssertEqual(t, 10, len(capabilities))
+	core.AssertEqual(t, 11, len(capabilities))
 	core.AssertEqual(t, work.Capability{Name: "dispatch", Available: true}, capabilities[0])
 	core.AssertEqual(t, work.Capability{Name: "queue.start", Available: true}, capabilities[2])
 	core.AssertEqual(t, work.Capability{Name: "queue.stop", Available: true}, capabilities[3])
 	core.AssertEqual(t, work.Capability{Name: "answer", Available: true}, capabilities[4])
 	core.AssertEqual(t, work.Capability{Name: "retry", Available: true}, capabilities[5])
 	core.AssertEqual(t, work.Capability{Name: "resume", Available: true}, capabilities[6])
+	core.AssertEqual(t, work.Capability{Name: "recovery.abandon", Available: true}, capabilities[10])
 }
 
 func TestOrchestrator_Orchestrator_Capabilities_Bad(t *testing.T) {
 	var orchestrator *Orchestrator
-	core.AssertEqual(t, 10, len(orchestrator.Capabilities()))
+	core.AssertEqual(t, 11, len(orchestrator.Capabilities()))
 	core.AssertFalse(t, orchestrator.Capabilities()[0].Available)
+	core.AssertFalse(t, orchestrator.Capabilities()[10].Available)
 }
 
 func TestOrchestrator_Orchestrator_Capabilities_Ugly(t *testing.T) {
@@ -1043,6 +1065,582 @@ func TestOrchestrator_Orchestrator_Snapshot_Ugly(t *testing.T) {
 	cancel()
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.Snapshot(ctx, "").OK)
+}
+
+type orchestratorCleanupRecoveryOutcomeProjection struct {
+	RecoveryEventID string
+	Receipt         workspace.RecoveryReceipt
+	Error           string
+}
+
+func orchestratorSeedCleanupRecovery(t *testing.T, fixture *orchestratorFixture) (work.Run, work.Event, workspace.RecoveryReceipt) {
+	t.Helper()
+	item, project, _ := fixture.registerRepository()
+	root := work.Run{
+		ID: "cleanup-root-run", WorkID: item.ID, ProjectID: project.ID,
+		Branch: "lem/work/work-1/run-1", Status: work.RunFailed,
+		Number: 1, Attempt: 1, UpdatedAt: fixture.at,
+	}
+	root.Worktree = core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", root.ID, "worktree")
+	child := root
+	child.ID = "cleanup-child-run"
+	child.ParentRunID = root.ID
+	child.Attempt = 2
+	receipt := workspace.RecoveryReceipt{
+		Kind: "run", ProjectID: project.ID, WorkID: item.ID, RunID: child.ID,
+		RunNumber: 1, WorkspaceRunID: root.ID, Branch: root.Branch, Worktree: root.Worktree,
+	}
+	retained := work.Event{
+		ID: "cleanup-recovery-retained-event", RunID: child.ID, WorkID: item.ID,
+		Kind: "workspace_cleanup_retained", Title: "provisional workspace cleanup retained",
+		Detail: receipt.Worktree, DetailJSON: core.JSONMarshalString(receipt), CreatedAt: fixture.at.Add(time.Second),
+	}
+	core.AssertTrue(t, fixture.store.Commit(Commit{Run: &root, CreateRun: true}).OK)
+	committed := fixture.store.Commit(Commit{Run: &child, CreateRun: true, Event: &retained})
+	core.AssertTrue(t, committed.OK, committed.Error())
+	return child, retained, receipt
+}
+
+func orchestratorCleanupRecoveryEvents(store *orchestratorTestStore, kind string) []work.Event {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	events := make([]work.Event, 0)
+	for _, event := range store.events {
+		if event.Kind == kind {
+			events = append(events, event)
+		}
+	}
+	return events
+}
+
+func TestOrchestrator_Orchestrator_AbandonRecovery_Good(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+	core.AssertEqual(t, 0, len(orchestratorCleanupRecoveryEvents(fixture.store, "cleanup_recovery_succeeded")))
+
+	result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertTrue(t, result.OK, result.Error())
+	outcomeEvent := result.Value.(work.Event)
+	core.AssertEqual(t, "cleanup_recovery_succeeded", outcomeEvent.Kind)
+	core.AssertEqual(t, receipt.Worktree, outcomeEvent.Detail)
+	var outcome orchestratorCleanupRecoveryOutcomeProjection
+	decoded := core.JSONUnmarshalString(outcomeEvent.DetailJSON, &outcome)
+	core.AssertTrue(t, decoded.OK, decoded.Error())
+	core.AssertEqual(t, retained.ID, outcome.RecoveryEventID)
+	core.AssertEqual(t, receipt, outcome.Receipt)
+	core.AssertEqual(t, "", outcome.Error)
+	persistedRun := fixture.store.Run(run.ID)
+	core.AssertTrue(t, persistedRun.OK, persistedRun.Error())
+	core.AssertEqual(t, "", persistedRun.Value.(work.Run).Branch)
+	core.AssertEqual(t, "", persistedRun.Value.(work.Run).Worktree)
+	fixture.store.mu.Lock()
+	successCommit := fixture.store.commits[len(fixture.store.commits)-1]
+	fixture.store.mu.Unlock()
+	if successCommit.Run == nil || successCommit.ExpectedStatus == nil || successCommit.Event == nil {
+		t.Fatal("run cleanup success was not committed atomically with the run projection")
+	}
+	core.AssertEqual(t, run.Status, *successCommit.ExpectedStatus)
+	core.AssertEqual(t, outcomeEvent.ID, successCommit.Event.ID)
+
+	fixture.git.setFailure(func(workspace.Command) bool { return true })
+	repeated := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertTrue(t, repeated.OK, repeated.Error())
+	core.AssertEqual(t, outcomeEvent.ID, repeated.Value.(work.Event).ID)
+	core.AssertEqual(t, 1, len(orchestratorCleanupRecoveryEvents(fixture.store, "cleanup_recovery_succeeded")))
+}
+
+func TestOrchestrator_Orchestrator_AbandonRecovery_Bad(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+	core.AssertFalse(t, fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, "missing-recovery-event").OK)
+
+	receipt.WorkspaceRunID = run.ID
+	receipt.Worktree = core.PathJoin(core.PathDir(core.PathDir(fixture.store.projects[run.ProjectID].ClonePath)), run.ProjectID, "runs", run.ID, "worktree")
+	fixture.store.mu.Lock()
+	for index := range fixture.store.events {
+		if fixture.store.events[index].ID == retained.ID {
+			fixture.store.events[index].Detail = receipt.Worktree
+			fixture.store.events[index].DetailJSON = core.JSONMarshalString(receipt)
+		}
+	}
+	fixture.store.mu.Unlock()
+	fixture.git.setFailure(func(workspace.Command) bool { return true })
+	result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "lineage")
+	failed := orchestratorCleanupRecoveryEvents(fixture.store, "cleanup_recovery_failed")
+	core.AssertEqual(t, 1, len(failed))
+	var outcome orchestratorCleanupRecoveryOutcomeProjection
+	decoded := core.JSONUnmarshalString(failed[0].DetailJSON, &outcome)
+	core.AssertTrue(t, decoded.OK, decoded.Error())
+	core.AssertEqual(t, retained.ID, outcome.RecoveryEventID)
+	core.AssertEqual(t, receipt, outcome.Receipt)
+	core.AssertTrue(t, outcome.Error != "")
+}
+
+func TestOrchestrator_Orchestrator_AbandonRecovery_Ugly(t *testing.T) {
+	var orchestrator *Orchestrator
+	core.AssertFalse(t, orchestrator.AbandonRecovery(context.Background(), "run", "event").OK)
+	fixture := newOrchestratorFixture(t)
+	core.AssertFalse(t, fixture.orchestrator.AbandonRecovery(nil, "run", "event").OK)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	core.AssertFalse(t, fixture.orchestrator.AbandonRecovery(ctx, "run", "event").OK)
+	core.AssertFalse(t, fixture.orchestrator.AbandonRecovery(context.Background(), "", "event").OK)
+	core.AssertFalse(t, fixture.orchestrator.AbandonRecovery(context.Background(), "run", "").OK)
+}
+
+func TestOrchestratorAbandonRecoveryPersistsManagerFailure(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+	fixture.git.setFailure(func(workspace.Command) bool { return true })
+
+	result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertFalse(t, result.OK)
+	failed := orchestratorCleanupRecoveryEvents(fixture.store, "cleanup_recovery_failed")
+	core.AssertEqual(t, 1, len(failed))
+	var outcome orchestratorCleanupRecoveryOutcomeProjection
+	decoded := core.JSONUnmarshalString(failed[0].DetailJSON, &outcome)
+	core.AssertTrue(t, decoded.OK, decoded.Error())
+	core.AssertEqual(t, retained.ID, outcome.RecoveryEventID)
+	core.AssertEqual(t, receipt, outcome.Receipt)
+	core.AssertTrue(t, outcome.Error != "")
+
+	fixture.git.setFailure(nil)
+	retried := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertTrue(t, retried.OK, retried.Error())
+	core.AssertEqual(t, "cleanup_recovery_succeeded", retried.Value.(work.Event).Kind)
+}
+
+func TestOrchestratorAbandonRecoveryAuditFailureContainsExactReceipt(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+	fixture.store.failNext(func(commit Commit) bool {
+		return commit.Event != nil && commit.Event.Kind == "cleanup_recovery_succeeded"
+	})
+
+	result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "injected commit failure")
+	core.AssertContains(t, result.Error(), core.JSONMarshalString(receipt))
+	core.AssertEqual(t, 0, len(orchestratorCleanupRecoveryEvents(fixture.store, "cleanup_recovery_succeeded")))
+
+	retried := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertTrue(t, retried.OK, retried.Error())
+	core.AssertEqual(t, "cleanup_recovery_succeeded", retried.Value.(work.Event).Kind)
+}
+
+func TestOrchestratorAbandonRecoveryRejectsIncompleteDurableSnapshot(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+	snapshotResult := fixture.store.Snapshot(run.WorkID)
+	core.AssertTrue(t, snapshotResult.OK, snapshotResult.Error())
+	snapshot := snapshotResult.Value.(work.Snapshot)
+	filtered := make([]work.Run, 0, len(snapshot.Runs)-1)
+	for _, candidate := range snapshot.Runs {
+		if candidate.ID != run.ID {
+			filtered = append(filtered, candidate)
+		}
+	}
+	snapshot.Runs = filtered
+	fixture.store.overrideSnapshot(snapshot)
+
+	result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "snapshot")
+}
+
+func TestOrchestratorAbandonRecoveryRejectsConflictingTerminalAudit(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+	succeeded := work.Event{
+		ID: "cleanup-success", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_succeeded",
+		Title: "cleanup recovery succeeded", Detail: receipt.Worktree, CreatedAt: fixture.at.Add(2 * time.Second),
+		DetailJSON: core.JSONMarshalString(orchestratorCleanupRecoveryOutcomeProjection{
+			RecoveryEventID: retained.ID, Receipt: receipt,
+		}),
+	}
+	conflictingReceipt := receipt
+	conflictingReceipt.RunNumber++
+	conflicting := work.Event{
+		ID: "cleanup-conflict", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_failed",
+		Title: "cleanup recovery failed", Detail: receipt.Worktree, CreatedAt: fixture.at.Add(3 * time.Second),
+		DetailJSON: core.JSONMarshalString(orchestratorCleanupRecoveryOutcomeProjection{
+			RecoveryEventID: retained.ID, Receipt: conflictingReceipt, Error: "conflicting audit",
+		}),
+	}
+	core.AssertTrue(t, fixture.store.Commit(Commit{Event: &succeeded}).OK)
+	core.AssertTrue(t, fixture.store.Commit(Commit{Event: &conflicting}).OK)
+	fixture.git.setFailure(func(workspace.Command) bool { return true })
+
+	result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "outcome differs")
+}
+
+func TestOrchestratorAbandonRecoveryRehydratesReviewReceipt(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, _ := fixture.registerRepository()
+	run := work.Run{
+		ID: "cleanup-review-run", WorkID: item.ID, ProjectID: project.ID,
+		Branch: "lem/work/work-1/run-1", Status: work.RunCompleted,
+		Number: 1, Attempt: 1, UpdatedAt: fixture.at,
+	}
+	run.Worktree = core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "runs", run.ID, "worktree")
+	receipt := workspace.RecoveryReceipt{
+		Kind: "review", ProjectID: project.ID, WorkID: item.ID, RunID: run.ID, RunNumber: run.Number,
+		ReviewID: "cleanup-review", Branch: "lem/integration/cleanup-review-run/cleanup-review",
+	}
+	receipt.Worktree = core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "reviews", run.ID, receipt.ReviewID, "worktree")
+	retained := work.Event{
+		ID: "cleanup-review-retained-event", RunID: run.ID, WorkID: run.WorkID,
+		Kind: "review_cleanup_retained", Title: "provisional workspace cleanup retained",
+		Detail: receipt.Worktree, DetailJSON: core.JSONMarshalString(receipt), CreatedAt: fixture.at.Add(time.Second),
+	}
+	committed := fixture.store.Commit(Commit{Run: &run, CreateRun: true, Event: &retained})
+	core.AssertTrue(t, committed.OK, committed.Error())
+
+	result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertTrue(t, result.OK, result.Error())
+	event := result.Value.(work.Event)
+	core.AssertEqual(t, "cleanup_recovery_succeeded", event.Kind)
+	var outcome orchestratorCleanupRecoveryOutcomeProjection
+	decoded := core.JSONUnmarshalString(event.DetailJSON, &outcome)
+	core.AssertTrue(t, decoded.OK, decoded.Error())
+	core.AssertEqual(t, receipt, outcome.Receipt)
+	persistedRun := fixture.store.Run(run.ID)
+	core.AssertTrue(t, persistedRun.OK, persistedRun.Error())
+	core.AssertEqual(t, run.Branch, persistedRun.Value.(work.Run).Branch)
+	core.AssertEqual(t, run.Worktree, persistedRun.Value.(work.Run).Worktree)
+	fixture.store.mu.Lock()
+	successCommit := fixture.store.commits[len(fixture.store.commits)-1]
+	fixture.store.mu.Unlock()
+	core.AssertTrue(t, successCommit.Run == nil)
+	core.AssertTrue(t, successCommit.ExpectedStatus == nil)
+}
+
+func TestOrchestratorAbandonRecoveryRejectsClosedAndInvalidDurableInputs(t *testing.T) {
+	t.Run("closed", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		core.AssertTrue(t, fixture.orchestrator.Close().OK)
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), "run", "recovery")
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "closed")
+	})
+	t.Run("missing run", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), "missing-run", "recovery")
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "run not found")
+	})
+	t.Run("wrong run type", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		fixture.store.overrideRun("not a run")
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), "run", "recovery")
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "instead of run")
+	})
+	t.Run("different run identity", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		other := run
+		other.ID = "different-run"
+		fixture.store.overrideRun(other)
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "different recovery run identity")
+	})
+	t.Run("snapshot failure", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.setSnapshotFailure(true)
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "snapshot failure")
+	})
+	t.Run("wrong snapshot type", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.overrideSnapshot("not a snapshot")
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "instead of snapshot")
+	})
+	t.Run("invalid receipt JSON", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.mu.Lock()
+		for index := range fixture.store.events {
+			if fixture.store.events[index].ID == retained.ID {
+				fixture.store.events[index].DetailJSON = "{"
+			}
+		}
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "receipt is invalid")
+	})
+	t.Run("duplicate recovery event", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.mu.Lock()
+		fixture.store.events = append(fixture.store.events, retained)
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "identity is duplicated")
+	})
+	t.Run("recovery event belongs to another run", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.mu.Lock()
+		for index := range fixture.store.events {
+			if fixture.store.events[index].ID == retained.ID {
+				fixture.store.events[index].RunID = "different-run"
+			}
+		}
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "does not belong")
+	})
+}
+
+func TestOrchestratorAbandonRecoveryRejectsForgedReceiptIdentity(t *testing.T) {
+	t.Run("receipt differs from run", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		receipt.ProjectID = "different-project"
+		fixture.store.mu.Lock()
+		for index := range fixture.store.events {
+			if fixture.store.events[index].ID == retained.ID {
+				fixture.store.events[index].DetailJSON = core.JSONMarshalString(receipt)
+			}
+		}
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "differs from its durable event or run")
+	})
+	t.Run("review names run workspace lineage", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		item, project, _ := fixture.registerRepository()
+		run := work.Run{
+			ID: "cleanup-review-forgery-run", WorkID: item.ID, ProjectID: project.ID,
+			Status: work.RunCompleted, Number: 1, Attempt: 1, UpdatedAt: fixture.at,
+		}
+		receipt := workspace.RecoveryReceipt{
+			Kind: "review", ProjectID: project.ID, WorkID: item.ID, RunID: run.ID, RunNumber: run.Number,
+			WorkspaceRunID: run.ID, ReviewID: "cleanup-review", Branch: "lem/integration/cleanup-review-forgery-run/cleanup-review",
+		}
+		receipt.Worktree = core.PathJoin(core.PathDir(core.PathDir(project.ClonePath)), project.ID, "reviews", run.ID, receipt.ReviewID, "worktree")
+		retained := work.Event{
+			ID: "cleanup-review-forgery-event", RunID: run.ID, WorkID: run.WorkID,
+			Kind: "review_cleanup_retained", Detail: receipt.Worktree, DetailJSON: core.JSONMarshalString(receipt), CreatedAt: fixture.at,
+		}
+		core.AssertTrue(t, fixture.store.Commit(Commit{Run: &run, CreateRun: true, Event: &retained}).OK)
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "review cannot name a run workspace lineage")
+	})
+	t.Run("run names review and audit event ID fails", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		receipt.ReviewID = "forged-review"
+		fixture.store.mu.Lock()
+		for index := range fixture.store.events {
+			if fixture.store.events[index].ID == retained.ID {
+				fixture.store.events[index].DetailJSON = core.JSONMarshalString(receipt)
+			}
+		}
+		fixture.store.mu.Unlock()
+		fixture.ids.failNext = 1
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "run cannot name a review")
+		core.AssertContains(t, result.Error(), "audit failed for exact receipt")
+		core.AssertContains(t, result.Error(), core.JSONMarshalString(receipt))
+	})
+	t.Run("snapshot run differs", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		snapshotResult := fixture.store.Snapshot(run.WorkID)
+		core.AssertTrue(t, snapshotResult.OK, snapshotResult.Error())
+		snapshot := snapshotResult.Value.(work.Snapshot)
+		for index := range snapshot.Runs {
+			if snapshot.Runs[index].ID == run.ID {
+				snapshot.Runs[index].Status = work.RunCompleted
+			}
+		}
+		fixture.store.overrideSnapshot(snapshot)
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "differs from its durable snapshot")
+	})
+}
+
+func TestOrchestratorAbandonRecoveryRejectsInvalidRunLineage(t *testing.T) {
+	t.Run("duplicate IDs", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		snapshotResult := fixture.store.Snapshot(run.WorkID)
+		core.AssertTrue(t, snapshotResult.OK, snapshotResult.Error())
+		snapshot := snapshotResult.Value.(work.Snapshot)
+		snapshot.Runs = append(snapshot.Runs, snapshot.Runs[0])
+		fixture.store.overrideSnapshot(snapshot)
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "duplicate IDs")
+	})
+	t.Run("cycle", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.mu.Lock()
+		root := fixture.store.runs[receipt.WorkspaceRunID]
+		root.ParentRunID = run.ID
+		fixture.store.runs[root.ID] = root
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "cyclic")
+	})
+	t.Run("ancestor differs from receipt", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.mu.Lock()
+		root := fixture.store.runs[receipt.WorkspaceRunID]
+		root.Number++
+		fixture.store.runs[root.ID] = root
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "lineage differs from the receipt")
+	})
+	t.Run("root differs from owner", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		receipt.WorkspaceRunID = "different-workspace-owner"
+		fixture.store.mu.Lock()
+		for index := range fixture.store.events {
+			if fixture.store.events[index].ID == retained.ID {
+				fixture.store.events[index].DetailJSON = core.JSONMarshalString(receipt)
+			}
+		}
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "root differs from the workspace owner")
+	})
+	t.Run("missing parent", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+		fixture.store.mu.Lock()
+		child := fixture.store.runs[run.ID]
+		child.ParentRunID = "missing-parent"
+		fixture.store.runs[child.ID] = child
+		fixture.store.mu.Unlock()
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "lineage is incomplete")
+	})
+}
+
+func TestOrchestratorAbandonRecoveryRejectsInvalidTerminalOutcomes(t *testing.T) {
+	appendEvent := func(t *testing.T, fixture *orchestratorFixture, event work.Event) {
+		t.Helper()
+		committed := fixture.store.Commit(Commit{Event: &event})
+		core.AssertTrue(t, committed.OK, committed.Error())
+	}
+	t.Run("malformed matching outcome", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		appendEvent(t, fixture, work.Event{
+			ID: "malformed-matching-outcome", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_succeeded",
+			Detail: receipt.Worktree, DetailJSON: "{", CreatedAt: fixture.at.Add(2 * time.Second),
+		})
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "outcome is invalid")
+	})
+	t.Run("unrelated malformed and other recovery outcomes", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		appendEvent(t, fixture, work.Event{
+			ID: "malformed-unrelated-outcome", RunID: "other-run", WorkID: "other-work", Kind: "cleanup_recovery_failed",
+			Detail: "other-worktree", DetailJSON: "{", CreatedAt: fixture.at.Add(2 * time.Second),
+		})
+		appendEvent(t, fixture, work.Event{
+			ID: "other-recovery-outcome", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_failed",
+			Detail: receipt.Worktree, CreatedAt: fixture.at.Add(3 * time.Second),
+			DetailJSON: core.JSONMarshalString(orchestratorCleanupRecoveryOutcomeProjection{
+				RecoveryEventID: "other-recovery-event", Receipt: receipt, Error: "prior failure",
+			}),
+		})
+		appendEvent(t, fixture, work.Event{
+			ID: "exact-success-with-uncleared-run", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_succeeded",
+			Detail: receipt.Worktree, CreatedAt: fixture.at.Add(4 * time.Second),
+			DetailJSON: core.JSONMarshalString(orchestratorCleanupRecoveryOutcomeProjection{
+				RecoveryEventID: retained.ID, Receipt: receipt,
+			}),
+		})
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "did not clear the durable run workspace projection")
+	})
+	t.Run("success contains error", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		appendEvent(t, fixture, work.Event{
+			ID: "success-with-error", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_succeeded",
+			Detail: receipt.Worktree, CreatedAt: fixture.at.Add(2 * time.Second),
+			DetailJSON: core.JSONMarshalString(orchestratorCleanupRecoveryOutcomeProjection{
+				RecoveryEventID: retained.ID, Receipt: receipt, Error: "impossible failure",
+			}),
+		})
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "success outcome contains a failure")
+	})
+	t.Run("failure omits error", func(t *testing.T) {
+		fixture := newOrchestratorFixture(t)
+		run, retained, receipt := orchestratorSeedCleanupRecovery(t, fixture)
+		appendEvent(t, fixture, work.Event{
+			ID: "failure-without-error", RunID: run.ID, WorkID: run.WorkID, Kind: "cleanup_recovery_failed",
+			Detail: receipt.Worktree, CreatedAt: fixture.at.Add(2 * time.Second),
+			DetailJSON: core.JSONMarshalString(orchestratorCleanupRecoveryOutcomeProjection{
+				RecoveryEventID: retained.ID, Receipt: receipt, Error: "  ",
+			}),
+		})
+		result := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), "failure outcome has no error")
+	})
+}
+
+func TestOrchestratorAbandonRecoveryWaitsForTerminalRunBeforeCleanup(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	run, retained, _ := orchestratorSeedCleanupRecovery(t, fixture)
+	fixture.store.mu.Lock()
+	preparing := fixture.store.runs[run.ID]
+	preparing.Status = work.RunPreparing
+	fixture.store.runs[run.ID] = preparing
+	fixture.store.mu.Unlock()
+	fixture.git.setFailure(func(workspace.Command) bool { return true })
+
+	early := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertFalse(t, early.OK)
+	core.AssertContains(t, early.Error(), "terminal")
+	core.AssertEqual(t, 0, len(orchestratorCleanupRecoveryEvents(fixture.store, "cleanup_recovery_succeeded")))
+
+	fixture.git.setFailure(nil)
+	fixture.store.mu.Lock()
+	failed := fixture.store.runs[run.ID]
+	failed.Status = work.RunFailed
+	fixture.store.runs[run.ID] = failed
+	fixture.store.mu.Unlock()
+	later := fixture.orchestrator.AbandonRecovery(context.Background(), run.ID, retained.ID)
+	core.AssertTrue(t, later.OK, later.Error())
+	core.AssertEqual(t, "cleanup_recovery_succeeded", later.Value.(work.Event).Kind)
 }
 
 func TestOrchestrator_Orchestrator_ReviewProject_Good(t *testing.T) {
