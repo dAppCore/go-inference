@@ -42,13 +42,20 @@ var gemma3LayerTensorNames = map[string]string{
 
 // gemma3CanonicalTensorName maps a gemma-3 source checkpoint tensor name to the
 // canonical GGUF tensor name llama.cpp maps the text stack by (token_embd.weight,
-// blk.N.attn_q.weight, …). An unrecognised name is an error rather than a
+// blk.N.attn_q.weight, …). A "language_model." prefix — the multimodal wrapper
+// layout mlx-community-style gemma-3 packs nest the text stack under, the same
+// convention model.NormalizeWrapperNames handles generically for weight loading
+// — is stripped before lookup, so a wrapped and a flat checkpoint resolve the
+// same tensor identically. An unrecognised name is an error rather than a
 // silent drop — a checkpoint carrying a tensor this mapping has not seen must
 // fail loudly so the mapping can be extended, not produce a GGUF missing a weight.
 //
 //	name, err := gemma3CanonicalTensorName("model.layers.7.self_attn.q_proj.weight")
 //	// name == "blk.7.attn_q.weight"
 func gemma3CanonicalTensorName(src string) (string, error) {
+	if unwrapped, ok := core.CutPrefix(src, "language_model."); ok {
+		src = unwrapped
+	}
 	if canonical, ok := gemma3TopLevelTensorNames[src]; ok {
 		return canonical, nil
 	}

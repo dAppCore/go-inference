@@ -53,6 +53,30 @@ func TestGemma3Names_gemma3CanonicalTensorName_PerLayer(t *testing.T) {
 	}
 }
 
+func TestGemma3Names_gemma3CanonicalTensorName_LanguageModelWrapper(t *testing.T) {
+	// mlx-community-style gemma-3 packs nest the text stack under a
+	// "language_model." wrapper (the same layout model.NormalizeWrapperNames
+	// handles generically for weight loading); the GGUF export lane must
+	// resolve the wrapped name to the identical canonical tensor as the flat
+	// (unwrapped) form.
+	cases := map[string]string{
+		"language_model.model.embed_tokens.weight":              "token_embd.weight",
+		"language_model.model.norm.weight":                      "output_norm.weight",
+		"language_model.model.layers.7.self_attn.q_proj.weight": "blk.7.attn_q.weight",
+		"language_model.model.layers.7.input_layernorm.weight":  "blk.7.attn_norm.weight",
+	}
+	for src, want := range cases {
+		got, err := gemma3CanonicalTensorName(src)
+		if err != nil {
+			t.Errorf("%s: %v", src, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s -> %s, want %s", src, got, want)
+		}
+	}
+}
+
 func TestGemma3Names_gemma3CanonicalTensorName_Unmapped(t *testing.T) {
 	// A vision-tower tensor gemma3_text never carries — must fail loudly rather
 	// than silently drop a weight.
