@@ -49,9 +49,9 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 4: Export writers + manifests
 
-- [ ] `sft-jsonl` (`{messages}` — pairs converted via the standard user/assistant wrap), `pairs-jsonl`, `capture-jsonl` writers; default filter `status=approved`, anything else requires the explicit filter.
-- [ ] Deterministic ordering (created_at, id); manifest row + sidecar JSON (counts, filter expression, per-item hashes, manifest hash).
-- [ ] Tests: each format golden-checked; the approved-only default proven; manifest hash stability; Examples. Root-module gate: `go build ./... && go vet ./dataset/ && go test -count=1 ./dataset/` clean, coverage ≥95%.
+- [x] `sft-jsonl` (`{messages}` — pairs converted via the standard user/assistant wrap), `pairs-jsonl`, `capture-jsonl` writers; default filter `status=approved`, anything else requires the explicit filter.
+- [x] Deterministic ordering (created_at, id); manifest row + sidecar JSON (counts, filter expression, per-item hashes, manifest hash).
+- [x] Tests: each format golden-checked; the approved-only default proven; manifest hash stability; Examples. Root-module gate: `go build ./... && go vet ./dataset/ && go test -count=1 ./dataset/` clean, coverage ≥95%.
 
 ### Task 5: DuckDB store + paths (CLI)
 
