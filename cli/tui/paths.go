@@ -52,8 +52,8 @@ func defaultAppPaths() core.Result {
 	if !homeResult.OK {
 		return core.Fail(core.E("tui.defaultAppPaths", "resolve user home", resultError(homeResult)))
 	}
-	home, ok := homeResult.Value.(string)
-	if !ok || core.Trim(home) == "" {
+	home := homeResult.String()
+	if core.Trim(home) == "" {
 		return core.Fail(core.E("tui.defaultAppPaths", "user home is empty", nil))
 	}
 	return appPathsAt(core.Path(home, ".lem"))
@@ -128,7 +128,7 @@ func resultError(result core.Result) error {
 // database; there is no --home override, HOME is the only seam.
 //
 //	dirResult := tui.OpenJudgesDir()
-//	dir := dirResult.Value.(string) // e.g. "/home/snider/.lem/judges"
+//	dir := dirResult.String() // e.g. "/home/snider/.lem/judges"
 func OpenJudgesDir() core.Result {
 	pathsResult := defaultAppPaths()
 	if !pathsResult.OK {

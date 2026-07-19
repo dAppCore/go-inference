@@ -52,7 +52,7 @@ func modelFingerprint(path string) string {
 		return ""
 	}
 	if r := core.PathAbs(trimmed); r.OK {
-		if abs, ok := r.Value.(string); ok && abs != "" {
+		if abs := r.String(); abs != "" {
 			return core.Concat("path:", abs)
 		}
 	}
@@ -341,10 +341,7 @@ func ingestTraceItem(store dataset.Store, datasetID string, content []byte, sour
 	if !hashResult.OK {
 		return dataset.Item{}, false, hashResult.Err()
 	}
-	hash, ok := hashResult.Value.(string)
-	if !ok {
-		return dataset.Item{}, false, core.NewError("dataset: unexpected ContentHash result type")
-	}
+	hash := hashResult.String()
 
 	existingResult := store.Items(dataset.ItemFilter{DatasetID: datasetID, ContentHash: hash, IncludeArchived: true})
 	if !existingResult.OK {

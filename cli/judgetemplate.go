@@ -223,8 +223,8 @@ func defaultInRepoJudgesDir() (string, bool) {
 	if !cwdResult.OK {
 		return "", false
 	}
-	cwd, ok := cwdResult.Value.(string)
-	if !ok || core.Trim(cwd) == "" {
+	cwd := cwdResult.String()
+	if core.Trim(cwd) == "" {
 		return "", false
 	}
 	return findInRepoJudgesDir(cwd, judgeTemplateMaxWalkUp)

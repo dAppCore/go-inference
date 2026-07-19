@@ -32,7 +32,7 @@ type discoveredMsg struct{ items []list.Item }
 func discoverModels() tea.Msg {
 	dirs := []string{}
 	if homeResult := core.UserHomeDir(); homeResult.OK {
-		if home, ok := homeResult.Value.(string); ok && core.Trim(home) != "" {
+		if home := homeResult.String(); core.Trim(home) != "" {
 			dirs = append(dirs, core.Path(home, ".cache", "huggingface", "hub"))
 		}
 	}

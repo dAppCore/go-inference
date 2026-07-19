@@ -703,7 +703,7 @@ func prettyJSON(raw []byte) string {
 		return core.AsString(raw)
 	}
 	if r := core.JSONMarshalIndent(value, "", "  "); r.OK {
-		return core.AsString(r.Value.([]byte))
+		return core.AsString(r.Bytes())
 	}
 	return core.AsString(raw)
 }
@@ -896,7 +896,7 @@ func dataEditedContent(item dataset.Item, prompt, response string) ([]byte, erro
 		if !marshalled.OK {
 			return nil, marshalled.Err()
 		}
-		return marshalled.Value.([]byte), nil
+		return marshalled.Bytes(), nil
 	case dataset.KindMessages:
 		var mc dataset.MessagesContent
 		if r := core.JSONUnmarshal(item.Content, &mc); !r.OK {
@@ -918,7 +918,7 @@ func dataEditedContent(item dataset.Item, prompt, response string) ([]byte, erro
 		if !marshalled.OK {
 			return nil, marshalled.Err()
 		}
-		return marshalled.Value.([]byte), nil
+		return marshalled.Bytes(), nil
 	default:
 		return nil, core.NewError("dataset: this item kind cannot be edited as a derived item")
 	}
@@ -952,7 +952,7 @@ func (panel *dataPanel) EditAsDerived(original dataset.Item, prompt, response st
 	derived := dataset.Item{
 		ID: panel.ids(), DatasetID: original.DatasetID, Kind: original.Kind, Content: content,
 		Source: original.Source, SourceRef: original.SourceRef, ModelFingerprint: original.ModelFingerprint,
-		ContentHash: hashResult.Value.(string), ParentItemID: original.ID, CreatedAt: now,
+		ContentHash: hashResult.String(), ParentItemID: original.ID, CreatedAt: now,
 	}
 	if result := panel.store.ItemAppend(derived); !result.OK {
 		return result
