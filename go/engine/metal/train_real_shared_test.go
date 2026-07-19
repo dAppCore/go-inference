@@ -365,6 +365,109 @@ func TestRealSharedChainBackward_SlidingOwnV(t *testing.T) {
 	sharedChainFDCheck(t, layers, shareFrom, adapters, rank, scaling)
 }
 
+// mixedGeometryStack builds the PER-LAYER-GEOMETRY-SWITCHING stack — the synthetic twin of the
+// real gemma4 E2B class split the #42 boundary refused: heads are model-wide (4), but head_dim AND
+// KV heads switch per layer class exactly as LayerSpec.HeadDim/KVHeads resolve them
+// (headDimOf/kvHeadsOf), and each class carries its OWN rope form:
+//
+//	layer 0 — SLIDING owner:   d=4, kv=2 (GQA 2), own WV, window 2 over T=4, standard full rotary
+//	layer 1 — GLOBAL owner:    d=8, kv=1 (GQA 4), own WV, the PROPORTIONAL partial rope — the
+//	          engine's Inf-padded table (globalRopePeriodsFromFolded, the globalRopeFreqs source)
+//	          driven over the FULL head: pairs (j, j+d/2), only the first rot/2 pairs rotate
+//	layer 2 — GLOBAL consumer of layer 1 (own q only, the owner's hd-8 cache)
+//	layer 3 — SLIDING consumer of layer 0 (own q only, the owner's hd-4 ring, windowed)
+//
+// All four layers carry the full E2B feature set (QK-norm, value-norm on owners, sandwich norms,
+// PLE tower, layer scalar). The rope spectra come from the SAME constructors the trainer's
+// template builder uses — realRopeInvFreqs for sliding, the inverted finite prefix of
+// globalRopePeriodsFromFolded for global — so this gate exercises the engine's table shape, not a
+// re-derived formula.
+func mixedGeometryStack() ([]*RealTrainLayerF32, []int) {
+	const T, dModel, dFF, H, pliDim = 4, 8, 12, 4, 4
+	s := func(n, salt int) []float32 { return scaleSlice(syntheticFloat32(n, salt), 0.3) }
+	mk := func(salt, d, kv int) *RealTrainLayerF32 {
+		return &RealTrainLayerF32{
+			AttnNormW: syntheticFloat32(dModel, salt+1),
+			WQ:        s(H*d*dModel, salt+2),
+			WO:        s(dModel*H*d, salt+5),
+			MLPNormW:  syntheticFloat32(dModel, salt+6),
+			WGate:     s(dFF*dModel, salt+7), WUp: s(dFF*dModel, salt+8), WDown: s(dModel*dFF, salt+9),
+			T: T, DModel: dModel, DFF: dFF, Heads: H, KVHeads: kv, HeadDim: d,
+			RopeScale: 1, AttnScale: 0.5, Eps: 1e-5,
+			QNormW:        near1F32(salt+10, d),
+			PostAttnNormW: near1F32(salt+11, dModel),
+			PostFFNormW:   near1F32(salt+12, dModel),
+			LayerScalar:   0.75,
+			PLIDim:        pliDim,
+			PLEGateW:      s(pliDim*dModel, salt+13),
+			PLEProjW:      scaleSlice(syntheticFloat32(dModel*pliDim, salt+14), 0.8),
+			PLEPostNormW:  near1F32(salt+15, dModel),
+			PLEInput:      syntheticFloat32(T*pliDim, salt+16),
+		}
+	}
+	slidingRope := func(L *RealTrainLayerF32) { // standard full rotary over the small head
+		L.RopePairHalf = L.HeadDim / 2
+		L.RopeInvFreq = realRopeInvFreqs(L.HeadDim, 10000)
+		L.Window = 2
+	}
+	globalRope := func(L *RealTrainLayerF32) { // the engine's Inf-padded proportional table, rot=2 of d=8
+		const rot = 2
+		folded := float32(math.Pow(1e6, float64(rot)/float64(L.HeadDim))) // the arch's pre-folded base
+		periods := globalRopePeriodsFromFolded(L.HeadDim, rot, folded)
+		inv := make([]float32, 0, rot/2)
+		for _, p := range periods[:rot/2] {
+			inv = append(inv, 1/p)
+		}
+		L.RopePairHalf = L.HeadDim / 2
+		L.RopeInvFreq = inv
+	}
+	slideOwner := mk(600, 4, 2)
+	slideOwner.WK = s(2*4*dModel, 620)
+	slideOwner.WV = s(2*4*dModel, 621)
+	slideOwner.KNormW = near1F32(622, 4)
+	slideOwner.ValueNorm = true
+	slidingRope(slideOwner)
+	globalOwner := mk(700, 8, 1)
+	globalOwner.WK = s(1*8*dModel, 720)
+	globalOwner.WV = s(1*8*dModel, 721) // E2B globals carry their own v_proj (K≠V)
+	globalOwner.KNormW = near1F32(722, 8)
+	globalOwner.ValueNorm = true
+	globalRope(globalOwner)
+	globalConsumer := mk(800, 8, 1)
+	globalConsumer.SharesKV = true
+	globalRope(globalConsumer)
+	globalConsumer.Window = 0
+	slideConsumer := mk(900, 4, 2)
+	slideConsumer.SharesKV = true
+	slidingRope(slideConsumer)
+	return []*RealTrainLayerF32{slideOwner, globalOwner, globalConsumer, slideConsumer}, []int{0, 1, 1, 0}
+}
+
+// TestRealSharedChainBackward_MixedHeadDim finite-difference-gates the per-layer GEOMETRY
+// SWITCHING shape (the #42 last rung): sliding hd-4/kv-2 beside global hd-8/kv-1 in ONE chain,
+// each class under its own rope form (standard windowed vs proportional Inf-padded full-head),
+// with shared-KV consumers of BOTH owner classes. Every one of the seven projection targets is
+// adapted somewhere in the mixed stack — k/v/o on the GLOBAL owner (the hd-8 cache the global
+// consumer attends, gradients owner-routed across the geometry switch), q/down on the global
+// consumer, up on the sliding owner, gate on the sliding consumer — and the harness FD-checks
+// dH0 through all four layers. Green here means the chain maths is exact ACROSS a head-dim
+// switch, the property the live E2B anchor asserts at B=0 on the real checkpoint.
+func TestRealSharedChainBackward_MixedHeadDim(t *testing.T) {
+	const rank = 2
+	scaling := float32(16.0 / rank)
+	layers, shareFrom := mixedGeometryStack()
+	adapters := []*layerLoRAAdapter{
+		newChainAdapter(t, layers, 1, ProjK, rank, 61),    // global owner: the consumed hd-8 cache paths
+		newChainAdapter(t, layers, 1, ProjV, rank, 63),
+		newChainAdapter(t, layers, 1, ProjO, rank, 65),
+		newChainAdapter(t, layers, 2, ProjQ, rank, 67),    // global consumer attention + MLP
+		newChainAdapter(t, layers, 2, ProjDown, rank, 69),
+		newChainAdapter(t, layers, 0, ProjUp, rank, 71),   // sliding owner MLP
+		newChainAdapter(t, layers, 3, ProjGate, rank, 73), // sliding consumer gate (consumer level — the owner-level gate coordinate defeats the FD instrument, see TestRealSharedChainBackward)
+	}
+	sharedChainFDCheck(t, layers, shareFrom, adapters, rank, scaling)
+}
+
 // TestRealSharedChainBackward_DenseChain gates the chain helpers on a SHARE-FREE stack — the
 // trainer now routes every per-layer walk through them, so the dense 3-layer composition must be
 // FD-exact for adapters at every depth (the deepest layer's parameters ride two more full layers

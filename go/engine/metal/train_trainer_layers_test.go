@@ -127,7 +127,7 @@ func TestValidatePerLayerLoRAShape_Bad(t *testing.T) {
 	check("moe", "MoE", func(g *BF16Model, arch *model.Arch) { arch.Experts = 8 })
 	check("moe layer", "MoE", func(g *BF16Model, arch *model.Arch) { arch.Layer[0].MoE = true })
 	// SoftCap is WIRED since #42's follow-through (train_softcap.go, FD-gated) — a capped shape
-	// now VALIDATES; the head-dim switch is the live refusal in its place.
+	// now VALIDATES.
 	{
 		g, arch := eligibleFixtureModel(2)
 		arch.SoftCap = 30
@@ -135,10 +135,16 @@ func TestValidatePerLayerLoRAShape_Bad(t *testing.T) {
 			t.Fatalf("softcap shape must validate (wired + FD-gated): %v", err)
 		}
 	}
-	check("per-layer head-dim switch", "head-dim switching", func(g *BF16Model, arch *model.Arch) {
+	// Per-layer head-dim switching is WIRED since the #42 last rung (the mixed-geometry chain FD
+	// gate + the real-E2B host probe) — the gemma4 global-vs-sliding shape now VALIDATES.
+	{
+		g, arch := eligibleFixtureModel(2)
 		arch.Layer[1].HeadDim = arch.HeadDim * 2
 		arch.Layer[1].KVShareFrom = 1 // owns its cache; only the head dim differs
-	})
+		if err := validatePerLayerLoRAShape(&NativeTokenModel{NativeBackend: &NativeBackend{arch: arch}, bf16: g}); err != nil {
+			t.Fatalf("a per-layer head-dim-switching shape must validate (mixed-geometry FD-gated): %v", err)
+		}
+	}
 	check("qkv bias", "biases", func(g *BF16Model, arch *model.Arch) {
 		g.Layers[0].BQ = toBF16Bytes(make([]float32, arch.Heads*arch.HeadDim))
 	})

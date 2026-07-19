@@ -144,16 +144,16 @@ func validatePerLayerLoRAShape(tm *NativeTokenModel) error {
 			}
 		}
 	}
-	// Per-layer head-dim switching (gemma4 global layers run hd 512 vs 256 sliding): the host
-	// mirror FAILS the B=0 parity anchor on the real E2B (worst layer just after the first global
-	// layer, cosine 0.83 vs the 0.999 bar — TestLoRATrainerE2BSharedKVSFT_Good's receipt, #42).
-	// Training on a divergent mirror is wrong-gradient training; refused until the anchor passes.
-	// Checked AFTER the KV-share topology loop so a malformed topology keeps its own refusal.
-	for li := range arch.Layer {
-		if hd := arch.Layer[li].HeadDim; hd != 0 && hd != arch.HeadDim {
-			return refuse("per-layer head-dim switching (the global-layer host mirror fails the B=0 parity anchor)")
-		}
-	}
+	// Per-layer head-dim switching (gemma4 global layers run hd 512 vs 256 sliding) is WIRED: the
+	// template builder resolves each layer's geometry exactly as the decode loop does
+	// (headDimOf/kvHeadsOf per spec) and each class's rope from the engine's own table sources
+	// (realRopeInvFreqs for sliding; the inverted finite prefix of globalRopePeriodsFromFolded —
+	// the globalRopeFreqs construction — for the proportional Inf-padded global form). Receipts:
+	// the mixed-geometry chain FD gate (TestRealSharedChainBackward_MixedHeadDim — all seven
+	// targets + dH0 across an hd/kv switch with consumers of both owner classes) and the real-E2B
+	// host probe (TestRealChainE2BMirrorVsReference_Good — the live loader path's templates match
+	// the ecosystem reference per layer, worst cosine 1.000000 across all four layer classes).
+	// The #42-era refusal here traced to the live anchor's engine-capture side, not the mirror.
 	return nil
 }
 
