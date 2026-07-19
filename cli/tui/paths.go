@@ -14,6 +14,7 @@ const (
 	appWorkspacesPath = "workspaces"
 	appPacksPath      = "packs"
 	appExportsPath    = "exports"
+	appJudgesPath     = "judges"
 )
 
 // appPaths keeps host-only database paths separate from medium-relative files.
@@ -32,6 +33,12 @@ type appPaths struct {
 	Workspaces string
 	Packs      string
 	Exports    string
+	// Judges is the host-only path to ~/.lem/judges — user overrides for
+	// judge-tier score templates (the dataset loop design's "in-repo
+	// defaults + ~/.lem/judges/ overrides" decision, Task 9). A CLI-side
+	// judge driver reads <name>.md from here directly; a present override
+	// wins over the in-repo judges/<name>.md default of the same name.
+	Judges string
 }
 
 // appFiles is the application's replaceable file boundary.
@@ -69,6 +76,7 @@ func appPathsAt(root string) core.Result {
 		Workspaces: core.Path(root, appWorkspacesPath),
 		Packs:      appPacksPath,
 		Exports:    appExportsPath,
+		Judges:     core.Path(root, appJudgesPath),
 	})
 }
 
@@ -96,7 +104,7 @@ func ensureAppFiles(medium coreio.Medium, paths appPaths) core.Result {
 	if medium == nil {
 		return core.Fail(core.E("tui.ensureAppFiles", "file medium is required", nil))
 	}
-	for _, directory := range []string{"", appWorkspacesPath, paths.Packs, paths.Exports} {
+	for _, directory := range []string{"", appWorkspacesPath, paths.Packs, paths.Exports, appJudgesPath} {
 		if err := medium.EnsureDir(directory); err != nil {
 			label := directory
 			if label == "" {
@@ -111,4 +119,27 @@ func ensureAppFiles(medium coreio.Medium, paths appPaths) core.Result {
 func resultError(result core.Result) error {
 	err, _ := result.Value.(error)
 	return err
+}
+
+// OpenJudgesDir resolves and ensures ~/.lem/judges — the medium-backed
+// override directory a CLI-side judge driver reads <name>.md templates
+// from (Task 9) — returning its host-absolute path. Mirrors
+// OpenDatasetStore's resolve-then-ensure sequence without opening a
+// database; there is no --home override, HOME is the only seam.
+//
+//	dirResult := tui.OpenJudgesDir()
+//	dir := dirResult.Value.(string) // e.g. "/home/snider/.lem/judges"
+func OpenJudgesDir() core.Result {
+	pathsResult := defaultAppPaths()
+	if !pathsResult.OK {
+		return pathsResult
+	}
+	paths, ok := pathsResult.Value.(appPaths)
+	if !ok {
+		return core.Fail(core.E("tui.OpenJudgesDir", "invalid application paths result", nil))
+	}
+	if ensured := openAppFilesAt(paths.Root); !ensured.OK {
+		return core.Fail(core.E("tui.OpenJudgesDir", "ensure application layout", resultError(ensured)))
+	}
+	return core.Ok(paths.Judges)
 }
