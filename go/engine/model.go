@@ -479,14 +479,22 @@ func (m *TextModel) stream(ctx context.Context, ids []int32, cfg inference.Gener
 		// of the last request is reused in place, only the divergent suffix
 		// is prefilled. A failed cached prefill drops the resident session
 		// and the request falls through to the fresh-session path below.
-		if rs, release, ok := m.acquireReuseSession(); ok {
-			if _, err := rs.PrefillTokensCached(ids); err == nil {
-				m.decodeFromPrefilled(ctx, rs, len(ids), cfg, start, yield)
+		// cfg.DisablePromptReuse skips this lane entirely — a caller that
+		// knows it never sends two calls sharing a prefix (a one-shot bench/
+		// CLI run) pays nothing for a reuse guarantee it will never use; on a
+		// q8-KV-capable model the lane otherwise arms position-invariant
+		// per-token landing on its resident session ahead of EVERY prefill
+		// regardless of length, not just the ones that actually reuse (#54).
+		if !cfg.DisablePromptReuse {
+			if rs, release, ok := m.acquireReuseSession(); ok {
+				if _, err := rs.PrefillTokensCached(ids); err == nil {
+					m.decodeFromPrefilled(ctx, rs, len(ids), cfg, start, yield)
+					release()
+					return
+				}
+				m.dropReuseSession()
 				release()
-				return
 			}
-			m.dropReuseSession()
-			release()
 		}
 		sess, err := m.openSession()
 		if err != nil {

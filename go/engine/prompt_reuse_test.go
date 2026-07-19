@@ -177,6 +177,52 @@ func TestModel_TextModel_PromptReuse_Ugly(t *testing.T) {
 	})
 }
 
+// TestModel_TextModel_PromptReuse_DisablePromptReuseSkipsLane_Good pins #54:
+// GenerateConfig.DisablePromptReuse is a THIRD stand-down (distinct from the
+// process-wide kill switch and the continuity interceptor above) scoped to
+// the calls that set it — a one-shot bench/CLI caller that knows its calls
+// never share a prefix opts out per-request rather than for the whole
+// process. Every such request opens and closes its own fresh session
+// (stream() never calls acquireReuseSession), the pinned resident-lane
+// session is used only as a plain fresh session on the first call, and the
+// second call falls through to its own independent fresh session exactly as
+// the kill-switch-off case does.
+func TestModel_TextModel_PromptReuse_DisablePromptReuseSkipsLane_Good(t *testing.T) {
+	rs := &reuseFakeSession{fakeSession: fakeSession{genIDs: []int32{10, 11, 12}}}
+	tm := &reuseFakeTokenModel{genIDs: []int32{10, 11, 12}, sessions: []*reuseFakeSession{rs}}
+	m := NewTextModel(tm, newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+
+	drain := func(prompt string) []inference.Token {
+		var got []inference.Token
+		for tok := range m.Generate(context.Background(), prompt, inference.WithMaxTokens(3), inference.WithDisablePromptReuse()) {
+			got = append(got, tok)
+		}
+		return got
+	}
+
+	if got := drain("hi"); len(got) != 3 {
+		t.Fatalf("first Generate produced %d tokens, want 3", len(got))
+	}
+	if got := drain("hi there again"); len(got) != 3 {
+		t.Fatalf("second Generate produced %d tokens, want 3", len(got))
+	}
+	if len(rs.cachedCalls) != 0 {
+		t.Fatalf("PrefillTokensCached calls = %d, want 0 (DisablePromptReuse must skip the reuse lane)", len(rs.cachedCalls))
+	}
+	if tm.openCalls != 2 {
+		t.Fatalf("openCalls = %d, want 2 (a fresh session per request, no resident reuse)", tm.openCalls)
+	}
+	if len(rs.prefillCalls) != 1 || rs.closeCalls != 1 {
+		t.Fatalf("pinned session: prefillCalls=%d closeCalls=%d, want 1/1 (opened, prefilled and closed once, as the first request's fresh session)", len(rs.prefillCalls), rs.closeCalls)
+	}
+	if len(tm.plain) != 1 || len(tm.plain[0].prefillCalls) != 1 {
+		t.Fatal("second request did not open its own independent fresh session via the plain path")
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("Err() after DisablePromptReuse generations = %+v, want OK", r)
+	}
+}
+
 // TestModel_TextModel_PromptReuse_BusySlotServesFresh pins the TryLock
 // semantics: while one request holds the resident slot, a concurrent request
 // takes the fresh-session path instead of queueing behind the cache.

@@ -79,6 +79,18 @@ type GenerateConfig struct {
 	// embedded in marshalled reports (train's SSD eval), and encoding/json
 	// rejects func fields it is asked to encode.
 	MetricsSink func(GenerateMetrics) `json:"-"`
+	// DisablePromptReuse skips the backend's resident-session prompt cache
+	// (engine's #377 stateless lane) for this call, opening a fresh session
+	// instead. false (default) preserves every existing caller's behaviour.
+	// A caller that KNOWS its calls never share a prefix — a one-shot bench/
+	// CLI run, or any driver making exactly one request per loaded model —
+	// should set this: on a q8-KV-capable model the reuse lane arms
+	// position-invariant landing on its resident session BEFORE the first
+	// prefill so a later reused prefix is byte-stable (#1846), which taxes
+	// every prefilled token at per-token (host-synced) speed even when reuse
+	// never happens. A caller with genuine multi-turn traffic should leave
+	// this false so reuse — and the q8 byte-stability it depends on — engages.
+	DisablePromptReuse bool
 }
 
 // cfg := inference.DefaultGenerateConfig() // Temperature=0.0 (greedy), RepeatPenalty=1.0
@@ -226,6 +238,19 @@ func WithThinking(cfg ThinkingConfig) GenerateOption {
 //	m.Chat(ctx, msgs, inference.WithVisionBudget(1120)) // gemma4's OCR budget
 func WithVisionBudget(n int) GenerateOption {
 	return func(c *GenerateConfig) { c.VisionBudget = n }
+}
+
+// WithDisablePromptReuse skips the resident-session prompt cache for this
+// call — every call opens (and pays for) a fresh session. Set it for a
+// caller that never sends two calls sharing a prefix (a one-shot bench/CLI
+// run): on a q8-KV-capable model the reuse lane otherwise arms position-
+// invariant per-token landing on its resident session ahead of every
+// prefill regardless of length (#1846's byte-stability guard), taxing a
+// prefill that will never actually get reused.
+//
+//	inference.WithDisablePromptReuse() // one-shot bench/CLI generation
+func WithDisablePromptReuse() GenerateOption {
+	return func(c *GenerateConfig) { c.DisablePromptReuse = true }
 }
 
 // WithMetricsSink registers a request-scoped receiver for this generation's

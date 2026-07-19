@@ -900,3 +900,16 @@ func TestOptions_WithMetricsSink_Bad(t *testing.T) {
 		t.Fatalf("WithMetricsSink(nil) set a sink, want none")
 	}
 }
+
+// TestOptions_WithDisablePromptReuse_Good pins #54: the default config never
+// sets it (every existing caller keeps the resident-session reuse lane), and
+// the option flips it on for a one-shot bench/CLI caller that opts out.
+func TestOptions_WithDisablePromptReuse_Good(t *testing.T) {
+	if DefaultGenerateConfig().DisablePromptReuse {
+		t.Fatal("DefaultGenerateConfig().DisablePromptReuse = true, want false (every existing caller keeps the reuse lane)")
+	}
+	cfg := ApplyGenerateOpts([]GenerateOption{WithDisablePromptReuse()})
+	if !cfg.DisablePromptReuse {
+		t.Fatal("WithDisablePromptReuse() left DisablePromptReuse = false, want true")
+	}
+}

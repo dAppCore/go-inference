@@ -1979,6 +1979,15 @@ func (s *ArchSession) prefillPromptRetainedInPool(ids []int32) ([]byte, error) {
 	if hidden, ok, err := s.prefillPromptRetainedGPUInputsInPool(ids); ok || err != nil {
 		return hidden, err
 	}
+	if gpuTraceEnabled() {
+		// #54: named so a slow prefill is diagnosable from LTHN_GPU_TRACE=host
+		// alone — both the batched-dense AND the chained GPU-inputs lane
+		// declined, so every remaining row pays a per-token host round trip
+		// (commit+wait per token; see prefillRetainedTokensBatchedDenseDeclineReason
+		// for WHY the batched lane declined).
+		nativeTraceLog(core.Sprintf("gpu-trace: host  prefill fallback ids=%d pos=%d reason=%s (per-token stepIDInPool loop)\n",
+			len(ids), s.pos, s.prefillRetainedTokensBatchedDenseDeclineReason()))
+	}
 	var err error
 	for _, id := range ids[:len(ids)-1] {
 		if _, err = s.stepIDInPool(id); err != nil {
@@ -2160,6 +2169,24 @@ func (s *ArchSession) prefillRetainedTokensBatchedDense(ids []int32, scope strin
 		return s.prefillRetainedTokensBatchedDenseChunks(ids, scope)
 	}
 	return s.prefillRetainedTokensBatchedDenseOne(ids, scope)
+}
+
+// prefillRetainedTokensBatchedDenseDeclineReason names WHY the batched-dense
+// prefill lane would decline for THIS session right now — a read-only mirror
+// of prefillRetainedTokensBatchedDense/DenseOne's own gates, called only from
+// the LTHN_GPU_TRACE=host fallback log (#54: a q8-ICB session that inherited
+// canonical (position-invariant, per-token) landing from the stateless
+// resident prompt-reuse lane — engine/prompt_reuse.go's acquireReuseSession —
+// pays a full per-token prefill regardless of prompt length; this is the
+// mechanism, not a length-dependent knee). Never called from a hot path.
+func (s *ArchSession) prefillRetainedTokensBatchedDenseDeclineReason() string {
+	if s.reuseCanonicalLanding && s.state.icb != nil && s.state.icb.hasKVQ8() {
+		return "reuseCanonicalLanding+hasKVQ8 (#1846 position-invariant landing armed by the resident prompt-reuse lane)"
+	}
+	if s.state.icb != nil && !gpuHasGeluKernel() {
+		return "icb without the fused gelu kernel (lthn_kernels.metallib not loaded)"
+	}
+	return "unresolved (see prefillRetainedTokensBatchedDenseOne / stepTokensBatchedDenseResultWithInputViewsPLE's own decline gates)"
 }
 
 func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope string) ([]byte, bool, error) {
