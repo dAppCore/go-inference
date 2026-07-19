@@ -14,9 +14,10 @@ import (
 
 // train_trainer_layers.go is stage 3 of #40: the PER-LAYER projection LoRA path of LoRATrainer,
 // wired ONLY for model shapes whose every layer feature is covered by the FD-gated real-arch
-// reference (train_real_layer.go). The #31 refusal REMAINS for everything else — a shape with any
-// un-gated feature (MoE, KV-shared layers, recurrent mixers, projection biases, logit soft-caps,
-// …) refuses per-layer targets loudly, naming the blocking feature (validatePerLayerLoRAShape).
+// reference (train_real_layer.go + the owner-routed KV-share chain of train_real_shared.go, #42).
+// The #31 refusal REMAINS for everything else — a shape with any un-gated feature (MoE, recurrent
+// mixers, projection biases, logit soft-caps, …) refuses per-layer targets loudly, naming the
+// blocking feature (validatePerLayerLoRAShape).
 //
 // The training maths: a per-layer adapter changes EVERY layer's forward, so — unlike the head
 // seam, where the frozen capture is exact — each step re-runs the layer chain HOST-SIDE
@@ -113,9 +114,23 @@ func validatePerLayerLoRAShape(tm *NativeTokenModel) error {
 			return refuse("the MoE feed-forward")
 		}
 		if spec.KVShareFrom != li {
-			return refuse(core.Concat("KV-cache sharing (layer ", core.Sprintf("%d", li),
-				" attends layer ", core.Sprintf("%d", spec.KVShareFrom),
-				"'s cache — the cross-layer K/V gradient path)"))
+			// KV-cache sharing itself is covered (#42): a consumer layer mirrors
+			// encAttnHalfShared (own q only, the owner's cached rows), FD-gated in
+			// train_real_shared_test.go. Only a topology the decode itself could not serve —
+			// and the mirror could not reproduce — refuses here; WHICH (layer, target)
+			// adapter combinations train on a shared stack is the separate, config-dependent
+			// gate (validateSharedKVAdapterSubset).
+			own := spec.KVShareFrom
+			if own < 0 || own >= li || arch.Layer[own].KVShareFrom != own {
+				return refuse(core.Concat("a malformed KV-share topology (layer ", core.Sprintf("%d", li),
+					" names owner ", core.Sprintf("%d", own), ", which is not an earlier cache owner)"))
+			}
+			ospec := arch.Layer[own]
+			if kvHeadsOf(spec, arch.KVHeads) != kvHeadsOf(ospec, arch.KVHeads) ||
+				headDimOf(spec, arch.HeadDim) != headDimOf(ospec, arch.HeadDim) {
+				return refuse(core.Concat("a KV-share consumer (layer ", core.Sprintf("%d", li),
+					") whose cache geometry differs from its owner's (layer ", core.Sprintf("%d", own), ")"))
+			}
 		}
 		if li < len(tm.bf16.Layers) {
 			w := &tm.bf16.Layers[li]
@@ -157,7 +172,6 @@ func buildRealLayerTemplates(g *BF16Model, arch model.Arch) ([]*RealTrainLayerF3
 		L := &RealTrainLayerF32{
 			AttnNormW: bf16ToF32Slice(w.AttnNormW),
 			WQ:        bf16ToF32Slice(w.WQ),
-			WK:        bf16ToF32Slice(w.WK),
 			WO:        bf16ToF32Slice(w.WO),
 			MLPNormW:  bf16ToF32Slice(w.MLPNormW),
 			WGate:     bf16ToF32Slice(w.WGate),
@@ -170,14 +184,24 @@ func buildRealLayerTemplates(g *BF16Model, arch model.Arch) ([]*RealTrainLayerF3
 			Eps:       arch.Eps,
 			RopeScale: arch.RopeScale,
 		}
-		if len(w.WV) > 0 {
-			L.WV = bf16ToF32Slice(w.WV) // nil WV = the K==V layer
+		if spec.KVShareFrom != li {
+			// a KV-share CONSUMER (#42): projects only its query and attends the owner's cached
+			// rows — no k/v projection, no K-norm, no value-norm of its own (encAttnHalfShared;
+			// the checkpoint carries no such tensors for it). The chain forward feeds it the
+			// owner tape's rows.
+			L.SharesKV = true
+			L.ValueNorm = false
+		} else {
+			L.WK = bf16ToF32Slice(w.WK)
+			if len(w.WV) > 0 {
+				L.WV = bf16ToF32Slice(w.WV) // nil WV = the K==V layer
+			}
+			if len(w.KNormW) > 0 {
+				L.KNormW = bf16ToF32Slice(w.KNormW)
+			}
 		}
 		if len(w.QNormW) > 0 {
 			L.QNormW = bf16ToF32Slice(w.QNormW)
-		}
-		if len(w.KNormW) > 0 {
-			L.KNormW = bf16ToF32Slice(w.KNormW)
 		}
 		if len(w.PostAttnNormW) > 0 {
 			L.PostAttnNormW = bf16ToF32Slice(w.PostAttnNormW)
@@ -240,9 +264,10 @@ func buildRealLayerTemplates(g *BF16Model, arch model.Arch) ([]*RealTrainLayerF3
 }
 
 // buildLayerAdapters resolves the requested projection targets against the model's layers into the
-// trainable adapter set. Every (layer, target) pair that exists is adapted; the ONE ecosystem
-// absence — v_proj on a K==V layer, which carries no value projection — is skipped (the saved
-// adapter shows exactly what trained). A request that resolves to NOTHING is refused.
+// trainable adapter set. Every (layer, target) pair that exists is adapted; the ecosystem
+// absences — v_proj on a K==V layer (no value projection), and k_proj/v_proj on a KV-share
+// consumer (it attends the owner's cache and carries no k/v tensors at all) — are skipped (the
+// saved adapter shows exactly what trained). A request that resolves to NOTHING is refused.
 func buildLayerAdapters(layers []*RealTrainLayerF32, targets []string, rank int, lr float32) ([]*layerLoRAAdapter, error) {
 	seen := map[string]bool{}
 	var adapters []*layerLoRAAdapter
@@ -252,6 +277,9 @@ func buildLayerAdapters(layers []*RealTrainLayerF32, targets []string, rank int,
 		}
 		seen[target] = true
 		for li, L := range layers {
+			if (target == ProjK || target == ProjV) && L.SharesKV {
+				continue // a KV-share consumer has no k/v projection — the owner's k/v feed the shared rows
+			}
 			if target == ProjV && L.WV == nil {
 				continue // the K==V layer has no v_proj — the documented ecosystem skip
 			}
@@ -315,8 +343,10 @@ func (t *LoRATrainer) effectiveWeightSets() ([]layerWeightSet, error) {
 }
 
 // layerChainForward seeds the per-layer templates with this sequence (T + the engine's PLE inputs),
-// then runs the host layer chain under the given weight sets from the engine's token embeddings.
-// Returns each layer's input hidden (inputs[l], [T,DModel]) and forward tape.
+// then runs the host layer chain under the given weight sets from the engine's token embeddings —
+// share-aware (#42): owners/dense layers run the full attention half, KV-share consumers attend
+// their owner tape's cached rows (realSharedChainForward). Returns each layer's input hidden
+// (inputs[l], [T,DModel]) and forward tape.
 func (t *LoRATrainer) layerChainForward(ids []int32, embeds [][]byte, sets []layerWeightSet) (inputs [][]float32, tapes []*realLayerTape, err error) {
 	T := len(ids)
 	x := make([]float32, 0, T*t.dModel)
@@ -336,8 +366,6 @@ func (t *LoRATrainer) layerChainForward(ids []int32, embeds [][]byte, sets []lay
 			pliRows[tok] = bf16ToF32Slice(pli)
 		}
 	}
-	inputs = make([][]float32, len(t.layers))
-	tapes = make([]*realLayerTape, len(t.layers))
 	for li, L := range t.layers {
 		L.T = T
 		if t.hasPLE && L.PLIDim > 0 {
@@ -347,16 +375,8 @@ func (t *LoRATrainer) layerChainForward(ids []int32, embeds [][]byte, sets []lay
 			}
 			L.PLEInput = pin
 		}
-		inputs[li] = x
-		s := sets[li]
-		tp, ferr := realLayerForwardTape(x, L, s.wQ, s.wK, s.wV, s.wO, s.wGate, s.wUp, s.wDown)
-		if ferr != nil {
-			return nil, nil, ferr
-		}
-		tapes[li] = tp
-		x = tp.out
 	}
-	return inputs, tapes, nil
+	return realSharedChainForward(x, t.layers, t.shareFrom, sets)
 }
 
 // perLayerSeqGrads runs one sequence's forward + backward under the current adapters and
@@ -427,16 +447,10 @@ func (t *LoRATrainer) perLayerSeqGrads(ids []int32, mask inference.LossMask, sam
 		return 0, 0, err
 	}
 
-	// walk the chain top-down; at each layer take every adapter's dW under the SUBSTITUTED
-	// weight set (all adapters active at once — the exact multi-adapter gradient) and fold it
-	// onto the factors.
-	for li := len(t.layers) - 1; li >= 0; li-- {
-		L := t.layers[li]
-		s := sets[li]
-		g, berr := realLayerBackward(dH, inputs[li], L, tapes[li], s.wQ, s.wK, s.wV, s.wO, s.wGate, s.wUp, s.wDown)
-		if berr != nil {
-			return 0, 0, berr
-		}
+	// walk the chain top-down (share-aware, #42); at each layer take every adapter's dW under the
+	// SUBSTITUTED weight set (all adapters active at once — the exact multi-adapter gradient) and
+	// fold it onto the factors.
+	_, err = realSharedChainBackward(dH, inputs, tapes, t.layers, t.shareFrom, sets, func(li int, g *realLayerGrads) error {
 		for ai, ad := range t.adapters {
 			if ad.layer != li {
 				continue
@@ -460,7 +474,7 @@ func (t *LoRATrainer) perLayerSeqGrads(ids []int32, mask inference.LossMask, sam
 			}
 			dA, dB, ferr := LoRAFactorGradsF32(dW, ad.a, ad.b, ad.out, ad.in, t.rank, t.scaling)
 			if ferr != nil {
-				return 0, 0, ferr
+				return ferr
 			}
 			for i := range sumDA[ai] {
 				sumDA[ai][i] += dA[i]
@@ -469,7 +483,10 @@ func (t *LoRATrainer) perLayerSeqGrads(ids []int32, mask inference.LossMask, sam
 				sumDB[ai][i] += dB[i]
 			}
 		}
-		dH = g.dH
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
 	}
 	return loss, len(maskRows), nil
 }
