@@ -10,6 +10,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/mamba2"
+	"dappco.re/go/inference/model/arch/rwkv7"
 	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -187,6 +188,15 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 			// ArchSpec, so it is reached by name here rather than through the composed registry.
 			return loadMamba2TokenModel(dir, cfg)
 		}
+		if mt == "rwkv7" {
+			if tqMode != nil {
+				return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines recurrent archs (rwkv7 carries per-layer state, not a KV cache) — reload without -kv-cache")
+			}
+			// rwkv7 is a standalone recurrent SSM (token-shift + WKV7 time-mix +
+			// channel-mix, no attention) with its own loader — see model/arch/rwkv7.
+			// It registers no ArchSpec, so it is reached by name here.
+			return loadRWKV7TokenModel(dir, cfg)
+		}
 		// Composed/hybrid archs route through the neutral registry: each registers an
 		// ArchSpec.Composed hook, and model.LoadComposedDir looks it up and builds the
 		// serve-ready TokenModel. A future qwenX checkpoint therefore loads with ZERO edits
@@ -357,6 +367,23 @@ func loadMamba2TokenModel(dir string, cfg []byte) (model.TokenModel, error) {
 		return nil, err
 	}
 	return mamba2.NewTokenModel(mm), nil
+}
+
+// loadRWKV7TokenModel loads an rwkv7 checkpoint into the host-f32 recurrent RWKV7Model and wraps it as a
+// model.SessionModel — the mamba2 shape exactly: weights widen to owned f32 at load, the shard mmap is
+// unmapped before return. Dense/LoRA projections ride rwkv7.ProjMatMul, already wired to the steel GEMM
+// (rwkv7_backend.go), so the host chain gets device matmuls with no further engine wiring.
+func loadRWKV7TokenModel(dir string, cfg []byte) (model.TokenModel, error) {
+	dm, err := safetensors.LoadDirMmap(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dm.Close() }()
+	rm, err := rwkv7.LoadRWKV7Model(dm.Tensors, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return rwkv7.NewTokenModel(rm), nil
 }
 
 // mamba2EpsFromConfig reads rms_norm_eps from the checkpoint config (top-level or nested text_config),
