@@ -10,15 +10,26 @@ import core "dappco.re/go"
 // one final top-level LayerNorm → the tied LM head (proj_out.weight IS model.decoder.embed_tokens.weight
 // — see weights.go's doc comment).
 //
-// DELIBERATE v1 SIMPLIFICATION (host-f32 correctness-first, per the design's own phasing): DecodeLogits
-// recomputes the FULL causal self-attention over every token generated so far on EVERY call — there is
-// no incremental self-attention KV cache. This is the exact shape validated against the reference
-// (transformers' generate() with no custom cache, same greedy argmax, same suppress lists) before this
-// file was written. Whisper-tiny's decode is 4 layers × d_model 384 over at most MaxTargetPositions=448
-// steps — O(T²) total self-attention work that stays well under a second on CPU host math. Cross-
-// attention K/V IS precomputed once per request (PrecomputeCrossKV), matching the design's explicit ask
-// — the standard Whisper serving trick, since cross K/V depend only on the fixed encoder output. A later
-// perf slice can add a self-attention KV cache without changing this function's outputs.
+// SELF-ATTENTION KV CACHE (the #37-tail perf slice): GreedyDecode/DetectLanguage now drive
+// DecodeLogitsStep, which processes ONLY the newly appended token(s) each call and attends over a
+// per-layer SelfAttnCache that grows by one batch per step — replacing the v1 "recompute the full
+// sequence from scratch every call" shape this file originally shipped with (host-f32 correctness-first,
+// per the design's own phasing). DecodeLogits (below) is UNCHANGED and kept as the whole-sequence
+// recompute reference: decoder_test.go's parity test proves DecodeLogitsStep produces BIT-IDENTICAL
+// logits at every step, not merely close ones. That equivalence holds because every op in the layer
+// stack except self-attention is row-wise (embedding/position lookup, LayerNorm, the FFN's two linear
+// projections, GELU, the residual adds — see attention.go/encoder.go) — a row's output depends only on
+// that row's own input, never on any other row in the same call — and self-attention itself is causal, so
+// row j's output depends only on rows [0,j], which are bit-identical regardless of how many further rows
+// a later call also happens to process. Concretely: linearForward/layerNormForward/geluRow/addRows all
+// loop per-row independently (T=1 or T=beginIndex, same arithmetic per row either way), and mhaCore's
+// weighted-sum loop reads exactly [0,limit) in the same fixed order whether those keys/values came from
+// THIS call's own batch or an earlier one now sitting in the cache — see attention.go's file doc comment
+// for mhaCore's offset parameter, the mechanism that makes this true. Cross-attention K/V stays
+// precomputed once per request (PrecomputeCrossKV, unchanged) — the standard Whisper serving trick, since
+// cross K/V depend only on the fixed encoder output; DecodeLogitsStep projects cross-attention Q for only
+// the new row(s) too (crossAttentionForward's Tq shrinks from the whole sequence to the new batch), which
+// is bit-identical per row for the same row-wise reason.
 
 // CrossKV is one decoder layer's precomputed cross-attention K/V — computed once per request from the
 // (fixed) encoder output.
@@ -92,6 +103,90 @@ func DecodeLogits(ids []int32, crossKV []CrossKV, tenc int, w *Weights, cfg *Con
 
 	normedFinal := layerNormForward(hidden, w.DecoderFinalNorm, T, D)
 	lastRow := normedFinal[(T-1)*D : T*D]
+	return tiedLMHead(lastRow, w), nil
+}
+
+// SelfAttnCache is one decoder layer's growing self-attention K/V cache — appended one step's new row(s)
+// at a time by DecodeLogitsStep, attended over in full (via mhaCore's offset parameter) on every
+// subsequent step. K/V are flat [n,DModel] (n = tokens appended so far, i.e. len(K)/DModel) so appending
+// a step's rows is a plain slice append, matching CrossKV's flat layout.
+type SelfAttnCache struct {
+	K, V []float32
+}
+
+// NewSelfAttnCache allocates one empty cache per decoder layer, ready for DecodeLogitsStep — mirrors
+// PrecomputeCrossKV's one-entry-per-layer shape, empty rather than precomputed because self-attention K/V
+// depend on the tokens generated so far, not on anything known before decoding starts.
+func NewSelfAttnCache(numLayers int) []SelfAttnCache {
+	return make([]SelfAttnCache, numLayers)
+}
+
+// DecodeLogitsStep is DecodeLogits' incremental twin: runs the decoder stack over ONLY the newly
+// appended token ids newIDs (a multi-token PREFILL batch on the very first call — GreedyDecode's whole
+// init prompt — or a single token on every call after), starting at absolute position startPos (the
+// count of tokens already in cache), appending each layer's self-attention K/V onto cache (mutated in
+// place) and attending over the FULL cache (history + this batch, causal). Returns the vocabulary logits
+// at the LAST new position only, BIT-IDENTICAL to what DecodeLogits(fullSequenceSoFar, ...) would return
+// for that same position — see the file doc comment for why, and decoder_test.go's
+// TestDecodeLogitsStep_MatchesDecodeLogits_Good for the proof. This is the function GreedyDecode/
+// DetectLanguage actually call (the ~23s → seconds wall-clock receipt on the live whisper-tiny fixture —
+// see live_test.go and docs/handover.md).
+func DecodeLogitsStep(newIDs []int32, startPos int, cache []SelfAttnCache, crossKV []CrossKV, tenc int, w *Weights, cfg *Config) ([]float32, error) {
+	if w == nil || cfg == nil {
+		return nil, core.NewError("whisper.DecodeLogitsStep: nil weights/config")
+	}
+	Tn := len(newIDs)
+	if Tn == 0 {
+		return nil, core.NewError("whisper.DecodeLogitsStep: no new tokens")
+	}
+	if startPos < 0 {
+		return nil, core.NewError("whisper.DecodeLogitsStep: negative startPos")
+	}
+	if startPos+Tn > cfg.MaxTargetPositions {
+		return nil, core.NewError(core.Sprintf("whisper.DecodeLogitsStep: sequence length %d exceeds max_target_positions %d", startPos+Tn, cfg.MaxTargetPositions))
+	}
+	if len(crossKV) != len(w.DecoderLayers) || len(cache) != len(w.DecoderLayers) {
+		return nil, core.NewError("whisper.DecodeLogitsStep: cache/crossKV must have one entry per decoder layer")
+	}
+	D := cfg.DModel
+	hidden := make([]float32, Tn*D)
+	for t, id := range newIDs {
+		if int(id) < 0 || int(id) >= cfg.VocabSize {
+			return nil, core.NewError(core.Sprintf("whisper.DecodeLogitsStep: token id %d at position %d is out of vocab range [0,%d)", id, startPos+t, cfg.VocabSize))
+		}
+		embedRow := w.EmbedTokens[int(id)*D : int(id)*D+D]
+		posRow := w.DecoderPos[(startPos+t)*D : (startPos+t)*D+D]
+		for d := range D {
+			hidden[t*D+d] = embedRow[d] + posRow[d]
+		}
+	}
+
+	for li := range w.DecoderLayers {
+		layer := w.DecoderLayers[li]
+		residual := hidden
+		normed := layerNormForward(hidden, layer.SelfAttnNorm, Tn, D)
+		selfOut, err := selfAttentionForwardCached(normed, Tn, D, cfg.DecoderAttentionHeads, layer.SelfAttn, &cache[li])
+		if err != nil {
+			return nil, err
+		}
+		hidden = addRows(residual, selfOut)
+
+		residual = hidden
+		normed = layerNormForward(hidden, layer.CrossAttnNorm, Tn, D)
+		crossOut, err := crossAttentionForward(normed, Tn, D, cfg.DecoderAttentionHeads, layer.CrossAttn, crossKV[li].K, crossKV[li].V, tenc)
+		if err != nil {
+			return nil, err
+		}
+		hidden = addRows(residual, crossOut)
+
+		residual = hidden
+		normed = layerNormForward(hidden, layer.FinalNorm, Tn, D)
+		ff := linearForward(geluRow(linearForward(normed, layer.FC1, Tn)), layer.FC2, Tn)
+		hidden = addRows(residual, ff)
+	}
+
+	normedFinal := layerNormForward(hidden, w.DecoderFinalNorm, Tn, D)
+	lastRow := normedFinal[(Tn-1)*D : Tn*D]
 	return tiedLMHead(lastRow, w), nil
 }
 

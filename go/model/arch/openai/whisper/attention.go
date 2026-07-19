@@ -10,11 +10,17 @@ import (
 
 // attention.go is WhisperAttention ported host-side: standard multi-head softmax(QKᵀ)V, scaling folded
 // into Q right after its projection (matching modeling_whisper.py's eager_attention_forward — the
-// attention core itself runs with scaling=1.0 because the reference already scaled Q). Three shapes
-// share the one mhaCore: encoder self-attention (Tq==Tk, non-causal), decoder self-attention (Tq==Tk,
-// causal — the FULL growing sequence is recomputed every decode step; see decoder.go's doc comment for
-// why that is the deliberate v1 simplification), and decoder cross-attention (Tq = decoder length,
-// Tk = 1500 fixed encoder positions, K/V PRECOMPUTED once per request — the design's explicit ask).
+// attention core itself runs with scaling=1.0 because the reference already scaled Q). Four shapes
+// share the one mhaCore: encoder self-attention (Tq==Tk, non-causal), decoder self-attention recompute
+// (Tq==Tk, causal, offset 0 — the whole-sequence reference path DecodeLogits still runs, kept as the
+// byte-identical test oracle for the cached path below — see decoder.go's doc comment), decoder cross-
+// attention (Tq = decoder length, Tk = 1500 fixed encoder positions, K/V PRECOMPUTED once per request —
+// the design's explicit ask), and decoder self-attention CACHED (selfAttentionForwardCached below: Tq =
+// only the newly appended row(s), Tk = the running per-layer K/V cache, offset = the cache's length
+// before this batch — mhaCore's causal boundary for query row i becomes offset+i+1, reproducing exactly
+// what a whole-sequence recompute would compute for that same absolute position, since self-attention
+// output at any position is a pure function of that position's own causal history and never changes once
+// computed — see decoder.go's file doc comment for the full argument and DecodeLogitsStep's use of this).
 
 // linearForward computes y[T,Out] = x[T,In]·Wᵀ + b (b nil ⇒ no bias — Whisper's k_proj). f64
 // accumulation for precision, matching mamba2.matNT's house convention (arch/mamba2/block.go).
@@ -84,10 +90,15 @@ func geluRow(x []float32) []float32 {
 
 // mhaCore runs scaled dot-product attention given ALREADY-PROJECTED q[Tq,D]/k[Tk,D]/v[Tk,D] split into H
 // heads of headDim=D/H, Q pre-scaled by 1/√headDim (callers apply the scale right after q_proj — see
-// projectQScaled). causal restricts query position i to keys [0,i] (decoder self-attention only;
-// encoder self-attention and cross-attention always attend to every key). Returns [Tq,D] with heads
-// concatenated back in channel order, ready for out_proj.
-func mhaCore(q, k, v []float32, Tq, Tk, H, headDim int, causal bool) []float32 {
+// projectQScaled). causal restricts query row i to keys [0, offset+i] (decoder self-attention only;
+// encoder self-attention and cross-attention always attend to every key and pass offset 0, which is
+// unused when causal is false). offset is 0 for a whole-sequence causal pass (query row i IS absolute
+// position i — selfAttentionForward's recompute path) and the pre-batch cache length for a cached causal
+// pass (query row i is absolute position offset+i — selfAttentionForwardCached): the same limit formula
+// covers both, since a whole-sequence recompute is just the offset-0 special case of a single batch
+// starting from an empty cache. Returns [Tq,D] with heads concatenated back in channel order, ready for
+// out_proj.
+func mhaCore(q, k, v []float32, Tq, Tk, H, headDim, offset int, causal bool) []float32 {
 	D := H * headDim
 	out := make([]float32, Tq*D)
 	scores := make([]float64, Tk)
@@ -96,7 +107,7 @@ func mhaCore(q, k, v []float32, Tq, Tk, H, headDim int, causal bool) []float32 {
 		for i := range Tq {
 			limit := Tk
 			if causal {
-				limit = i + 1
+				limit = offset + i + 1
 				if limit > Tk {
 					limit = Tk
 				}
@@ -156,8 +167,34 @@ func selfAttentionForward(x []float32, T, D, H int, causal bool, w AttnWeights) 
 	q := projectQScaled(x, w.Q, T, headDim)
 	k := linearForward(x, w.K, T)
 	v := linearForward(x, w.V, T)
-	attn := mhaCore(q, k, v, T, T, H, headDim, causal)
+	attn := mhaCore(q, k, v, T, T, H, headDim, 0, causal)
 	return linearForward(attn, w.Out, T), nil
+}
+
+// selfAttentionForwardCached is DecodeLogitsStep's self-attention: projects Q/K/V for ONLY the newly
+// appended rows x[Tn,D], appends the new K/V onto cache (mutated in place — the standard decoder KV
+// cache growing by one batch per call), then attends each new row's Q over the FULL cache (history + the
+// rows just appended) via mhaCore's offset parameter, so row i of this batch sees exactly keys
+// [0, cacheLenBefore+i] — identical to what selfAttentionForward's whole-sequence causal pass computes
+// for that same absolute position (see the file doc comment's argument for why this is bit-identical,
+// not merely close).
+func selfAttentionForwardCached(x []float32, Tn, D, H int, w AttnWeights, cache *SelfAttnCache) ([]float32, error) {
+	if D%H != 0 {
+		return nil, core.NewError("whisper.selfAttentionForwardCached: d_model not divisible by heads")
+	}
+	if cache == nil {
+		return nil, core.NewError("whisper.selfAttentionForwardCached: nil cache")
+	}
+	headDim := D / H
+	q := projectQScaled(x, w.Q, Tn, headDim)
+	kNew := linearForward(x, w.K, Tn)
+	vNew := linearForward(x, w.V, Tn)
+	offset := len(cache.K) / D
+	cache.K = append(cache.K, kNew...)
+	cache.V = append(cache.V, vNew...)
+	Tk := len(cache.K) / D
+	attn := mhaCore(q, cache.K, cache.V, Tn, Tk, H, headDim, offset, true)
+	return linearForward(attn, w.Out, Tn), nil
 }
 
 // precomputeCrossKV projects the (fixed, already-encoded) encoder output through one decoder layer's
@@ -176,6 +213,6 @@ func crossAttentionForward(xq []float32, Tq, D, H int, w AttnWeights, encK, encV
 	}
 	headDim := D / H
 	q := projectQScaled(xq, w.Q, Tq, headDim)
-	attn := mhaCore(q, encK, encV, Tq, Tenc, H, headDim, false)
+	attn := mhaCore(q, encK, encV, Tq, Tenc, H, headDim, 0, false)
 	return linearForward(attn, w.Out, Tq), nil
 }
