@@ -297,6 +297,51 @@ func TestTurboQuantSDPADevice_TwoPass_Good(t *testing.T) {
 	}
 }
 
+// TestTurboQuantSDPADevice_TwoPassShallow_Good pins the LIVE prefill regime the
+// deep gate misses: N far below the block fan (E2B kv=1 bakes 256 blocks; the
+// first decode steps run N ≤ 32), so almost every pass-1 block is EMPTY and the
+// merge must reconstruct from a handful of live partials. gqa=8 matches the
+// served E2B head shape.
+func TestTurboQuantSDPADevice_TwoPassShallow_Good(t *testing.T) {
+	for _, d := range []int{512, 256} {
+		const kBits, vBits = 4, 4
+		tqKVRequire(t, kBits, vBits, d)
+		const nHeads, nKV, n = 8, 1, 16
+		scale := float32(1 / math.Sqrt(float64(d)))
+
+		kStage, _ := tqKVGenBF16(int64(11000+d), n*nKV, d)
+		vStage, _ := tqKVGenBF16(int64(12000+d), n*nKV, d)
+		qBytes, qRef := tqKVGenBF16(int64(13000+d), nHeads, d)
+
+		kCodes, kGammas, err := TurboQuantKVStoreDevice(kStage, n*nKV, d, kBits)
+		if err != nil {
+			t.Fatalf("K store: %v", err)
+		}
+		vCodes, vGammas, err := TurboQuantKVStoreDevice(vStage, n*nKV, d, vBits)
+		if err != nil {
+			t.Fatalf("V store: %v", err)
+		}
+		got, err := TurboQuantSDPADevice(qBytes, kCodes, vCodes, kGammas, vGammas, nHeads, nKV, d, n, kBits, vBits, scale, true)
+		if err != nil {
+			t.Fatalf("TurboQuantSDPADevice(twoPass, shallow): %v", err)
+		}
+		kRows := tqKVDequantRowsHost(kCodes, kGammas, n, nKV, d, kBits)
+		vRows := tqKVDequantRowsHost(vCodes, vGammas, n, nKV, d, vBits)
+		want := tqKVSDPAHostRef(qRef, kRows, vRows, nHeads, nKV, d, n, float64(scale))
+		gotF := bf16ToF32Slice(got)
+		var maxDiff float64
+		for i := range want {
+			if diff := math.Abs(float64(gotF[i]) - want[i]); diff > maxDiff {
+				maxDiff = diff
+			}
+		}
+		t.Logf("d=%d shallow 2-pass (N=%d, gqa=8): max |Δ| vs oracle %g", d, n, maxDiff)
+		if maxDiff > 0.08 {
+			t.Fatalf("d=%d shallow 2-pass: max |Δ| %g exceeds 0.08", d, maxDiff)
+		}
+	}
+}
+
 // TestTurboQuantSDPADevice_Bad proves the driver guards: unsupported head dim,
 // unsupported bits, a GQA factor that does not divide, and a size mismatch.
 func TestTurboQuantSDPADevice_Bad(t *testing.T) {
@@ -389,15 +434,20 @@ func TestEmitSDPAVectorTQ_Good(t *testing.T) {
 	}
 }
 
-// TestEmitSDPAVector2Pass1TQ_Good asserts the pass-1 TQ ABI: N inline at 7,
-// γ planes at 13/14, centroid tables at 15/16.
+// TestEmitSDPAVector2Pass1TQ_Good asserts the pass-1 TQ ABI: kCentroids at 6
+// (the MLX ABI's free slot), N inline at 7, γ planes at 13/14, vCentroids at
+// 15 — and NOTHING at 16, which the recorded arch ICB's
+// maxKernelBufferBindCount=16 turns into a silent no-op (the S3 bring-up bug).
 func TestEmitSDPAVector2Pass1TQ_Good(t *testing.T) {
 	rec := &recordingDispatchSink{}
 	emitSDPAVector2Pass1TQ(rec, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, 8, 2, 4096, 32, 128, 512, 96, 384, 0.125)
-	for _, idx := range []uint{13, 14, 15, 16} {
+	for _, idx := range []uint{6, 13, 14, 15} {
 		if !rec.boundBuf(idx) {
 			t.Fatalf("emitSDPAVector2Pass1TQ did not bind buffer(%d)", idx)
 		}
+	}
+	if rec.boundBuf(16) {
+		t.Fatal("emitSDPAVector2Pass1TQ bound buffer(16) — past the ICB's maxKernelBufferBindCount, a silent no-op")
 	}
 	if got := rec.i32[7]; got != 4096 {
 		t.Fatalf("N(7) = %d, want 4096", got)

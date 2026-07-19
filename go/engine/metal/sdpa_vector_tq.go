@@ -346,11 +346,14 @@ func emitSDPAVectorTQ[S dispatchSink](sink S, pso metal.MTLComputePipelineState,
 }
 
 // emitSDPAVector2Pass1TQ records the TQ pass-1 through any sink — the MLX
-// 2-pass ABI with the γ/centroid planes appended (N at 7 as a buffer or
-// inline; strides 8..11; scale 12; kGammas 13; vGammas 14; centroids 15/16)
-// and the decode grid (nKVHeads, 1, blocks) of (32, gqa, 1). Pass 2 is MLX's
-// sdpa_vector_2pass_2 unchanged; its merged output stays in rotated space and
-// the recorded unrotation op lands it.
+// 2-pass ABI with the γ/centroid planes appended (kCentroids at 6, the MLX
+// ABI's free slot; N at 7 as a buffer or inline; strides 8..11; scale 12;
+// kGammas 13; vGammas 14; vCentroids 15 — NEVER 16: the recorded arch ICB is
+// built with maxKernelBufferBindCount 16, so an index-16 bind records as a
+// silent no-op and the kernel reads garbage) and the decode grid
+// (nKVHeads, 1, blocks) of (32, gqa, 1). Pass 2 is MLX's sdpa_vector_2pass_2
+// unchanged; its merged output stays in rotated space and the recorded
+// unrotation op lands it.
 func emitSDPAVector2Pass1TQ[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q, k, v, partials metal.MTLBuffer, sums, maxs metal.MTLBuffer, kGammas, vGammas, kCentroids, vCentroids metal.MTLBuffer, nBuf metal.MTLBuffer, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
 	sink.setPSO(pso)
 	sink.setBuf(q, 0, 0)
@@ -359,6 +362,7 @@ func emitSDPAVector2Pass1TQ[S dispatchSink](sink S, pso metal.MTLComputePipeline
 	sink.setBuf(partials, 0, 3)
 	sink.setBuf(sums, 0, 4)
 	sink.setBuf(maxs, 0, 5)
+	sink.setBuf(kCentroids, 0, 6)
 	if nBuf != nil {
 		sink.setBuf(nBuf, 0, 7)
 	} else {
@@ -371,8 +375,7 @@ func emitSDPAVector2Pass1TQ[S dispatchSink](sink S, pso metal.MTLComputePipeline
 	sink.setF32(scale, 12)
 	sink.setBuf(kGammas, 0, 13)
 	sink.setBuf(vGammas, 0, 14)
-	sink.setBuf(kCentroids, 0, 15)
-	sink.setBuf(vCentroids, 0, 16)
+	sink.setBuf(vCentroids, 0, 15)
 	sink.dispatchThreadgroups(
 		metal.MTLSize{Width: uint(nKVHeads), Height: 1, Depth: uint(blocks)},
 		metal.MTLSize{Width: 32, Height: uint(nHeads / nKVHeads), Depth: 1},

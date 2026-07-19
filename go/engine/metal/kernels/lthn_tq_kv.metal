@@ -50,10 +50,16 @@ typedef bfloat bf16;
 // kvHeads·khs per row — and the γ planes derive from them in-kernel):
 //   single:  q=0 kCodes=1 vCodes=2 out=3 gqa=4 N=5 khs=6 kss=7 vhs=8 vss=9
 //            scale=10 kGammas=11 vGammas=12 kCentroids=13 vCentroids=14
-//   2pass_1: q=0 kCodes=1 vCodes=2 partials=3 sums=4 maxs=5 N=7 khs=8 kss=9
-//            vhs=10 vss=11 scale=12 kGammas=13 vGammas=14 kCentroids=15
-//            vCentroids=16   (blocks = fc 26, as MLX)
+//   2pass_1: q=0 kCodes=1 vCodes=2 partials=3 sums=4 maxs=5 kCentroids=6
+//            N=7 khs=8 kss=9 vhs=10 vss=11 scale=12 kGammas=13 vGammas=14
+//            vCentroids=15   (blocks = fc 26, as MLX)
 //   bits:    kBits = fc 27, vBits = fc 28 (2, 3 or 4 — the S1/S2 widths)
+//
+// The 2-pass table binds sit at 6 (the MLX ABI's free slot) and 15 — NOT 16:
+// the recorded arch ICB is built with maxKernelBufferBindCount = 16, so bind
+// indices stop at 15; an index-16 bind records as a silent no-op and the
+// kernel reads garbage there (the S3 bring-up bug — encoder paths carry no
+// such limit, which is why only the ICB lane broke).
 //
 // The per-coordinate unpack reads bit-by-bit from the packed row (LSB-first,
 // cross-byte — kv/turboquant packBits, identical to lthn_tq_dequant_unrotate's
@@ -393,6 +399,7 @@ template <int D>
     device bf16* out [[buffer(3)]],
     device float* sums [[buffer(4)]],
     device float* maxs [[buffer(5)]],
+    const device float* k_centroids [[buffer(6)]],
     const constant int& N [[buffer(7)]],
     const constant size_t& k_head_stride [[buffer(8)]],
     const constant size_t& k_seq_stride [[buffer(9)]],
@@ -401,8 +408,7 @@ template <int D>
     const constant float& scale [[buffer(12)]],
     const device float* k_gammas [[buffer(13)]],
     const device float* v_gammas [[buffer(14)]],
-    const device float* k_centroids [[buffer(15)]],
-    const device float* v_centroids [[buffer(16)]],
+    const device float* v_centroids [[buffer(15)]],
     uint3 tptg [[threads_per_threadgroup]],
     uint3 tidtg [[thread_position_in_threadgroup]],
     uint3 tid [[threadgroup_position_in_grid]],
@@ -511,11 +517,12 @@ template <int D>
       [[host_name("lthn_sdpa_vector_2pass_1_tq_bf16_" #dim)]] [[kernel]]    \
   void lthn_sdpa_vector_2pass_1_tq<dim>(                                    \
       const device bf16*, const device uint8_t*, const device uint8_t*,     \
-      device bf16*, device float*, device float*, const constant int&,      \
+      device bf16*, device float*, device float*, const device float*,     \
+      const constant int&,                                                  \
       const constant size_t&, const constant size_t&,                       \
       const constant size_t&, const constant size_t&,                       \
       const constant float&, const device float*, const device float*,      \
-      const device float*, const device float*,                             \
+      const device float*,                                                  \
       uint3, uint3, uint3, uint3, uint);
 
 instantiate_lthn_sdpa_vector_tq(128)
