@@ -12,17 +12,20 @@ import (
 
 // testConfigJSON mirrors the field names/values confirmed live from
 // https://huggingface.co/deepseek-ai/DeepSeek-OCR/resolve/main/config.json (trimmed to the
-// fields this package reads; the real file also duplicates hidden_size/num_hidden_layers/
-// vocab_size at the top level, which this package intentionally does not read — language_config
-// is the semantically correct location).
-const testConfigJSON = `{"model_type":"deepseek_vl_v2","language_config":{"hidden_size":1280,"num_hidden_layers":12,"vocab_size":129280},"vision_config":{"model_type":"vision","model_name":"deeplip_b_l","image_size":1024}}`
+// fields this package reads). The real file duplicates hidden_size/num_hidden_layers/vocab_size
+// under a nested "language_config" key too, but that nested copy is vestigial — DeepseekOCRConfig
+// (the checkpoint's own custom_code config class) is instantiated straight from the TOP-LEVEL
+// fields (verified by constructing it directly and reading back cfg.hidden_size etc.), so this
+// fixture carries both: language_config for the (still-supported) recognition-only reporting
+// path, and top-level fields for the fields Config/weights.go/decoder.go actually load geometry
+// from.
+const testConfigJSON = `{"model_type":"deepseek_vl_v2","hidden_size":1280,"intermediate_size":6848,"moe_intermediate_size":896,"num_hidden_layers":12,"num_attention_heads":10,"num_key_value_heads":10,"vocab_size":129280,"n_routed_experts":64,"n_shared_experts":2,"num_experts_per_tok":6,"first_k_dense_replace":1,"use_mla":false,"max_position_embeddings":8192,"bos_token_id":0,"eos_token_id":1,"language_config":{"hidden_size":1280,"num_hidden_layers":12,"vocab_size":129280},"vision_config":{"model_type":"vision","model_name":"deeplip_b_l","image_size":1024}}`
 
-// TestDeepseekvl2Registered_Good pins the deepseek_vl_v2 "recognised, not yet implemented"
-// contract: model.LookupArch succeeds (a user pointing lem at a DeepSeek-OCR checkpoint gets
-// direction, not "unknown model architecture"), Parse succeeds far enough to report what the
-// arch is, and both the Arch and Composed refusal seams name the arch and say why the forward is
-// missing — mirroring composed.TestComposedMTPRefusal's discipline for a non-hybrid
-// vision-language arch.
+// TestDeepseekvl2Registered_Good pins the deepseek_vl_v2 "recognised, and OCR works through its
+// own verb" contract: model.LookupArch succeeds (a user pointing lem at a DeepSeek-OCR checkpoint
+// gets direction, not "unknown model architecture"), Parse succeeds far enough to report what the
+// arch is, and both the Arch and Composed refusal seams name the arch and redirect to `lem ocr`
+// — mirroring composed.TestComposedMTPRefusal's discipline for a non-hybrid vision-language arch.
 func TestDeepseekvl2Registered_Good(t *testing.T) {
 	spec, ok := model.LookupArch("deepseek_vl_v2")
 	if !ok {
@@ -52,8 +55,8 @@ func TestDeepseekvl2Registered_Good(t *testing.T) {
 
 	if _, err := ac.Arch(); err == nil {
 		t.Fatal("Arch: expected a clean forward refusal, got a resolved architecture")
-	} else if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("Arch refusal %q must name deepseek_vl_v2 and say the forward is not yet implemented", err.Error())
+	} else if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not a decoder-only causal-LM") {
+		t.Fatalf("Arch refusal %q must name deepseek_vl_v2 and say it is not a decoder-only causal-LM", err.Error())
 	}
 
 	tm, err := spec.Composed(map[string]safetensors.Tensor{}, []byte(testConfigJSON))
@@ -63,7 +66,7 @@ func TestDeepseekvl2Registered_Good(t *testing.T) {
 	if tm != nil {
 		t.Fatal("Composed: refusal must return a nil model")
 	}
-	if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("Composed refusal %q must name deepseek_vl_v2 and say the forward is not yet implemented", err.Error())
+	if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not a decoder-only causal-LM") {
+		t.Fatalf("Composed refusal %q must name deepseek_vl_v2 and say it is not a decoder-only causal-LM", err.Error())
 	}
 }
