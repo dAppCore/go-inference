@@ -55,9 +55,9 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 5: DuckDB store + paths (CLI)
 
-- [ ] `datasets.duckdb` at the medium-backed path; its own migration versioning (v1) following the `cli/tui/migrations.go` pattern; typed records mirroring the domain; implements `dataset.Store`.
-- [ ] Score-expression filters compile to SQL over the latest-score-per-kind view; latest-review-wins views.
-- [ ] Tests: full Store conformance against the root fake's behaviour (same test table driven over both), temp-root isolation, migration idempotence.
+- [x] `datasets.duckdb` at the medium-backed path; its own migration versioning (v1) following the `cli/tui/migrations.go` pattern; typed records mirroring the domain; implements `dataset.Store`.
+- [x] Score-expression filters compile to SQL over the latest-score-per-kind view; latest-review-wins views.
+- [x] Tests: full Store conformance against the root fake's behaviour (same test table driven over both), temp-root isolation, migration idempotence.
 
 ### Task 6: `lem data` verbs
 
