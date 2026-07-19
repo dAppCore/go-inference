@@ -73,9 +73,18 @@ func TestArchQuantSessionTurboQuant_Good(t *testing.T) {
 	if native.state.icb.hasKVTQ() {
 		t.Fatal("native session armed the TQ carrier — the off-path must be untouched")
 	}
-	// The submit-ahead peer DECLINES under TQ (v1): recordPeerICB stays nil.
-	if tq.recordPeerICB != nil {
-		t.Fatal("turboquant session armed recordPeerICB — the submit-ahead tail must decline (v1)")
+	// The submit-ahead peer ARMS under TQ: both ICBs share the row-addressed
+	// codes caches, so the pipelined decode keeps its #23 win. A nil recorder
+	// here re-pays the serial submit/wait gap per token (the −32% receipt).
+	if tq.recordPeerICB == nil {
+		t.Fatal("turboquant session left recordPeerICB nil — TQ decode falls off the submit-ahead pipeline")
+	}
+	peer, perr := tq.recordPeerICB()
+	if perr != nil {
+		t.Fatalf("turboquant peer ICB record: %v", perr)
+	}
+	if !peer.hasKVTQ() {
+		t.Fatal("turboquant peer ICB recorded WITHOUT the kvTQ set — a bf16 peer would corrupt the codes cache")
 	}
 	// Residency receipt: every global owner's code cache is smaller than its
 	// bf16 twin (hd=128 b=4: 64 codes + 4 γ bytes vs 256 bf16 bytes per row per head).

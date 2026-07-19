@@ -867,22 +867,22 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 				return
 			}
 			sess.state.icb = rep
-			if tqMode == nil {
-				// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
-				// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
-				// TurboQuant sessions DECLINE the submit-ahead/live-link tails (v1): recordPeerICB stays
-				// nil, so every pipelined gate falls through to the serial chained loop.
-				sess.recordPeerICB = func() (*archICBReplay, error) {
-					return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, nil)
+			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
+			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
+			// TurboQuant peers record the SAME kvTQ set: both ICBs append codes+norms into the shared
+			// row-addressed caches, each rebinding its own row at replay — the peer without kvTQ would
+			// write bf16 rows into a codes cache (and serial-only TQ decode re-pays the #23 submit/wait
+			// gap per token, the −32% receipt).
+			sess.recordPeerICB = func() (*archICBReplay, error) {
+				return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
+			}
+			if pipelinedGPUDecodeEnabled {
+				peer, perr := sess.recordPeerICB()
+				if perr != nil {
+					buildErr = perr
+					return
 				}
-				if pipelinedGPUDecodeEnabled {
-					peer, perr := sess.recordPeerICB()
-					if perr != nil {
-						buildErr = perr
-						return
-					}
-					sess.icbPeer = peer
-				}
+				sess.icbPeer = peer
 			}
 		}
 	})
@@ -1192,22 +1192,18 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 				return
 			}
 			sess.state.icb = rep
-			if tqMode == nil {
-				// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
-				// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
-				// TurboQuant sessions DECLINE the submit-ahead/live-link tails (v1): recordPeerICB stays
-				// nil, so every pipelined gate falls through to the serial chained loop.
-				sess.recordPeerICB = func() (*archICBReplay, error) {
-					return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, nil)
+			// Peer ICB for the submit-ahead decode — TurboQuant peers record the SAME kvTQ set
+			// (shared row-addressed codes caches, per-replay row binds); see the BF16 recorder note.
+			sess.recordPeerICB = func() (*archICBReplay, error) {
+				return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
+			}
+			if pipelinedGPUDecodeEnabled {
+				peer, perr := sess.recordPeerICB()
+				if perr != nil {
+					buildErr = perr
+					return
 				}
-				if pipelinedGPUDecodeEnabled {
-					peer, perr := sess.recordPeerICB()
-					if perr != nil {
-						buildErr = perr
-						return
-					}
-					sess.icbPeer = peer
-				}
+				sess.icbPeer = peer
 			}
 		}
 	})
