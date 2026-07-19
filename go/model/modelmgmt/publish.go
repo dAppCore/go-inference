@@ -155,7 +155,7 @@ func uploadFileToHF(token, repoID, localPath, remotePath string) core.Result {
 		rBody := readAll(resp.Body)
 		body := []byte{}
 		if rBody.OK {
-			body = rBody.Value.([]byte)
+			body = rBody.Bytes()
 		}
 		return core.Fail(core.E("modelmgmt.uploadFileToHF", core.Sprintf("upload failed: HTTP %d: %s", resp.StatusCode, string(body)), nil))
 	}

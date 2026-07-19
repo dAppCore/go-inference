@@ -144,7 +144,7 @@ func ConvertMLXtoGGUFLoRA(safetensorsPath, configPath, outputPath, architecture 
 		if !ggufNameResult.OK {
 			return ggufNameResult
 		}
-		ggufName := ggufNameResult.Value.(string)
+		ggufName := ggufNameResult.String()
 
 		ggmlTypeResult := SafetensorsDtypeToGGML(info.Dtype)
 		if !ggmlTypeResult.OK {

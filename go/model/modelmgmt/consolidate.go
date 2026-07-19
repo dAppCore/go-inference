@@ -41,7 +41,7 @@ func Consolidate(cfg ConsolidateConfig, w io.Writer) core.Result {
 	if !listResult.OK {
 		return core.Fail(core.E("modelmgmt.Consolidate", "list remote files: "+listResult.Error(), nil))
 	}
-	listOutput, _ := listResult.Value.([]byte)
+	listOutput := listResult.Bytes()
 
 	remoteFiles := core.Split(core.Trim(string(listOutput)), "\n")
 	var validFiles []string
@@ -64,7 +64,7 @@ func Consolidate(cfg ConsolidateConfig, w io.Writer) core.Result {
 
 		rLines := countLines(local)
 		if rLines.OK {
-			core.Print(w, "  %s: %d records", core.PathBase(rf), rLines.Value.(int))
+			core.Print(w, "  %s: %d records", core.PathBase(rf), rLines.Int())
 		}
 	}
 
@@ -138,7 +138,7 @@ func Consolidate(cfg ConsolidateConfig, w io.Writer) core.Result {
 //
 //	r := countLines("/data/file.jsonl")
 //	if !r.OK { return r }
-//	n := r.Value.(int)
+//	n := r.Int()
 func countLines(path string) core.Result {
 	f, err := coreio.Local.Open(path)
 	if err != nil {

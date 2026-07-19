@@ -137,7 +137,7 @@ func BuildModelBook(opts ModelBookOptions) core.Result {
 		if !rRaw.OK {
 			return core.Fail(core.E("modelmgmt.BuildModelBook", "read "+name, rRaw.Value.(error)))
 		}
-		raw := rRaw.Value.([]byte)
+		raw := rRaw.Bytes()
 		sum := sha256.Sum256(raw)
 		tensors, elements, _ := ebookSafetensorsStats(raw)
 		wf := weightFile{
