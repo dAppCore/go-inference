@@ -280,9 +280,11 @@ func TestPack_Roundtrip_Ugly(t *testing.T) {
 }
 
 func TestPack_VindexOption_Bad(t *testing.T) {
-	// Seam-honesty: VindexBlob != nil must return an explicit
-	// "not yet implemented" failure so callers know the embedding seam
-	// exists but isn't wired.
+	// Vindex is a derived field — Embedded/Offset/Length/Hash describe
+	// bytes Pack itself writes into the payload. A caller supplying
+	// Manifest.Vindex without VindexBlob to back it describes a section
+	// that would never actually be embedded; Pack must reject rather than
+	// silently drop the caller's ref or lie about the payload contents.
 	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-vindex-bad-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
@@ -291,12 +293,130 @@ func TestPack_VindexOption_Bad(t *testing.T) {
 
 	buildFixturePack(t, srcDir)
 
+	m := sampleManifest()
+	m.Vindex = &pack.VindexRef{Embedded: true, Length: 10}
+
 	r := pack.Pack(srcDir, dest, pack.PackOptions{
-		Manifest:   sampleManifest(),
-		VindexBlob: []byte("not real msgpack but non-nil"),
+		Manifest: m,
+		// VindexBlob deliberately left nil — nothing to back the ref.
 	})
 	if r.OK {
-		t.Fatalf("expected Pack to fail when VindexBlob is non-nil, got OK")
+		t.Fatalf("expected Pack to fail when Manifest.Vindex is set without VindexBlob, got OK")
+	}
+}
+
+func TestPack_VindexRoundtrip_Good(t *testing.T) {
+	// Full write->read cycle with a small synthetic vindex blob: Pack
+	// embeds it as a trailing payload section; Inspect must report the
+	// derived placement (caller-supplied bogus Offset/Length/Embedded
+	// overwritten, Format preserved); ExtractVindex must hand back the
+	// exact original bytes; Unpack and List must still see only the
+	// original pack tree, unaffected by the trailing vindex bytes.
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-vindex-roundtrip-").Value.(string)
+	defer core.RemoveAll(tempRoot)
+
+	srcDir := core.JoinPath(tempRoot, "src")
+	dest := core.JoinPath(tempRoot, "out.model")
+	outDir := core.JoinPath(tempRoot, "out")
+
+	buildFixturePack(t, srcDir)
+	srcHash := fileTreeHash(t, srcDir)
+
+	blob := []byte("synthetic-larql-vindex-blob-for-roundtrip-testing-0123456789")
+
+	m := sampleManifest()
+	// Caller pre-sets Format (preserved) plus bogus structural values
+	// (must be overwritten — they describe bytes Pack, not the caller,
+	// actually writes).
+	m.Vindex = &pack.VindexRef{Format: "msgpack", Embedded: false, Offset: 999, Length: 999}
+
+	if r := pack.Pack(srcDir, dest, pack.PackOptions{Manifest: m, VindexBlob: blob}); !r.OK {
+		t.Fatalf("Pack: %v", r.Value)
+	}
+
+	manifest, _, r := pack.Inspect(dest)
+	if !r.OK {
+		t.Fatalf("Inspect: %v", r.Value)
+	}
+	if manifest.Vindex == nil {
+		t.Fatalf("expected Manifest.Vindex populated after Pack with VindexBlob")
+	}
+	if !manifest.Vindex.Embedded {
+		t.Errorf("expected Vindex.Embedded true, got false")
+	}
+	if manifest.Vindex.Length != uint64(len(blob)) {
+		t.Errorf("expected Vindex.Length %d, got %d", len(blob), manifest.Vindex.Length)
+	}
+	if manifest.Vindex.Format != "msgpack" {
+		t.Errorf("expected caller-supplied Format %q preserved, got %q", "msgpack", manifest.Vindex.Format)
+	}
+	if manifest.Vindex.Offset == 999 {
+		t.Errorf("expected bogus caller Offset overwritten, still 999")
+	}
+	wantHash := sha256.Sum256(blob)
+	if manifest.Vindex.Hash != hex.EncodeToString(wantHash[:]) {
+		t.Errorf("expected Vindex.Hash %s, got %s", hex.EncodeToString(wantHash[:]), manifest.Vindex.Hash)
+	}
+
+	gotBlob, r := pack.ExtractVindex(dest)
+	if !r.OK {
+		t.Fatalf("ExtractVindex: %v", r.Value)
+	}
+	if string(gotBlob) != string(blob) {
+		t.Fatalf("ExtractVindex mismatch:\n  want: %q\n  got:  %q", blob, gotBlob)
+	}
+
+	if r := pack.Unpack(dest, outDir, pack.UnpackOptions{}); !r.OK {
+		t.Fatalf("Unpack: %v", r.Value)
+	}
+	if outHash := fileTreeHash(t, outDir); outHash != srcHash {
+		t.Fatalf("file tree hash mismatch after vindex-embedded pack:\n  src: %s\n  out: %s", srcHash, outHash)
+	}
+
+	entries, _, r := pack.List(dest)
+	if !r.OK {
+		t.Fatalf("List: %v", r.Value)
+	}
+	want := map[string]bool{
+		"config.json":         false,
+		"tokenizer.json":      false,
+		"chat_template.jinja": false,
+		"model.safetensors":   false,
+	}
+	for _, e := range entries {
+		if _, ok := want[e.Path]; !ok {
+			t.Errorf("unexpected entry %q — tar decode likely read into the vindex bytes", e.Path)
+			continue
+		}
+		want[e.Path] = true
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Errorf("expected entry %q not present in List output", name)
+		}
+	}
+}
+
+func TestPack_ExtractVindex_NoVindex_Good(t *testing.T) {
+	// A pack with no vindex is a normal state, not an error: ExtractVindex
+	// must return a nil blob and core.Ok(nil), never a failing Result.
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-vindex-none-").Value.(string)
+	defer core.RemoveAll(tempRoot)
+
+	srcDir := core.JoinPath(tempRoot, "src")
+	dest := core.JoinPath(tempRoot, "out.model")
+
+	buildFixturePack(t, srcDir)
+	if r := pack.Pack(srcDir, dest, pack.PackOptions{Manifest: sampleManifest()}); !r.OK {
+		t.Fatalf("Pack: %v", r.Value)
+	}
+
+	blob, r := pack.ExtractVindex(dest)
+	if !r.OK {
+		t.Fatalf("ExtractVindex: %v", r.Value)
+	}
+	if blob != nil {
+		t.Fatalf("expected nil blob for a pack with no vindex, got %d bytes", len(blob))
 	}
 }
 
@@ -464,6 +584,7 @@ func TestPack_Fingerprint_IdentityDelta_Ugly(t *testing.T) {
 		{"Tokenizer.Kind", func(m *pack.Manifest) { m.Tokenizer.Kind = "gpt2-bpe" }},
 		{"Tokenizer.ChatTemplate", func(m *pack.Manifest) { m.Tokenizer.ChatTemplate = "llama" }},
 		{"SourceFormat", func(m *pack.Manifest) { m.SourceFormat = "gguf" }},
+		{"Vindex.Hash", func(m *pack.Manifest) { m.Vindex = &pack.VindexRef{Embedded: true, Hash: "deadbeefdeadbeef"} }},
 	}
 	for _, tc := range cases {
 		m := sampleManifest()

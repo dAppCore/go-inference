@@ -57,3 +57,17 @@ func ExampleInspect() {
 	_ = inspection.Model.Architecture
 	_ = core.Sprintf("inspected %s", inspection.Path)
 }
+
+// ExampleExtractVindex shows how to read the embedded vindex blob back out
+// of a .model that was packed with PackOptions.VindexBlob set. A nil blob
+// with an OK Result means this pack carries no vindex — not an error.
+func ExampleExtractVindex() {
+	blob, r := pack.ExtractVindex("/tmp/gemma-3-4b-it.model")
+	if !r.OK {
+		return
+	}
+	if blob == nil {
+		return // this pack carries no vindex
+	}
+	_ = core.Sprintf("vindex blob: %d bytes", len(blob))
+}
