@@ -3,6 +3,7 @@
 package gptoss
 
 import (
+	"math"
 	"testing"
 
 	core "dappco.re/go"
@@ -59,11 +60,11 @@ func TestConfig_ParseConfig_Ugly(t *testing.T) {
 	}
 }
 
-// TestConfig_Arch_Good pins the documented "resolves cleanly, still refuses" behaviour for the REAL
-// openai/gpt-oss-20b config fixture: buildArch's geometry construction must succeed (proving parse +
-// layer schedule + MoE dims + YaRN table all resolve against real data), and the refusal that follows
-// must echo the config's ACTUAL layer/expert/vocab counts (proving it doesn't fabricate a generic
-// message) and name the specific missing primitives (sinks, biases) rather than a vague "not validated".
+// TestConfig_Arch_Good pins the LIFTED boundary (#37, all three rungs landed): the REAL
+// openai/gpt-oss-20b config fixture resolves to a full decode Arch — geometry, MoE dims, the
+// clamped-SwiGLU declaration (with its limit), the YaRN rope table, AND the mscale²-folded
+// attention scale (factor 32 → mscale = 0.1·ln 32 + 1 = 1.34657…; AttnScale = mscale²/√64 —
+// the cos·sin double application both fetched references carry, see buildArch's derivation).
 func TestConfig_Arch_Good(t *testing.T) {
 	data := core.ReadFile(core.PathJoin("testdata", "openai-gpt-oss-20b-config.json"))
 	if !data.OK {
@@ -73,34 +74,51 @@ func TestConfig_Arch_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseConfig: %v", err)
 	}
-	_, err = cfg.Arch()
-	if err == nil {
-		t.Fatal("Arch: expected a clean sinks/bias-boundary refusal, got a resolved architecture")
+	a, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch (all three #37 rungs landed — sinks, biases, attention_factor): %v", err)
 	}
-	if !core.Contains(err.Error(), "24") || !core.Contains(err.Error(), "32") || !core.Contains(err.Error(), "201088") {
-		t.Fatalf("Arch refusal %q must echo the config's actual layer/expert/vocab counts", err.Error())
+	if len(a.Layer) != 24 || a.Experts != 32 || a.TopK != 4 || a.Vocab != 201088 {
+		t.Fatalf("Arch geometry = %d layers, %d experts, topK %d, vocab %d — want 24/32/4/201088", len(a.Layer), a.Experts, a.TopK, a.Vocab)
 	}
-	if !core.Contains(err.Error(), "self_attn.sinks") {
-		t.Fatalf("Arch refusal %q must name the attention-sinks gap", err.Error())
+	if a.Activation != "gpt_oss_clamped_swiglu" || a.SwigluLimit != 7 {
+		t.Fatalf("Arch activation = %q limit %v, want gpt_oss_clamped_swiglu/7", a.Activation, a.SwigluLimit)
 	}
-	if !core.Contains(err.Error(), "biases") {
-		t.Fatalf("Arch refusal %q must name the o_proj/router/expert bias gap", err.Error())
+	mscale := float64(yarnAttentionFactor(32))
+	want := float32(mscale * mscale / math.Sqrt(64))
+	if a.AttnScale != want {
+		t.Fatalf("AttnScale = %v, want mscale²/√headDim = %v (mscale %v at factor 32)", a.AttnScale, want, mscale)
+	}
+	if len(a.RopeFreqs) != 32 {
+		t.Fatalf("RopeFreqs length = %d, want 32 (rotaryDim/2)", len(a.RopeFreqs))
 	}
 }
 
-// TestConfig_Arch_Bad proves Arch validates the STRUCTURAL geometry first (a change from the old
-// unconditional-refusal shape): an empty config fails on the basic hidden_size/layers/heads guard, not
-// the sinks/bias boundary — the boundary is only reachable once the geometry genuinely resolves.
+// TestConfig_Arch_NonYarnScale_Good is the attention-scale REGRESSION: a config without YaRN rope
+// keeps the plain 1/√headDim — the mscale fold engages ONLY under rope_type "yarn" with factor>1,
+// so no other arch's (and no non-YaRN gpt_oss variant's) scale resolution changes.
+func TestConfig_Arch_NonYarnScale_Good(t *testing.T) {
+	cfg := realConfig()
+	cfg.RopeScaling = RopeScaling{} // no yarn → no mscale
+	a, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch(non-yarn): %v", err)
+	}
+	if want := float32(1 / math.Sqrt(64)); a.AttnScale != want {
+		t.Fatalf("non-YaRN AttnScale = %v, want the plain 1/√headDim = %v", a.AttnScale, want)
+	}
+}
+
+// TestConfig_Arch_Bad proves Arch still validates the STRUCTURAL geometry: an empty config fails on
+// the basic hidden_size/layers/heads guard with a precise error — the lift removed the serving
+// refusal, never the validation.
 func TestConfig_Arch_Bad(t *testing.T) {
 	_, err := (&Config{}).Arch()
 	if err == nil {
 		t.Fatal("Arch accepted an empty config")
 	}
 	if !core.Contains(err.Error(), "hidden_size") {
-		t.Fatalf("Arch refusal %q for an empty config must name the missing hidden_size/layers/heads, not the sinks/bias boundary", err.Error())
-	}
-	if core.Contains(err.Error(), "self_attn.sinks") {
-		t.Fatalf("Arch refusal %q reached the sinks/bias boundary on a structurally invalid config", err.Error())
+		t.Fatalf("Arch refusal %q for an empty config must name the missing hidden_size/layers/heads", err.Error())
 	}
 }
 
@@ -127,13 +145,13 @@ func TestConfig_InferFromWeights_Good(t *testing.T) {
 	}
 }
 
-// TestConfig_InferFromWeights_Bad proves the no-op does not make Arch
-// succeed — Arch always refuses regardless.
+// TestConfig_InferFromWeights_Bad proves the no-op resolves nothing: an empty config still fails
+// Arch's structural validation after InferFromWeights (nothing was inferred into it).
 func TestConfig_InferFromWeights_Bad(t *testing.T) {
 	cfg := Config{}
 	cfg.InferFromWeights(nil)
 	if _, err := cfg.Arch(); err == nil {
-		t.Fatal("Arch must still refuse after InferFromWeights")
+		t.Fatal("Arch must still reject an empty config after InferFromWeights (the no-op infers nothing)")
 	}
 }
 

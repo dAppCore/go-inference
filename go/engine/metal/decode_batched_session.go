@@ -1080,6 +1080,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		// norm+rope (a full-row write) lands each row into its slot in order. Needs the fused
 		// qknorm-rope kernel + the gemma4 norms; anything else keeps the proven per-row halves.
 		foldAttn := foldMLP && s.lb[li].qNorm.buf != nil
+		// Attention sinks (gpt_oss) are wired through the per-row interleave's encSDPADecodeSinksAt
+		// ONLY — the fold's multi-query SDPA kernels have no has_sinks lane, so a sinks layer folding
+		// would silently drop its sinks. (Today this is doubly-guarded: gpt_oss carries no qNorm, so
+		// foldAttn is already false above — this line keeps the guard explicit, not incidental.)
+		foldAttn = foldAttn && s.lb[li].sinks.buf == nil
 		ownsCache := s.specs[li].OwnsCache()
 		kvDim := lkv * lhd
 		qDim := s.nHeads * lhd
@@ -1521,7 +1526,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if ownsCache {
 				if err = encAttnHalfKVInputAt(enc, readRows[i], readOff[i], layerK, layerV, offBuf[i], hTarget, hOff, offOff[i],
 					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
-					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}
@@ -1535,7 +1540,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 				if err = encAttnHalfSharedInputAt(enc, readRows[i], readOff[i], kC, vC, offBuf[i], hTarget, hOff, offOff[i],
 					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj,
-					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}

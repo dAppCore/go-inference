@@ -11,8 +11,8 @@ func ExampleParseConfig() {
 }
 
 func ExampleConfig_Arch() {
-	// A fully-populated, structurally valid gpt_oss config — geometry resolves cleanly, but Arch still
-	// refuses: engine/metal has no consumer yet for attention sinks or the o_proj/router/expert biases.
+	// A fully-populated, structurally valid gpt_oss config resolves to a full decode Arch — every
+	// layer MoE on the alternating sliding/full schedule, the clamped-SwiGLU activation declared.
 	cfg := Config{
 		HiddenSize: 2880, NumHiddenLayers: 24, NumAttentionHeads: 64, NumKeyValueHeads: 8, HeadDim: 64,
 		VocabSize: 201088, NumLocalExperts: 32, NumExpertsPerTok: 4, IntermediateSize: 2880,
@@ -25,9 +25,9 @@ func ExampleConfig_Arch() {
 			"sliding_attention", "full_attention", "sliding_attention", "full_attention",
 		},
 	}
-	_, err := cfg.Arch()
-	core.Println(err != nil)
-	// Output: true
+	a, err := cfg.Arch()
+	core.Println(err == nil, len(a.Layer), a.Experts, a.Activation)
+	// Output: true 24 32 gpt_oss_clamped_swiglu
 }
 
 func ExampleConfig_InferFromWeights() {

@@ -21,7 +21,12 @@ type LoadedLayer struct {
 	AttnNorm, PostAttnNorm []byte // input_layernorm, post_attention_layernorm
 	QNorm, KNorm           []byte // self_attn.q_norm / k_norm (nil without QK-norm)
 	LayerScalar            []byte // per-layer output scalar [1] (nil when absent)
-	Q, K, V, O             *Linear
+	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [heads]): a learned
+	// per-head score that joins the softmax denominator as one extra "key" contributing NO value mass
+	// (transformers modeling_gpt_oss.py eager_attention_forward: cat([attn_weights, sinks]) → softmax
+	// → drop the last column). nil for every arch whose WeightNames declares no Sinks suffix.
+	Sinks      []byte
+	Q, K, V, O *Linear
 	// GatedDelta is a MixerGatedDelta layer's linear-attention recurrence weights (non-nil ⇒ this layer
 	// is a gated-delta mixer, Q/K/V/O then unused — the mixer analogue of MoE replacing dense Gate/Up/
 	// Down). GatedDeltaCfg carries its resolved geometry. Built by assembleGatedDelta when the layer's

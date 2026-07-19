@@ -128,12 +128,21 @@ func ffnUsesSiLU(activation string) bool {
 	return activation == "silu" || activation == "swish"
 }
 
+// ffnUsesClampedSwiGLU recognises gpt_oss's clamped-sigmoid SwiGLU marker — the deliberately
+// non-standard string gptoss.Config.Arch declares so ffnUsesSiLU can NEVER mis-route it onto the
+// plain (uncapped, unshifted) SiLU kernel (see model/arch/openai/gptoss/config.go). It selects the
+// MoEExpertsQuantClampedSiLU expert path via MoEQuantLayerWeights.ClampedSwiGLU.
+func ffnUsesClampedSwiGLU(activation string) bool {
+	return activation == "gpt_oss_clamped_swiglu"
+}
+
 // bf16Projector drives a bf16 gemv per projection (the original weight path). Each weight is a
 // bufView — a Metal buffer plus a byte offset — so the projection binds either an uploaded copy
 // (off 0) or a no-copy view into a shared shard mmap at its offset, transparently.
 type bf16Projector struct {
 	wQ, wK, wV, wO, wGate, wUp, wDown bufView
 	bQ, bK, bV                        bufView // Qwen2/2.5 additive q/k/v projection bias (zero bufView ⇒ none)
+	bO                                bufView // gpt_oss additive o_proj bias (attention_bias=true reaches o_proj); zero bufView ⇒ none
 	dModel, qDim, kvDim, dFF          int
 	mlpUsesSiLU                       bool // SwiGLU (llama/mistral/qwen); zero ⇒ gemma GELU (byte-identical)
 }
@@ -145,8 +154,9 @@ func (b bf16Projector) withSiLU(v bool) projector {
 	return b
 }
 
-// biasView returns the additive projection bias for q/k/v (a zero bufView for every other
-// projection — o_proj and the MLP never carry one in the supported arches).
+// biasView returns the additive projection bias for q/k/v/o (a zero bufView for every other
+// projection — the MLP never carries one in the supported arches; o_proj's is gpt_oss's
+// attention_bias=true, zero for every other arch so their dispatch stream is unchanged).
 func (b bf16Projector) biasView(p projIndex) bufView {
 	switch p {
 	case projQ:
@@ -155,6 +165,8 @@ func (b bf16Projector) biasView(p projIndex) bufView {
 		return b.bK
 	case projV:
 		return b.bV
+	case projO:
+		return b.bO
 	}
 	return bufView{}
 }
@@ -238,6 +250,7 @@ func (w qmvWeight) dense() bool { return w.present() && w.scales.buf == nil && w
 type qmvProjector struct {
 	q, k, v, o, gate, up, down qmvWeight
 	bQ, bK, bV                 bufView // Qwen2/2.5 additive q/k/v bias (plain bf16; zero bufView ⇒ none)
+	bO                         bufView // gpt_oss additive o_proj bias (plain bf16; zero bufView ⇒ none)
 	dModel, qDim, kvDim, dFF   int
 	groupSize, bits            int
 	mlpUsesSiLU                bool // SwiGLU (llama/mistral/qwen); zero ⇒ gemma GELU (byte-identical)
@@ -250,8 +263,9 @@ func (m qmvProjector) withSiLU(v bool) projector {
 	return m
 }
 
-// biasView returns the additive projection bias for q/k/v (a zero bufView otherwise) — the
-// same q/k/v-only bias as the bf16 path; the affine pack still ships it as a plain bf16 vector.
+// biasView returns the additive projection bias for q/k/v/o (a zero bufView otherwise) — the
+// same bias seam as the bf16 path; the affine pack still ships each as a plain bf16 vector.
+// o_proj's bias is gpt_oss's attention_bias=true; zero for every other arch (byte-identical).
 func (m qmvProjector) biasView(p projIndex) bufView {
 	switch p {
 	case projQ:
@@ -260,6 +274,8 @@ func (m qmvProjector) biasView(p projIndex) bufView {
 		return m.bK
 	case projV:
 		return m.bV
+	case projO:
+		return m.bO
 	}
 	return bufView{}
 }

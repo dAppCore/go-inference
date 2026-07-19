@@ -93,6 +93,12 @@ func (s *archDecodeState) batchedMoEUsable(w *MoEQuantLayerWeights) bool {
 	if w == nil || !gpuHasGeluKernel() {
 		return false
 	}
+	if w.ClampedSwiGLU {
+		// gpt_oss: the batched MoE block encodes the gemma dual-branch shape (local MLP + sandwich
+		// norms + GELU experts) — none of which a clamped-SwiGLU layer has. Declining here keeps the
+		// batched pass off gpt_oss layers entirely; they decode via encGptOssMoEHalf per token.
+		return false
+	}
 	if !quantMoEDeviceRouterBuffersUsable(*w, s.dModel) || !routerTopKUsable(w.NumExperts, w.TopK) {
 		return false
 	}

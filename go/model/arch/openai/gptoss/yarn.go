@@ -11,10 +11,10 @@ import (
 // yarn.go computes GPT-OSS's YaRN ("Yet another RoPE extensioN") long-context rope correction: the
 // per-dimension inverse-frequency table Config.buildArch feeds into model.Arch.RopeFreqs (consumed
 // end-to-end by the ALREADY-GENERIC engine/metal RoPEFreqsBF16/encRopeDecode path — no engine change
-// needed for the frequency table itself), plus the attention_factor/mscale cos-sin postscale the
-// reference also applies (computed here, NOT wired into serving — see config.go's Arch doc for why: the
-// engine's one candidate hook, arch.RopeScale, scales the rope ANGLE pre-cos/sin, a different and
-// incompatible operation).
+// needed for the frequency table itself), plus the attention_factor/mscale (yarnAttentionFactor) —
+// APPLIED by buildArch as an mscale² fold into the SDPA scale (exact for full-rotary heads; the
+// engine's rope hook, arch.RopeScale, scales the rope ANGLE pre-cos/sin and stays 1 — a magnitude
+// scale folded there would be confidently wrong, which is why the fold lives on AttnScale instead).
 //
 // Formula verified against the canonical implementation, fetched directly (not from training-data
 // recall) on 2026-07-19:
@@ -128,9 +128,10 @@ func (c *Config) yarnRopeFreqs(rotaryDim int, ropeBase float32) ([]float32, erro
 
 // yarnAttentionFactor is get_mscale(factor) — the reference's attention_factor default when the config
 // (as every real gpt_oss checkpoint does) sets neither "attention_factor" nor "mscale"/"mscale_all_dim"
-// under rope_scaling. Returns 1.0 (no scaling) for factor<=1, matching get_mscale's own guard — computed
-// for documentation/the Arch refusal message and unit-tested, but NOT applied anywhere: see config.go's
-// Arch doc for why no correct hook exists yet.
+// under rope_scaling. Returns 1.0 (no scaling) for factor<=1, matching get_mscale's own guard. APPLIED
+// by buildArch as AttnScale = mscale²/√headDim — the reference scales cos AND sin (equivalently, the
+// pre-rope q/k input) by mscale, so both q and k carry it and the attention logits carry its square;
+// full derivation + both fetched sources in buildArch's comment.
 func yarnAttentionFactor(factor float32) float32 {
 	f := float64(factor)
 	if f <= 1 {

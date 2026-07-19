@@ -48,6 +48,9 @@ func TestWeightNames(t *testing.T) {
 	if w.Q != ".self_attn.q_proj" || w.K != ".self_attn.k_proj" || w.V != ".self_attn.v_proj" || w.O != ".self_attn.o_proj" {
 		t.Errorf("attention projections = %+v, want the standard self_attn.{q,k,v,o}_proj suffixes", w)
 	}
+	if w.Sinks != ".self_attn.sinks" {
+		t.Errorf("Sinks = %q, want .self_attn.sinks (the per-layer [heads] sink-logit tensor every real gpt_oss checkpoint carries)", w.Sinks)
+	}
 }
 
 // gptossSyntheticTensors builds a hermetic single-layer, 2-expert tensor set using GPT-OSS's REAL tensor
@@ -67,6 +70,7 @@ func gptossSyntheticTensors() map[string]safetensors.Tensor {
 		"model.embed_tokens.weight":                      mat(8, hidden),
 		"model.norm.weight":                              vec(hidden),
 		"model.layers.0.input_layernorm.weight":          vec(hidden),
+		"model.layers.0.self_attn.sinks":                 vec(2), // [heads] attention-sink logits
 		"model.layers.0.self_attn.q_proj.weight":         mat(hidden, hidden),
 		"model.layers.0.self_attn.k_proj.weight":         mat(hidden, hidden),
 		"model.layers.0.self_attn.v_proj.weight":         mat(hidden, hidden),
@@ -120,6 +124,9 @@ func TestWeightNames_Assemble_Good(t *testing.T) {
 	}
 	if L.Q == nil || L.K == nil || L.O == nil {
 		t.Fatalf("layer 0 missing a required attention weight: %+v", L)
+	}
+	if len(L.Sinks) != 2*2 { // [heads]=2 bf16 values — the sinks tensor resolved through WeightNames().Sinks
+		t.Fatalf("layer 0 Sinks = %d bytes, want 4 (the .self_attn.sinks [heads] vector)", len(L.Sinks))
 	}
 }
 

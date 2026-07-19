@@ -184,7 +184,7 @@ func TestMoEExpertsQuantClampedSiLU(t *testing.T) {
 	idx := []int32{2, 0}
 	weights := toBF16Bytes([]float32{0.7, 0.3})
 
-	got, err := MoEExpertsQuantClampedSiLU(x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, gs, bits, limit)
+	got, err := MoEExpertsQuantClampedSiLU(x, idx, weights, gate, up, down, nil, nil, nil, numExperts, topK, dModel, dFF, gs, bits, limit)
 	if err != nil {
 		t.Fatalf("MoEExpertsQuantClampedSiLU: %v", err)
 	}
@@ -231,4 +231,98 @@ func TestMoEExpertsQuantClampedSiLU(t *testing.T) {
 		t.Fatal("clamped-SwiGLU and GELU MoE produced identical output — the activation branch is not engaged")
 	}
 	t.Logf("4-bit batched clamped-SwiGLU experts: gpt_oss activation ≡ composed reference, distinct from both the SiLU and GELU siblings")
+}
+
+// TestMoEExpertsQuantClampedSiLU_Biases_Good gates the per-expert additive biases (rung 2, #37):
+// with nonzero gate/up/down biases the dispatch must equal the composed reference — each selected
+// expert's QMV + its own bias slice added THROUGH THE SAME add kernel, gate/up biased BEFORE the
+// clamp, down biased before the router-weighted combine — byte for byte. And the bias must
+// actually engage: the biased output differs from the nil-bias output.
+func TestMoEExpertsQuantClampedSiLU_Biases_Good(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const numExperts, topK, dModel, dFF, gs, bits = 4, 2, 64, 128, 32, 4
+	const limit = 7.0
+	mk := func(n, salt int) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = float32((i*salt+11)%89-44) * 0.02
+		}
+		return s
+	}
+	gate, up, down := quantMoEExpertsFixture(t, numExperts, dModel, dFF, gs, bits)
+	x := toBF16Bytes(mk(dModel, 5))
+	idx := []int32{2, 0}
+	weights := toBF16Bytes([]float32{0.7, 0.3})
+	gateBias := toBF16Bytes(mk(numExperts*dFF, 13))
+	upBias := toBF16Bytes(mk(numExperts*dFF, 17))
+	downBias := toBF16Bytes(mk(numExperts*dModel, 19))
+
+	got, err := MoEExpertsQuantClampedSiLU(x, idx, weights, gate, up, down, gateBias, upBias, downBias, numExperts, topK, dModel, dFF, gs, bits, limit)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantClampedSiLU(biased): %v", err)
+	}
+
+	gp, gsz := dFF*dModel*bits/8, dFF*(dModel/gs)*bf16Size
+	dp, dsz := dModel*dFF*bits/8, dModel*(dFF/gs)*bf16Size
+	must := func(b []byte, e error) []byte {
+		t.Helper()
+		if e != nil {
+			t.Fatalf("ref op: %v", e)
+		}
+		return b
+	}
+	var acc []byte
+	for i, e := range idx {
+		ee := int(e)
+		ge := must(QMVBF16(x, gate.Packed[ee*gp:(ee+1)*gp], gate.Scales[ee*gsz:(ee+1)*gsz], gate.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
+		ge = must(AddBF16(ge, gateBias[ee*dFF*bf16Size:(ee+1)*dFF*bf16Size])) // + gateBias[e] BEFORE the clamp
+		ue := must(QMVBF16(x, up.Packed[ee*gp:(ee+1)*gp], up.Scales[ee*gsz:(ee+1)*gsz], up.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
+		ue = must(AddBF16(ue, upBias[ee*dFF*bf16Size:(ee+1)*dFF*bf16Size])) // + upBias[e] before the symmetric clamp
+		gg := must(ClampedSwiGLUBF16(ge, ue, dFF, limit))
+		de := must(QMVBF16(gg, down.Packed[ee*dp:(ee+1)*dp], down.Scales[ee*dsz:(ee+1)*dsz], down.Biases[ee*dsz:(ee+1)*dsz], dModel, dFF, gs, bits))
+		de = must(AddBF16(de, downBias[ee*dModel*bf16Size:(ee+1)*dModel*bf16Size])) // + downBias[e] before the combine
+		scaled := must(MulBF16(de, scalarFillBF16(weights[i*bf16Size:(i+1)*bf16Size], dModel)))
+		if i == 0 {
+			acc = scaled
+		} else {
+			acc = must(AddBF16(acc, scaled))
+		}
+	}
+	if !bytes.Equal(got, acc) {
+		t.Fatal("biased MoEExpertsQuantClampedSiLU != composed biased reference — a bias landed in the wrong place or through a different op")
+	}
+
+	plain, err := MoEExpertsQuantClampedSiLU(x, idx, weights, gate, up, down, nil, nil, nil, numExperts, topK, dModel, dFF, gs, bits, limit)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantClampedSiLU(nil biases): %v", err)
+	}
+	if bytes.Equal(got, plain) {
+		t.Fatal("nonzero expert biases left the output unchanged — the bias adds did not engage")
+	}
+}
+
+// TestMoEExpertsQuantClampedSiLU_Biases_Bad proves the batched bias-shape guards: a bias of the
+// wrong batched length refuses (each must be [numExperts×outDim] bf16 or nil).
+func TestMoEExpertsQuantClampedSiLU_Biases_Bad(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const numExperts, topK, dModel, dFF, gs, bits = 4, 2, 64, 128, 32, 4
+	gate, up, down := quantMoEExpertsFixture(t, numExperts, dModel, dFF, gs, bits)
+	x := toBF16Bytes(syntheticFloat32(dModel, 5))
+	idx := []int32{2, 0}
+	weights := toBF16Bytes([]float32{0.7, 0.3})
+	short := toBF16Bytes([]float32{1, 2, 3})
+
+	if _, err := MoEExpertsQuantClampedSiLU(x, idx, weights, gate, up, down, short, nil, nil, numExperts, topK, dModel, dFF, gs, bits, 7); err == nil {
+		t.Fatal("expected a short gateBias to refuse")
+	}
+	if _, err := MoEExpertsQuantClampedSiLU(x, idx, weights, gate, up, down, nil, short, nil, numExperts, topK, dModel, dFF, gs, bits, 7); err == nil {
+		t.Fatal("expected a short upBias to refuse")
+	}
+	if _, err := MoEExpertsQuantClampedSiLU(x, idx, weights, gate, up, down, nil, nil, short, numExperts, topK, dModel, dFF, gs, bits, 7); err == nil {
+		t.Fatal("expected a short downBias to refuse")
+	}
 }

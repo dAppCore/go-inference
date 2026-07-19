@@ -24,6 +24,11 @@ type WeightNames struct {
 	LayerPrefix                                                                               string // "model.layers.%d" — the %d carrier
 	AttnNorm, PostAttnNorm, QNorm, KNorm, LayerScalar                                         string // per-layer norms (suffixes)
 	Q, K, V, O                                                                                string // attention projections (suffixes)
+	// Sinks is the per-layer attention-sink tensor suffix (gpt_oss ".self_attn.sinks" — a learned
+	// [heads] logit vector that joins each head's softmax denominator; see LoadedLayer.Sinks). "" (the
+	// StandardWeightNames default, and every non-sink arch) loads nil — byte-identical to before the
+	// field existed. Loaded RAW (never through the NormBiasOne fold: a sink is a logit, not a norm).
+	Sinks string
 	MLPNorm, Gate, Up, Down, PostFFNorm                                                       string // dense MLP (suffixes)
 	PerLayerGate, PerLayerProjection                                                          string // PLE per-layer (suffixes)
 	PostPerLayerInputNorm                                                                     string
@@ -101,6 +106,16 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		return x.Data
 	}
 
+	// raw fetches a tensor's bytes verbatim — no NormBiasOne fold, no Linear probing. The fetch for
+	// per-layer parameter VECTORS that are neither norms nor projections (the attention sinks).
+	raw := func(name string) []byte {
+		x, ok := t[name]
+		if !ok {
+			return nil
+		}
+		return x.Data
+	}
+
 	m := &LoadedModel{Arch: arch, EmbedNorm: norm(names.EmbedNorm), FinalNorm: norm(names.FinalNorm)}
 	embedDim := arch.EmbeddingDim
 	if embedDim == 0 {
@@ -151,6 +166,9 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		} else {
 			L.QNorm = norm(p + names.QNorm)
 			L.KNorm = norm(p + names.KNorm)
+			if names.Sinks != "" { // attention sinks (gpt_oss): a raw [heads] logit vector, not a norm
+				L.Sinks = raw(p + names.Sinks)
+			}
 			L.Q = lin(p+names.Q, d)
 			if spec.OwnsCache() { // KV-shared layers carry no own k/v; v is also absent on K==V layers (lin → nil)
 				L.K = lin(p+names.K, d)

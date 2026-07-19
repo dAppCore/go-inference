@@ -261,17 +261,20 @@ func encResidualMaybeNormAt(enc metal.MTLComputeCommandEncoder, x metal.MTLBuffe
 // (seq-major) at row pos via the projection's bound-buffer offset; offBuf must
 // already hold int32(pos). attends over rows [0..pos]; writes x + Wo·attn -> h (with
 // the gemma4 post-attention norm on Wo·attn first when postAttnNorm is non-nil).
+// sinks is the layer's gpt_oss attention-sink logits (bf16 [nHeads]); the zero bufView
+// (every sink-free arch) keeps the plain SDPA pipelines — byte-identical by construction
+// (encSDPADecodeSinksAt delegates to encSDPADecodeAt unchanged).
 func encAttnHalfKV(
 	enc metal.MTLComputeCommandEncoder,
 	x, kCacheBuf, vCacheBuf, offBuf, h metal.MTLBuffer,
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
-	ropeFreqs metal.MTLBuffer,
+	ropeFreqs metal.MTLBuffer, sinks bufView,
 ) error {
 	return encAttnHalfKVAt(enc, x, kCacheBuf, vCacheBuf, offBuf, h, 0,
 		attnNormW, postAttnNorm, qNorm, kNorm, valueNorm, sc, proj,
-		dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim, base, scale, ropeScale, eps, ropeFreqs)
+		dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim, base, scale, ropeScale, eps, ropeFreqs, sinks)
 }
 
 func encAttnHalfKVAt(
@@ -280,11 +283,11 @@ func encAttnHalfKVAt(
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
-	ropeFreqs metal.MTLBuffer,
+	ropeFreqs metal.MTLBuffer, sinks bufView,
 ) error {
 	return encAttnHalfKVInputAt(enc, x, 0, kCacheBuf, vCacheBuf, offBuf, h, 0, offOff,
 		attnNormW, postAttnNorm, qNorm, kNorm, valueNorm, sc, proj,
-		dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim, base, scale, ropeScale, eps, ropeFreqs)
+		dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim, base, scale, ropeScale, eps, ropeFreqs, sinks)
 }
 
 func encAttnHalfKVInputAt(
@@ -293,7 +296,7 @@ func encAttnHalfKVInputAt(
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
-	ropeFreqs metal.MTLBuffer,
+	ropeFreqs metal.MTLBuffer, sinks bufView,
 ) error {
 	kvDim := nKVHeads * headDim
 	// the cache is a RING of size slideW for sliding layers (slideW>0): write this token's row at
@@ -376,7 +379,9 @@ func encAttnHalfKVInputAt(
 	}
 	// attend the n live rows from offset 0 — the whole seq-major cache (global) or the whole ring
 	// (sliding). n + the ring write above replace the old seq-major slideWindow(pos, slideW).
-	if err := encSDPADecode(enc, sc, sc.q, kCacheBuf, vCacheBuf, sc.attn,
+	// A layer with attention sinks (gpt_oss) routes through the has_sinks pipeline variants; the
+	// zero sinks bufView delegates to the plain encSDPADecodeAt — byte-identical for every other arch.
+	if err := encSDPADecodeSinksAt(enc, sc, sinks, sc.q, 0, kCacheBuf, vCacheBuf, sc.attn, 0,
 		nHeads, nKVHeads, headDim, n,
 		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale, 0); err != nil {
 		return err
@@ -555,7 +560,7 @@ func AttentionStepKVInto(out []byte, x, attnNormW, wQ, wK, wV, wO, kCache, vCach
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		if encErr = encAttnHalfKV(enc, xBuf, kBuf, vBuf, offBuf, hBuf, bufView{buf: nwBuf}, bufView{}, bufView{}, bufView{}, nil, *sc, proj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, scale, eps, nil); encErr != nil {
+		if encErr = encAttnHalfKV(enc, xBuf, kBuf, vBuf, offBuf, hBuf, bufView{buf: nwBuf}, bufView{}, bufView{}, bufView{}, nil, *sc, proj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, scale, eps, nil, bufView{}); encErr != nil {
 			endEncodingFast(enc)
 			return
 		}
@@ -673,7 +678,7 @@ func DecodeStepKVInto(
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		if encErr = encAttnHalfKV(enc, xBuf, kBuf, vBuf, offBuf, layerScratch.h, bufView{buf: nwBuf}, bufView{}, bufView{}, bufView{}, nil, *asc, proj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, scale, eps, nil); encErr != nil {
+		if encErr = encAttnHalfKV(enc, xBuf, kBuf, vBuf, offBuf, layerScratch.h, bufView{buf: nwBuf}, bufView{}, bufView{}, bufView{}, nil, *asc, proj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, scale, eps, nil, bufView{}); encErr != nil {
 			endEncodingFast(enc)
 			return
 		}

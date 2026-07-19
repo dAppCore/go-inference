@@ -35,10 +35,16 @@ import (
 type DecodeLayerWeights struct {
 	AttnNormW, WQ, WK, WV, WO []byte
 	// BQ/BK/BV are the ADDITIVE q/k/v projection biases (bf16, [outDim]) — Qwen2/2.5's
-	// distinguishing trait (bias=True on q_proj/k_proj/v_proj; o_proj and the MLP carry
-	// none, so there is no BO). nil for the bias-free arches (llama/gemma/mistral/qwen3).
-	// Added after the projection matvec, before QK-norm/RoPE (see bf16Projector.project).
-	BQ, BK, BV                  []byte
+	// bias=True q/k/v. BO is o_proj's sibling (gpt_oss attention_bias=true reaches o_proj
+	// — bf16 [dModel], added after the attention output projection). All nil for the
+	// bias-free arches (llama/gemma/mistral/qwen3); the MLP projections carry none in any
+	// supported arch. Added after the projection matvec (see bf16Projector.project).
+	BQ, BK, BV, BO []byte
+	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [nHeads]): a learned
+	// per-head score seeding each head's softmax denominator as one extra key with NO value mass
+	// (the sdpa_vector kernels' has_sinks lane — see sdpa.go). nil for every sink-free arch, which
+	// keeps the plain SDPA pipelines byte-identical.
+	Sinks                       []byte
 	MLPNormW, WGate, WUp, WDown []byte
 	// MoE, when non-nil, replaces the dense MLP half with the gemma4 dual-branch MoE
 	// feed-forward (MoEBlockBF16) for this layer. The dense MLPNormW/WGate/WUp/WDown
@@ -385,7 +391,7 @@ func decodeForwardInto(
 			in, out := sc.xA, sc.xB
 			for li := range nLayers {
 				l := lb[li]
-				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil); encErr != nil {
+				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil, bufView{}); encErr != nil {
 					endEncodingFast(enc)
 					return
 				}
