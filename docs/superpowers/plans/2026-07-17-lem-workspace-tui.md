@@ -1,6 +1,6 @@
 # LEM Workspace TUI Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace the current six-tab LEM terminal UI with a polished, persistent four-panel workspace that supports concurrent chat sessions, searchable DuckDB history, a shared serial model lane, contextual controls, local work/runtime/knowledge views, and complete unavailable states for the later `go/agent/*` capabilities.
 
@@ -111,26 +111,26 @@ func openAppFilesAt(root string) core.Result
 func ensureAppFiles(medium coreio.Medium, paths appPaths) core.Result
 ```
 
-- [ ] Write `TestAppPaths_Good`, asserting `Database` and `State` resolve below the injected host root while `Config`, `Workspaces`, `Packs`, and `Exports` are exactly the medium-relative values `config.yaml`, `workspaces`, `packs`, and `exports`.
-- [ ] Write `TestAppFiles_Good`, opening a temporary root, asserting the three medium directories exist, writing `config.yaml` through the returned medium, and proving an absolute/traversal write cannot escape the root.
-- [ ] Write `TestAppPaths_Bad`, asserting `appPathsAt("")` returns `!OK`.
-- [ ] Write `TestAppFiles_Ugly`, placing a regular file at the intended root and asserting `openAppFilesAt` fails without deleting or replacing it.
-- [ ] Run the focused tests and confirm they fail because the path contract does not exist:
+- [x] Write `TestAppPaths_Good`, asserting `Database` and `State` resolve below the injected host root while `Config`, `Workspaces`, `Packs`, and `Exports` are exactly the medium-relative values `config.yaml`, `workspaces`, `packs`, and `exports`.
+- [x] Write `TestAppFiles_Good`, opening a temporary root, asserting the three medium directories exist, writing `config.yaml` through the returned medium, and proving an absolute/traversal write cannot escape the root.
+- [x] Write `TestAppPaths_Bad`, asserting `appPathsAt("")` returns `!OK`.
+- [x] Write `TestAppFiles_Ugly`, placing a regular file at the intended root and asserting `openAppFilesAt` fails without deleting or replacing it.
+- [x] Run the focused tests and confirm they fail because the path contract does not exist:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
 go test ./tui -run '^TestApp(Paths|Files)_' -count=1
 ```
 
-- [ ] Pin the fixed medium implementation before production code imports it:
+- [x] Pin the fixed medium implementation before production code imports it:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
 go get dappco.re/go/io@v0.15.1
 ```
 
-- [ ] Implement `appPathsAt` with `core.Path` only for the root and two database filenames. Implement `openAppFilesAt` with `coreio.NewSandboxed(root)`, then call `EnsureDir("")`, `EnsureDir("workspaces")`, `EnsureDir("packs")`, and `EnsureDir("exports")`. Do not create either database or the config file in this helper.
-- [ ] Re-run the focused tests, then commit:
+- [x] Implement `appPathsAt` with `core.Path` only for the root and two database filenames. Implement `openAppFilesAt` with `coreio.NewSandboxed(root)`, then call `EnsureDir("")`, `EnsureDir("workspaces")`, `EnsureDir("packs")`, and `EnsureDir("exports")`. Do not create either database or the config file in this helper.
+- [x] Re-run the focused tests, then commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -265,7 +265,7 @@ type attachmentRecord struct {
 
 Use Unix epoch UTC as the explicit “unset” timestamp for non-null archive and finish fields. Each record implements `Schema() orm.Schema`; names are `lem_schema_versions`, `lem_sessions`, `lem_turns`, `lem_events`, `lem_generation_jobs`, `lem_work_items`, `lem_artifacts`, and `lem_attachments`. Declare text IDs as primary keys, `external_id` as unique, and indexes matching the migration below.
 
-- [ ] Pin ORM, go-store, and UUID directly, then tidy only after the new source imports them:
+- [x] Pin ORM, go-store, and UUID directly, then tidy only after the new source imports them:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
@@ -274,12 +274,12 @@ go get dappco.re/go/store@v0.14.1
 go get github.com/google/uuid@v1.6.0
 ```
 
-- [ ] Write `TestRecordSchemas_Good`, checking every schema name, primary key, field, unique constraint, and required index directly through each record's `Schema()` method.
-- [ ] Write `TestMigrations_Good`, opening a temporary DuckDB, applying migrations twice, and asserting one schema-version row and all eight tables.
-- [ ] Write `TestMigrations_Bad`, injecting an invalid statement into a migration and asserting the version row is not committed.
-- [ ] Write `TestMigrations_Ugly`, pre-creating version 1 and asserting startup skips it without changing its timestamp.
-- [ ] Run the tests and observe the missing types/functions failure.
-- [ ] Implement this exact migration inventory as individually executed statements inside one SQL transaction per version:
+- [x] Write `TestRecordSchemas_Good`, checking every schema name, primary key, field, unique constraint, and required index directly through each record's `Schema()` method.
+- [x] Write `TestMigrations_Good`, opening a temporary DuckDB, applying migrations twice, and asserting one schema-version row and all eight tables.
+- [x] Write `TestMigrations_Bad`, injecting an invalid statement into a migration and asserting the version row is not committed.
+- [x] Write `TestMigrations_Ugly`, pre-creating version 1 and asserting startup skips it without changing its timestamp.
+- [x] Run the tests and observe the missing types/functions failure.
+- [x] Implement this exact migration inventory as individually executed statements inside one SQL transaction per version:
 
 ```sql
 CREATE TABLE IF NOT EXISTS lem_schema_versions (version BIGINT PRIMARY KEY, applied_at TIMESTAMP NOT NULL);
@@ -299,8 +299,8 @@ CREATE INDEX IF NOT EXISTS lem_artifacts_session_idx ON lem_artifacts(session_id
 CREATE INDEX IF NOT EXISTS lem_attachments_session_idx ON lem_attachments(session_id, archived, added_at);
 ```
 
-- [ ] After migration, mount the DuckDB medium as ORM `default`, register each schema with both the medium and ORM cache, and expose a close function. If any step fails, close the medium before returning.
-- [ ] Re-run the focused tests, `go mod tidy`, and commit:
+- [x] After migration, mount the DuckDB medium as ORM `default`, register each schema with both the medium and ORM cache, and expose a close function. If any step fails, close the medium before returning.
+- [x] Re-run the focused tests, `go mod tidy`, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -346,14 +346,14 @@ type workspaceRepository interface {
 }
 ```
 
-- [ ] Write `TestDuckRepository_Good`: save a session, ordered user/assistant turns, an event, a job, a work item, an artifact, and an attachment; close and reopen the database; then assert typed round trips and ordering.
-- [ ] Write `TestDuckRepository_Bad`: save two turn IDs at the same `(session_id, sequence)` and assert the second write fails without changing the first.
-- [ ] Write `TestDuckRepository_Ugly`: create queued and generating jobs, call `InterruptActiveJobs`, and assert both become `interrupted` while completed jobs remain completed.
-- [ ] Write `TestDuckRepository_SearchAndArchive_Good`: match title and turn content case-insensitively, return a useful snippet, archive a session through `SaveSession`, and prove normal lists/search exclude it while `ListSessions(true)` retains it.
-- [ ] Run the focused tests and confirm failure before implementation.
-- [ ] Implement routine CRUD through `orm.Of[T]`. Use parameterised raw DuckDB SQL only for cross-table search and the set-based interrupted-job recovery update.
-- [ ] Keep repository return values concrete: `sessionRecord`, `[]sessionRecord`, `[]turnRecord`, `[]eventRecord`, `[]generationJobRecord`, `[]workItemRecord`, `[]artifactRecord`, `[]attachmentRecord`, and `[]sessionSearchHit` inside `core.Result`.
-- [ ] Re-run focused tests and commit:
+- [x] Write `TestDuckRepository_Good`: save a session, ordered user/assistant turns, an event, a job, a work item, an artifact, and an attachment; close and reopen the database; then assert typed round trips and ordering.
+- [x] Write `TestDuckRepository_Bad`: save two turn IDs at the same `(session_id, sequence)` and assert the second write fails without changing the first.
+- [x] Write `TestDuckRepository_Ugly`: create queued and generating jobs, call `InterruptActiveJobs`, and assert both become `interrupted` while completed jobs remain completed.
+- [x] Write `TestDuckRepository_SearchAndArchive_Good`: match title and turn content case-insensitively, return a useful snippet, archive a session through `SaveSession`, and prove normal lists/search exclude it while `ListSessions(true)` retains it.
+- [x] Run the focused tests and confirm failure before implementation.
+- [x] Implement routine CRUD through `orm.Of[T]`. Use parameterised raw DuckDB SQL only for cross-table search and the set-based interrupted-job recovery update.
+- [x] Keep repository return values concrete: `sessionRecord`, `[]sessionRecord`, `[]turnRecord`, `[]eventRecord`, `[]generationJobRecord`, `[]workItemRecord`, `[]artifactRecord`, `[]attachmentRecord`, and `[]sessionSearchHit` inside `core.Result`.
+- [x] Re-run focused tests and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -397,20 +397,20 @@ type preferenceStore interface {
 
 Defaults are context `0`, max tokens `4096`, thinking `model`, theme `midnight`, show thinking `true`, recent sessions `12`, knowledge max bytes `65536`, preferred runtime `auto`, and confirmation `true`. The default knowledge path is the medium-relative `packs` directory.
 
-- [ ] Pin config exactly:
+- [x] Pin config exactly:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
 go get dappco.re/go/config@v0.18.0
 ```
 
-- [ ] Write `TestPreferences_Good`: stage theme/max-token changes, prove the file remains absent before `Commit`, commit, reopen, and assert both values.
-- [ ] Write `TestPreferences_Bad`: write malformed YAML, load preferences, assert defaults are usable with a warning, assert `Commit` fails, and byte-compare the malformed file to prove it was not overwritten.
-- [ ] Write `TestPreferences_Ugly`: set `LEM_GENERATION_MAX_TOKENS`, commit an unrelated theme change, and assert the environment-derived token value is not written into YAML.
-- [ ] Run the focused tests and confirm failure.
-- [ ] Implement the main config with `config.WithMedium(files)`, `config.WithPath("config.yaml")`, `WithEnvPrefix("LEM")`, and `WithDefaults`. On parse failure, construct a defaults-only config against a separate in-memory medium and mark commits disabled until `Reload` succeeds against the real medium/path.
-- [ ] Do not attach config to go-store: config writes are explicit, while go-store is reserved for drafts and UI state.
-- [ ] Re-run tests, tidy, and commit:
+- [x] Write `TestPreferences_Good`: stage theme/max-token changes, prove the file remains absent before `Commit`, commit, reopen, and assert both values.
+- [x] Write `TestPreferences_Bad`: write malformed YAML, load preferences, assert defaults are usable with a warning, assert `Commit` fails, and byte-compare the malformed file to prove it was not overwritten.
+- [x] Write `TestPreferences_Ugly`: set `LEM_GENERATION_MAX_TOKENS`, commit an unrelated theme change, and assert the environment-derived token value is not written into YAML.
+- [x] Run the focused tests and confirm failure.
+- [x] Implement the main config with `config.WithMedium(files)`, `config.WithPath("config.yaml")`, `WithEnvPrefix("LEM")`, and `WithDefaults`. On parse failure, construct a defaults-only config against a separate in-memory medium and mark commits disabled until `Reload` succeeds against the real medium/path.
+- [x] Do not attach config to go-store: config writes are explicit, while go-store is reserved for drafts and UI state.
+- [x] Re-run tests, tidy, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -453,16 +453,16 @@ func (resources *workspaceResources) Close() core.Result
 
 Use scoped namespace `lem`; groups are `workspace`, `drafts`, `viewport`, and `collapsed`. Keys include `active_session`, `active_panel`, `inspector_open`, and session IDs. A disabled state adapter returns misses for reads and explicit failures for writes while allowing the in-memory UI to continue.
 
-- [ ] Write `TestReactiveState_Good`, round-tripping all four groups through a temporary `state.db`, reopening it, and asserting values survived.
-- [ ] Write `TestReactiveState_Bad`, passing an unusable database path and asserting an open failure rather than a panic.
-- [ ] Write `TestReactiveState_Ugly`, deleting a draft and asserting the miss is distinguishable from an empty stored draft.
-- [ ] Write `TestOpenWorkspace_Good`, injecting an in-memory medium through `openWorkspaceWith` and asserting medium directories, migration, repository, state, preferences, and reverse-order close.
-- [ ] Write `TestOpenWorkspace_Bad`, inject a repository-open failure and assert startup is blocking with the exact DuckDB path in the error.
-- [ ] Write `TestOpenWorkspace_Ugly`, inject state and config failures independently and assert startup succeeds with a disabled state/default preferences plus persistent warnings.
-- [ ] Run the focused tests and confirm failure.
-- [ ] Implement go-store through `store.New(paths.State, store.WithWorkspaceStateDirectory(core.Path(paths.Root, paths.Workspaces)))` and `store.NewScoped(instance, "lem")`. This is confined to the local SQLite adapter; no panel receives the host path.
-- [ ] Implement bootstrap order: open/ensure the medium, open repository/apply migrations, interrupt stale jobs, open state, open preferences with the same medium. Repository failure is fatal; state/config failure is degraded exactly as the design specifies.
-- [ ] Re-run tests and commit:
+- [x] Write `TestReactiveState_Good`, round-tripping all four groups through a temporary `state.db`, reopening it, and asserting values survived.
+- [x] Write `TestReactiveState_Bad`, passing an unusable database path and asserting an open failure rather than a panic.
+- [x] Write `TestReactiveState_Ugly`, deleting a draft and asserting the miss is distinguishable from an empty stored draft.
+- [x] Write `TestOpenWorkspace_Good`, injecting an in-memory medium through `openWorkspaceWith` and asserting medium directories, migration, repository, state, preferences, and reverse-order close.
+- [x] Write `TestOpenWorkspace_Bad`, inject a repository-open failure and assert startup is blocking with the exact DuckDB path in the error.
+- [x] Write `TestOpenWorkspace_Ugly`, inject state and config failures independently and assert startup succeeds with a disabled state/default preferences plus persistent warnings.
+- [x] Run the focused tests and confirm failure.
+- [x] Implement go-store through `store.New(paths.State, store.WithWorkspaceStateDirectory(core.Path(paths.Root, paths.Workspaces)))` and `store.NewScoped(instance, "lem")`. This is confined to the local SQLite adapter; no panel receives the host path.
+- [x] Implement bootstrap order: open/ensure the medium, open repository/apply migrations, interrupt stale jobs, open state, open preferences with the same medium. Repository failure is fatal; state/config failure is degraded exactly as the design specifies.
+- [x] Re-run tests and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -502,13 +502,13 @@ type sessionManager struct {
 }
 ```
 
-- [ ] Write `TestSessionManager_Good`: start empty, create the first session, add a second, switch both directions, save independent drafts/viewport offsets, reconstruct the manager, and assert active/recent state restores.
-- [ ] Write `TestSessionManager_Bad`: attempt to switch to an unknown ID and assert no active-state mutation.
-- [ ] Write `TestSessionManager_Ugly`: complete a hidden session, assert its attention marker, switch to it, and assert only that session's marker clears.
-- [ ] Write `TestSessionManager_Title_Good`: first user text creates a bounded one-line title; later prompts do not rename a user-edited title.
-- [ ] Run the tests and observe failure.
-- [ ] Implement `Ctrl+N`-ready creation, recent ordering, previous/next navigation, active persistence, draft persistence, lazy turn loading, archive exclusion, and attention state. Repository records are the source of truth; go-store stores only draft/UI affordances.
-- [ ] Re-run and commit:
+- [x] Write `TestSessionManager_Good`: start empty, create the first session, add a second, switch both directions, save independent drafts/viewport offsets, reconstruct the manager, and assert active/recent state restores.
+- [x] Write `TestSessionManager_Bad`: attempt to switch to an unknown ID and assert no active-state mutation.
+- [x] Write `TestSessionManager_Ugly`: complete a hidden session, assert its attention marker, switch to it, and assert only that session's marker clears.
+- [x] Write `TestSessionManager_Title_Good`: first user text creates a bounded one-line title; later prompts do not rename a user-edited title.
+- [x] Run the tests and observe failure.
+- [x] Implement `Ctrl+N`-ready creation, recent ordering, previous/next navigation, active persistence, draft persistence, lazy turn loading, archive exclusion, and attention state. Repository records are the source of truth; go-store stores only draft/UI affordances.
+- [x] Re-run and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -557,18 +557,18 @@ func (jobs *jobManager) CancelAll() core.Result
 
 Every `streamEvent` and `streamMsg` carries `SessionID` and `JobID`. `Start` rejects a second job in the same session but permits jobs in distinct sessions. Scheduler config is serial, max concurrent 1, max queue 64, stream buffer 16, request prefix `tui`.
 
-- [ ] Add a deterministic `fakeTextModel` in `jobs_test.go` that satisfies every `inference.TextModel` method, honours cancellation, can block/yield scripted tokens, counts concurrent calls, and records close calls.
-- [ ] Write `TestModelLane_Good`, submit two concurrent chats and prove the base model's maximum concurrency is one.
-- [ ] Write `TestModelLane_Bad`, assert an unknown scheduler construction cannot be represented and nil base input fails.
-- [ ] Write `TestModelLane_Ugly`, close with queued and running jobs and assert both drain, the base closes exactly once, and close is idempotent.
-- [ ] Write `TestJobManager_Good`, start jobs for two sessions, consume tagged events interleaved, and assert no delta lands in the wrong session.
-- [ ] Write `TestJobManager_Bad`, start two jobs in one session and assert the second fails.
-- [ ] Write `TestJobManager_Ugly`, cancel one hidden session and prove the other continues.
-- [ ] Refactor service tests to prove starting/stopping the listener never creates or closes a scheduler/model. The service resolver receives `lane.Model()` and stopping only owns the HTTP context/listener.
-- [ ] Run focused tests and confirm failure before implementation.
-- [ ] Implement the lane once per loaded model. Remove `serviceState.sched`, remove `chatModel`'s service-dependent branch, and let chat always use `lane.Model()`.
-- [ ] Preserve the reasoning parser and metrics sink, but derive generation contexts from the app parent rather than `context.Background()`.
-- [ ] Re-run focused tests and commit:
+- [x] Add a deterministic `fakeTextModel` in `jobs_test.go` that satisfies every `inference.TextModel` method, honours cancellation, can block/yield scripted tokens, counts concurrent calls, and records close calls.
+- [x] Write `TestModelLane_Good`, submit two concurrent chats and prove the base model's maximum concurrency is one.
+- [x] Write `TestModelLane_Bad`, assert an unknown scheduler construction cannot be represented and nil base input fails.
+- [x] Write `TestModelLane_Ugly`, close with queued and running jobs and assert both drain, the base closes exactly once, and close is idempotent.
+- [x] Write `TestJobManager_Good`, start jobs for two sessions, consume tagged events interleaved, and assert no delta lands in the wrong session.
+- [x] Write `TestJobManager_Bad`, start two jobs in one session and assert the second fails.
+- [x] Write `TestJobManager_Ugly`, cancel one hidden session and prove the other continues.
+- [x] Refactor service tests to prove starting/stopping the listener never creates or closes a scheduler/model. The service resolver receives `lane.Model()` and stopping only owns the HTTP context/listener.
+- [x] Run focused tests and confirm failure before implementation.
+- [x] Implement the lane once per loaded model. Remove `serviceState.sched`, remove `chatModel`'s service-dependent branch, and let chat always use `lane.Model()`.
+- [x] Preserve the reasoning parser and metrics sink, but derive generation contexts from the app parent rather than `context.Background()`.
+- [x] Re-run focused tests and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -613,14 +613,14 @@ func chooseLayout(width int) layoutKind
 
 `chooseLayout` returns wide at 120 columns and above, overlay at 80–119, and narrow below 80. Wide renders a 32-column inspector beside the main panel. Overlay renders the inspector above the main panel only while open. Narrow renders one column and short labels without clipping the frame.
 
-- [ ] Write `TestChooseLayout_Good` for widths 120 and 160, `TestChooseLayout_Bad` for 80 and 119, and `TestChooseLayout_Ugly` for 0, 1, and 79.
-- [ ] Write `TestPanelID_Good`, cycling Tab and Shift+Tab through exactly Chat, Work, Models, and Service with wraparound.
-- [ ] Write `TestKeyMap_Good`, directly matching `Ctrl+N`, `Ctrl+P`, `Alt+Left`, `Alt+Right`, `Ctrl+K`, `Ctrl+O`, `Ctrl+F`, `Ctrl+S`, and `F1` through Bubbles `key.Binding`.
-- [ ] Write frame tests that assert a stable outer border, product title, panel labels, session strip, main region, inspector policy, and footer at all three widths.
-- [ ] Run the focused tests and confirm failure.
-- [ ] Replace global style variables with an app-owned `uiStyles` built from an adaptive `theme`. The `midnight` preset uses cyan focus, violet assistant identity, amber attention, green success, red error, and muted blue-grey; every status also carries a text label or symbol.
-- [ ] Use Lip Gloss joins and explicit width/height math. Never crop by slicing ANSI strings.
-- [ ] Re-run and commit:
+- [x] Write `TestChooseLayout_Good` for widths 120 and 160, `TestChooseLayout_Bad` for 80 and 119, and `TestChooseLayout_Ugly` for 0, 1, and 79.
+- [x] Write `TestPanelID_Good`, cycling Tab and Shift+Tab through exactly Chat, Work, Models, and Service with wraparound.
+- [x] Write `TestKeyMap_Good`, directly matching `Ctrl+N`, `Ctrl+P`, `Alt+Left`, `Alt+Right`, `Ctrl+K`, `Ctrl+O`, `Ctrl+F`, `Ctrl+S`, and `F1` through Bubbles `key.Binding`.
+- [x] Write frame tests that assert a stable outer border, product title, panel labels, session strip, main region, inspector policy, and footer at all three widths.
+- [x] Run the focused tests and confirm failure.
+- [x] Replace global style variables with an app-owned `uiStyles` built from an adaptive `theme`. The `midnight` preset uses cyan focus, violet assistant identity, amber attention, green success, red error, and muted blue-grey; every status also carries a text label or symbol.
+- [x] Use Lip Gloss joins and explicit width/height math. Never crop by slicing ANSI strings.
+- [x] Re-run and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -640,25 +640,25 @@ git commit -m "feat(tui): frame the lem agent workspace"
 - Modify: `cli/tui/app.go`
 - Modify: `cli/tui/app_test.go`
 
-- [ ] Pin Glamour exactly:
+- [x] Pin Glamour exactly:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
 go get github.com/charmbracelet/glamour@v1.0.0
 ```
 
-- [ ] Write `TestMarkdownRenderer_Good`, rendering headings, lists, emphasis, inline code, fenced Go, and a link at two widths; strip ANSI and assert content plus wrapping.
-- [ ] Write `TestMarkdownRenderer_Bad`, pass an invalid width and assert a plain-text fallback rather than a panic or blank message.
-- [ ] Write `TestMarkdownRenderer_Ugly`, render the same completed turn twice and assert the second call hits the `(turn ID, content hash, width, theme)` cache.
-- [ ] Write `TestTranscriptFollow_Good`: at bottom, stream a delta and remain at bottom.
-- [ ] Write `TestTranscriptFollow_Bad`: scroll upward, stream a delta, and preserve the offset plus a “new output” marker.
-- [ ] Write `TestTranscriptFollow_Ugly`: finish in a hidden session and assert attention without moving the active viewport.
-- [ ] Add `BenchmarkMarkdownTranscript` with 20 mixed turns, `ReportAllocs`, and a package sink.
-- [ ] Run tests and see them fail before implementation.
-- [ ] Construct Glamour with `WithStandardStyle("dark")`, `WithWordWrap(width)`, `WithTableWrap(true)`, `WithPreservedNewLines()`, and `WithEmoji()`. Cache completed turns; render the active streaming turn as styled plain text until completion, then promote it to cached Markdown.
-- [ ] Replace unconditional `GotoBottom` with explicit `Follow`. Mouse/wheel, PgUp/PgDn, and arrow scrolling turn follow off; `End` or scrolling to the bottom turns it back on.
-- [ ] Batch persistence and viewport refresh on a short Bubble Tea tick while streaming, and flush the completed assistant turn/job immediately.
-- [ ] Re-run tests/benchmark, tidy, and commit:
+- [x] Write `TestMarkdownRenderer_Good`, rendering headings, lists, emphasis, inline code, fenced Go, and a link at two widths; strip ANSI and assert content plus wrapping.
+- [x] Write `TestMarkdownRenderer_Bad`, pass an invalid width and assert a plain-text fallback rather than a panic or blank message.
+- [x] Write `TestMarkdownRenderer_Ugly`, render the same completed turn twice and assert the second call hits the `(turn ID, content hash, width, theme)` cache.
+- [x] Write `TestTranscriptFollow_Good`: at bottom, stream a delta and remain at bottom.
+- [x] Write `TestTranscriptFollow_Bad`: scroll upward, stream a delta, and preserve the offset plus a “new output” marker.
+- [x] Write `TestTranscriptFollow_Ugly`: finish in a hidden session and assert attention without moving the active viewport.
+- [x] Add `BenchmarkMarkdownTranscript` with 20 mixed turns, `ReportAllocs`, and a package sink.
+- [x] Run tests and see them fail before implementation.
+- [x] Construct Glamour with `WithStandardStyle("dark")`, `WithWordWrap(width)`, `WithTableWrap(true)`, `WithPreservedNewLines()`, and `WithEmoji()`. Cache completed turns; render the active streaming turn as styled plain text until completion, then promote it to cached Markdown.
+- [x] Replace unconditional `GotoBottom` with explicit `Follow`. Mouse/wheel, PgUp/PgDn, and arrow scrolling turn follow off; `End` or scrolling to the bottom turns it back on.
+- [x] Batch persistence and viewport refresh on a short Bubble Tea tick while streaming, and flush the completed assistant turn/job immediately.
+- [x] Re-run tests/benchmark, tidy, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -677,15 +677,15 @@ git commit -m "feat(tui): render markdown chat transcripts"
 
 The always-enabled command registry contains: new session, switch session, search history, toggle inspector, show help, go to each of the four panels, save settings, export active session as Markdown, export as JSON, refresh work, refresh runtimes, and refresh knowledge. Task 12 appends the complete agent feature catalogue as capability-bound commands; unavailable commands stay visible with their reason and cannot be invoked.
 
-- [ ] Write `TestCommandPalette_Good`, filter by fuzzy text and invoke a navigation command.
-- [ ] Write `TestCommandPalette_Bad`, invoke an unknown command ID and assert no state mutation.
-- [ ] Write `TestSessionSwitcher_Good`, assert recent ordering, status/model metadata, hidden-job markers, keyboard selection, and active-session switch without cancellation.
-- [ ] Write `TestHistorySearch_Good`, drive the real repository search, select a hit, switch session, and position the viewport at its matching turn.
-- [ ] Write `TestOverlayRouting_Ugly`, prove an open overlay consumes Enter/Escape/arrows before global or panel handlers.
-- [ ] Run tests and confirm failure.
-- [ ] Implement overlays with Bubbles `list.Model` and `help.Model`. Keep one overlay active at a time; Escape closes it without affecting a running job.
-- [ ] Wire keys: `Ctrl+K` command palette, `Ctrl+P` switcher, `Ctrl+F` search, `F1` help, `Ctrl+N` new session, `Alt+Left/Right` previous/next session.
-- [ ] Re-run and commit:
+- [x] Write `TestCommandPalette_Good`, filter by fuzzy text and invoke a navigation command.
+- [x] Write `TestCommandPalette_Bad`, invoke an unknown command ID and assert no state mutation.
+- [x] Write `TestSessionSwitcher_Good`, assert recent ordering, status/model metadata, hidden-job markers, keyboard selection, and active-session switch without cancellation.
+- [x] Write `TestHistorySearch_Good`, drive the real repository search, select a hit, switch session, and position the viewport at its matching turn.
+- [x] Write `TestOverlayRouting_Ugly`, prove an open overlay consumes Enter/Escape/arrows before global or panel handlers.
+- [x] Run tests and confirm failure.
+- [x] Implement overlays with Bubbles `list.Model` and `help.Model`. Keep one overlay active at a time; Escape closes it without affecting a running job.
+- [x] Wire keys: `Ctrl+K` command palette, `Ctrl+P` switcher, `Ctrl+F` search, `F1` help, `Ctrl+N` new session, `Alt+Left/Right` previous/next session.
+- [x] Re-run and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -704,16 +704,16 @@ git commit -m "feat(tui): add workspace navigation overlays"
 - Modify: `cli/tui/tools.go`
 - Modify: `cli/tui/app.go`
 
-- [ ] Write `TestInspector_Good`, asserting Chat shows session/model/generation/settings/mode/tools, Work shows work detail/runtime/agent capability, Models shows model detail, and Service shows address/request detail.
-- [ ] Write `TestInspector_Bad`, open at an overlay width and prove the main panel remains intact behind the overlay.
-- [ ] Write `TestInspector_Ugly`, open below 80 columns and prove sections remain reachable in one column with no negative dimensions.
-- [ ] Write `TestInspectorPreferences_Good`, edit max tokens/theme, assert dirty state, press `Ctrl+S`, reopen preferences, and assert persistence.
-- [ ] Write `TestInspectorTools_Bad`, enable a disabled tool, generate a malformed call, and assert an explicit tool-result turn/event rather than silent execution.
-- [ ] Run focused tests and confirm failure.
-- [ ] Reuse the existing settings, modes, and tools domain logic, but remove their primary tab views. Inspector navigation owns its own selected row and edit focus.
-- [ ] Keep the existing bounded two-hop tool loop. Persist structured call/result JSON and an event before auto-continuation.
-- [ ] Rebuild styles and Markdown renderer after a saved theme change; do not reload the application.
-- [ ] Re-run and commit:
+- [x] Write `TestInspector_Good`, asserting Chat shows session/model/generation/settings/mode/tools, Work shows work detail/runtime/agent capability, Models shows model detail, and Service shows address/request detail.
+- [x] Write `TestInspector_Bad`, open at an overlay width and prove the main panel remains intact behind the overlay.
+- [x] Write `TestInspector_Ugly`, open below 80 columns and prove sections remain reachable in one column with no negative dimensions.
+- [x] Write `TestInspectorPreferences_Good`, edit max tokens/theme, assert dirty state, press `Ctrl+S`, reopen preferences, and assert persistence.
+- [x] Write `TestInspectorTools_Bad`, enable a disabled tool, generate a malformed call, and assert an explicit tool-result turn/event rather than silent execution.
+- [x] Run focused tests and confirm failure.
+- [x] Reuse the existing settings, modes, and tools domain logic, but remove their primary tab views. Inspector navigation owns its own selected row and edit focus.
+- [x] Keep the existing bounded two-hop tool loop. Persist structured call/result JSON and an event before auto-continuation.
+- [x] Rebuild styles and Markdown renderer after a saved theme change; do not reload the application.
+- [x] Re-run and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -818,25 +818,25 @@ func agentFeatureCatalog(reason string) []agentCapability
 func newUnavailableAgentProvider(reason string) agentProvider
 ```
 
-- [ ] Write `TestAgentFeatureCatalog_Good`, asserting every constant above appears exactly once and all capabilities carry the supplied unavailable reason.
-- [ ] Write `TestUnavailableAgentProvider_Bad`, asserting `Snapshot` returns an empty typed snapshot, `Run` fails with the feature and reason, and `Close` succeeds idempotently.
-- [ ] Write `TestAgentProviderBoundary_Ugly` with a fake provider that returns two work snapshots and three events; refresh twice and assert deterministic display ordering without duplicate persisted events.
-- [ ] Write `TestWorkPanel_Good`, creating, renaming, completing, reopening, linking, and archiving a local work item through the real repository.
-- [ ] Write `TestWorkPanel_Bad`, focus every disabled agent action and assert Enter leaves repository/provider state unchanged while displaying the provider reason.
-- [ ] Write `TestWorkPanel_Ugly`, render empty, local-only, waiting-question, failed, and completed states at wide and narrow widths.
-- [ ] Write `TestAgentCommandPalette_Good`, asserting all agent feature commands are searchable, visibly disabled, and include the same reason as the Work inspector.
-- [ ] Run tests and confirm failure.
-- [ ] Implement the unavailable provider and capability catalogue. `Run` always returns `!OK`; the UI checks `Available` before calling it, so a disabled action has no side effect.
-- [ ] Implement the Work list/detail panel over `workspaceRepository`; provider snapshots are translated into existing `workItemRecord` and `eventRecord` values at this boundary only.
-- [ ] Add capability-bound palette commands and Work inspector sections for execution, queue/setup/providers/templates, plans/sessions/handoffs, scan/audit/pipeline/monitor/harvest, Brain/messages, fleet/forge/remote, and QA/review/PR. Keep labels useful even when disabled.
-- [ ] Enforce the no-CoreAgent boundary with this source scan:
+- [x] Write `TestAgentFeatureCatalog_Good`, asserting every constant above appears exactly once and all capabilities carry the supplied unavailable reason.
+- [x] Write `TestUnavailableAgentProvider_Bad`, asserting `Snapshot` returns an empty typed snapshot, `Run` fails with the feature and reason, and `Close` succeeds idempotently.
+- [x] Write `TestAgentProviderBoundary_Ugly` with a fake provider that returns two work snapshots and three events; refresh twice and assert deterministic display ordering without duplicate persisted events.
+- [x] Write `TestWorkPanel_Good`, creating, renaming, completing, reopening, linking, and archiving a local work item through the real repository.
+- [x] Write `TestWorkPanel_Bad`, focus every disabled agent action and assert Enter leaves repository/provider state unchanged while displaying the provider reason.
+- [x] Write `TestWorkPanel_Ugly`, render empty, local-only, waiting-question, failed, and completed states at wide and narrow widths.
+- [x] Write `TestAgentCommandPalette_Good`, asserting all agent feature commands are searchable, visibly disabled, and include the same reason as the Work inspector.
+- [x] Run tests and confirm failure.
+- [x] Implement the unavailable provider and capability catalogue. `Run` always returns `!OK`; the UI checks `Available` before calling it, so a disabled action has no side effect.
+- [x] Implement the Work list/detail panel over `workspaceRepository`; provider snapshots are translated into existing `workItemRecord` and `eventRecord` values at this boundary only.
+- [x] Add capability-bound palette commands and Work inspector sections for execution, queue/setup/providers/templates, plans/sessions/handoffs, scan/audit/pipeline/monitor/harvest, Brain/messages, fleet/forge/remote, and QA/review/PR. Keep labels useful even when disabled.
+- [x] Enforce the no-CoreAgent boundary with this source scan:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
 if rg -n 'dappco\.re/go/agent' cli; then exit 1; fi
 ```
 
-- [ ] Re-run tests and commit:
+- [x] Re-run tests and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -874,19 +874,19 @@ type runtimeDetector interface {
 }
 ```
 
-- [ ] Pin container exactly:
+- [x] Pin container exactly:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
 go get dappco.re/go/container@v0.11.0
 ```
 
-- [ ] Write `TestRuntimeAdapter_Good`, project scripted Apple, VZ, Docker, and Podman values into LEM capabilities and preserve priority order.
-- [ ] Write `TestRuntimeAdapter_Bad`, inject a detection failure and assert a disabled inspector section with the exact reason.
-- [ ] Write `TestRuntimeAdapter_Ugly`, return no runtimes and assert a labelled `none available` state rather than an empty panel.
-- [ ] Run tests and confirm failure.
-- [ ] Implement the production adapter with `container.DetectAll` and only capability getters. Do not construct providers and do not call Build, Run, Stop, Exec, Pull, or image APIs.
-- [ ] Re-run, tidy, and commit:
+- [x] Write `TestRuntimeAdapter_Good`, project scripted Apple, VZ, Docker, and Podman values into LEM capabilities and preserve priority order.
+- [x] Write `TestRuntimeAdapter_Bad`, inject a detection failure and assert a disabled inspector section with the exact reason.
+- [x] Write `TestRuntimeAdapter_Ugly`, return no runtimes and assert a labelled `none available` state rather than an empty panel.
+- [x] Run tests and confirm failure.
+- [x] Implement the production adapter with `container.DetectAll` and only capability getters. Do not construct providers and do not call Build, Run, Stop, Exec, Pull, or image APIs.
+- [x] Re-run, tidy, and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -928,15 +928,15 @@ type knowledgeScanner interface {
 func knowledgeSystemMessage(attachments []attachmentRecord) string
 ```
 
-- [ ] Write `TestKnowledgeDiscover_Good` against `coreio.NewMemoryMedium`, finding nested `.md` and `.markdown` files, deriving titles from the first heading or basename, sorting by mount/title/path, and hashing exact content.
-- [ ] Write `TestKnowledgeDiscover_Bad`, include an over-limit file and assert it is rejected with a visible reason while valid documents remain.
-- [ ] Write `TestKnowledgeDiscover_Ugly`, include symlink loops, unreadable files, duplicate configured roots, and non-Markdown files; assert no loop, duplicate, or network activity.
-- [ ] Write `TestKnowledgeAttachment_Good`, attach a document to a session, persist its snapshot/hash, build a bounded system message, restart, and assert the same snapshot is used.
-- [ ] Write `TestKnowledgeAttachmentStale_Good`, change the source file and assert stale state without replacing the persisted snapshot.
-- [ ] Run tests and confirm failure.
-- [ ] Implement recursive scanning only through each mount's `List`, `Stat`, and `Read` methods plus `core.SHA256HexString`. Ignore symlink entries, deduplicate `(mount, path)`, restrict the default mount to the medium-relative `packs` root, and never clone or update the linked knowledge-packs repository. Additional configured local roots are each opened as their own sandboxed medium by composition code before being passed to the scanner.
-- [ ] Attach/detach through archived attachment records. Prepend active snapshots to the single system message before tool declarations, within the configured aggregate byte limit.
-- [ ] Re-run and commit:
+- [x] Write `TestKnowledgeDiscover_Good` against `coreio.NewMemoryMedium`, finding nested `.md` and `.markdown` files, deriving titles from the first heading or basename, sorting by mount/title/path, and hashing exact content.
+- [x] Write `TestKnowledgeDiscover_Bad`, include an over-limit file and assert it is rejected with a visible reason while valid documents remain.
+- [x] Write `TestKnowledgeDiscover_Ugly`, include symlink loops, unreadable files, duplicate configured roots, and non-Markdown files; assert no loop, duplicate, or network activity.
+- [x] Write `TestKnowledgeAttachment_Good`, attach a document to a session, persist its snapshot/hash, build a bounded system message, restart, and assert the same snapshot is used.
+- [x] Write `TestKnowledgeAttachmentStale_Good`, change the source file and assert stale state without replacing the persisted snapshot.
+- [x] Run tests and confirm failure.
+- [x] Implement recursive scanning only through each mount's `List`, `Stat`, and `Read` methods plus `core.SHA256HexString`. Ignore symlink entries, deduplicate `(mount, path)`, restrict the default mount to the medium-relative `packs` root, and never clone or update the linked knowledge-packs repository. Additional configured local roots are each opened as their own sandboxed medium by composition code before being passed to the scanner.
+- [x] Attach/detach through archived attachment records. Prepend active snapshots to the single system message before tool declarations, within the configured aggregate byte limit.
+- [x] Re-run and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -967,15 +967,15 @@ type sessionExporter interface {
 }
 ```
 
-- [ ] Write `TestExportSessionMarkdown_Good`, exporting metadata, visible/thought content according to preference, tool receipts, attachments, events, and artifacts to a collision-safe file below `exports/`.
-- [ ] Write `TestExportSessionJSON_Good`, export the same data as structured JSON and unmarshal it back into the export DTO.
-- [ ] Write `TestExportSessionSelectedMedium_Good`, inject a second in-memory medium as a user-selected destination and assert the export exists there while the default medium remains unchanged.
-- [ ] Write `TestExportSession_Bad`, make the exports path unwritable and assert the exact path/error is surfaced without modifying database records.
-- [ ] Write `TestExportSession_Ugly`, export two same-title sessions in one second and assert unique filenames.
-- [ ] Run tests and confirm failure.
-- [ ] Implement writes through the injected export medium: `WriteMode` a same-directory temporary name, then `Rename` it to the collision-safe final name. Filenames are UTC timestamp, title slug, short session ID, and extension. Export never archives or mutates the session.
-- [ ] Wire both formats into the command palette and persist an artifact record only after a successful write.
-- [ ] Re-run and commit:
+- [x] Write `TestExportSessionMarkdown_Good`, exporting metadata, visible/thought content according to preference, tool receipts, attachments, events, and artifacts to a collision-safe file below `exports/`.
+- [x] Write `TestExportSessionJSON_Good`, export the same data as structured JSON and unmarshal it back into the export DTO.
+- [x] Write `TestExportSessionSelectedMedium_Good`, inject a second in-memory medium as a user-selected destination and assert the export exists there while the default medium remains unchanged.
+- [x] Write `TestExportSession_Bad`, make the exports path unwritable and assert the exact path/error is surfaced without modifying database records.
+- [x] Write `TestExportSession_Ugly`, export two same-title sessions in one second and assert unique filenames.
+- [x] Run tests and confirm failure.
+- [x] Implement writes through the injected export medium: `WriteMode` a same-directory temporary name, then `Rename` it to the collision-safe final name. Filenames are UTC timestamp, title slug, short session ID, and extension. Export never archives or mutates the session.
+- [x] Wire both formats into the command palette and persist an artifact record only after a successful write.
+- [x] Re-run and commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -996,20 +996,20 @@ git commit -m "feat(tui): export durable chat sessions"
 
 The final `app` owns boot state, resources, sessions, jobs, one model lane, four panel models, overlays, inspector, runtime/knowledge/work adapters, an agent provider, and a root context cancel function. Resource-heavy startup runs as a Bubble Tea command and returns either `workspaceReadyMsg` or a blocking `workspaceFailedMsg`.
 
-- [ ] Replace the old transition test with focused app tests for booting, ready, degraded warnings, blocking storage failure, Retry, and Quit.
-- [ ] Add `TestAppSessionGeneration_Good`, using the real app update loop and fake model to send in session A, switch/create session B, send there, consume both streams, and assert isolated persisted transcripts plus hidden attention.
-- [ ] Add `TestAppSharedServiceLane_Good`, start HTTP service and a TUI job concurrently against the fake model, assert serial base concurrency, stop the service, and prove later chat still works.
-- [ ] Add `TestAppModelSwap_Bad`, asserting a model change is refused while any session job is active.
-- [ ] Add `TestAppModelSwap_Good`, asserting the service drains first, the old lane closes exactly once, one new model loads, and a failed load leaves a clear no-model state.
-- [ ] Add `TestAppQuit_Ugly`, with queued jobs, open service, state/repository resources, and capability providers; assert cancellation, listener stop, flush, close order, and no blocked goroutine.
-- [ ] Keep the existing `LTHN_PROBE_MODEL` live chat/service tests, updating them to sessions and the shared lane. They remain opt-in and do not replace deterministic tests.
-- [ ] Run the app tests and confirm failure before integration.
-- [ ] Make Chat the default primary panel even without a model; render a useful empty state with a Models shortcut. Model selection is disabled while jobs run. If service is running, model change first stops the listener, then closes the old lane, then loads one new model.
-- [ ] Persist user turn, assistant placeholder, job, deltas on flush ticks, final metrics/status, tool turns/events, session recent time, draft, viewport, and attention transitions.
-- [ ] Implement startup recovery: queued/generating jobs become interrupted; partial assistant content remains; no work restarts automatically.
-- [ ] Update `Run` and `--check` to construct the new app. `--check` performs a synchronous real workspace bootstrap, renders 100x30, closes resources, and returns nonzero on blocking storage failure.
-- [ ] Replace direct `os`, `filepath`, `strings`, `encoding/json`, `fmt`, `bytes`, and process imports in all touched production TUI files with core/go wrappers.
-- [ ] Re-run focused and package tests, then commit:
+- [x] Replace the old transition test with focused app tests for booting, ready, degraded warnings, blocking storage failure, Retry, and Quit.
+- [x] Add `TestAppSessionGeneration_Good`, using the real app update loop and fake model to send in session A, switch/create session B, send there, consume both streams, and assert isolated persisted transcripts plus hidden attention.
+- [x] Add `TestAppSharedServiceLane_Good`, start HTTP service and a TUI job concurrently against the fake model, assert serial base concurrency, stop the service, and prove later chat still works.
+- [x] Add `TestAppModelSwap_Bad`, asserting a model change is refused while any session job is active.
+- [x] Add `TestAppModelSwap_Good`, asserting the service drains first, the old lane closes exactly once, one new model loads, and a failed load leaves a clear no-model state.
+- [x] Add `TestAppQuit_Ugly`, with queued jobs, open service, state/repository resources, and capability providers; assert cancellation, listener stop, flush, close order, and no blocked goroutine.
+- [x] Keep the existing `LTHN_PROBE_MODEL` live chat/service tests, updating them to sessions and the shared lane. They remain opt-in and do not replace deterministic tests.
+- [x] Run the app tests and confirm failure before integration.
+- [x] Make Chat the default primary panel even without a model; render a useful empty state with a Models shortcut. Model selection is disabled while jobs run. If service is running, model change first stops the listener, then closes the old lane, then loads one new model.
+- [x] Persist user turn, assistant placeholder, job, deltas on flush ticks, final metrics/status, tool turns/events, session recent time, draft, viewport, and attention transitions.
+- [x] Implement startup recovery: queued/generating jobs become interrupted; partial assistant content remains; no work restarts automatically.
+- [x] Update `Run` and `--check` to construct the new app. `--check` performs a synchronous real workspace bootstrap, renders 100x30, closes resources, and returns nonzero on blocking storage failure.
+- [x] Replace direct `os`, `filepath`, `strings`, `encoding/json`, `fmt`, `bytes`, and process imports in all touched production TUI files with core/go wrappers.
+- [x] Re-run focused and package tests, then commit:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
@@ -1028,9 +1028,9 @@ git commit -m "feat(tui): integrate the lem workspace"
 - Modify: `docs/superpowers/specs/2026-07-17-lem-workspace-tui-design.md`
 - Modify: `Taskfile.yml` only if the repository lacks an equivalent CLI QA command at implementation time.
 
-- [ ] Update the README with the four panels, responsive modes, complete key table, session/job semantics, inspector, service sharing, `~/.lem/` tree, medium boundary, knowledge snapshots, work/runtime limits, unavailable agent features, config recovery, export, and optional live-test environment.
-- [ ] Reconcile the design document against actual behaviour and dependency pins. Keep the complete `go/agent/*` capability implementation as the next slice, not a CLI dependency.
-- [ ] Run formatting and static analysis:
+- [x] Update the README with the four panels, responsive modes, complete key table, session/job semantics, inspector, service sharing, `~/.lem/` tree, medium boundary, knowledge snapshots, work/runtime limits, unavailable agent features, config recovery, export, and optional live-test environment.
+- [x] Reconcile the design document against actual behaviour and dependency pins. Keep the complete `go/agent/*` capability implementation as the next slice, not a CLI dependency.
+- [x] Run formatting and static analysis:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -1044,7 +1044,7 @@ go test ./... -count=1
 go test -race ./tui -count=1
 ```
 
-- [ ] Verify standalone nested-module resolution, proving no workspace-only sibling dependency slipped in:
+- [x] Verify standalone nested-module resolution, proving no workspace-only sibling dependency slipped in:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
@@ -1052,7 +1052,7 @@ GOWORK=off go mod tidy
 GOWORK=off go test ./tui -count=1
 ```
 
-- [ ] Measure TUI coverage and inspect uncovered critical branches rather than reporting only an aggregate:
+- [x] Measure TUI coverage and inspect uncovered critical branches rather than reporting only an aggregate:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
@@ -1060,7 +1060,7 @@ go test ./tui -covermode=atomic -coverprofile=/tmp/lem-tui-cover.out -count=1
 go tool cover -func=/tmp/lem-tui-cover.out
 ```
 
-- [ ] Run the repository's portable gates and preserve the 95% root-package Codecov contract:
+- [x] Run the repository's portable gates and preserve the 95% root-package Codecov contract:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -1068,7 +1068,7 @@ task qa
 task cover
 ```
 
-- [ ] Run the Markdown benchmark and one headless frame:
+- [x] Run the Markdown benchmark and one headless frame:
 
 ```sh
 cd /Users/snider/Code/core/go-inference/cli
@@ -1076,14 +1076,14 @@ go test ./tui -run '^$' -bench '^BenchmarkMarkdownTranscript$' -benchmem -bencht
 go run . tui --check
 ```
 
-- [ ] Run the core/go compliance audit and require every counter to be zero:
+- [x] Run the core/go compliance audit and require every counter to be zero:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
 bash /Users/snider/Code/core/go/tests/cli/v090-upgrade/audit.sh .
 ```
 
-- [ ] Confirm dependency and authority boundaries:
+- [x] Confirm dependency and authority boundaries:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -1095,7 +1095,7 @@ if rg -n '(git clone|http\.Get|https://github\.com/dAppCore/knowledge-packs)' cl
 if rg -n '(core\.Fs|NewUnrestricted)' cli/tui/paths.go cli/tui/preferences.go cli/tui/knowledge.go cli/tui/export.go; then exit 1; fi
 ```
 
-- [ ] Review `git diff --stat`, `git diff`, and `git status --short` for unrelated user changes, then commit documentation/QA wiring:
+- [x] Review `git diff --stat`, `git diff`, and `git status --short` for unrelated user changes, then commit documentation/QA wiring:
 
 ```sh
 cd /Users/snider/Code/core/go-inference
@@ -1106,16 +1106,16 @@ git commit -m "docs(tui): document the lem workspace"
 
 ## Final Acceptance Checklist
 
-- [ ] The outer frame remains stable while switching Chat, Work, Models, and Service.
-- [ ] Wide, overlay, and narrow layouts pass boundary-width tests.
-- [ ] Settings, modes, tools, knowledge, model, service, work, and runtime detail are reachable through the inspector.
-- [ ] Multiple sessions persist and remain independently scrollable/searchable; switching never cancels a job.
-- [ ] Each session has at most one job; the single model lane serialises all TUI and HTTP work.
-- [ ] Hidden output and work questions produce attention markers without stealing focus.
-- [ ] Markdown, thinking, tool calls/results, metrics, cancellation, failure, and interrupted restart states are visible and durable.
-- [ ] `~/.lem/config.yaml`, `lem.duckdb`, `state.db`, `workspaces/`, `packs/`, and `exports/` are the only default application paths.
-- [ ] Malformed config is preserved; DuckDB failure blocks with Retry/Quit; state/integration failures degrade visibly.
-- [ ] The complete future agent feature catalogue is visible with honest unavailable states; the CLI has no CoreAgent dependency.
-- [ ] Config, knowledge, exports, and future workspace files use an injected `go-io` medium; only local SQL adapters receive host database paths.
-- [ ] go-container usage is read-only; knowledge usage is local-only; no execution authority is introduced.
-- [ ] Deterministic TUI tests, standalone module tests, race tests, root QA/coverage, benchmark, headless render, and the core/go audit all pass with fresh output.
+- [x] The outer frame remains stable while switching Chat, Work, Models, and Service.
+- [x] Wide, overlay, and narrow layouts pass boundary-width tests.
+- [x] Settings, modes, tools, knowledge, model, service, work, and runtime detail are reachable through the inspector.
+- [x] Multiple sessions persist and remain independently scrollable/searchable; switching never cancels a job.
+- [x] Each session has at most one job; the single model lane serialises all TUI and HTTP work.
+- [x] Hidden output and work questions produce attention markers without stealing focus.
+- [x] Markdown, thinking, tool calls/results, metrics, cancellation, failure, and interrupted restart states are visible and durable.
+- [x] `~/.lem/config.yaml`, `lem.duckdb`, `state.db`, `workspaces/`, `packs/`, and `exports/` are the only default application paths.
+- [x] Malformed config is preserved; DuckDB failure blocks with Retry/Quit; state/integration failures degrade visibly.
+- [x] The complete future agent feature catalogue is visible with honest unavailable states; the CLI has no CoreAgent dependency.
+- [x] Config, knowledge, exports, and future workspace files use an injected `go-io` medium; only local SQL adapters receive host database paths.
+- [x] go-container usage is read-only; knowledge usage is local-only; no execution authority is introduced.
+- [x] Deterministic TUI tests, standalone module tests, race tests, root QA/coverage, benchmark, headless render, and the core/go audit all pass with fresh output.
