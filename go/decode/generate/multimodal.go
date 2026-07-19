@@ -76,10 +76,7 @@ func readImageFile(path string) ([]byte, error) {
 	if !read.OK {
 		return nil, core.E("generate.image", core.Sprintf("read image %s", path), resultErr(read))
 	}
-	bytes, ok := read.Value.([]byte)
-	if !ok {
-		return nil, core.E("generate.image", core.Sprintf("read image %s returned non-byte data", path), nil)
-	}
+	bytes := read.Bytes()
 	if len(bytes) == 0 {
 		return nil, core.E("generate.image", core.Sprintf("image %s is empty", path), nil)
 	}
@@ -110,14 +107,7 @@ func decodeImageDataURL(url string) ([]byte, error) {
 	if !decoded.OK {
 		return nil, core.E("generate.image", "image base64 payload is invalid", resultErr(decoded))
 	}
-	bytes, ok := decoded.Value.([]byte)
-	if !ok {
-		text, textOK := decoded.Value.(string)
-		if !textOK {
-			return nil, core.E("generate.image", "image base64 decode returned an unexpected type", nil)
-		}
-		bytes = []byte(text)
-	}
+	bytes := decoded.Bytes()
 	if len(bytes) == 0 {
 		return nil, core.E("generate.image", "image payload is empty", nil)
 	}

@@ -248,7 +248,7 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 			return nil, core.E("tokenizer.LoadTokenizer", "re-encode vocab", nil)
 		}
 		var vocab map[string]int32
-		if r := core.JSONUnmarshal(vocabBytes.Value.([]byte), &vocab); !r.OK {
+		if r := core.JSONUnmarshal(vocabBytes.Bytes(), &vocab); !r.OK {
 			return nil, core.E("tokenizer.LoadTokenizer", "parse vocab", nil)
 		}
 		tokenizer.vocab = vocab
@@ -261,7 +261,7 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 	if tj.Model.Merges != nil {
 		mergeBytes := core.JSONMarshal(tj.Model.Merges)
 		if mergeBytes.OK {
-			raw := mergeBytes.Value.([]byte)
+			raw := mergeBytes.Bytes()
 			var stringMerges []string
 			if r := core.JSONUnmarshal(raw, &stringMerges); r.OK {
 				for rank, merge := range stringMerges {
