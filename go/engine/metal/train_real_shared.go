@@ -270,19 +270,20 @@ func realSharedChainForward(x []float32, layers []*RealTrainLayerF32, shareFrom 
 // seven projection gradients, consumers carry q/o/gate/up/down plus dExtK/dExtV — and returns the
 // gradient at the chain input.
 //
-// STAGE-1 EXACTNESS RULE (cached rows treated as CONSTANTS — this backward does not yet route a
-// consumer's dExtK/dExtV back into its owner): an adapter at (layer li, target t) influences owner
-// o's cached rows iff li < o (ANY target moves the owner's input hidden and therefore its cache),
-// or li == o with t ∈ {k_proj, v_proj} (the projections that write the cache; on a K==V owner
-// k_proj writes both). Discarding dExtK/dExtV is therefore EXACT iff, for EVERY owner with at
-// least one consumer, no adapter sits strictly below it and none of its own k_proj/v_proj is
-// adapted — equivalently: every adapter sits at li ≥ the HIGHEST consumed owner, with k_proj/
-// v_proj excluded at that owner (consumer-side q/o/mlp adapters, at-or-above the last consumed
-// owner). validateSharedKVAdapterSubset enforces exactly this rule at trainer open;
-// train_real_shared_test.go finite-difference-gates it through a genuinely shared stack. The dH
-// returned at the chain input is NOT exact under sharing (the input feeds the lowest owner's
-// cache) — it is unused by the trainer (the embedding is frozen) and must not be consumed while
-// this stage-1 boundary stands.
+// OWNER-ROUTED and EXACT for ARBITRARY adapter placement (#42 stage 2): a consumer's attention
+// over the owner's cached rows creates a cross-layer gradient edge that BYPASSES the intervening
+// layers — h_owner → (k_proj/v_proj → K-norm/rope / value-norm → cache) → every consumer's
+// scores/output. Reverse-mode handles it by ADJOINT ACCUMULATION at the cached rows: each
+// consumer's backward emits dExtK/dExtV (its gradient w.r.t. the owner's post-rope K /
+// post-value-norm V rows); the walk BANKS them per owner, and — because every consumer sits ABOVE
+// its owner (validateShareTopology) — the bank is complete when the walk reaches the owner, whose
+// backward injects the summed adjoints into its own dKr/dV (realLayerBackwardInject) so the
+// combined gradient routes through the owner's k_proj/v_proj (dWK/dWV accumulate the owner's own
+// use AND every consumer — the K==V owner folds both onto k_proj) and through the owner's
+// pre-attention norm into ITS dH, reaching every layer and adapter below. The returned chain-input
+// gradient is exact under sharing. FD-gated per placement family in train_real_shared_test.go:
+// owner k/v with multiple consumers, adapters below the owner, and the consumer-side set, all
+// mixed with the #40 features.
 func realSharedChainBackward(dout []float32, inputs [][]float32, tapes []*realLayerTape, layers []*RealTrainLayerF32, shareFrom []int, sets []layerWeightSet, visit func(li int, g *realLayerGrads) error) ([]float32, error) {
 	if err := validateShareTopology(layers, shareFrom); err != nil {
 		return nil, err
@@ -290,14 +291,32 @@ func realSharedChainBackward(dout []float32, inputs [][]float32, tapes []*realLa
 	if len(inputs) != len(layers) || len(tapes) != len(layers) || len(sets) != len(layers) {
 		return nil, core.NewError("native.realSharedChainBackward: inputs/tapes/sets must carry one entry per layer")
 	}
+	// per-owner banked cache adjoints, accumulated from consumers as the walk descends.
+	type ownerBank struct{ dKr, dV []float32 }
+	banks := map[int]*ownerBank{}
 	dH := dout
 	for li := len(layers) - 1; li >= 0; li-- {
 		L := layers[li]
 		s := sets[li]
 		var g *realLayerGrads
 		var err error
-		if shareFrom[li] != li {
+		if own := shareFrom[li]; own != li {
 			g, err = realConsumerBackward(dH, inputs[li], L, tapes[li], s.wQ, s.wO, s.wGate, s.wUp, s.wDown)
+			if err == nil {
+				bank := banks[own]
+				if bank == nil {
+					bank = &ownerBank{dKr: make([]float32, len(g.dExtK)), dV: make([]float32, len(g.dExtV))}
+					banks[own] = bank
+				}
+				for i := range g.dExtK {
+					bank.dKr[i] += g.dExtK[i]
+				}
+				for i := range g.dExtV {
+					bank.dV[i] += g.dExtV[i]
+				}
+			}
+		} else if bank := banks[li]; bank != nil {
+			g, err = realLayerBackwardInject(dH, inputs[li], L, tapes[li], s.wQ, s.wK, s.wV, s.wO, s.wGate, s.wUp, s.wDown, bank.dKr, bank.dV)
 		} else {
 			g, err = realLayerBackward(dH, inputs[li], L, tapes[li], s.wQ, s.wK, s.wV, s.wO, s.wGate, s.wUp, s.wDown)
 		}
@@ -312,51 +331,4 @@ func realSharedChainBackward(dout []float32, inputs [][]float32, tapes []*realLa
 		dH = g.dH
 	}
 	return dH, nil
-}
-
-// consumedOwnerSet returns the owner indices that have at least one consumer — the layers whose
-// cached rows create cross-layer gradient paths.
-func consumedOwnerSet(shareFrom []int) map[int]bool {
-	owners := map[int]bool{}
-	for li, own := range shareFrom {
-		if own != li {
-			owners[own] = true
-		}
-	}
-	return owners
-}
-
-// validateSharedKVAdapterSubset enforces the stage-1 exactness rule (realSharedChainBackward's
-// doc) on a resolved adapter set: on a stack with KV-cache sharing, every adapter must sit
-// AT-OR-ABOVE every consumed owner, and a consumed owner's own k_proj/v_proj must not be adapted —
-// the combinations where the cached rows are constants of every trainable parameter, so the
-// consumer backward is exact WITHOUT the owner-routed dK/dV path. Anything else refuses, naming
-// the missing path (the stage-2 backward: dK/dV from every consumer routed back through the
-// owner's k_proj/v_proj and hidden). A share-free stack passes vacuously.
-func validateSharedKVAdapterSubset(shareFrom []int, adapters []*layerLoRAAdapter) error {
-	owners := consumedOwnerSet(shareFrom)
-	if len(owners) == 0 {
-		return nil
-	}
-	for _, ad := range adapters {
-		for own := range owners {
-			below := ad.layer < own
-			cacheWriting := ad.layer == own && (ad.target == ProjK || ad.target == ProjV)
-			if !below && !cacheWriting {
-				continue
-			}
-			reason := "its k_proj/v_proj write the rows layer "
-			if below {
-				reason = "every target moves the hidden that feeds the cached rows layer "
-			}
-			return core.NewError(core.Concat(
-				"native.NewLoRATrainer: adapter (layer ", core.Sprintf("%d", ad.layer), ", ", ad.target,
-				") can influence layer ", core.Sprintf("%d", own), "'s SHARED KV cache (", reason,
-				core.Sprintf("%d", own), "'s consumers attend) — the owner-routed cross-layer gradient path",
-				" (dK/dV from every consumer back through the owner's k_proj/v_proj and hidden) is not wired;",
-				" restrict per-layer adapters to layers at-or-above every consumed owner (k_proj/v_proj",
-				" excluded on the owner itself), or train the ", loraTargetHead, " adapter"))
-		}
-	}
-	return nil
 }

@@ -360,24 +360,28 @@ func sharingFixtureTokenModel(t *testing.T, nL, numShared int) *NativeTokenModel
 	return tm
 }
 
-// TestNewLoRATrainerSharedKV_Good: the stage-1 subset OPENS on a real KV-sharing session (#42) —
-// owner + 2 consumers, q_proj everywhere — and at B = 0 the share-aware host chain reproduces the
-// ENGINE's own captured hiddens layer by layer, consumers included: the receipt that the consumer
-// mirror carries encAttnHalfShared's exact semantics (owner-position rope'd K, value-normed V,
-// read as-is).
+// TestNewLoRATrainerSharedKV_Good: the FULL per-layer LoRA shape OPENS on a real KV-sharing
+// session (#42 — owner + 2 consumers, all seven targets: k/v resolve on the owner, consumers
+// carry the other five) — and at B = 0 the share-aware host chain reproduces the ENGINE's own
+// captured hiddens layer by layer, consumers included: the receipt that the consumer mirror
+// carries encAttnHalfShared's exact semantics (owner-position rope'd K, value-normed V, read
+// as-is).
 func TestNewLoRATrainerSharedKV_Good(t *testing.T) {
 	requireNativeRuntime(t)
 	tm := sharingFixtureTokenModel(t, 3, 2) // layer 0 owns; layers 1 and 2 attend its cache
 	tr, err := NewLoRATrainer(tm, inference.TrainingConfig{
-		LoRA:         inference.LoRAConfig{Rank: 4, Alpha: 8, TargetKeys: []string{"q_proj"}},
+		LoRA: inference.LoRAConfig{Rank: 4, Alpha: 8, TargetKeys: []string{
+			ProjQ, ProjK, ProjV, ProjO, ProjGate, ProjUp, ProjDown,
+		}},
 		LearningRate: 0.02,
 	})
 	if err != nil {
-		t.Fatalf("NewLoRATrainer must accept the stage-1 subset on a sharing shape: %v", err)
+		t.Fatalf("NewLoRATrainer must accept the full per-layer shape on a sharing stack: %v", err)
 	}
 	defer func() { _ = tr.Close() }()
-	if !tr.perLayer || len(tr.adapters) != 3 {
-		t.Fatalf("expected the layers mode with q_proj on all 3 layers: perLayer=%v adapters=%d", tr.perLayer, len(tr.adapters))
+	// 7 targets on the owner + 5 on each consumer (no k/v tensors there — the documented skip).
+	if !tr.perLayer || len(tr.adapters) != 17 {
+		t.Fatalf("expected the layers mode with 7 owner + 2×5 consumer adapters: perLayer=%v adapters=%d", tr.perLayer, len(tr.adapters))
 	}
 
 	// B = 0 parity anchor: the share-aware host chain must reproduce the engine's captured
@@ -421,22 +425,27 @@ func TestNewLoRATrainerSharedKV_Good(t *testing.T) {
 	if lossLast >= loss0 {
 		t.Fatalf("shared-KV per-layer SFT did not reduce loss: first=%.4f last=%.4f", loss0, lossLast)
 	}
-	t.Logf("shared-KV per-layer SFT receipt: loss %.4f -> %.4f over 20 steps (q_proj on owner + 2 consumers)", loss0, lossLast)
+	t.Logf("shared-KV per-layer SFT receipt: loss %.4f -> %.4f over 20 steps (all 7 targets, owner + 2 consumers)", loss0, lossLast)
 }
 
-// TestNewLoRATrainerPerLayer_Bad: the refusal boundary in both directions on a REAL model — on a
-// KV-sharing shape the stage-1 subset rule refuses an owner's k_proj (its cached rows feed the
-// consumers; the owner-routed dK/dV path is not wired), naming the missing path, while the head
-// adapter still opens on the very same model.
+// TestNewLoRATrainerPerLayer_Bad: the refusal boundary in both directions on a REAL model — a
+// shape with a genuinely un-gated feature (the final-logit soft-cap) refuses per-layer targets
+// naming the feature, while the head adapter still opens on the very same model. (KV sharing no
+// longer refuses — the owner-routed backward covers it; see TestNewLoRATrainerSharedKV_Good.)
 func TestNewLoRATrainerPerLayer_Bad(t *testing.T) {
 	requireNativeRuntime(t)
-	tm := sharingFixtureTokenModel(t, 2, 1) // the last layer SHARES the first's KV cache
-
-	_, err := NewLoRATrainer(tm, inference.TrainingConfig{LoRA: inference.LoRAConfig{TargetKeys: []string{"k_proj"}}})
-	if err == nil {
-		t.Fatal("an owner's k_proj on a KV-sharing shape must be refused (the owner-routed path is not wired)")
+	g, arch := eligibleFixtureModel(2)
+	arch.SoftCap = 30 // the un-gated feature: the head backward does not model the soft-cap
+	tm, err := NewBF16TokenModel(g, arch, 16)
+	if err != nil {
+		t.Fatalf("NewBF16TokenModel: %v", err)
 	}
-	for _, want := range []string{"k_proj", "SHARED KV cache", "owner-routed", "lm_head"} {
+
+	_, err = NewLoRATrainer(tm, inference.TrainingConfig{LoRA: inference.LoRAConfig{TargetKeys: []string{"q_proj"}}})
+	if err == nil {
+		t.Fatal("per-layer targets on a soft-cap shape must be refused")
+	}
+	for _, want := range []string{"q_proj", "soft-cap", "lm_head"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the boundary refusal must name %q; got: %s", want, err.Error())
 		}

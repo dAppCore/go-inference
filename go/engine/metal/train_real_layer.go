@@ -576,8 +576,23 @@ type realLayerGrads struct {
 // realLayerBackward walks the tape in reverse: given dout [T,DModel] it returns every projection's
 // weight gradient plus dH — the gradient to the layer input. Pure host, f64 accumulation.
 func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTape, wQ, wK, wV, wO, wGate, wUp, wDown []float32) (*realLayerGrads, error) {
+	return realLayerBackwardInject(dout, h, L, tp, wQ, wK, wV, wO, wGate, wUp, wDown, nil, nil)
+}
+
+// realLayerBackwardInject is realLayerBackward with the OWNER-ROUTED shared-KV adjoints (#42):
+// injKr/injV, when non-nil ([T, KVHeads·HeadDim] each), are the summed gradients w.r.t. this
+// layer's CACHED post-rope K / post-value-norm V rows accumulated from every KV-share consumer
+// that attended them (realConsumerBackward's dExtK/dExtV, banked by realSharedChainBackward).
+// They join the layer's OWN SDPA-derived dKr/dV before the rope/K-norm/value-norm backwards, so
+// the combined adjoint routes through k_proj/v_proj (accumulating dWK/dWV across the owner's own
+// use AND every consumer) and onward through the pre-attention norm into dH — the cross-layer
+// gradient path a consumer's attention creates. nil/nil is the plain dense backward, bit-for-bit.
+func realLayerBackwardInject(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTape, wQ, wK, wV, wO, wGate, wUp, wDown, injKr, injV []float32) (*realLayerGrads, error) {
 	if len(dout) != L.T*L.DModel {
 		return nil, core.NewError("native.RealTrainLayerF32: dout must be [T,DModel]")
+	}
+	if kvLen := L.T * L.KVHeads * L.HeadDim; (injKr != nil && len(injKr) != kvLen) || (injV != nil && len(injV) != kvLen) {
+		return nil, core.NewError("native.RealTrainLayerF32: injected cache adjoints must be [T, KVHeads·HeadDim]")
 	}
 	T, D, d := L.T, L.DModel, L.HeadDim
 	qDim, kvDim := L.Heads*d, L.KVHeads*d
@@ -643,6 +658,16 @@ func realLayerBackward(dout, h []float32, L *RealTrainLayerF32, tp *realLayerTap
 		scatterAddHeadF32(dQr, dqh, T, L.Heads, d, hh)
 		scatterAddHeadF32(dKr, dkh, T, L.KVHeads, d, hk)
 		scatterAddHeadF32(dV, dvh, T, L.KVHeads, d, hk)
+	}
+	// owner-routed shared-KV adjoints (#42): every consumer's gradient w.r.t. this layer's cached
+	// rows joins the layer's own SDPA contributions HERE — dKr is the post-rope K adjoint (the
+	// cache holds rope'd+normed K), dV the post-value-norm V adjoint — so the stations below route
+	// the combined gradient exactly once.
+	for i := range injKr {
+		dKr[i] += injKr[i]
+	}
+	for i := range injV {
+		dV[i] += injV[i]
 	}
 	// rope backward lands on the POST-QK-norm values; the QK-norm backward (when the layer carries
 	// one) then maps that onto the raw projections — QKNormBackwardF32, the gemma4 station between

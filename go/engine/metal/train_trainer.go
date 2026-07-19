@@ -30,12 +30,12 @@ import (
 // (train_real_layer.go + train_real_shared.go + train_trainer_layers.go) — but ONLY on shapes
 // whose every layer feature that reference covers (validatePerLayerLoRAShape): dense attention
 // layers with QK-norm / sandwich norms / value-norm / K==V / PLE / sliding+partial+proportional
-// rope / layer scalars / KV-cache sharing (the gemma4 E2B/E4B tail — with the stage-1 adapter
-// boundary of validateSharedKVAdapterSubset: adapters at-or-above every consumed owner, k/v
-// excluded on the owner, until the owner-routed dK/dV backward lands). Any other feature — MoE,
-// recurrent mixers, projection biases, logit soft-caps, non-rotary positions — REFUSES per-layer
-// targets at open, naming the blocking feature, exactly the #31 shape: never silently train less
-// (or wronger) than asked.
+// rope / layer scalars / KV-cache sharing (the gemma4 E2B/E4B tail — the OWNER-ROUTED backward:
+// every consumer's dK/dV accumulates back through the owner's k_proj/v_proj and hidden, so any of
+// the 7 targets trains on any layer; consumers simply carry no k/v of their own). Any other
+// feature — MoE, recurrent mixers, projection biases, logit soft-caps, non-rotary positions —
+// REFUSES per-layer targets at open, naming the blocking feature, exactly the #31 shape: never
+// silently train less (or wronger) than asked.
 
 // loraTargetHead is the one adapter target this trainer trains: the output head. It is the tensor-name
 // prefix LoRATrainer.Save writes (lm_head.lora_a / lm_head.lora_b), the name the load path reads back
@@ -177,13 +177,6 @@ func NewLoRATrainer(tm *NativeTokenModel, cfg inference.TrainingConfig) (*LoRATr
 		layers, lerr := buildRealLayerTemplates(tm.bf16, tm.arch)
 		if lerr == nil {
 			t.adapters, lerr = buildLayerAdapters(layers, cfg.LoRA.TargetKeys, rank, lr)
-		}
-		if lerr == nil {
-			// the stage-1 shared-KV boundary (#42): on a KV-sharing stack, only adapter
-			// placements for which the cached rows are constants of every trainable parameter
-			// are exact without the owner-routed dK/dV path — anything else refuses, naming
-			// that path (realSharedChainBackward's exactness rule).
-			lerr = validateSharedKVAdapterSubset(shareFrom, t.adapters)
 		}
 		if lerr != nil {
 			_ = sess.Close()

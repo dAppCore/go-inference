@@ -14,12 +14,10 @@ import (
 
 // train_trainer_layers.go is stage 3 of #40: the PER-LAYER projection LoRA path of LoRATrainer,
 // wired ONLY for model shapes whose every layer feature is covered by the FD-gated real-arch
-// reference (train_real_layer.go + the KV-share chain of train_real_shared.go, #42). The #31
-// refusal REMAINS for everything else — a shape with any un-gated feature (MoE, recurrent mixers,
-// projection biases, logit soft-caps, …) refuses per-layer targets loudly, naming the blocking
-// feature (validatePerLayerLoRAShape); on a KV-sharing stack the ADAPTER PLACEMENT is additionally
-// bounded by the stage-1 exactness rule (validateSharedKVAdapterSubset) until the owner-routed
-// dK/dV backward lands.
+// reference (train_real_layer.go + the owner-routed KV-share chain of train_real_shared.go, #42).
+// The #31 refusal REMAINS for everything else — a shape with any un-gated feature (MoE, recurrent
+// mixers, projection biases, logit soft-caps, …) refuses per-layer targets loudly, naming the
+// blocking feature (validatePerLayerLoRAShape).
 //
 // The training maths: a per-layer adapter changes EVERY layer's forward, so — unlike the head
 // seam, where the frozen capture is exact — each step re-runs the layer chain HOST-SIDE

@@ -13,9 +13,11 @@ import (
 // train_real_shared_test.go gates the KV-share chain reference (#42) by central finite differences
 // — pure host, NO runtime gate (the train_real_layer_test.go discipline). The chain FD gates run
 // through a GENUINELY shared stack: one owner + two consumers, T ≥ 3, mixed with the #40 features
-// (QK-norm + sandwich norms + value-norm + K==V + PLE + layer scalar — the E2B shape). Stage 1
-// proves the exact-by-construction adapter subset (cached rows constant); the acceptance boundary
-// (validateSharedKVAdapterSubset) is gated beside it.
+// (QK-norm + sandwich norms + value-norm + K==V + PLE + layer scalar — the E2B shape), per
+// placement family: the consumer-side set, the OWNER-ROUTED set (owner k/v with multiple
+// consumers — dK/dV accumulating from every consumer back through the owner's projections), and
+// adapters BELOW the owner (the path through the owner's hidden). Every gate also FD-checks the
+// chain-INPUT gradient — exact only when the owner-routed path is complete.
 
 // near1F32 returns a near-one synthetic weight (the real checkpoints' norm shape).
 func near1F32(salt, n int) []float32 {
@@ -153,7 +155,7 @@ func sharedChainFDCheck(t *testing.T, layers []*RealTrainLayerF32, shareFrom []i
 		return s
 	}
 
-	analytic := func() (dAs, dBs [][]float32) {
+	analytic := func() (dAs, dBs [][]float32, dH0 []float32) {
 		sets := chainEffectiveSets(t, layers, adapters, rank, scaling)
 		inputs, tapes, err := realSharedChainForward(h, layers, shareFrom, sets)
 		if err != nil {
@@ -161,7 +163,7 @@ func sharedChainFDCheck(t *testing.T, layers []*RealTrainLayerF32, shareFrom []i
 		}
 		dAs = make([][]float32, len(adapters))
 		dBs = make([][]float32, len(adapters))
-		_, err = realSharedChainBackward(cot, inputs, tapes, layers, shareFrom, sets, func(li int, g *realLayerGrads) error {
+		dH0, err = realSharedChainBackward(cot, inputs, tapes, layers, shareFrom, sets, func(li int, g *realLayerGrads) error {
 			for ai, ad := range adapters {
 				if ad.layer != li {
 					continue
@@ -194,9 +196,9 @@ func sharedChainFDCheck(t *testing.T, layers []*RealTrainLayerF32, shareFrom []i
 		if err != nil {
 			t.Fatalf("chain backward: %v", err)
 		}
-		return dAs, dBs
+		return dAs, dBs, dH0
 	}
-	dAs, dBs := analytic()
+	dAs, dBs, dH0 := analytic()
 
 	// Richardson-extrapolated central differences (the single-layer harness's method refined for
 	// the CHAIN): three stacked layers of gelu towers, softmax and rmsnorm compound — chain
@@ -236,20 +238,24 @@ func sharedChainFDCheck(t *testing.T, layers []*RealTrainLayerF32, shareFrom []i
 		check(name+".dA", ad.a, dAs[ai])
 		check(name+".dB", ad.b, dBs[ai])
 	}
+	// the chain-INPUT gradient: exact only when every consumer's dK/dV is routed back through its
+	// owner (the chain input feeds the lowest owner's cached rows) — the owner-routed backward's
+	// own FD receipt, on every stack shape.
+	check("dH0", h, dH0)
 	if !t.Failed() {
-		t.Logf("%d adapters match finite differences through the shared-KV chain (1 owner + 2 consumers, T=%d)", len(adapters), T)
+		t.Logf("%d adapters + dH0 match finite differences through the shared-KV chain (T=%d, %d layers)", len(adapters), T, len(layers))
 	}
 }
 
-// TestRealSharedChainBackward finite-difference-gates the STAGE-1 subset through the E2B-shaped
-// shared stack (K==V owner with value-norm + QK-norm + sandwich norms + PLE + layer scalar; two
-// consumers): adapters on consumer-side q/o/mlp and on the owner's own q/o/up/down — every
-// placement for which the cached rows are constants of every trainable parameter, so discarding
-// the consumers' dExtK/dExtV is exact. All adapters active at once (the trainer's multi-adapter
-// gradient). The owner's gate_proj — equally cache-independent — is exercised at the consumer
-// level here and by the single-layer #40 gate instead: the owner-level gate COORDINATE defeats
-// the FD instrument on this fixture (quotients swing sign across eps — a near-singular direction;
-// the share-free dense control fails it identically, so sharing is not implicated).
+// TestRealSharedChainBackward finite-difference-gates the CONSUMER-SIDE placement family through
+// the E2B-shaped shared stack (K==V owner with value-norm + QK-norm + sandwich norms + PLE +
+// layer scalar; two consumers): adapters on consumer-side q/o/mlp and on the owner's own
+// q/o/up/down (the cache-independent owner targets). All adapters active at once (the trainer's
+// multi-adapter gradient). The owner's gate_proj — equally cache-independent — is exercised at
+// the consumer level here and by the single-layer #40 gate instead: the owner-level gate
+// COORDINATE defeats the FD instrument on this fixture (quotients swing sign across eps — a
+// near-singular direction; the share-free dense control fails it identically, so sharing is not
+// implicated).
 func TestRealSharedChainBackward(t *testing.T) {
 	const rank = 2
 	scaling := float32(16.0 / rank)
@@ -264,6 +270,71 @@ func TestRealSharedChainBackward(t *testing.T) {
 		newChainAdapter(t, layers, 2, ProjO, rank, 39),
 		newChainAdapter(t, layers, 2, ProjGate, rank, 41),
 		newChainAdapter(t, layers, 2, ProjUp, rank, 43),
+	}
+	sharedChainFDCheck(t, layers, shareFrom, adapters, rank, scaling)
+}
+
+// TestRealSharedChainBackward_OwnerRouted finite-difference-gates the OWNER-ROUTED path (#42
+// stage 2) on the E2B-shaped stack: an adapter on the K==V owner's k_proj — whose effective
+// weight writes the cached K rows (rope'd+normed) AND the cached V rows (the raw-copy value
+// path) that BOTH consumers attend, plus the owner's own attention use — must carry every one of
+// those accumulation paths to match central differences. A consumer-side q adapter rides along
+// so the two families mix in one multi-adapter gradient.
+func TestRealSharedChainBackward_OwnerRouted(t *testing.T) {
+	const rank = 2
+	scaling := float32(16.0 / rank)
+	layers, shareFrom := tinySharedStackWithMap()
+	adapters := []*layerLoRAAdapter{
+		newChainAdapter(t, layers, 0, ProjK, rank, 71), // the consumed K==V owner's key projection
+		newChainAdapter(t, layers, 1, ProjQ, rank, 73),
+	}
+	sharedChainFDCheck(t, layers, shareFrom, adapters, rank, scaling)
+}
+
+// TestRealSharedChainBackward_OwnerRoutedOwnV is the own-V twin: the owner carries a separate
+// value projection (the gemma4 sliding-owner shape), and BOTH its k_proj and v_proj are adapted —
+// dWK accumulates the owner's own scores + every consumer's scores; dWV the owner's own values +
+// every consumer's values — under the sliding window (the ring-live rows are the only cached rows
+// a consumer sees).
+func TestRealSharedChainBackward_OwnerRoutedOwnV(t *testing.T) {
+	const rank = 2
+	scaling := float32(16.0 / rank)
+	layers, shareFrom := tinySharedStackWithMap()
+	for _, L := range layers {
+		L.T = 4
+		L.Window = 2
+		L.RopePairHalf = 1
+		L.RopeInvFreq = realRopeInvFreqs(2, 10000)
+		L.PLEInput = syntheticFloat32(L.T*L.PLIDim, 411)
+	}
+	owner := layers[0]
+	owner.WV = scaleSlice(syntheticFloat32(owner.KVHeads*owner.HeadDim*owner.DModel, 414), 0.3)
+	adapters := []*layerLoRAAdapter{
+		newChainAdapter(t, layers, 0, ProjK, rank, 75),
+		newChainAdapter(t, layers, 0, ProjV, rank, 77),
+		newChainAdapter(t, layers, 2, ProjO, rank, 79),
+	}
+	sharedChainFDCheck(t, layers, shareFrom, adapters, rank, scaling)
+}
+
+// TestRealSharedChainBackward_BelowOwner finite-difference-gates adapters BELOW a consumed owner
+// (#42 stage 2): a dense layer under the owner whose q and down adapters move the owner's INPUT
+// hidden — and therefore its cached rows — so their gradients must ride the owner-routed path
+// (consumers' dK/dV → the owner's k_proj AND its pre-attention norm → dH into the dense layer)
+// on top of the ordinary residual chain. The owner's k_proj is adapted too, mixing every family
+// through a 4-layer stack: dense + K==V owner + two consumers.
+func TestRealSharedChainBackward_BelowOwner(t *testing.T) {
+	const rank = 2
+	scaling := float32(16.0 / rank)
+	shared := tinySharedStack()
+	// the dense under-layer: the owner shape re-salted, owning its own (unshared) cache.
+	denseFloor := tinySharedStack()[0]
+	layers := []*RealTrainLayerF32{denseFloor, shared[0], shared[1], shared[2]}
+	shareFrom := []int{0, 1, 1, 1}
+	adapters := []*layerLoRAAdapter{
+		newChainAdapter(t, layers, 0, ProjQ, rank, 81),    // below the owner: the path through
+		newChainAdapter(t, layers, 0, ProjDown, rank, 83), // the owner's hidden into its cache
+		newChainAdapter(t, layers, 1, ProjK, rank, 85),    // and the owner's own cache-writing k
 	}
 	sharedChainFDCheck(t, layers, shareFrom, adapters, rank, scaling)
 }
@@ -468,51 +539,6 @@ func TestValidateShareTopology_Bad(t *testing.T) {
 	if err := validateShareTopology(layers, shareFrom); err == nil {
 		t.Fatal("a consumer/owner cache-geometry mismatch must be refused")
 	}
-}
-
-// TestValidateSharedKVAdapterSubset_Good: the stage-1-exact placements pass — everything at-or-
-// above the consumed owner with only q/o/mlp on the owner itself — and a share-free stack passes
-// vacuously with any placement.
-func TestValidateSharedKVAdapterSubset_Good(t *testing.T) {
-	layers, shareFrom := tinySharedStackWithMap()
-	adapters := []*layerLoRAAdapter{
-		newChainAdapter(t, layers, 0, ProjQ, 2, 61),
-		newChainAdapter(t, layers, 0, ProjO, 2, 63),
-		newChainAdapter(t, layers, 0, ProjDown, 2, 65),
-		newChainAdapter(t, layers, 1, ProjQ, 2, 67),
-		newChainAdapter(t, layers, 2, ProjUp, 2, 69),
-	}
-	if err := validateSharedKVAdapterSubset(shareFrom, adapters); err != nil {
-		t.Fatalf("the stage-1-exact placements must pass: %v", err)
-	}
-	kAd := &layerLoRAAdapter{layer: 0, target: ProjK}
-	if err := validateSharedKVAdapterSubset([]int{0, 1}, []*layerLoRAAdapter{kAd}); err != nil {
-		t.Fatalf("a share-free stack must pass any placement: %v", err)
-	}
-}
-
-// TestValidateSharedKVAdapterSubset_Bad: the two inexact placement families refuse, naming the
-// influenced owner, the missing owner-routed path, and the lm_head fallback — an adapter BELOW a
-// consumed owner (any target), and the owner's own k_proj/v_proj.
-func TestValidateSharedKVAdapterSubset_Bad(t *testing.T) {
-	// a 4-layer map: dense layer 0, owner 1, consumers 2 and 3.
-	shareFrom := []int{0, 1, 1, 1}
-	check := func(name string, ad *layerLoRAAdapter) {
-		t.Helper()
-		err := validateSharedKVAdapterSubset(shareFrom, []*layerLoRAAdapter{ad})
-		if err == nil {
-			t.Fatalf("%s: must refuse", name)
-		}
-		for _, want := range []string{"SHARED KV cache", "owner-routed", "lm_head", ad.target} {
-			if !strings.Contains(err.Error(), want) {
-				t.Fatalf("%s: refusal must name %q; got: %s", name, want, err.Error())
-			}
-		}
-	}
-	check("below the owner", &layerLoRAAdapter{layer: 0, target: ProjQ})
-	check("below the owner (mlp)", &layerLoRAAdapter{layer: 0, target: ProjDown})
-	check("owner k_proj", &layerLoRAAdapter{layer: 1, target: ProjK})
-	check("owner v_proj", &layerLoRAAdapter{layer: 1, target: ProjV})
 }
 
 // TestBuildLayerAdaptersSharedKV_Good: on a shared stack, k_proj/v_proj requests skip the
