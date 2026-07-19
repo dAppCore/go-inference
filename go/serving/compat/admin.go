@@ -27,6 +27,11 @@ type AdminConfig struct {
 	// Models returns the currently servable model IDs for GET /v1/models. The
 	// host supplies it (the serve knows its --model); nil yields an empty list.
 	Models func() []string
+	// Transcriber wires POST /v1/audio/transcriptions when the host loaded a Whisper checkpoint (see
+	// dappco.re/go/inference/serving's detectAndLoadWhisper) — nil leaves the route mounted but every
+	// request gets the clean capability refusal (openai.TranscriptionHandler's nil-transcriber branch),
+	// matching the vision/audio 400 pattern rather than a 404.
+	Transcriber inference.Transcriber
 }
 
 // Health is the small health payload served by the local compatibility mux.

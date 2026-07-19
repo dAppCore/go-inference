@@ -40,7 +40,7 @@ type ContinuityEnabler func(model inference.TextModel, store state.Store) error
 // lives here in the library, not in cmd/.
 type ServeConfig struct {
 	Addr        string                 // listen address (e.g. ":36911")
-	ModelPath   string                 // model to load; "" starts model-less (reload later)
+	ModelPath   string                 // model to load; "" starts model-less (reload later); a Whisper checkpoint routes the whole process to ASR-only serving instead (see serve_transcribe.go)
 	ContextLen  int                    // context-length override (0 = model default); reported by /v1/admin/serve/status
 	LoadOptions []inference.LoadOption // adapter, slots, … forwarded to the loader (context is applied from ContextLen)
 
@@ -159,6 +159,19 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	outboundPolicy, err := loadOutboundPolicy(cfg)
 	if err != nil {
 		return err
+	}
+
+	// Whisper checkpoints never enter the TextModel factory (model/arch/openai/whisper's own doc
+	// comment). Detected up front from --model's config.json: this v1 "honest shape" routes the WHOLE
+	// process into ASR-only serving rather than folding Whisper into the chat hot-swap/multi-model
+	// machinery below, none of which fits an encoder-decoder (see serve_transcribe.go). Any non-Whisper
+	// --model (including "") falls straight through unchanged — this only ever short-circuits a
+	// genuine Whisper directory.
+	if transcriber, isWhisper, whisperErr := detectAndLoadWhisper(cfg.ModelPath); isWhisper {
+		if whisperErr != nil {
+			return whisperErr
+		}
+		return runWhisperServe(ctx, cfg, transcriber, outboundPolicy, log)
 	}
 
 	// Multi-model serving is a separate host path built on the multiModelResolver;
@@ -293,7 +306,7 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		}
 	}
 
-	return hostServe(ctx, cfg, host, outboundPolicy, log)
+	return hostServe(ctx, cfg, host, outboundPolicy, log, nil)
 }
 
 // serveHost bundles the resolver and per-mode wiring hostServe needs to stand up
@@ -330,8 +343,12 @@ func loadOutboundPolicy(cfg ServeConfig) (*policy.Policy, error) {
 
 // hostServe composes the compatibility mux, the /v1/admin control plane, the
 // welfare + outbound-policy wraps, and runs the server. It is the shared tail
-// both serve modes reach after wiring their resolver + continuity.
-func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPolicy *policy.Policy, log io.Writer) error {
+// every serve mode reaches after wiring their resolver + continuity. transcriber
+// is nil for the ordinary chat/multi-model paths — only runWhisperServe
+// (serve_transcribe.go) supplies one; POST /v1/audio/transcriptions stays
+// mounted regardless (compat.NewMuxWithAdmin), answering the capability
+// refusal when transcriber is nil.
+func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPolicy *policy.Policy, log io.Writer, transcriber inference.Transcriber) error {
 	// Embeddings/rerank model — loaded once, up front, so a bad -embed-model
 	// fails the boot before any listener binds (fail-closed, matching the
 	// outbound-policy and admin-token pattern below). Folded into /v1/models
@@ -356,7 +373,8 @@ func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPol
 		Health: func(_ context.Context) (compat.Health, error) {
 			return compat.Health{Status: "ok", Runtime: "go-inference", Models: host.healthModels(), Time: time.Now().Unix()}, nil
 		},
-		Models: host.listModels,
+		Models:      host.listModels,
+		Transcriber: transcriber,
 	}
 	adminMux := adminpkg.NewMux(adminpkg.Config{
 		Reloader:        host.reloader,
@@ -479,7 +497,7 @@ func runMultiModelServe(ctx context.Context, cfg ServeConfig, outboundPolicy *po
 			},
 		},
 	}
-	return hostServe(ctx, cfg, host, outboundPolicy, log)
+	return hostServe(ctx, cfg, host, outboundPolicy, log, nil)
 }
 
 // modelLoadOptions builds the loader options for the -model default in

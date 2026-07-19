@@ -82,6 +82,9 @@ func NewMuxWithAdmin(resolver openaicompat.Resolver, admin AdminConfig) http.Han
 	mux.Handle(openaicompat.DefaultCacheWarmPath, openaicompat.NewCacheWarmHandler(resolver))
 	mux.Handle(openaicompat.DefaultCacheClearPath, openaicompat.NewCacheClearHandler(resolver))
 	mux.Handle(openaicompat.DefaultCancelPath, openaicompat.NewCancelHandler(resolver))
+	// Always mounted, even with admin.Transcriber nil: a non-whisper (or model-less) serve still
+	// answers with the clean capability refusal rather than a 404 — the vision/audio 400 pattern.
+	mux.Handle(openaicompat.DefaultTranscriptionsPath, openaicompat.NewTranscriptionHandler(admin.Transcriber))
 	mux.Handle(anthropiccompat.DefaultMessagesPath, newAnthropicMessagesHandler(resolver))
 	mux.Handle(ollamacompat.DefaultChatPath, newOllamaChatHandler(resolver))
 	mux.Handle(ollamacompat.DefaultGeneratePath, newOllamaGenerateHandler(resolver))

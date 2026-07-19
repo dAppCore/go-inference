@@ -53,6 +53,27 @@ func ParseConfig(data []byte) (*Config, error) {
 	return &cfg, nil
 }
 
+// IsWhisperCheckpoint reports whether dir's config.json declares model_type "whisper" — a cheap probe
+// (JSON parse only, no tokenizer/safetensors read) serve's --model detection uses to route a process into
+// ASR-only serving BEFORE attempting the full, heavier Load (see serving.detectAndLoadWhisper). Any
+// read/parse failure or a non-"whisper" model_type reports false — this is a probe, not a validator; Load
+// still runs its own full checks on the directories this says yes to.
+func IsWhisperCheckpoint(dir string) bool {
+	configRead := core.ReadFile(core.PathJoin(dir, "config.json"))
+	if !configRead.OK {
+		return false
+	}
+	cb, ok := configRead.Value.([]byte)
+	if !ok {
+		return false
+	}
+	cfg, err := ParseConfig(cb)
+	if err != nil {
+		return false
+	}
+	return cfg.ModelType == "whisper"
+}
+
 // InferFromWeights is a no-op: Whisper's config.json declares every encoder/decoder dimension, and
 // Config.Arch refuses before any dimension would be consulted for an Assemble — there is nothing to
 // resolve from the checkpoint's weight shapes yet (the don't-guess rule; see qwen2.Config.InferFromWeights

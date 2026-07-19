@@ -35,3 +35,22 @@ func ExampleModel_Transcribe() {
 	}
 	core.Println(result.Text, result.Language)
 }
+
+// ExampleModel_TranscribeAudio documents the inference.Transcriber adapter's call shape — the primitive-
+// string reshape serve's POST /v1/audio/transcriptions handler calls through a plain interface value,
+// never importing this package directly. No "Output:" comment, same reasoning as ExampleModel_Transcribe;
+// see live_test.go's TestLive_RealCheckpoint_TranscribeAudio_Good for a real, executed run.
+func ExampleModel_TranscribeAudio() {
+	m, err := Load("/path/to/whisper-tiny")
+	if err != nil {
+		core.Println("load:", err)
+		return
+	}
+	wav := []byte{} // a real 16-bit PCM mono 16 kHz WAV file's bytes
+	text, language, err := m.TranscribeAudio(wav, "en")
+	if err != nil {
+		core.Println("transcribe:", err)
+		return
+	}
+	core.Println(text, language)
+}

@@ -70,3 +70,33 @@ func TestTranscribe_TooLong_Bad(t *testing.T) {
 		t.Fatalf("refusal %q must name the bound (30s)", err.Error())
 	}
 }
+
+// TestTranscribeAudio_Bad proves the inference.Transcriber adapter forwards Transcribe's error AND
+// reshapes it to the (empty, empty, err) contract rather than a partial/zero Result being papered over —
+// mirrors TestTranscribe_BadWAV_Bad's malformed-WAV case through the adapter. The real-checkpoint success
+// reshape (text/language correctly unwrapped from Result) is live_test.go's
+// TestLive_RealCheckpoint_TranscribeAudio_Good — this package carries no hermetic fixture that gets
+// Transcribe all the way to a successful Result (see ExampleModel_Transcribe's doc comment).
+func TestTranscribeAudio_Bad(t *testing.T) {
+	m := &Model{}
+	text, lang, err := m.TranscribeAudio([]byte("not a wav"), "")
+	if err == nil {
+		t.Fatal("TranscribeAudio accepted malformed WAV bytes")
+	}
+	if text != "" || lang != "" {
+		t.Fatalf("TranscribeAudio on error = (%q, %q), want (\"\", \"\") — no partial result on failure", text, lang)
+	}
+}
+
+// TestTranscribeAudio_Ugly proves a nil *Model refuses cleanly through the adapter too, rather than
+// panicking on the nil dereference Transcribe itself guards against (TestTranscribe_NilModel_Ugly).
+func TestTranscribeAudio_Ugly(t *testing.T) {
+	var m *Model
+	text, lang, err := m.TranscribeAudio(nil, "en")
+	if err == nil {
+		t.Fatal("TranscribeAudio accepted a nil model")
+	}
+	if text != "" || lang != "" {
+		t.Fatalf("TranscribeAudio(nil model) = (%q, %q), want (\"\", \"\")", text, lang)
+	}
+}
