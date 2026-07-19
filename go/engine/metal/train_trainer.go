@@ -27,7 +27,35 @@ import (
 // Scope note (the honest boundary): this trains the HEAD LoRA, the seam that is EXACT over any real base
 // via the frozen capture. A LoRA on the per-LAYER projections would need a backward through the engine's
 // real (PLE / QK-norm / post-norm) forward — the host block backwards (train_backward.go) model a
-// simplified gemma layer only, so that is a separate engine train-step follow-up, not this seam.
+// simplified gemma layer only, so that is a separate engine train-step follow-up, not this seam. A config
+// that requests per-layer projection targets (LoRA.TargetKeys naming anything but the head) is REFUSED at
+// open (validateHeadLoRATargets, #31) rather than silently trained as head-only; the host-side correctness
+// reference for the per-layer backward lives in train_lora_layer.go, awaiting the real-arch layer backward.
+
+// loraTargetHead is the one adapter target this trainer trains: the output head. It is the tensor-name
+// prefix LoRATrainer.Save writes (lm_head.lora_a / lm_head.lora_b), the name the load path reads back
+// (lora_apply.go), and the only inference.LoRAConfig.TargetKeys entry validateHeadLoRATargets accepts.
+const loraTargetHead = "lm_head"
+
+// validateHeadLoRATargets refuses a LoRA configuration this head-only trainer will not honour — the
+// honesty gate of #31. Empty TargetKeys means the engine's default target (the head) and passes; an
+// explicit ["lm_head"] passes (it names exactly what is trained); any other key is a per-layer
+// projection request (q_proj, v_proj, down_proj, …) whose backward is not wired into this trainer, so
+// it is refused LOUDLY here rather than silently training less than asked. The error names both the
+// requested keys and the supported target.
+func validateHeadLoRATargets(cfg inference.LoRAConfig) error {
+	for _, key := range cfg.TargetKeys {
+		if key != loraTargetHead {
+			return core.NewError(core.Concat(
+				"native.NewLoRATrainer: LoRA TargetKeys ", core.Sprintf("%v", cfg.TargetKeys),
+				" request a per-layer projection adapter (", core.Sprintf("%q", key),
+				"); this trainer trains the HEAD adapter only (", loraTargetHead,
+				") — the backward through the engine's per-layer projection matmuls is not wired (#31). ",
+				"Leave TargetKeys empty (or [", loraTargetHead, "]) to train the head."))
+		}
+	}
+	return nil
+}
 
 // adapterConfigJSON is the go-mlx on-disk adapter_config.json: rank/alpha, the number of decoder layers
 // the adapter spans (0 for a head-only adapter), and the target projection names. Written by
@@ -60,8 +88,15 @@ type LoRATrainer struct {
 // NewLoRATrainer opens a head-LoRA trainer over tm: it takes a fresh frozen base session, widens the
 // final-norm + head weights to f32, and initialises the LoRA factors (A small-random, B zero, so the
 // adapter starts as the identity). cfg.LoRA supplies rank/alpha (defaults 8/16); cfg.LearningRate the
-// AdamW step (default 0.05). The trainer OWNS the base session — Close releases it.
+// AdamW step (default 0.05). A cfg.LoRA.TargetKeys naming per-layer projections is refused loudly —
+// this trainer trains the head only (validateHeadLoRATargets, #31). The trainer OWNS the base
+// session — Close releases it.
 func NewLoRATrainer(tm *NativeTokenModel, cfg inference.TrainingConfig) (*LoRATrainer, error) {
+	// The honesty gate first (#31): a config this trainer will not honour is refused before any
+	// resource is touched, so a per-layer projection request can never silently train head-only.
+	if err := validateHeadLoRATargets(cfg.LoRA); err != nil {
+		return nil, err
+	}
 	if tm == nil || tm.bf16 == nil {
 		return nil, core.NewError("native.NewLoRATrainer: trainer needs a loaded bf16 model")
 	}
@@ -337,7 +372,7 @@ func (t *LoRATrainer) Save(path string) error {
 	if werr := coreio.Local.Write(core.PathJoin(path, "adapter.safetensors"), string(blob)); werr != nil {
 		return core.E("native.LoRATrainer.Save", "write adapter.safetensors", werr)
 	}
-	cfg := adapterConfigJSON{Rank: t.rank, Alpha: t.alpha, NumLayers: 0, LoRALayers: []string{"lm_head"}}
+	cfg := adapterConfigJSON{Rank: t.rank, Alpha: t.alpha, NumLayers: 0, LoRALayers: []string{loraTargetHead}}
 	cj := core.JSONMarshal(cfg)
 	if !cj.OK {
 		return core.E("native.LoRATrainer.Save", "marshal adapter_config.json", nil)

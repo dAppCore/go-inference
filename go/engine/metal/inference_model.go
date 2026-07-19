@@ -121,7 +121,8 @@ func (m *NativeTokenModel) OpenEngineSession() (engine.Session, error) {
 
 // OpenTrainer opens a retained head-LoRA SFT trainer over this loaded model — the metal half of the
 // engine.TrainerModel seam. The returned engine.Trainer (a *LoRATrainer) owns a fresh frozen base
-// session and a zero-initialised head adapter; cfg supplies the LoRA rank/alpha and learning rate.
+// session and a zero-initialised head adapter; cfg supplies the LoRA rank/alpha and learning rate. A
+// cfg.LoRA.TargetKeys naming per-layer projections is refused loudly (head-only trainer, #31).
 func (m *NativeTokenModel) OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error) {
 	return NewLoRATrainer(m, cfg)
 }
