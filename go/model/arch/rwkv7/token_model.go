@@ -46,6 +46,14 @@ func NewTokenModel(m *RWKV7Model) *RWKV7TokenModel { return &RWKV7TokenModel{m: 
 
 func (tm *RWKV7TokenModel) Vocab() int { return tm.m.Vocab }
 
+// HiddenSize reports the model's hidden dimension — the optional serve-side geometry capability
+// (mirrors model/composed.ComposedTokenModel.HiddenSize) a serving engine reads for inference.ModelInfo.
+func (tm *RWKV7TokenModel) HiddenSize() int { return tm.m.D }
+
+// NumLayers reports the block count — the optional serve-side geometry capability (mirrors
+// model/composed.ComposedTokenModel.NumLayers) a serving engine reads for inference.ModelInfo.
+func (tm *RWKV7TokenModel) NumLayers() int { return len(tm.m.Layers) }
+
 // Embed maps a token id to its input embedding (dModel bf16 bytes).
 func (tm *RWKV7TokenModel) Embed(id int32) ([]byte, error) {
 	if int(id) < 0 || int(id) >= tm.m.Vocab {

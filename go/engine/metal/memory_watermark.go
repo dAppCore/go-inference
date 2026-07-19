@@ -57,7 +57,7 @@ func (m *NativeTokenModel) ActiveMemoryBytes() uint64 { return deviceAllocatedBy
 func (m *NativeTokenModel) PeakMemoryBytes() uint64 { return memWatermarkPeak() }
 
 // ActiveMemoryBytes implements engine.MemoryReporter.
-func (m *composedTextModel) ActiveMemoryBytes() uint64 { return deviceAllocatedBytes() }
+func (m *sessionTextModel) ActiveMemoryBytes() uint64 { return deviceAllocatedBytes() }
 
 // PeakMemoryBytes implements engine.MemoryReporter.
-func (m *composedTextModel) PeakMemoryBytes() uint64 { return memWatermarkPeak() }
+func (m *sessionTextModel) PeakMemoryBytes() uint64 { return memWatermarkPeak() }

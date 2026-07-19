@@ -66,10 +66,10 @@ func loadComposedSpeculativePair(targetPath, draftPath string, draftBlock int, o
 	}
 	rec := &composedSpecMetrics{}
 	src := &composedSpeculativeTextModel{
-		composedTextModel: composedTextModel{sm: tm, tok: tok, modelType: modelType, numLayers: tm.NumLayers()},
-		pair:              pair,
-		rec:               rec,
-		draftBlock:        draftBlock,
+		sessionTextModel: sessionTextModel{sm: tm, tok: tok, modelType: modelType, numLayers: tm.NumLayers()},
+		pair:             pair,
+		rec:              rec,
+		draftBlock:       draftBlock,
 	}
 	return &composedSpeculativePairModel{
 		TextModel: engine.NewTextModel(src, tok, modelType, info, serveLen),
@@ -114,14 +114,14 @@ func (r *composedSpecMetrics) snapshot() inference.SpeculativeMetrics {
 // composed source (templates, vision declarations, Close) with sessions that route greedy generation
 // through the pair.
 type composedSpeculativeTextModel struct {
-	composedTextModel
+	sessionTextModel
 	pair       *composed.SpeculativePair
 	rec        *composedSpecMetrics
 	draftBlock int
 }
 
 func (m *composedSpeculativeTextModel) OpenEngineSession() (engine.Session, error) {
-	plain, err := m.composedTextModel.OpenEngineSession()
+	plain, err := m.sessionTextModel.OpenEngineSession()
 	if err != nil {
 		return nil, err
 	}

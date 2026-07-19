@@ -8,9 +8,12 @@ import (
 	"math"
 	"testing"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/arch/rwkv7"
 )
 
 // TestMetalBackend_LoadSpeculativePair_Good pins the compile-time contract:
@@ -116,12 +119,12 @@ func (m bridgeVisionModel) TokenEmbeddingsWithFeatures(ids []int32, imageFeature
 	return rows, nil
 }
 
-// TestComposedTextModel_VisionForwarding_Good pins the bridge's model half: a
+// TestSessionTextModel_VisionForwarding_Good pins the bridge's model half: a
 // composed model implementing the vision method set BY SHAPE forwards through
-// composedTextModel — capability, placeholder id/block, and projection all
+// sessionTextModel — capability, placeholder id/block, and projection all
 // reach the engine unchanged.
-func TestComposedTextModel_VisionForwarding_Good(t *testing.T) {
-	m := &composedTextModel{sm: bridgeVisionModel{bridgePlainModel{vocab: 16, dModel: 1}}}
+func TestSessionTextModel_VisionForwarding_Good(t *testing.T) {
+	m := &sessionTextModel{sm: bridgeVisionModel{bridgePlainModel{vocab: 16, dModel: 1}}}
 	if !m.AcceptsImageInput() {
 		t.Fatal("vision-capable composed model must report AcceptsImageInput")
 	}
@@ -141,12 +144,12 @@ func TestComposedTextModel_VisionForwarding_Good(t *testing.T) {
 	}
 }
 
-// TestComposedTextModel_VisionForwarding_Bad pins the text-only side: a
+// TestSessionTextModel_VisionForwarding_Bad pins the text-only side: a
 // composed model WITHOUT the vision shape answers false/zero/empty through the
 // same forwards, and the projection entries refuse with an error instead of
 // inventing features.
-func TestComposedTextModel_VisionForwarding_Bad(t *testing.T) {
-	m := &composedTextModel{sm: bridgePlainModel{vocab: 16, dModel: 1}}
+func TestSessionTextModel_VisionForwarding_Bad(t *testing.T) {
+	m := &sessionTextModel{sm: bridgePlainModel{vocab: 16, dModel: 1}}
 	if m.AcceptsImageInput() {
 		t.Fatal("text-only composed model must not report AcceptsImageInput")
 	}
@@ -162,7 +165,7 @@ func TestComposedTextModel_VisionForwarding_Bad(t *testing.T) {
 	if _, err := m.TokenEmbeddingsWithFeatures([]int32{1}, nil, nil, nil); err == nil {
 		t.Fatal("TokenEmbeddingsWithFeatures without a vision tower must refuse")
 	}
-	var nilModel *composedTextModel
+	var nilModel *sessionTextModel
 	if nilModel.AcceptsImageInput() {
 		t.Fatal("nil bridge must answer false, not panic")
 	}
@@ -227,5 +230,95 @@ func TestComposedEngineSession_PrefillTokenEmbeddings_Bad(t *testing.T) {
 	}
 	if err := s.RangeKVBlocks(4, kv.CaptureOptions{}, func(kv.Block) (bool, error) { return true, nil }); err == nil {
 		t.Fatal("sleep-lane blocks over multimodal rows must refuse")
+	}
+}
+
+// TestSessionTextModel_ThirdArm_FakeSessionModel_Good pins LoadModel's generalised switch arm (#36): a
+// completely fake, non-composed, non-native model.SessionModel — bridgePlainModel, arch-tagged as a
+// standalone-recurrent SSM the way rwkv7/mamba2 would be — serves end to end through EXACTLY the
+// construction the third arm performs (sessionTextModel.OpenEngineSession -> PrefillTokens ->
+// GenerateFromCacheEach), with no compose- or native-specific machinery involved anywhere in the chain.
+// bridgePlainModel's deterministic walk (Embed writes id into dim0, Head one-hots (id+1)%vocab) makes the
+// expected continuation computable by hand: prefilling [0,1,2] leaves the session on id 2, so greedy
+// decode must walk 3, 4, 5.
+func TestSessionTextModel_ThirdArm_FakeSessionModel_Good(t *testing.T) {
+	sm := bridgePlainModel{vocab: 16, dModel: 1}
+	src := &sessionTextModel{sm: sm, modelType: "fake-standalone-recurrent", numLayers: 3}
+	sess, err := src.OpenEngineSession()
+	if err != nil {
+		t.Fatalf("OpenEngineSession: %v", err)
+	}
+	if err := sess.PrefillTokens([]int32{0, 1, 2}); err != nil {
+		t.Fatalf("PrefillTokens: %v", err)
+	}
+	got, err := sess.GenerateFromCacheEach(3, -1, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromCacheEach: %v", err)
+	}
+	if want := []int32{3, 4, 5}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("generated = %v, want %v (the fake model's deterministic walk)", got, want)
+	}
+}
+
+// TestSessionTextModel_ThirdArm_FakeSessionModel_Bad proves the generic arm's Close is a clean no-op (the
+// standalone-recurrent loaders, like the composed loader, widen weights to owned f32 at load and hold
+// nothing past that — see sessionTextModel.Close) rather than requiring special teardown per arch.
+func TestSessionTextModel_ThirdArm_FakeSessionModel_Bad(t *testing.T) {
+	src := &sessionTextModel{sm: bridgePlainModel{vocab: 4, dModel: 1}, modelType: "fake-standalone-recurrent"}
+	if err := src.Close(); err != nil {
+		t.Fatalf("Close = %v, want nil", err)
+	}
+}
+
+// TestLoadServeTokenizer_TokenizerJSON_Good pins the FIRST fallback rung: a checkpoint directory
+// shipping tokenizer.json (every transformer, composed/hybrid, and mamba2 checkpoint) resolves through
+// the unchanged tokenizer.LoadTokenizer path — hfTok is the concrete loaded tokenizer and svc is that
+// SAME value, not a different wrapper (mamba2's serve path "must stay byte-identical in behaviour").
+func TestLoadServeTokenizer_TokenizerJSON_Good(t *testing.T) {
+	dir := t.TempDir()
+	writeLocal(t, core.PathJoin(dir, "tokenizer.json"), []byte(nativeCoverageTokenizerJSON))
+	hfTok, svc, err := loadServeTokenizer(dir, bridgePlainModel{vocab: 4, dModel: 1})
+	if err != nil {
+		t.Fatalf("loadServeTokenizer: %v", err)
+	}
+	if hfTok == nil {
+		t.Fatal("hfTok = nil, want the loaded concrete *tokenizer.Tokenizer on the tokenizer.json path")
+	}
+	concrete, ok := svc.(*tokenizer.Tokenizer)
+	if !ok || concrete != hfTok {
+		t.Fatalf("svc = %v (ok=%v), want the SAME concrete tokenizer as hfTok (unchanged path)", svc, ok)
+	}
+}
+
+// TestLoadServeTokenizer_RWKV7Fallback_Good pins the SECOND fallback rung: no tokenizer.json, but tm is
+// the concrete *rwkv7.RWKV7TokenModel — the arch-specific World tokenizer serves instead, with no
+// checkpoint-directory dependency (rwkv7 ships no tokenizer.json and no derived .hex — the World vocab is
+// embedded in the binary; see model/arch/rwkv7/tokenizer.go).
+func TestLoadServeTokenizer_RWKV7Fallback_Good(t *testing.T) {
+	dir := t.TempDir() // no tokenizer.json
+	tm := rwkv7.NewTokenModel(&rwkv7.RWKV7Model{})
+	hfTok, svc, err := loadServeTokenizer(dir, tm)
+	if err != nil {
+		t.Fatalf("loadServeTokenizer: %v", err)
+	}
+	if hfTok != nil {
+		t.Fatalf("hfTok = %v, want nil on the arch-tokenizer fallback path (no tokenizer.json was read)", hfTok)
+	}
+	if _, ok := svc.(*rwkv7.WorldTokenizer); !ok {
+		t.Fatalf("svc = %T, want *rwkv7.WorldTokenizer", svc)
+	}
+	if ids := svc.Encode("hi"); len(ids) == 0 {
+		t.Fatal("World tokenizer fallback encoded to zero tokens")
+	}
+}
+
+// TestLoadServeTokenizer_Bad pins the THIRD rung: neither tokenizer.json NOR an arch-specific tokenizer
+// is available (tm is not *rwkv7.RWKV7TokenModel) — the original tokenizer.json error propagates rather
+// than a fallback silently inventing one.
+func TestLoadServeTokenizer_Bad(t *testing.T) {
+	dir := t.TempDir() // no tokenizer.json
+	_, _, err := loadServeTokenizer(dir, bridgePlainModel{vocab: 4, dModel: 1})
+	if err == nil {
+		t.Fatal("loadServeTokenizer with neither tokenizer.json nor an arch tokenizer must fail")
 	}
 }

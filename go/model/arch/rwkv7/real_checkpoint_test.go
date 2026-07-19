@@ -190,9 +190,9 @@ func TestRWKV7RealCheckpointGenerationSmoke(t *testing.T) {
 	if dir == "" {
 		t.Skip("set RWKV7_SMOKE_DIR to the RWKV7-Goose-World2.8-0.1B-HF checkpoint dir")
 	}
-	tok, err := LoadWorldTokenizerHex("testdata/rwkv_vocab_v20230424.hex")
+	tok, err := NewWorldTokenizer()
 	if err != nil {
-		t.Fatalf("LoadWorldTokenizerHex: %v", err)
+		t.Fatalf("NewWorldTokenizer: %v", err)
 	}
 	m := loadRealRWKV7Model(t, dir)
 
