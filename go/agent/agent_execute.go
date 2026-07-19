@@ -133,7 +133,7 @@ func DiscoverCheckpointsIter(cfg *AgentConfig) iter.Seq2[Checkpoint, error] {
 			yield(Checkpoint{}, core.E("agent.DiscoverCheckpointsIter", "list adapter dirs", rOut.Value.(error)))
 			return
 		}
-		out := rOut.Value.(string)
+		out := rOut.String()
 
 		var adapterDirs []string
 		for _, dirpath := range core.Split(core.Trim(out), "\n") {
@@ -141,8 +141,8 @@ func DiscoverCheckpointsIter(cfg *AgentConfig) iter.Seq2[Checkpoint, error] {
 				continue
 			}
 			rSub := t.Run(ctx, core.Sprintf("ls -d %s/gemma-3-* 2>/dev/null", dirpath))
-			if rSub.OK && core.Trim(rSub.Value.(string)) != "" {
-				for _, sub := range core.Split(core.Trim(rSub.Value.(string)), "\n") {
+			if rSub.OK && core.Trim(rSub.String()) != "" {
+				for _, sub := range core.Split(core.Trim(rSub.String()), "\n") {
 					if sub != "" {
 						adapterDirs = append(adapterDirs, sub)
 					}
@@ -159,7 +159,7 @@ func DiscoverCheckpointsIter(cfg *AgentConfig) iter.Seq2[Checkpoint, error] {
 			if !rFiles.OK {
 				continue
 			}
-			filesOut := rFiles.Value.(string)
+			filesOut := rFiles.String()
 
 			for _, fp := range core.Split(core.Trim(filesOut), "\n") {
 				if fp == "" {

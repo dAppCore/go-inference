@@ -17,7 +17,7 @@ type RemoteTransport interface {
 	//
 	//	r := t.Run(ctx, "ls /tmp")
 	//	if !r.OK { return r }
-	//	out := r.Value.(string)
+	//	out := r.String()
 	Run(ctx context.Context, cmd string) core.Result
 
 	// CopyFrom copies a file from the remote host to a local path.
@@ -114,7 +114,7 @@ func (t *SSHTransport) sshPortArgs() []string {
 //
 //	r := t.Run(ctx, "ls /tmp")
 //	if !r.OK { return r }
-//	out := r.Value.(string)
+//	out := r.String()
 func (t *SSHTransport) Run(ctx context.Context, cmd string) core.Result {
 	args := t.sshPortArgs()
 	args = append(args, core.Sprintf("%s@%s", t.User, t.Host), cmd)
@@ -124,8 +124,7 @@ func (t *SSHTransport) Run(ctx context.Context, cmd string) core.Result {
 	if !result.OK {
 		return core.Fail(core.E("agent.SSHTransport.Run", core.Sprintf("ssh %q: %s", cmd, result.Error()), nil))
 	}
-	out, _ := result.Value.([]byte)
-	return core.Ok(string(out))
+	return core.Ok(string(result.Bytes()))
 }
 
 // CopyFrom copies a file from the remote host to a local path via scp.
@@ -166,7 +165,7 @@ func (t *SSHTransport) CopyTo(ctx context.Context, local, remote string) core.Re
 //
 //	r := agent.SSHCommand(cfg, "ls /tmp")
 //	if !r.OK { return r }
-//	out := r.Value.(string)
+//	out := r.String()
 func SSHCommand(cfg *AgentConfig, cmd string) core.Result {
 	return cfg.transport().Run(context.Background(), cmd)
 }

@@ -208,7 +208,7 @@ func equalsPathJoin(target, dir, file string) bool {
 //
 //	r := agent.ExecuteRemote(ctx, "ls /models")
 //	if !r.OK { return r }
-//	out := r.Value.(string)
+//	out := r.String()
 //	r = agent.ExecuteRemote(ctx, "host.example", "2222", "uptime")
 //	if !r.OK { return r }
 func (a *Agent) ExecuteRemote(ctx context.Context, args ...string) core.Result {

@@ -128,7 +128,7 @@ func workerPoll(cfg *WorkerConfig) int {
 		core.Print(nil, "Error fetching tasks: %v", respResult.Value.(error))
 		return 0
 	}
-	resp := respResult.Value.([]byte)
+	resp := respResult.Bytes()
 
 	var result struct {
 		Tasks []APITask `json:"tasks"`
@@ -193,7 +193,7 @@ func workerProcessTask(cfg *WorkerConfig, task APITask) core.Result {
 		})
 		return core.Fail(core.E("agent.workerProcessTask", "inference", inferResult.Value.(error)))
 	}
-	response := inferResult.Value.(string)
+	response := inferResult.String()
 
 	modelUsed := task.ModelName
 	if modelUsed == "" {
@@ -265,7 +265,7 @@ func apiGet(cfg *WorkerConfig, path string) core.Result {
 	if !rBody.OK {
 		return core.Fail(rBody.Value.(error))
 	}
-	body := rBody.Value.([]byte)
+	body := rBody.Bytes()
 
 	if resp.StatusCode >= 400 {
 		return core.Fail(core.E("agent.apiGet", core.Sprintf("HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
@@ -307,7 +307,7 @@ func apiRequest(cfg *WorkerConfig, method, path string, data map[string]any) cor
 	if !rBody.OK {
 		return core.Fail(rBody.Value.(error))
 	}
-	body := rBody.Value.([]byte)
+	body := rBody.Bytes()
 
 	if resp.StatusCode >= 400 {
 		return core.Fail(core.E("agent.apiRequest", core.Sprintf("HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
@@ -328,7 +328,7 @@ func MachineID() string {
 	if !rHost.OK {
 		return ""
 	}
-	return rHost.Value.(string)
+	return rHost.String()
 }
 
 // Hostname returns the system hostname.
@@ -337,7 +337,7 @@ func Hostname() string {
 	if !rHost.OK {
 		return ""
 	}
-	return rHost.Value.(string)
+	return rHost.String()
 }
 
 // ReadKeyFile reads the LEM API key from ~/.config/lem/api_key.
@@ -346,7 +346,7 @@ func ReadKeyFile() string {
 	if !rHome.OK {
 		return ""
 	}
-	home := rHome.Value.(string)
+	home := rHome.String()
 	path := core.Path(home, ".config", "lem", "api_key")
 	data, err := coreio.Local.Read(path)
 	if err != nil {
