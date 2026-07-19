@@ -18,7 +18,7 @@ func SamePath(a, b string) bool { return samePath(a, b) }
 // SamePathResolved is the per-source-loop variant of SamePath where the
 // right-hand side is already absolute — saves a resolution per iteration.
 //
-//	absOut, _ := core.PathAbs(outputRoot).Value.(string)
+//	absOut := core.PathAbs(outputRoot).String()
 //	for _, s := range sources { if merge.SamePathResolved(s.Root, absOut) { /* refuse */ } }
 func SamePathResolved(a, absB string) bool { return samePathResolved(a, absB) }
 
@@ -44,11 +44,11 @@ func HashFile(path string) (string, error) { return hashFile(path) }
 func samePath(a, b string) bool {
 	absA := a
 	if resolved := core.PathAbs(a); resolved.OK {
-		absA = resolved.Value.(string)
+		absA = resolved.String()
 	}
 	absB := b
 	if resolved := core.PathAbs(b); resolved.OK {
-		absB = resolved.Value.(string)
+		absB = resolved.String()
 	}
 	return absA == absB
 }
@@ -58,7 +58,7 @@ func samePath(a, b string) bool {
 func samePathResolved(a, absB string) bool {
 	absA := a
 	if resolved := core.PathAbs(a); resolved.OK {
-		absA = resolved.Value.(string)
+		absA = resolved.String()
 	}
 	return absA == absB
 }
