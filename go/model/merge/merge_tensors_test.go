@@ -8,6 +8,7 @@ import (
 	core "dappco.re/go"
 
 	"dappco.re/go/inference/model/modelmgmt"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func writeShard(t *core.T, path string, values map[string][]float32) {
@@ -21,6 +22,11 @@ func writeShard(t *core.T, path string, values map[string][]float32) {
 	requireResultOK(t, modelmgmt.WriteSafetensors(path, tensors, data))
 }
 
+// TestMergeTensors_IndexWeightFiles_Good also asserts each tensor's Ref
+// resolves to the shard file that actually holds it (not just the union of
+// names) — the shard-resolution walk indexWeightFiles reuses from
+// safetensors.IndexFiles is the load-bearing behaviour a sharded checkpoint
+// needs.
 func TestMergeTensors_IndexWeightFiles_Good(t *core.T) {
 	dir := t.TempDir()
 	shard0 := core.PathJoin(dir, "model-00000.safetensors")
@@ -31,6 +37,8 @@ func TestMergeTensors_IndexWeightFiles_Good(t *core.T) {
 	index, err := indexWeightFiles([]string{shard0, shard1})
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, []string{"a", "b"}, index.Names)
+	core.AssertEqual(t, shard0, index.Tensors["a"].Ref.Path)
+	core.AssertEqual(t, shard1, index.Tensors["b"].Ref.Path)
 }
 
 func TestMergeTensors_IndexWeightFiles_Bad(t *core.T) {
@@ -105,24 +113,49 @@ func TestMergeTensors_GatherTensorEntries_Ugly(t *core.T) {
 	core.AssertLen(t, entries, 2)
 }
 
+// TestMergeTensors_DecodeAll_Good builds two real single-tensor shard files
+// (t.TempDir) and decodes both entries through a shared ShardCache — the
+// same on-demand, per-shard-handle-reuse path writeMergedSafetensors drives.
 func TestMergeTensors_DecodeAll_Good(t *core.T) {
-	entries := []tensorEntry{
-		{DType: "F32", Shape: []int{1}, Raw: modelmgmt.EncodeFloat32([]float32{1})},
-		{DType: "F32", Shape: []int{1}, Raw: modelmgmt.EncodeFloat32([]float32{2})},
-	}
-	values, err := decodeAll(entries)
+	dir := t.TempDir()
+	pathA := core.PathJoin(dir, "a.safetensors")
+	pathB := core.PathJoin(dir, "b.safetensors")
+	writeShard(t, pathA, map[string][]float32{"a": {1}})
+	writeShard(t, pathB, map[string][]float32{"b": {2}})
+	idx, err := indexWeightFiles([]string{pathA, pathB})
+	core.RequireNoError(t, err)
+
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+	entries := []tensorEntry{idx.Tensors["a"], idx.Tensors["b"]}
+	values, err := decodeAll(cache, entries)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, [][]float32{{1}, {2}}, values)
 }
 
+// TestMergeTensors_DecodeAll_Bad points a tensorEntry's Ref at a real file
+// whose header carries an unsupported dtype (I64) — decode must fail rather
+// than silently reinterpreting the bytes.
 func TestMergeTensors_DecodeAll_Bad(t *core.T) {
-	entries := []tensorEntry{{DType: "I64", Shape: []int{1}, Raw: []byte{1, 2, 3, 4}}}
-	_, err := decodeAll(entries)
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "int.safetensors")
+	requireResultOK(t, safetensors.WriteSafetensors(path,
+		map[string]safetensors.SafetensorsTensorInfo{"i": {Dtype: "I64", Shape: []int{1}}},
+		map[string][]byte{"i": {1, 2, 3, 4, 5, 6, 7, 8}},
+	))
+	idx, err := indexWeightFiles([]string{path})
+	core.RequireNoError(t, err)
+
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+	_, err = decodeAll(cache, []tensorEntry{idx.Tensors["i"]})
 	core.AssertError(t, err)
 }
 
+// TestMergeTensors_DecodeAll_Ugly documents that an empty entries slice
+// needs no cache access at all — nil is a safe cache in that case.
 func TestMergeTensors_DecodeAll_Ugly(t *core.T) {
-	values, err := decodeAll(nil)
+	values, err := decodeAll(nil, nil)
 	core.RequireNoError(t, err)
 	core.AssertEmpty(t, values)
 }

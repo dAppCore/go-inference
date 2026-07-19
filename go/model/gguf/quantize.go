@@ -5,7 +5,6 @@ package gguf
 import (
 	"context"
 	"math"
-	"sort"
 
 	core "dappco.re/go"
 
@@ -136,12 +135,18 @@ type ggufMetadataEntry = MetadataEntry
 
 // QuantizeModelPack converts a dense safetensors model pack into a GGUF pack.
 //
-// Every source weight file is decoded fully into memory (via
-// safetensors.ReadSafetensors) rather than streamed — the same tradeoff the
-// merge package already makes for the pack sizes go-inference callers
-// quantise today. A chunked/streaming variant bounded to a fixed working
-// set for multi-GB sharded checkpoints is future work, not implemented
-// here.
+// Source weight files (a single model.safetensors, or the N shards of a
+// model.safetensors.index.json checkpoint) are resolved to a tensor→shard-
+// offset index via safetensors.IndexFiles — a header-only walk, no tensor
+// payload read, the same shard-resolution primitive model/quant's snapshot
+// converters (fp8, gptq, awq, mlxaffine, nf4, autoround) already use — and
+// each tensor's payload is then streamed from its owning shard on demand
+// through a safetensors.ShardCache (see loadDenseSafetensors), so a multi-GB
+// sharded checkpoint's raw bytes are never all resident at once. The
+// decoded (dense, float32) tensor set is still held in memory for the
+// quantise pass itself — quantizeGGUFTensors and the arch-specific
+// QuantizeLane both need whole-model tensor access (e.g. to fuse gate+up
+// pairs) — matching the merge package's output-side tradeoff.
 func QuantizeModelPack(ctx context.Context, opts QuantizeOptions) (*QuantizeResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -302,72 +307,35 @@ func ensureEmptyGGUFQuantizeDestination(output string) error {
 	return nil
 }
 
-// loadDenseSafetensors decodes every tensor in paths (in sorted-name order,
-// duplicates across shards rejected) to float32 via safetensors.ReadSafetensors.
+// loadDenseSafetensors decodes every tensor named across paths (in sorted-name order,
+// duplicates across shards rejected) to float32. Tensor names and shard locations are
+// resolved once via safetensors.IndexFiles — a header-only walk across every shard file (a
+// single model.safetensors, or the N shards of a model.safetensors.index.json checkpoint),
+// no tensor payload read — and each tensor's payload is then streamed from its owning shard
+// on demand through a ShardCache (one open file handle per shard, reused across every tensor
+// it holds), so a sharded checkpoint's raw shard bytes are never all resident at once; only
+// the tensor currently being decoded is.
 func loadDenseSafetensors(paths []string) ([]DenseSafetensor, error) {
 	if len(paths) == 0 {
 		return nil, core.NewError("gguf: no safetensors weight files available")
 	}
-	var out []DenseSafetensor
-	seen := map[string]struct{}{}
-	for _, path := range paths {
-		tensors, err := readDenseSafetensorsFile(path)
-		if err != nil {
-			return nil, err
-		}
-		for _, tensor := range tensors {
-			if _, ok := seen[tensor.Name]; ok {
-				return nil, core.NewError("gguf: duplicate tensor in safetensors shards: " + tensor.Name)
-			}
-			seen[tensor.Name] = struct{}{}
-			out = append(out, tensor)
-		}
+	idx, err := safetensors.IndexFiles(paths)
+	if err != nil {
+		return nil, core.E("QuantizeModelPack", "read safetensors weight files", err)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+
+	out := make([]DenseSafetensor, 0, len(idx.Names))
+	for _, name := range idx.Names {
+		ref := idx.Tensors[name]
+		values, err := cache.ReadRefValues(ref)
+		if err != nil {
+			return nil, core.E("QuantizeModelPack", "decode "+ref.Path+" tensor "+name, err)
+		}
+		out = append(out, DenseSafetensor{Name: name, Shape: ref.Shape, Data: values})
+	}
 	return out, nil
-}
-
-// readDenseSafetensorsFile decodes every tensor in one safetensors file,
-// in sorted tensor-name order.
-func readDenseSafetensorsFile(path string) ([]DenseSafetensor, error) {
-	read := safetensors.ReadSafetensors(path)
-	if !read.OK {
-		return nil, core.E("QuantizeModelPack", "read safetensors "+path, read.Err())
-	}
-	data := read.Value.(safetensors.SafetensorsData)
-
-	names := make([]string, 0, len(data.Tensors))
-	for name := range data.Tensors {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	tensors := make([]DenseSafetensor, 0, len(names))
-	for _, name := range names {
-		info := data.Tensors[name]
-		raw := safetensors.GetTensorData(info, data.Data)
-		values, err := safetensors.DecodeFloat32(info.Dtype, raw, safetensorsShapeElements(info.Shape))
-		if err != nil {
-			return nil, core.E("QuantizeModelPack", "decode "+path+" tensor "+name, err)
-		}
-		shape := make([]uint64, len(info.Shape))
-		for i, dim := range info.Shape {
-			shape[i] = uint64(dim)
-		}
-		tensors = append(tensors, DenseSafetensor{Name: name, Shape: shape, Data: values})
-	}
-	return tensors, nil
-}
-
-// safetensorsShapeElements returns the element count a safetensors []int
-// shape describes (the product of its dimensions; 1 for a scalar's empty
-// shape).
-func safetensorsShapeElements(shape []int) int {
-	n := 1
-	for _, dim := range shape {
-		n *= dim
-	}
-	return n
 }
 
 func quantizeGGUFTensors(ctx context.Context, tensors []DenseSafetensor, format QuantizeFormat) ([]Tensor, error) {

@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 
-	"dappco.re/go/inference/model/modelmgmt"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func TestCompare_ComparePacks_Good(t *core.T) {
@@ -81,6 +81,29 @@ func TestCompare_ComparePacks_ShapeMismatch(t *core.T) {
 	core.AssertEqual(t, CompareStatusShapeMismatch, result.Tensors[0].Status)
 }
 
+// TestCompare_ComparePacks_Sharded proves ComparePacks works across a genuinely multi-shard
+// checkpoint (each source split across 2 safetensors files, the model.safetensors.index.json
+// + N-shard HF layout) — the sharded-checkpoint gap tracker #34 flagged as unimplemented.
+func TestCompare_ComparePacks_Sharded(t *core.T) {
+	shardNames := []string{"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"}
+	base := writeSourceFixtureSharded(t, t.TempDir(), "arch", "tok", map[string][]float32{
+		"changed":   {1, 2, 3, 4},
+		"unchanged": {5, 6},
+	}, shardNames)
+	tuned := writeSourceFixtureSharded(t, t.TempDir(), "arch", "tok", map[string][]float32{
+		"changed":   {2, 2, 3, 8},
+		"unchanged": {5, 6},
+	}, shardNames)
+	core.AssertLen(t, base.WeightFiles, 2)
+	core.AssertLen(t, tuned.WeightFiles, 2)
+
+	result, err := ComparePacks(context.Background(), CompareOptions{Base: base, FineTuned: tuned})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 1, result.ChangedTensors)
+	core.AssertEqual(t, 1, result.UnchangedTensors)
+	core.AssertInDelta(t, 1.25, result.Tensors[0].MeanAbsDelta, 1e-6)
+}
+
 func TestCompare_ComparePacks_ContextCancelled(t *core.T) {
 	base := writeSourceFixture(t, t.TempDir(), "arch", "tok", map[string][]float32{"w": {1}})
 	tuned := writeSourceFixture(t, t.TempDir(), "arch", "tok", map[string][]float32{"w": {2}})
@@ -112,27 +135,55 @@ func TestCompare_ValidateComparePack_Ugly(t *core.T) {
 	core.AssertError(t, err, "fine-tuned")
 }
 
+// compareEntryPair writes base/tuned as two independent single-tensor "w"
+// shard files (t.TempDir) and indexes each through indexWeightFiles,
+// returning the two real, file-backed tensorEntry values compareTensorEntries
+// now requires (it reads each Ref's payload from disk, not an in-memory
+// Raw buffer).
+func compareEntryPair(t *core.T, base, tuned safetensors.SafetensorsTensorInfo, baseData, tunedData []byte) (tensorEntry, tensorEntry) {
+	t.Helper()
+	dir := t.TempDir()
+	basePath := core.PathJoin(dir, "base.safetensors")
+	tunedPath := core.PathJoin(dir, "tuned.safetensors")
+	requireResultOK(t, safetensors.WriteSafetensors(basePath, map[string]safetensors.SafetensorsTensorInfo{"w": base}, map[string][]byte{"w": baseData}))
+	requireResultOK(t, safetensors.WriteSafetensors(tunedPath, map[string]safetensors.SafetensorsTensorInfo{"w": tuned}, map[string][]byte{"w": tunedData}))
+	baseIdx, err := indexWeightFiles([]string{basePath})
+	core.RequireNoError(t, err)
+	tunedIdx, err := indexWeightFiles([]string{tunedPath})
+	core.RequireNoError(t, err)
+	return baseIdx.Tensors["w"], tunedIdx.Tensors["w"]
+}
+
 func TestCompare_CompareTensorEntries_Good(t *core.T) {
-	base := tensorEntry{DType: "F32", Shape: []int{2}, Raw: modelmgmt.EncodeFloat32([]float32{1, 2})}
-	tuned := tensorEntry{DType: "F32", Shape: []int{2}, Raw: modelmgmt.EncodeFloat32([]float32{2, 4})}
-	delta, err := compareTensorEntries("w", base, tuned)
+	base, tuned := compareEntryPair(t,
+		safetensors.SafetensorsTensorInfo{Dtype: "F32", Shape: []int{2}}, safetensors.SafetensorsTensorInfo{Dtype: "F32", Shape: []int{2}},
+		safetensors.EncodeFloat32([]float32{1, 2}), safetensors.EncodeFloat32([]float32{2, 4}))
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+	delta, err := compareTensorEntries(cache, "w", base, tuned)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, CompareStatusChanged, delta.Status)
 	core.AssertInDelta(t, 1.5, delta.MeanAbsDelta, 1e-6)
 }
 
 func TestCompare_CompareTensorEntries_Bad(t *core.T) {
-	base := tensorEntry{DType: "F32", Shape: []int{2}, Raw: modelmgmt.EncodeFloat32([]float32{1, 2})}
-	tuned := tensorEntry{DType: "F32", Shape: []int{3}, Raw: modelmgmt.EncodeFloat32([]float32{1, 2, 3})}
-	delta, err := compareTensorEntries("w", base, tuned)
+	base, tuned := compareEntryPair(t,
+		safetensors.SafetensorsTensorInfo{Dtype: "F32", Shape: []int{2}}, safetensors.SafetensorsTensorInfo{Dtype: "F32", Shape: []int{3}},
+		safetensors.EncodeFloat32([]float32{1, 2}), safetensors.EncodeFloat32([]float32{1, 2, 3}))
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+	delta, err := compareTensorEntries(cache, "w", base, tuned)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, CompareStatusShapeMismatch, delta.Status)
 }
 
 func TestCompare_CompareTensorEntries_Ugly(t *core.T) {
-	base := tensorEntry{DType: "F32", Shape: []int{2}, Raw: modelmgmt.EncodeFloat32([]float32{1, 2})}
-	tuned := tensorEntry{DType: "BF16", Shape: []int{2}, Raw: []byte{0, 0, 0, 0}}
-	delta, err := compareTensorEntries("w", base, tuned)
+	base, tuned := compareEntryPair(t,
+		safetensors.SafetensorsTensorInfo{Dtype: "F32", Shape: []int{2}}, safetensors.SafetensorsTensorInfo{Dtype: "BF16", Shape: []int{2}},
+		safetensors.EncodeFloat32([]float32{1, 2}), []byte{0, 0, 0, 0})
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+	delta, err := compareTensorEntries(cache, "w", base, tuned)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, CompareStatusDTypeMismatch, delta.Status)
 }

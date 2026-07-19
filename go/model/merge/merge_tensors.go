@@ -12,48 +12,66 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
-// sourceIndex is the in-memory tensor set for one merge source, built by
-// reading every WeightFiles entry via safetensors.ReadSafetensors and unioning
-// the results. Unlike a chunked/offset-addressed index designed for multi-GB
-// sharded checkpoints, sourceIndex holds each tensor's full raw bytes in
-// memory — see the package doc for the tradeoff.
+// sourceIndex is one merge source's tensor set, resolved to shard locations
+// only (see tensorEntry) — never a whole shard's payload bytes, however many
+// files the source spans.
 type sourceIndex struct {
 	Names   []string
 	Tensors map[string]tensorEntry
 }
 
-// tensorEntry is one tensor's dtype, shape, and raw (still-encoded) bytes.
+// tensorEntry is one tensor's dtype, shape, and shard location. Ref carries
+// the owning shard's file path plus byte offsets, so a ShardCache-bound
+// reader can stream the tensor's payload on demand — no tensor payload is
+// read at index-build time.
 type tensorEntry struct {
 	DType string
 	Shape []int
-	Raw   []byte
+	Ref   safetensors.TensorRef
 }
 
-// indexWeightFiles reads every safetensors file in paths and unions their
-// tensors into one sourceIndex. A tensor name repeated across two files in
-// the same source is an error — shards of one pack must not overlap.
+// indexWeightFiles resolves every tensor name across paths (one merge
+// source's shard set — a single safetensors file, or the N shards of one
+// sharded checkpoint) to its owning shard file and byte offsets, via
+// safetensors.IndexFiles: a header-only walk across every shard (no tensor
+// payload read) that is the same shard-resolution primitive model/quant's
+// snapshot converters (fp8, gptq, awq, mlxaffine, nf4, autoround) already
+// use for their own sharded sources. Tensor payloads are streamed from
+// their shard on demand by decodeAll/writeMergedSafetensors, through a
+// ShardCache shared across the whole merge — so a multi-GB sharded source
+// is never resident beyond the one tensor currently being merged. A tensor
+// name repeated across two files in the same source is an error (surfaced
+// by IndexFiles): shards of one pack must not overlap.
 func indexWeightFiles(paths []string) (sourceIndex, error) {
-	index := sourceIndex{Tensors: make(map[string]tensorEntry)}
-	for _, path := range paths {
-		read := safetensors.ReadSafetensors(path)
-		if !read.OK {
-			return sourceIndex{}, core.E("Packs", "read safetensors "+path, read.Err())
-		}
-		data := read.Value.(safetensors.SafetensorsData)
-		for name, info := range data.Tensors {
-			if _, exists := index.Tensors[name]; exists {
-				return sourceIndex{}, core.NewError("merge: duplicate tensor across safetensors shards: " + name)
-			}
-			index.Tensors[name] = tensorEntry{
-				DType: info.Dtype,
-				Shape: info.Shape,
-				Raw:   safetensors.GetTensorData(info, data.Data),
-			}
-			index.Names = append(index.Names, name)
+	idx, err := safetensors.IndexFiles(paths)
+	if err != nil {
+		return sourceIndex{}, core.E("Packs", "read safetensors weight files", err)
+	}
+	index := sourceIndex{
+		Names:   idx.Names,
+		Tensors: make(map[string]tensorEntry, len(idx.Names)),
+	}
+	for _, name := range idx.Names {
+		ref := idx.Tensors[name]
+		index.Tensors[name] = tensorEntry{
+			DType: ref.DType,
+			Shape: intShapeFromRef(ref.Shape),
+			Ref:   ref,
 		}
 	}
-	sort.Strings(index.Names)
 	return index, nil
+}
+
+// intShapeFromRef converts a TensorRef's []uint64 shape (the safetensors
+// index's on-disk-dimension type) to the []int shape merge/compare's
+// public result types (TensorDelta.Shape et al.) and shapeElements have
+// always used.
+func intShapeFromRef(shape []uint64) []int {
+	out := make([]int, len(shape))
+	for i, dim := range shape {
+		out[i] = int(dim)
+	}
+	return out
 }
 
 // shapeElements returns the element count a shape describes (the product
@@ -71,12 +89,23 @@ func shapeElements(shape []int) int {
 // file at path. Output dtype is always F32, matching go-mlx's merge
 // convention: even a mismatch-tolerated "copied" tensor is decoded and
 // re-encoded through F32 rather than passed through in its original dtype,
-// so a merged pack never mixes dtypes.
+// so a merged pack never mixes dtypes. Every source tensor payload is
+// streamed from its shard on demand — through a ShardCache shared across
+// this whole call — exactly when this loop reaches its name, so a multi-GB
+// sharded source is never resident beyond the one tensor currently being
+// merged. The merged OUTPUT tensor set is still assembled in mergedInfo/
+// mergedData before the single safetensors.WriteSafetensors call below
+// (merge output is always one file — see outputWeightsFile), so peak
+// memory is bounded by one copy of the output pack, not the input shard
+// set(s).
 func writeMergedSafetensors(ctx context.Context, path string, indexes []sourceIndex, method Method, t float64, sources []Source, allowMismatch bool) (merged int, copied int, skipped []string, err error) {
 	linearWeights, err := normalizedWeights(sources)
 	if err != nil {
 		return 0, 0, nil, err
 	}
+
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
 
 	base := indexes[0]
 	mergedInfo := make(map[string]safetensors.SafetensorsTensorInfo, len(base.Names))
@@ -92,7 +121,7 @@ func writeMergedSafetensors(ctx context.Context, path string, indexes []sourceIn
 		var outValues []float32
 		switch {
 		case complete:
-			decoded, decodeErr := decodeAll(entries)
+			decoded, decodeErr := decodeAll(cache, entries)
 			if decodeErr != nil {
 				return 0, 0, nil, decodeErr
 			}
@@ -102,7 +131,7 @@ func writeMergedSafetensors(ctx context.Context, path string, indexes []sourceIn
 			}
 			merged++
 		case allowMismatch:
-			outValues, err = safetensors.DecodeFloat32(baseEntry.DType, baseEntry.Raw, shapeElements(baseEntry.Shape))
+			outValues, err = cache.ReadRefValues(baseEntry.Ref)
 			if err != nil {
 				return 0, 0, nil, err
 			}
@@ -147,12 +176,14 @@ func gatherTensorEntries(indexes []sourceIndex, name string) ([]tensorEntry, boo
 	return entries, complete && len(entries) == len(indexes)
 }
 
-// decodeAll decodes every entry's raw bytes to float32 according to its own
-// dtype and shape.
-func decodeAll(entries []tensorEntry) ([][]float32, error) {
+// decodeAll reads and decodes every entry's tensor payload to float32, from
+// its own shard, over cache — the ShardCache shared for the whole merge
+// call, so tensors sharing a shard file reuse one open handle instead of
+// reopening it per tensor.
+func decodeAll(cache *safetensors.ShardCache, entries []tensorEntry) ([][]float32, error) {
 	values := make([][]float32, len(entries))
 	for i, entry := range entries {
-		decoded, err := safetensors.DecodeFloat32(entry.DType, entry.Raw, shapeElements(entry.Shape))
+		decoded, err := cache.ReadRefValues(entry.Ref)
 		if err != nil {
 			return nil, err
 		}

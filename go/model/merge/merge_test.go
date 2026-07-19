@@ -31,6 +31,31 @@ func TestMerge_Packs_Good(t *core.T) {
 	core.AssertEqual(t, []float32{2, 3, 4, 5}, got)
 }
 
+// TestMerge_Packs_Sharded proves a genuinely multi-shard checkpoint (each source split across
+// 2 safetensors files, the model.safetensors.index.json + N-shard HF layout) merges correctly
+// — the sharded-checkpoint gap tracker #34 flagged as unimplemented.
+func TestMerge_Packs_Sharded(t *core.T) {
+	shardNames := []string{"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"}
+	a := writeSourceFixtureSharded(t, t.TempDir(), "test-arch", "shared-tokenizer",
+		map[string][]float32{"w": {1, 2, 3, 4}, "v": {10, 20}}, shardNames)
+	b := writeSourceFixtureSharded(t, t.TempDir(), "test-arch", "shared-tokenizer",
+		map[string][]float32{"w": {3, 4, 5, 6}, "v": {30, 40}}, shardNames)
+	core.AssertLen(t, a.WeightFiles, 2)
+	core.AssertLen(t, b.WeightFiles, 2)
+	outDir := core.PathJoin(t.TempDir(), "merged")
+
+	result, err := Packs(context.Background(), Options{
+		Sources:    []Source{a, b},
+		OutputPath: outDir,
+	})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, result.MergedTensors)
+	core.AssertEqual(t, 2, result.TensorCount)
+
+	core.AssertEqual(t, []float32{2, 3, 4, 5}, readMergedTensor(t, result.WeightPath, "w"))
+	core.AssertEqual(t, []float32{20, 30}, readMergedTensor(t, result.WeightPath, "v"))
+}
+
 func TestMerge_Packs_Bad(t *core.T) {
 	a := writeSourceFixture(t, t.TempDir(), "test-arch", "tok", map[string][]float32{"w": {1, 2}})
 	_, err := Packs(context.Background(), Options{

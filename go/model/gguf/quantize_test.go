@@ -96,6 +96,56 @@ func TestQuantize_QuantizeModelPack_Good_KQuant(t *testing.T) {
 	}
 }
 
+// buildQuantizeSourceSharded is buildQuantizeSource's multi-shard sibling: it writes two
+// block-aligned tensors ("weight" and "weight2") across two safetensors shard files instead of
+// one model.safetensors, simulating a real HF sharded checkpoint
+// (model.safetensors.index.json + N shard files) — the layout QuantizeModelPack now streams
+// tensor-by-tensor through Source.WeightFiles (see loadDenseSafetensors) rather than requiring
+// one blob per source.
+func buildQuantizeSourceSharded(t *testing.T) Source {
+	t.Helper()
+	dir := t.TempDir()
+	if result := core.WriteFile(core.PathJoin(dir, "config.json"), []byte(`{"model_type":"llama"}`), 0o644); !result.OK {
+		t.Fatalf("write config.json: %v", result.Value)
+	}
+	shard0 := core.PathJoin(dir, "model-00001-of-00002.safetensors")
+	shard1 := core.PathJoin(dir, "model-00002-of-00002.safetensors")
+	writeTestSafetensors(t, shard0, map[string][]float32{"weight": rampBlock(qkBlockSize)}, map[string][]int{"weight": {qkBlockSize}})
+	writeTestSafetensors(t, shard1, map[string][]float32{"weight2": rampBlock(qkBlockSize)}, map[string][]int{"weight2": {qkBlockSize}})
+	return Source{
+		Root:          dir,
+		Architecture:  "llama",
+		VocabSize:     32000,
+		HiddenSize:    32,
+		NumLayers:     1,
+		ContextLength: 2048,
+		WeightFiles:   []string{shard0, shard1},
+	}
+}
+
+// TestQuantize_QuantizeModelPack_Sharded proves a genuinely multi-shard source (2 safetensors
+// files, one tensor each) quantises correctly — the sharded-set gap tracker #34 flagged as
+// unimplemented. Both tensors must be resolved to their own shard and quantised.
+func TestQuantize_QuantizeModelPack_Sharded(t *testing.T) {
+	source := buildQuantizeSourceSharded(t)
+	output := core.PathJoin(t.TempDir(), "out")
+
+	result, err := QuantizeModelPack(context.Background(), QuantizeOptions{
+		SourcePack: source,
+		OutputPath: output,
+		Format:     QuantizeQ8_0,
+	})
+	if err != nil {
+		t.Fatalf("QuantizeModelPack: %v", err)
+	}
+	if result.TensorCount != 2 || result.QuantizedTensors != 2 {
+		t.Errorf("TensorCount/QuantizedTensors = %d/%d, want 2/2", result.TensorCount, result.QuantizedTensors)
+	}
+	if !result.Info.Valid() {
+		t.Errorf("generated GGUF failed validation: %v", result.Info.ValidationIssues)
+	}
+}
+
 func TestQuantize_QuantizeModelPack_Bad(t *testing.T) {
 	if _, err := QuantizeModelPack(context.Background(), QuantizeOptions{}); err == nil {
 		t.Fatalf("QuantizeModelPack(no source root): want error, got nil")
