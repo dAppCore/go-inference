@@ -89,7 +89,7 @@ re-runs the reactive drafter ladder over the new target).
 | `--addr` | `:36911` | listen address (Lethean's own port) |
 | `--model` | `""` | model to load; empty starts the driver model-less (load later via admin reload) |
 | `--context` | `0` | override context length; 0 uses the model default |
-| `--kv-cache` | `""` | KV cache mode override; the no-cgo metal engine runs only its built-in `native` cache — any other mode name is noted and ignored |
+| `--kv-cache` | `""` | live KV cache mode: `native` (default) or `turboquant[:4|:3.5|:3|:2]` — TurboQuant codes on global attention layers (dense archs; MoE/hybrid/sinks refuse loudly). Opt-in: at 16k on E2B it costs ~32% decode for no residency win (see `docs/receipts/2026-07-19-turboquant-live-kv-receipts.md`); the credible case is many-global-layer models at very long context |
 | `--draft` | `auto` | MTP drafter: `auto` detects one beside a Gemma 4 target, a path forces it, `""` disables |
 | `--draft-detect` | `true` | reactive drafter detection for Gemma 4 targets |
 | `--draft-block` | `0` | MTP draft block; 0 = engine default (5), a tuned profile overrides when present |
