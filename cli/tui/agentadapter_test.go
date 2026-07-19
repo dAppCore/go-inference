@@ -9,12 +9,16 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/agent/orchestrator"
 	"dappco.re/go/inference/agent/provider"
 	"dappco.re/go/inference/agent/queue"
 	"dappco.re/go/inference/agent/work"
 	"dappco.re/go/inference/agent/workspace"
+	coreio "dappco.re/go/io"
+	commandexec "dappco.re/go/process/exec"
 )
 
 func TestAgentAdapter_Capabilities_Good(t *testing.T) {
@@ -83,6 +87,27 @@ func TestAgentAdapter_Snapshot_Good(t *testing.T) {
 	if engine.snapshotWorkID != "" {
 		t.Fatalf("Snapshot work ID = %q, want all work", engine.snapshotWorkID)
 	}
+}
+
+func TestAgentAdapterSnapshotMapsAnsweredWaitingResumeIdentity(t *testing.T) {
+	at := time.Date(2026, time.July, 19, 10, 0, 0, 0, time.UTC)
+	projection := agentAnswerProjection{AnswerID: "answer-1", QuestionID: "question-1", ResumeRunID: "resume-1"}
+	adapter := requireAgentAdapter(t, &fixtureNativeAgentEngine{snapshot: work.Snapshot{
+		Runs:      []work.Run{{ID: "waiting-1", WorkID: "work-1", Status: work.RunWaiting}},
+		Questions: []work.Question{{ID: projection.QuestionID, RunID: "waiting-1", Text: "Which target?", CreatedAt: at}},
+		Events: []work.Event{{
+			ID: "answer:" + projection.AnswerID, RunID: "waiting-1", WorkID: "work-1", Kind: "answered",
+			DetailJSON: core.JSONMarshalString(projection), CreatedAt: at.Add(time.Second),
+		}},
+	}})
+
+	result := adapter.Snapshot(context.Background())
+	core.AssertTrue(t, result.OK, result.Error())
+	mapped := result.Value.(agentSnapshot)
+	core.AssertEqual(t, 1, len(mapped.Work))
+	core.AssertEqual(t, projection.QuestionID, mapped.Work[0].QuestionID)
+	core.AssertEqual(t, projection.AnswerID, mapped.Work[0].AnswerID)
+	core.AssertEqual(t, projection.ResumeRunID, mapped.Work[0].ResumeRunID)
 }
 
 func TestAgentAdapter_SnapshotProjectWithoutRunDoesNotCreateWork(t *testing.T) {
@@ -247,8 +272,6 @@ func TestAgentAdapter_Actions_Good(t *testing.T) {
 	actions := []agentRequest{
 		{Feature: agentFeatureCancel, WorkID: "run-1"},
 		{Feature: agentFeatureAnswer, WorkID: "run-1", Input: "Use target A"},
-		{Feature: agentFeatureRetry, WorkID: "run-1", Work: workRequest},
-		{Feature: agentFeatureResume, WorkID: "run-1", Input: "answer-1", Provider: "codex", Model: "gpt-5", Work: workRequest},
 		{Feature: agentFeatureQueueStart},
 		{Feature: agentFeatureQueueStop},
 		{Feature: agentFeatureReject, WorkID: "run-1"},
@@ -259,6 +282,20 @@ func TestAgentAdapter_Actions_Good(t *testing.T) {
 		} else if _, ok := result.Value.(agentActionReceipt); !ok {
 			t.Fatalf("Run(%s) value = %T, want private receipt", request.Feature, result.Value)
 		}
+	}
+	retryReview := adapter.Review(context.Background(), agentReviewRequest{Feature: agentFeatureRetry, WorkID: "run-1", Work: workRequest})
+	if !retryReview.OK {
+		t.Fatalf("retry Review: %s", retryReview.Error())
+	}
+	if retried := adapter.Run(context.Background(), agentRequest{Feature: agentFeatureRetry, Review: retryReview.Value.(agentReview), Confirmed: true}); !retried.OK {
+		t.Fatalf("confirmed Retry: %s", retried.Error())
+	}
+	resumeReview := adapter.Review(context.Background(), agentReviewRequest{Feature: agentFeatureResume, WorkID: "run-1", Input: "answer-1", Provider: "codex", Model: "gpt-5", Work: workRequest})
+	if !resumeReview.OK {
+		t.Fatalf("resume Review: %s", resumeReview.Error())
+	}
+	if resumed := adapter.Run(context.Background(), agentRequest{Feature: agentFeatureResume, Review: resumeReview.Value.(agentReview), Confirmed: true}); !resumed.OK {
+		t.Fatalf("confirmed Resume: %s", resumed.Error())
 	}
 
 	reviewed := adapter.Review(context.Background(), agentReviewRequest{Feature: agentFeatureChangesReview, WorkID: "run-1"})
@@ -273,7 +310,7 @@ func TestAgentAdapter_Actions_Good(t *testing.T) {
 	if !accepted.OK {
 		t.Fatalf("Accept: %s", accepted.Error())
 	}
-	wantCalls := []string{"cancel", "answer", "retry", "resume", "queue.start", "queue.stop", "reject", "changes.review", "accept"}
+	wantCalls := []string{"cancel", "answer", "queue.start", "queue.stop", "reject", "retry.review", "retry", "resume.review", "resume", "changes.review", "accept"}
 	if core.JSONMarshalString(engine.calls) != core.JSONMarshalString(wantCalls) {
 		t.Fatalf("mapped action order = %#v, want %#v", engine.calls, wantCalls)
 	}
@@ -296,17 +333,37 @@ func TestAgentAdapter_Actions_Good(t *testing.T) {
 	}
 }
 
-func TestAgentAdapter_Close_Ugly(t *testing.T) {
+func TestAgentAdapterChildActionsRequireReviewedConfirmation(t *testing.T) {
 	engine := &fixtureNativeAgentEngine{}
 	adapter := requireAgentAdapter(t, engine)
-	if result := adapter.Close(); !result.OK {
-		t.Fatalf("first Close: %s", result.Error())
+	request := agentReviewRequest{
+		Feature: agentFeatureRetry, WorkID: "run-parent",
+		Work: agentWorkRequest{ID: "work-1", Title: "Work one", Task: "Task one", Repository: "/src/one"},
+	}
+	reviewed := adapter.Review(context.Background(), request)
+	core.AssertTrue(t, reviewed.OK, reviewed.Error())
+	review := reviewed.Value.(agentReview)
+	core.AssertTrue(t, review.ConfirmRequired)
+	core.AssertEqual(t, agentFeatureRetry, review.Feature)
+	core.AssertFalse(t, adapter.Run(context.Background(), agentRequest{Feature: agentFeatureRetry, Review: review}).OK)
+	confirmed := adapter.Run(context.Background(), agentRequest{Feature: agentFeatureRetry, Review: review, Confirmed: true})
+	core.AssertTrue(t, confirmed.OK, confirmed.Error())
+}
+
+func TestAgentAdapter_Close_Ugly(t *testing.T) {
+	engine := &fixtureNativeAgentEngine{closeFailures: 1}
+	adapter := requireAgentAdapter(t, engine)
+	if result := adapter.Close(); result.OK {
+		t.Fatal("first Close unexpectedly ignored injected ownership cleanup failure")
 	}
 	if result := adapter.Close(); !result.OK {
-		t.Fatalf("second Close: %s", result.Error())
+		t.Fatalf("retried Close: %s", result.Error())
 	}
-	if engine.closeCalls != 1 {
-		t.Fatalf("engine Close calls = %d, want 1", engine.closeCalls)
+	if result := adapter.Close(); !result.OK {
+		t.Fatalf("idempotent Close: %s", result.Error())
+	}
+	if engine.closeCalls != 2 {
+		t.Fatalf("engine Close calls = %d, want 2", engine.closeCalls)
 	}
 }
 
@@ -356,9 +413,13 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	})
 	at := time.Date(2026, time.July, 18, 18, 0, 0, 0, time.UTC)
 	task := "Resume the durable interrupted run"
-	project := testAgentProject(at)
+	project := testDurableAgentProject(t, at)
 	parent := testAgentRun("run-interrupted", work.RunInterrupted, at)
 	parent.ProcessID = 0
+	parent.SourceRevision = project.SourceRevision
+	parent.DurableRevision = project.SourceRevision
+	parent.ExecutionRevision = project.SourceRevision
+	parent.Worktree = t.TempDir()
 	event := work.Event{
 		ID: "event-interrupted", RunID: parent.ID, WorkID: parent.WorkID,
 		Kind: "queued", Title: "queued", Detail: task, CreatedAt: at,
@@ -405,6 +466,10 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	}
 	storedParent := requireAgentValue[work.Run](t, "parent before UI Resume", reopenedStore.Run(parent.ID))
 	engine := newDurableResumeReceiptEngine(t, reopenedStore, at.Add(time.Hour))
+	if _, available := engine.(nativeChildReviewEngine); !available {
+		_ = engine.Close()
+		t.Skip("standalone inference dependency predates reviewed child continuation APIs")
+	}
 	var adapter agentProvider
 	t.Cleanup(func() {
 		var result core.Result
@@ -430,7 +495,17 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	if result := restarted.queueAgentAction(agentFeatureResume); !result.OK {
 		t.Fatalf("queue interrupted UI Resume: %v", result.Value)
 	}
-	next := driveCorrectiveCommand(t, &restarted, restarted.takeAgentCommand())
+	driveCorrectiveCommand(t, &restarted, restarted.takeAgentCommand())
+	if restarted.activeOverlay != overlayLaunchReview {
+		t.Fatalf("interrupted Resume did not present launch review: overlay=%d err=%q", restarted.activeOverlay, restarted.errText)
+	}
+	beforeConfirm := requireAgentValue[work.Snapshot](t, "Snapshot before explicit Resume confirmation", reopenedStore.Snapshot(parent.WorkID))
+	if len(beforeConfirm.Runs) != 1 {
+		t.Fatalf("interrupted Resume created child before confirmation: %#v", beforeConfirm.Runs)
+	}
+	model, command := restarted.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	restarted = model.(app)
+	next := driveCorrectiveCommand(t, &restarted, command)
 	if next != nil {
 		driveCorrectiveCommand(t, &restarted, next)
 	}
@@ -454,8 +529,120 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	}
 }
 
+func TestAgentAdapterDurableAnsweredWaitingResumeAfterRestartReceipt(t *testing.T) {
+	root, repository, agentStore := openTestAgentStore(t)
+	initialRepositoryClosed := false
+	t.Cleanup(func() {
+		if !initialRepositoryClosed {
+			_ = repository.Close()
+		}
+	})
+	at := time.Date(2026, time.July, 19, 11, 0, 0, 0, time.UTC)
+	task := "Resume the durable answered waiting run"
+	project := testDurableAgentProject(t, at)
+	parent := testAgentRun("run-answered-waiting", work.RunWaiting, at)
+	parent.ProcessID = 0
+	parent.SourceRevision = project.SourceRevision
+	parent.DurableRevision = project.SourceRevision
+	parent.ExecutionRevision = project.SourceRevision
+	parent.Worktree = t.TempDir()
+	question := work.Question{ID: "question-reopened", RunID: parent.ID, Text: "Which target?", CreatedAt: at.Add(time.Second)}
+	answer := work.Answer{
+		ID: "answer-reopened", QuestionID: question.ID, ResumeRunID: "resume-reopened",
+		Text: "Use target A", CreatedAt: at.Add(2 * time.Second),
+	}
+	event := work.Event{
+		ID: "event-answered-waiting", RunID: parent.ID, WorkID: parent.WorkID,
+		Kind: "queued", Title: "queued", Detail: task, CreatedAt: at,
+	}
+	initial := newApp("", 0, 64)
+	if result := initial.attachWork(repository, requireAgentAdapter(t, &fixtureNativeAgentEngine{})); !result.OK {
+		t.Fatalf("attach initial answered Work: %s", result.Error())
+	}
+	initial.work.ids = sequenceIDs(parent.WorkID)
+	if result := initial.work.CreateWork("Answered restart", task, project.SourcePath); !result.OK {
+		t.Fatalf("create durable answered Work: %s", result.Error())
+	}
+	if result := agentStore.Commit(orchestrator.Commit{
+		Project: &project, Run: &parent, CreateRun: true, Event: &event, Question: &question, Answer: &answer,
+	}); !result.OK {
+		t.Fatalf("persist answered waiting parent: %s", result.Error())
+	}
+	if result := repository.Close(); !result.OK {
+		t.Fatalf("close answered repository/store: %s", result.Error())
+	}
+	initialRepositoryClosed = true
+
+	reopenedResult := openDuckRepository(core.PathJoin(root, "lem.duckdb"))
+	if !reopenedResult.OK {
+		t.Fatalf("reopen answered repository: %s", reopenedResult.Error())
+	}
+	reopened := reopenedResult.Value.(workspaceRepository)
+	t.Cleanup(func() { _ = reopened.Close() })
+	reopenedStore := requireAgentValue[*duckAgentStore](t, "newDuckAgentStore answered reopened", newDuckAgentStore(reopened))
+	engine := newDurableResumeReceiptEngine(t, reopenedStore, at.Add(time.Hour))
+	if _, available := engine.(nativeChildReviewEngine); !available {
+		_ = engine.Close()
+		t.Skip("standalone inference dependency predates reviewed child continuation APIs")
+	}
+	adapter := requireAgentAdapter(t, engine)
+	t.Cleanup(func() { _ = adapter.Close() })
+	restarted := newApp("", 0, 64)
+	if result := restarted.attachWork(reopened, adapter); !result.OK {
+		t.Fatalf("attach restarted answered Work: %s", result.Error())
+	}
+	driveCorrectiveCommand(t, &restarted, restarted.requestAgentSnapshot())
+	selected, ok := restarted.work.Selected()
+	if !ok || selected.ID != parent.WorkID || selected.Status != string(work.RunWaiting) {
+		t.Fatalf("reopened answered selection = %#v selected=%v", selected, ok)
+	}
+	state := restarted.work.AgentState(selected)
+	if state.NativeRunID != parent.ID || state.QuestionID != question.ID || state.AnswerID != answer.ID || state.ResumeRunID != answer.ResumeRunID {
+		t.Fatalf("reopened durable answer projection = %#v", state)
+	}
+	if result := restarted.queueAgentAction(agentFeatureResume); !result.OK {
+		t.Fatalf("queue answered Resume: %s", result.Error())
+	}
+	driveCorrectiveCommand(t, &restarted, restarted.takeAgentCommand())
+	if restarted.activeOverlay != overlayLaunchReview {
+		t.Fatalf("answered Resume did not present launch review: overlay=%d err=%q", restarted.activeOverlay, restarted.errText)
+	}
+	beforeConfirm := requireAgentValue[work.Snapshot](t, "answered Snapshot before confirmation", reopenedStore.Snapshot(parent.WorkID))
+	if len(beforeConfirm.Runs) != 1 {
+		t.Fatalf("answered Resume created child before confirmation: %#v", beforeConfirm.Runs)
+	}
+	model, confirm := restarted.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	restarted = model.(app)
+	next := driveCorrectiveCommand(t, &restarted, confirm)
+	if next != nil {
+		driveCorrectiveCommand(t, &restarted, next)
+	}
+	after := requireAgentValue[work.Snapshot](t, "answered Snapshot after confirmation", reopenedStore.Snapshot(parent.WorkID))
+	var child work.Run
+	for _, candidate := range after.Runs {
+		if candidate.ParentRunID == parent.ID {
+			child = candidate
+		}
+	}
+	if child.ID != answer.ResumeRunID || child.Status != work.RunQueued || child.Attempt != parent.Attempt+1 || child.Branch != parent.Branch || child.Worktree != parent.Worktree {
+		t.Fatalf("durable answered resumed child = %#v", child)
+	}
+}
+
 func newDurableResumeReceiptEngine(t *testing.T, store orchestrator.Store, at time.Time) nativeAgentEngine {
 	t.Helper()
+	workspaceRoot := t.TempDir()
+	files, filesErr := coreio.NewSandboxed(workspaceRoot)
+	if filesErr != nil {
+		t.Fatalf("construct durable receipt workspace medium: %v", filesErr)
+	}
+	managerResult := workspace.NewManager(workspace.ManagerOptions{
+		Root: workspaceRoot, Files: files, Git: agentAdapterDirectGitRunner{}, Server: &fixtureGitServer{},
+		IDs: func() string { return "durable-review" }, Now: func() time.Time { return at },
+	})
+	if !managerResult.OK {
+		t.Fatalf("construct durable receipt workspace manager: %s", managerResult.Error())
+	}
 	registryResult := provider.NewRegistry(&fixtureNativeProvider{name: "codex", available: true})
 	if !registryResult.OK {
 		t.Fatalf("construct durable receipt provider registry: %v", registryResult.Value)
@@ -474,7 +661,7 @@ func newDurableResumeReceiptEngine(t *testing.T, store orchestrator.Store, at ti
 		t.Fatalf("construct durable receipt queue: %v", queueResult.Value)
 	}
 	engineResult := orchestrator.New(orchestrator.Options{
-		Store: store, GitServer: &fixtureGitServer{}, Workspaces: &workspace.Manager{},
+		Store: store, GitServer: &fixtureGitServer{}, Workspaces: managerResult.Value.(*workspace.Manager),
 		Providers: registryResult.Value.(*provider.Registry), Queue: queueResult.Value.(*queue.Controller),
 		Launcher: &fixtureAgentLauncher{}, Clock: agentClock{now: func() time.Time { return at }},
 		IDs: &fixtureAgentIdentifiers{},
@@ -483,6 +670,61 @@ func newDurableResumeReceiptEngine(t *testing.T, store orchestrator.Store, at ti
 		t.Fatalf("construct durable receipt orchestrator: %v", engineResult.Value)
 	}
 	return engineResult.Value.(nativeAgentEngine)
+}
+
+func testDurableAgentProject(t *testing.T, at time.Time) work.Project {
+	t.Helper()
+	source := t.TempDir()
+	canonical := core.PathEvalSymlinks(source)
+	if !canonical.OK {
+		t.Fatalf("canonicalize durable review source: %s", canonical.Error())
+	}
+	source = canonical.Value.(string)
+	agentAdapterGit(t, source, "init", "-b", "main")
+	agentAdapterGit(t, source, "config", "user.name", "LEM Test")
+	agentAdapterGit(t, source, "config", "user.email", "lem@example.invalid")
+	if result := core.WriteFile(core.PathJoin(source, "README.md"), []byte("durable review source\n"), 0o600); !result.OK {
+		t.Fatalf("write durable review source: %s", result.Error())
+	}
+	agentAdapterGit(t, source, "add", "README.md")
+	agentAdapterGit(t, source, "commit", "-m", "durable review source")
+	revision := core.Trim(agentAdapterGit(t, source, "rev-parse", "HEAD"))
+	project := testAgentProject(at)
+	project.SourcePath = source
+	project.RepositoryRoot = source
+	project.SourceBranch = "main"
+	project.SourceRevision = revision
+	return project
+}
+
+func agentAdapterGit(t *testing.T, directory string, arguments ...string) string {
+	t.Helper()
+	result := (agentAdapterDirectGitRunner{}).Run(context.Background(), workspace.Command{
+		Dir: directory, Executable: "git", Args: arguments,
+		Environment: []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C"},
+	})
+	if !result.OK {
+		t.Fatalf("git %s: %s", core.Join(" ", arguments...), result.Error())
+	}
+	return result.Value.(string)
+}
+
+type agentAdapterDirectGitRunner struct{}
+
+func (agentAdapterDirectGitRunner) Run(ctx context.Context, command workspace.Command) core.Result {
+	stdout := core.NewBuffer()
+	stderr := core.NewBuffer()
+	result := commandexec.Command(ctx, command.Executable, command.Args...).
+		WithDir(command.Dir).
+		WithEnv(command.Environment).
+		WithStdout(stdout).
+		WithStderr(stderr).
+		Run()
+	output := core.Concat(stdout.String(), stderr.String())
+	if !result.OK {
+		return core.Fail(core.E("test.agentAdapterDirectGitRunner", output, result.Err()))
+	}
+	return core.Ok(output)
 }
 
 func requireAgentAdapter(t *testing.T, engine nativeAgentEngine) agentProvider {
@@ -522,6 +764,7 @@ type fixtureNativeAgentEngine struct {
 	reviewDispatchCalls int
 	dispatchCalls       int
 	closeCalls          int
+	closeFailures       int
 }
 
 func (engine *fixtureNativeAgentEngine) Capabilities() []work.Capability {
@@ -574,16 +817,52 @@ func (engine *fixtureNativeAgentEngine) Answer(_ context.Context, runID, text st
 }
 
 func (engine *fixtureNativeAgentEngine) Retry(_ context.Context, item work.Item, parentRunID string) core.Result {
-	engine.calls = append(engine.calls, "retry")
+	engine.calls = append(engine.calls, "retry.legacy")
 	engine.retryItem = item
 	engine.retryParent = parentRunID
 	return core.Ok(work.Run{ID: "run-2", WorkID: "work-1", Status: work.RunQueued})
 }
 
 func (engine *fixtureNativeAgentEngine) Resume(_ context.Context, request work.ResumeRequest) core.Result {
-	engine.calls = append(engine.calls, "resume")
+	engine.calls = append(engine.calls, "resume.legacy")
 	engine.resumeRequest = request
 	return core.Ok(work.Run{ID: "run-3", WorkID: "work-1", Status: work.RunQueued})
+}
+
+func (engine *fixtureNativeAgentEngine) ReviewRetry(_ context.Context, item work.Item, parentRunID string) core.Result {
+	engine.calls = append(engine.calls, "retry.review")
+	engine.retryItem = item
+	engine.retryParent = parentRunID
+	return core.Ok(fixtureChildReview("retry", "run-2", "fake", "test-model"))
+}
+
+func (engine *fixtureNativeAgentEngine) ConfirmRetry(_ context.Context, _ any) core.Result {
+	engine.calls = append(engine.calls, "retry")
+	return core.Ok(work.Run{ID: "run-2", WorkID: "work-1", Status: work.RunQueued})
+}
+
+func (engine *fixtureNativeAgentEngine) ReviewResume(_ context.Context, request work.ResumeRequest) core.Result {
+	engine.calls = append(engine.calls, "resume.review")
+	engine.resumeRequest = request
+	return core.Ok(fixtureChildReview("resume", "run-3", request.Provider, request.Model))
+}
+
+func (engine *fixtureNativeAgentEngine) ConfirmResume(_ context.Context, _ any) core.Result {
+	engine.calls = append(engine.calls, "resume")
+	return core.Ok(work.Run{ID: "run-3", WorkID: "work-1", Status: work.RunQueued})
+}
+
+func fixtureChildReview(action, runID, providerName, model string) agentChildReviewProjection {
+	review := agentChildReviewProjection{
+		Action: action, RunID: runID, Provider: providerName, Model: model,
+		WorktreePath: "/private/runs/parent/worktree", Branch: "lem/work-1/1",
+		Warning: "native host access",
+	}
+	review.Project.RepositoryName = "private-one"
+	review.Source.Path, review.Source.Branch, review.Source.Revision = "/src/one", "main", "abc123"
+	review.Command.Receipt = core.Concat(providerName, " run <redacted>")
+	review.Queue.Reason = "queue frozen"
+	return review
 }
 
 func (engine *fixtureNativeAgentEngine) StartQueue(context.Context) core.Result {
@@ -616,6 +895,10 @@ func (engine *fixtureNativeAgentEngine) Reject(_ context.Context, runID string) 
 
 func (engine *fixtureNativeAgentEngine) Close() core.Result {
 	engine.closeCalls++
+	if engine.closeFailures > 0 {
+		engine.closeFailures--
+		return core.Fail(core.E("test.nativeAgentEngine.Close", "injected ownership cleanup failure", nil))
+	}
 	return core.Ok(nil)
 }
 

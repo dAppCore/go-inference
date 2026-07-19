@@ -34,11 +34,45 @@ type nativeAgentEngine interface {
 	Close() core.Result
 }
 
+// nativeChildReviewEngine is optional so the standalone CLI keeps compiling
+// against an older published inference contract while preferring the current
+// fail-closed review/confirm surface when it is available.
+type nativeChildReviewEngine interface {
+	ReviewRetry(context.Context, work.Item, string) core.Result
+	ConfirmRetry(context.Context, any) core.Result
+	ReviewResume(context.Context, work.ResumeRequest) core.Result
+	ConfirmResume(context.Context, any) core.Result
+}
+
+type agentChildReviewProjection struct {
+	Action       string
+	RunID        string
+	Provider     string
+	Model        string
+	WorktreePath string
+	Branch       string
+	Warning      string
+	Project      struct{ RepositoryName string }
+	Source       struct{ Path, Branch, Revision string }
+	Detection    struct{ Provider, Executable, Version string }
+	Command      struct{ Receipt string }
+	Queue        struct {
+		Allowed bool
+		Reason  string
+	}
+}
+
+type agentChildReviewPayload struct {
+	Action agentFeature
+	Value  any
+}
+
 type nativeAgentAdapter struct {
-	engine       nativeAgentEngine
-	availability *agentAvailability
-	closeOnce    sync.Once
-	closeResult  core.Result
+	engine        nativeAgentEngine
+	availability  *agentAvailability
+	closeMu       sync.Mutex
+	closeComplete bool
+	closeResult   core.Result
 }
 
 type agentProjectRegistration struct {
@@ -190,6 +224,15 @@ func mapAgentSnapshot(snapshot work.Snapshot) agentSnapshot {
 		if workID == "" {
 			workID = runWork[event.RunID]
 		}
+		if event.Kind == "answered" {
+			var projection agentAnswerProjection
+			decoded := core.JSONUnmarshalString(event.DetailJSON, &projection)
+			if index, exists := workIndex[workID]; decoded.OK && exists && mapped.Work[index].NativeRunID == event.RunID &&
+				projection.AnswerID != "" && projection.QuestionID != "" && projection.ResumeRunID != "" {
+				mapped.Work[index].AnswerID = projection.AnswerID
+				mapped.Work[index].ResumeRunID = projection.ResumeRunID
+			}
+		}
 		mapped.Events = append(mapped.Events, agentEventSnapshot{
 			ExternalID: event.ID, WorkID: workID, RunID: event.RunID, Kind: event.Kind,
 			Title: event.Title, Detail: event.Detail, CreatedAt: event.CreatedAt,
@@ -307,6 +350,27 @@ func (adapter *nativeAgentAdapter) Review(ctx context.Context, request agentRevi
 			}
 		}
 		return core.Ok(mapChangeReview(review, allowed))
+	case agentFeatureRetry, agentFeatureResume:
+		children, ok := adapter.engine.(nativeChildReviewEngine)
+		if !ok {
+			return core.Fail(core.E("tui.agentAdapter.Review", "native agent engine does not support reviewed child launches", nil))
+		}
+		var reviewed core.Result
+		item := nativeWorkItem(request.Work, request.Work.ID, "")
+		action := agentFeatureResume
+		if request.Feature == agentFeatureRetry || core.Trim(request.Input) == "" {
+			action = agentFeatureRetry
+			reviewed = children.ReviewRetry(ctx, item, request.WorkID)
+		} else {
+			reviewed = children.ReviewResume(ctx, work.ResumeRequest{
+				Work: item, ParentRunID: request.WorkID, AnswerID: request.Input,
+				Provider: request.Provider, Model: request.Model,
+			})
+		}
+		if !reviewed.OK {
+			return reviewed
+		}
+		return mapChildLaunchReview(request.Feature, action, reviewed.Value)
 	default:
 		return core.Fail(core.E("tui.agentAdapter.Review", core.Concat("agent feature does not support review: ", string(request.Feature)), nil))
 	}
@@ -349,15 +413,24 @@ func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest
 	case agentFeatureAnswer:
 		result = adapter.engine.Answer(ctx, runID, request.Input)
 	case agentFeatureRetry:
-		result = adapter.engine.Retry(ctx, nativeWorkItem(request.Work, request.Work.ID, ""), runID)
+		children, ok := adapter.engine.(nativeChildReviewEngine)
+		payload, payloadOK := request.Review.Payload.(agentChildReviewPayload)
+		if !ok || !payloadOK || payload.Action != agentFeatureRetry || !request.Confirmed || request.Review.Feature != agentFeatureRetry || payload.Value == nil {
+			return core.Fail(core.E("tui.agentAdapter.Run", "retry requires an explicitly confirmed child launch review", nil))
+		}
+		result = children.ConfirmRetry(ctx, payload.Value)
 	case agentFeatureResume:
-		if core.Trim(request.Input) == "" {
-			result = adapter.engine.Retry(ctx, nativeWorkItem(request.Work, request.Work.ID, ""), runID)
+		children, ok := adapter.engine.(nativeChildReviewEngine)
+		payload, payloadOK := request.Review.Payload.(agentChildReviewPayload)
+		if !ok || !payloadOK || !request.Confirmed || request.Review.Feature != agentFeatureResume || payload.Value == nil {
+			return core.Fail(core.E("tui.agentAdapter.Run", "resume requires an explicitly confirmed child launch review", nil))
+		}
+		if payload.Action == agentFeatureRetry {
+			result = children.ConfirmRetry(ctx, payload.Value)
+		} else if payload.Action == agentFeatureResume {
+			result = children.ConfirmResume(ctx, payload.Value)
 		} else {
-			result = adapter.engine.Resume(ctx, work.ResumeRequest{
-				Work: nativeWorkItem(request.Work, request.Work.ID, ""), ParentRunID: runID,
-				AnswerID: request.Input, Provider: request.Provider, Model: request.Model,
-			})
+			return core.Fail(core.E("tui.agentAdapter.Run", "resume child review has an invalid continuation action", nil))
 		}
 	case agentFeatureQueueStart:
 		result = adapter.engine.StartQueue(ctx)
@@ -375,6 +448,30 @@ func (adapter *nativeAgentAdapter) Run(ctx context.Context, request agentRequest
 		return core.Fail(core.E("tui.agentAdapter.Run", core.Concat("unsupported native agent action: ", string(request.Feature)), nil))
 	}
 	return privateAgentReceipt(request, result)
+}
+
+func mapChildLaunchReview(feature, action agentFeature, payload any) core.Result {
+	var review agentChildReviewProjection
+	decoded := core.JSONUnmarshalString(core.JSONMarshalString(payload), &review)
+	if !decoded.OK || review.Action != string(action) || review.RunID == "" || review.Command.Receipt == "" {
+		return core.Fail(core.E("tui.mapChildLaunchReview", "native child review is incomplete", decoded.Err()))
+	}
+	queueStatus := "ready for admission"
+	if reason := core.Trim(review.Queue.Reason); reason != "" {
+		queueStatus = reason
+	}
+	title := "Review native retry launch"
+	if feature == agentFeatureResume {
+		title = "Review native resume launch"
+	}
+	return core.Ok(agentReview{
+		Feature: feature, Title: title,
+		Body: core.Sprintf("Provider: %s\nModel: %s\nCommand: %s\nSource: %s\nBranch: %s\nRevision: %s\nPrivate repository: %s\nWorktree: %s\nQueue: %s\nParent branch: %s\nChild run: %s",
+			review.Provider, review.Model, review.Command.Receipt, review.Source.Path, review.Source.Branch,
+			review.Source.Revision, review.Project.RepositoryName, review.WorktreePath, queueStatus,
+			review.Branch, review.RunID),
+		Warning: review.Warning, ConfirmRequired: true, Payload: agentChildReviewPayload{Action: action, Value: payload},
+	})
 }
 
 func (adapter *nativeAgentAdapter) runDispatch(ctx context.Context, request agentRequest) core.Result {
@@ -475,10 +572,14 @@ func (adapter *nativeAgentAdapter) Close() core.Result {
 	if adapter == nil {
 		return core.Ok(nil)
 	}
-	adapter.closeOnce.Do(func() {
-		if adapter.engine != nil {
-			adapter.closeResult = adapter.engine.Close()
-		}
-	})
+	adapter.closeMu.Lock()
+	defer adapter.closeMu.Unlock()
+	if adapter.closeComplete {
+		return adapter.closeResult
+	}
+	if adapter.engine != nil {
+		adapter.closeResult = adapter.engine.Close()
+	}
+	adapter.closeComplete = adapter.closeResult.OK
 	return adapter.closeResult
 }

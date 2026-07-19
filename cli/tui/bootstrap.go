@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	"reflect"
 	"sync"
 	"time"
 
@@ -209,10 +210,10 @@ func (resources *workspaceResources) Close() core.Result {
 	if resources == nil {
 		return core.Ok(nil)
 	}
-	failures := make([]string, 0, 3)
 	if closeResult := resources.closeAgent(); !closeResult.OK {
-		failures = append(failures, closeResult.Error())
+		return core.Fail(core.E("tui.workspaceResources.Close", closeResult.Error(), closeResult.Err()))
 	}
+	failures := make([]string, 0, 2)
 	if resources.State != nil {
 		if closeResult := resources.State.Close(); !closeResult.OK {
 			failures = append(failures, closeResult.Error())
@@ -236,8 +237,11 @@ func (resources *workspaceResources) closeAgent() core.Result {
 		return core.Ok(nil)
 	}
 	agent := resources.Agent
-	resources.Agent = nil
-	return agent.Close()
+	closed := agent.Close()
+	if closed.OK {
+		resources.Agent = nil
+	}
+	return closed
 }
 
 func (openers workspaceOpeners) withDefaults() workspaceOpeners {
@@ -284,6 +288,11 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 	if !ok {
 		return core.Fail(core.E("tui.composeNativeAgent", "agent policy loader returned an invalid policy; queue is frozen", nil))
 	}
+	maxAttemptMinutes := int64(time.Duration(1<<63-1) / time.Minute)
+	if int64(policy.Dispatch.TimeoutMinutes) > maxAttemptMinutes {
+		return core.Fail(core.E("tui.composeNativeAgent", "agent dispatch timeout exceeds the supported duration; queue is frozen", nil))
+	}
+	attemptTimeout := time.Duration(policy.Dispatch.TimeoutMinutes) * time.Minute
 
 	workspaceMediumResult := factories.OpenWorkspaceMedium(input.Files.Paths.Workspaces)
 	if !workspaceMediumResult.OK {
@@ -393,10 +402,12 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 		return agentCompositionFailure("construct native launcher", core.Fail(core.E("tui.composeNativeAgent", "launcher constructor returned an invalid launcher", nil)), server, nil)
 	}
 
-	engineResult := factories.NewOrchestrator(orchestrator.Options{
+	engineOptions := orchestrator.Options{
 		Store: store, GitServer: server, Workspaces: workspaces, Providers: providers,
 		Queue: controller, Launcher: launcher, Clock: agentClock{now: factories.Now}, IDs: factories.IDs,
-	})
+	}
+	setAgentOrchestratorDurationOption(&engineOptions, "AttemptTimeout", attemptTimeout)
+	engineResult := factories.NewOrchestrator(engineOptions)
 	if !engineResult.OK {
 		return agentCompositionFailure("construct native orchestrator", engineResult, server, launcher)
 	}
@@ -412,6 +423,26 @@ func composeNativeAgent(ctx context.Context, input agentBootstrapInput, factorie
 		return adapterResult
 	}
 	return core.Ok(agentBootstrapResult{Provider: adapterResult.Value.(agentProvider), Warnings: detection.Warnings})
+}
+
+func setAgentOrchestratorDurationOption(options *orchestrator.Options, name string, duration time.Duration) bool {
+	if options == nil {
+		return false
+	}
+	value := reflect.ValueOf(options).Elem().FieldByName(name)
+	if !value.IsValid() || !value.CanSet() || value.Kind() != reflect.Int64 {
+		return false
+	}
+	value.SetInt(int64(duration))
+	return true
+}
+
+func agentOrchestratorDurationOption(options orchestrator.Options, name string) (time.Duration, bool) {
+	value := reflect.ValueOf(options).FieldByName(name)
+	if !value.IsValid() || value.Kind() != reflect.Int64 {
+		return 0, false
+	}
+	return time.Duration(value.Int()), true
 }
 
 func (availability *agentAvailability) reason(feature agentFeature) string {
@@ -583,10 +614,11 @@ type agentIdentifiers struct{}
 func (*agentIdentifiers) New() string { return newRecordID() }
 
 type ownedNativeLauncher struct {
-	launcher orchestrator.Launcher
-	service  *coreprocess.Service
-	once     sync.Once
-	result   core.Result
+	launcher      orchestrator.Launcher
+	service       *coreprocess.Service
+	closeMu       sync.Mutex
+	closeComplete bool
+	result        core.Result
 }
 
 func newOwnedNativeLauncher() core.Result {
@@ -636,22 +668,27 @@ func (launcher *ownedNativeLauncher) Close() core.Result {
 	if launcher == nil {
 		return core.Ok(nil)
 	}
-	launcher.once.Do(func() {
-		failures := make([]string, 0, 2)
-		if launcher.launcher != nil {
-			if result := launcher.launcher.Close(); !result.OK {
-				failures = append(failures, result.Error())
-			}
+	launcher.closeMu.Lock()
+	defer launcher.closeMu.Unlock()
+	if launcher.closeComplete {
+		return launcher.result
+	}
+	if launcher.launcher != nil {
+		if result := launcher.launcher.Close(); !result.OK {
+			launcher.result = core.Fail(core.E("tui.ownedNativeLauncher.Close", result.Error(), result.Err()))
+			return launcher.result
 		}
-		if launcher.service != nil {
-			if result := launcher.service.OnShutdown(context.Background()); !result.OK {
-				failures = append(failures, result.Error())
-			}
+		launcher.launcher = nil
+	}
+	if launcher.service != nil {
+		if result := launcher.service.OnShutdown(context.Background()); !result.OK {
+			launcher.result = core.Fail(core.E("tui.ownedNativeLauncher.Close", result.Error(), result.Err()))
+			return launcher.result
 		}
-		if len(failures) > 0 {
-			launcher.result = core.Fail(core.E("tui.ownedNativeLauncher.Close", core.Join("; ", failures...), nil))
-		}
-	})
+		launcher.service = nil
+	}
+	launcher.result = core.Ok(nil)
+	launcher.closeComplete = true
 	return launcher.result
 }
 

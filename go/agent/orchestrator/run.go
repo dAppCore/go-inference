@@ -51,6 +51,7 @@ type runExecution struct {
 	sequence   int64
 	response   []string
 	failure    string
+	timedOut   bool
 }
 
 // ReviewDispatch revalidates source and provider state without creating a run or worktree.
@@ -308,101 +309,113 @@ func (orchestrator *Orchestrator) Answer(ctx context.Context, runID, text string
 	return core.Ok(answer)
 }
 
-// Resume queues one immutable child attempt using a previously stored answer.
+// Resume refuses the legacy unreviewed child-launch path.
 func (orchestrator *Orchestrator) Resume(ctx context.Context, request work.ResumeRequest) core.Result {
 	if orchestrator == nil {
 		return core.Fail(core.NewError("agent orchestrator is required"))
 	}
-	orchestrator.lifecycle.RLock()
-	defer orchestrator.lifecycle.RUnlock()
 	if contextResult := validateContext(ctx, "resume"); !contextResult.OK {
 		return contextResult
 	}
-	if orchestrator.isClosed() {
-		return core.Fail(core.NewError("agent orchestrator is closed"))
-	}
-	request.Work = normalizeWorkItem(request.Work)
-	request.ParentRunID = core.Trim(request.ParentRunID)
-	request.AnswerID = core.Trim(request.AnswerID)
-	request.Provider = core.Lower(core.Trim(request.Provider))
-	request.Model = core.Trim(request.Model)
-	if invalid := validateChildRequest(request.Work, request.ParentRunID); !invalid.OK {
-		return invalid
-	}
-	if request.AnswerID == "" || request.Provider == "" {
-		return core.Fail(core.NewError("agent resume requires answer and provider IDs"))
-	}
-
-	orchestrator.queueMu.Lock()
-	defer orchestrator.queueMu.Unlock()
-	continuationResult := orchestrator.continuation(request.ParentRunID)
-	if !continuationResult.OK {
-		return continuationResult
-	}
-	continuation := continuationResult.Value.(work.Continuation)
-	parent := continuation.Run
-	if parent.Status != work.RunWaiting {
-		return core.Fail(core.Errorf("agent run %s in %s cannot be resumed", parent.ID, parent.Status))
-	}
-	if parent.WorkID != request.Work.ID {
-		return core.Fail(core.NewError("agent resume Work does not match the parent run"))
-	}
-	if durableTask := core.Trim(continuation.Task); durableTask == "" || request.Work.Task != durableTask {
-		return core.Fail(core.NewError("agent resume Work task does not match the durable parent task"))
-	}
-	answer := continuation.Answer
-	if answer.ID == "" {
-		return core.Fail(core.NewError("agent resume requires a stored answer"))
-	}
-	if answer.ID != request.AnswerID || answer.QuestionID != continuation.Question.ID || core.Trim(answer.ResumeRunID) == "" {
-		return core.Fail(core.NewError("agent resume answer does not match the durable question linkage"))
-	}
-	return orchestrator.queueChildAttempt(request.Work, parent, answer.ResumeRunID, request.Provider, request.Model)
+	return core.Fail(core.NewError("agent resume requires an explicitly confirmed child launch review"))
 }
 
-// Retry queues one immutable child attempt from a failed, cancelled, or interrupted parent.
+// Retry refuses the legacy unreviewed child-launch path.
 func (orchestrator *Orchestrator) Retry(ctx context.Context, item work.Item, parentRunID string) core.Result {
+	if orchestrator == nil {
+		return core.Fail(core.NewError("agent orchestrator is required"))
+	}
+	if contextResult := validateContext(ctx, "retry"); !contextResult.OK {
+		return contextResult
+	}
+	return core.Fail(core.NewError("agent retry requires an explicitly confirmed child launch review"))
+}
+
+// ReviewRetry revalidates and renders one retry launch without creating a child run.
+func (orchestrator *Orchestrator) ReviewRetry(ctx context.Context, item work.Item, parentRunID string) core.Result {
 	if orchestrator == nil {
 		return core.Fail(core.NewError("agent orchestrator is required"))
 	}
 	orchestrator.lifecycle.RLock()
 	defer orchestrator.lifecycle.RUnlock()
-	if contextResult := validateContext(ctx, "retry"); !contextResult.OK {
+	if contextResult := validateContext(ctx, "retry review"); !contextResult.OK {
 		return contextResult
 	}
 	if orchestrator.isClosed() {
 		return core.Fail(core.NewError("agent orchestrator is closed"))
-	}
-	item = normalizeWorkItem(item)
-	parentRunID = core.Trim(parentRunID)
-	if invalid := validateChildRequest(item, parentRunID); !invalid.OK {
-		return invalid
-	}
-
-	orchestrator.queueMu.Lock()
-	defer orchestrator.queueMu.Unlock()
-	continuationResult := orchestrator.continuation(parentRunID)
-	if !continuationResult.OK {
-		return continuationResult
-	}
-	continuation := continuationResult.Value.(work.Continuation)
-	parent := continuation.Run
-	if parent.WorkID != item.ID {
-		return core.Fail(core.NewError("agent retry Work does not match the parent run"))
-	}
-	if durableTask := core.Trim(continuation.Task); durableTask == "" || item.Task != durableTask {
-		return core.Fail(core.NewError("agent retry Work task does not match the durable parent task"))
-	}
-	switch parent.Status {
-	case work.RunFailed, work.RunCancelled, work.RunInterrupted:
-	default:
-		return core.Fail(core.Errorf("agent run %s in %s cannot be retried", parent.ID, parent.Status))
 	}
 	runIDResult := orchestrator.nextID("run")
 	if !runIDResult.OK {
 		return runIDResult
 	}
-	return orchestrator.queueChildAttempt(item, parent, runIDResult.Value.(string), parent.Provider, parent.Model)
+	orchestrator.queueMu.Lock()
+	defer orchestrator.queueMu.Unlock()
+	return orchestrator.reviewChild(ctx, "retry", item, parentRunID, "", "", "", runIDResult.Value.(string))
+}
+
+// ConfirmRetry queues only the exact retry launch that was explicitly reviewed.
+func (orchestrator *Orchestrator) ConfirmRetry(ctx context.Context, supplied any) core.Result {
+	review, ok := supplied.(ChildReview)
+	if !ok {
+		return core.Fail(core.Errorf("agent retry confirmation received %T instead of child review", supplied))
+	}
+	return orchestrator.confirmChild(ctx, "retry", review)
+}
+
+// ReviewResume revalidates and renders one answered continuation without creating a child run.
+func (orchestrator *Orchestrator) ReviewResume(ctx context.Context, request work.ResumeRequest) core.Result {
+	if orchestrator == nil {
+		return core.Fail(core.NewError("agent orchestrator is required"))
+	}
+	orchestrator.lifecycle.RLock()
+	defer orchestrator.lifecycle.RUnlock()
+	if contextResult := validateContext(ctx, "resume review"); !contextResult.OK {
+		return contextResult
+	}
+	if orchestrator.isClosed() {
+		return core.Fail(core.NewError("agent orchestrator is closed"))
+	}
+	orchestrator.queueMu.Lock()
+	defer orchestrator.queueMu.Unlock()
+	return orchestrator.reviewChild(ctx, "resume", request.Work, request.ParentRunID, request.AnswerID, request.Provider, request.Model, "")
+}
+
+// ConfirmResume queues only the exact answered continuation that was explicitly reviewed.
+func (orchestrator *Orchestrator) ConfirmResume(ctx context.Context, supplied any) core.Result {
+	review, ok := supplied.(ChildReview)
+	if !ok {
+		return core.Fail(core.Errorf("agent resume confirmation received %T instead of child review", supplied))
+	}
+	return orchestrator.confirmChild(ctx, "resume", review)
+}
+
+func (orchestrator *Orchestrator) confirmChild(ctx context.Context, action string, review ChildReview) core.Result {
+	if orchestrator == nil {
+		return core.Fail(core.NewError("agent orchestrator is required"))
+	}
+	orchestrator.lifecycle.RLock()
+	defer orchestrator.lifecycle.RUnlock()
+	if contextResult := validateContext(ctx, core.Concat(action, " confirmation")); !contextResult.OK {
+		return contextResult
+	}
+	if orchestrator.isClosed() {
+		return core.Fail(core.NewError("agent orchestrator is closed"))
+	}
+	if review.Action != action || core.Trim(review.RunID) == "" {
+		return core.Fail(core.NewError("agent child launch review has the wrong action or run identity"))
+	}
+	orchestrator.queueMu.Lock()
+	defer orchestrator.queueMu.Unlock()
+	freshResult := orchestrator.reviewChild(ctx, action, review.Work, review.Parent.ID, review.AnswerID,
+		review.Provider, review.Model, review.RunID)
+	if !freshResult.OK {
+		return freshResult
+	}
+	fresh := freshResult.Value.(ChildReview)
+	if !sameChildReview(review, fresh) {
+		return core.Fail(core.NewError("agent child launch review is stale; review the continuation again"))
+	}
+	return orchestrator.queueReviewedChild(fresh)
 }
 
 func (orchestrator *Orchestrator) continuation(runID string) core.Result {
@@ -427,8 +440,63 @@ func validateChildRequest(item work.Item, parentRunID string) core.Result {
 	return core.Ok(item)
 }
 
-func (orchestrator *Orchestrator) queueChildAttempt(item work.Item, parent work.Run, runID, providerName, model string) core.Result {
-	if parent.Number <= 0 || parent.Attempt <= 0 || core.Trim(parent.Branch) == "" || core.Trim(parent.Worktree) == "" {
+func (orchestrator *Orchestrator) reviewChild(ctx context.Context, action string, item work.Item, parentRunID, answerID, providerName, model, runID string) core.Result {
+	item = normalizeWorkItem(item)
+	parentRunID = core.Trim(parentRunID)
+	answerID = core.Trim(answerID)
+	providerName = core.Lower(core.Trim(providerName))
+	model = core.Trim(model)
+	runID = core.Trim(runID)
+	if invalid := validateChildRequest(item, parentRunID); !invalid.OK {
+		return invalid
+	}
+	continuationResult := orchestrator.continuation(parentRunID)
+	if !continuationResult.OK {
+		return continuationResult
+	}
+	continuation := continuationResult.Value.(work.Continuation)
+	parent := continuation.Run
+	if parent.WorkID != item.ID {
+		return core.Fail(core.NewError("agent child review Work does not match the parent run"))
+	}
+	if durableTask := core.Trim(continuation.Task); durableTask == "" || item.Task != durableTask {
+		return core.Fail(core.NewError("agent child review Work task does not match the durable parent task"))
+	}
+	switch action {
+	case "retry":
+		switch parent.Status {
+		case work.RunFailed, work.RunCancelled, work.RunInterrupted:
+		default:
+			return core.Fail(core.Errorf("agent run %s in %s cannot be retried", parent.ID, parent.Status))
+		}
+		providerName, model = parent.Provider, parent.Model
+		if runID == "" {
+			return core.Fail(core.NewError("agent retry review requires a reserved run ID"))
+		}
+	case "resume":
+		if parent.Status != work.RunWaiting {
+			return core.Fail(core.Errorf("agent run %s in %s cannot be resumed", parent.ID, parent.Status))
+		}
+		answer := continuation.Answer
+		if answer.ID == "" {
+			return core.Fail(core.NewError("agent resume review requires a stored answer"))
+		}
+		if answer.ID != answerID || answer.QuestionID != continuation.Question.ID || core.Trim(answer.ResumeRunID) == "" {
+			return core.Fail(core.NewError("agent resume review answer does not match the durable question linkage"))
+		}
+		if providerName == "" {
+			return core.Fail(core.NewError("agent resume review requires a provider ID"))
+		}
+		if runID == "" {
+			runID = core.Trim(answer.ResumeRunID)
+		}
+		if runID != core.Trim(answer.ResumeRunID) {
+			return core.Fail(core.NewError("agent resume review run ID differs from the durable answer reservation"))
+		}
+	default:
+		return core.Fail(core.NewError("agent child review requires retry or resume action"))
+	}
+	if parent.Number <= 0 || parent.Attempt <= 0 || core.Trim(parent.Branch) == "" || core.Trim(parent.Worktree) == "" || core.Trim(parent.DurableRevision) == "" {
 		return core.Fail(core.NewError("agent parent run has no durable workspace identity"))
 	}
 	projectResult := orchestrator.store.Project(parent.ProjectID)
@@ -438,6 +506,93 @@ func (orchestrator *Orchestrator) queueChildAttempt(item work.Item, parent work.
 	project, ok := projectResult.Value.(work.Project)
 	if !ok {
 		return core.Fail(core.Errorf("agent store returned %T instead of project", projectResult.Value))
+	}
+	sourceResult := orchestrator.workspaces.ReviewSource(ctx, item.Repository)
+	if !sourceResult.OK {
+		return sourceResult
+	}
+	source, ok := sourceResult.Value.(workspace.SourceReview)
+	if !ok {
+		return core.Fail(core.Errorf("agent workspace returned %T instead of source review", sourceResult.Value))
+	}
+	if !source.Git || !source.Clean || source.Detached || source.Branch == "" {
+		return core.Fail(core.NewError("agent child review source must be a clean attached Git repository"))
+	}
+	if source.Path != project.SourcePath || source.Root != project.RepositoryRoot || source.Branch != project.SourceBranch ||
+		source.Revision != project.SourceRevision || parent.SourceRevision != project.SourceRevision {
+		return core.Fail(core.NewError("agent child review source or project registration changed after the parent launch"))
+	}
+	adapterResult := orchestrator.providers.Adapter(providerName)
+	if !adapterResult.OK {
+		return adapterResult
+	}
+	adapter, ok := adapterResult.Value.(provider.Adapter)
+	if !ok {
+		return core.Fail(core.Errorf("agent provider registry returned %T instead of adapter", adapterResult.Value))
+	}
+	detectionResult := adapter.Detect(ctx)
+	if !detectionResult.OK {
+		return detectionResult
+	}
+	detection, ok := detectionResult.Value.(provider.Detection)
+	if !ok {
+		return core.Fail(core.Errorf("agent provider returned %T instead of detection", detectionResult.Value))
+	}
+	if !detection.Available {
+		reason := core.Trim(detection.Reason)
+		if reason == "" {
+			reason = core.Concat(providerName, " is unavailable")
+		}
+		return core.Fail(core.NewError(reason))
+	}
+	commandResult := adapter.Build(provider.Launch{
+		WorkID: item.ID, RunID: runID, Title: item.Title, Task: item.Task,
+		Worktree: parent.Worktree, Branch: parent.Branch, Model: model,
+		Continuation: renderContinuation(continuation),
+	})
+	if !commandResult.OK {
+		return commandResult
+	}
+	command, ok := commandResult.Value.(provider.Command)
+	if !ok {
+		return core.Fail(core.Errorf("agent provider returned %T instead of command", commandResult.Value))
+	}
+	snapshotResult := orchestrator.durableQueueSnapshot()
+	if !snapshotResult.OK {
+		return snapshotResult
+	}
+	snapshot := snapshotResult.Value.(work.Snapshot)
+	for _, existing := range snapshot.Runs {
+		if existing.ParentRunID == parent.ID || existing.ID == runID {
+			return core.Fail(core.Errorf("agent run %s already has child attempt %s", parent.ID, existing.ID))
+		}
+	}
+	atResult := orchestrator.now()
+	if !atResult.OK {
+		return atResult
+	}
+	decisionResult := orchestrator.queue.Decide(queue.Candidate{
+		RunID: runID, Provider: providerName, Model: model, QueuedAt: atResult.Value.(time.Time),
+	}, queue.Runtime{Queued: snapshot.Runs, Running: snapshot.Runs, Now: atResult.Value.(time.Time)})
+	if !decisionResult.OK {
+		return decisionResult
+	}
+	decision, ok := decisionResult.Value.(queue.Decision)
+	if !ok {
+		return core.Fail(core.Errorf("agent queue returned %T instead of decision", decisionResult.Value))
+	}
+	return core.Ok(ChildReview{
+		Action: action, Work: item, Parent: parent, AnswerID: answerID, RunID: runID,
+		Provider: providerName, Model: model, Project: project, Source: source, Detection: detection,
+		Command: command, Queue: decision, WorktreePath: parent.Worktree, Branch: parent.Branch,
+		Warning: nativeHostWarning,
+	})
+}
+
+func (orchestrator *Orchestrator) queueReviewedChild(review ChildReview) core.Result {
+	item, parent := review.Work, review.Parent
+	if parent.Number <= 0 || parent.Attempt <= 0 || core.Trim(parent.Branch) == "" || core.Trim(parent.Worktree) == "" {
+		return core.Fail(core.NewError("agent parent run has no durable workspace identity"))
 	}
 	snapshotResult := orchestrator.store.Snapshot(parent.WorkID)
 	if !snapshotResult.OK {
@@ -458,11 +613,12 @@ func (orchestrator *Orchestrator) queueChildAttempt(item work.Item, parent work.
 	}
 	at := atResult.Value.(time.Time)
 	child := work.Run{
-		ID: core.Trim(runID), WorkID: parent.WorkID, ProjectID: parent.ProjectID, ParentRunID: parent.ID,
-		Provider: core.Lower(core.Trim(providerName)), Model: core.Trim(model), SourceRevision: parent.SourceRevision,
+		ID: review.RunID, WorkID: parent.WorkID, ProjectID: parent.ProjectID, ParentRunID: parent.ID,
+		Provider: review.Provider, Model: review.Model, SourceRevision: parent.SourceRevision,
 		DurableRevision: parent.DurableRevision,
 		Branch:          parent.Branch, Worktree: parent.Worktree, Status: work.RunQueued,
 		Number: parent.Number, Attempt: parent.Attempt + 1, QueuedAt: at, UpdatedAt: at,
+		CommandReceipt: review.Command.Receipt,
 	}
 	if child.ID == "" || child.Provider == "" {
 		return core.Fail(core.NewError("agent child attempt requires run and provider IDs"))
@@ -475,12 +631,14 @@ func (orchestrator *Orchestrator) queueChildAttempt(item work.Item, parent work.
 	if committed := commitStore(orchestrator.store, Commit{Run: &child, CreateRun: true, Event: &event}); !committed.OK {
 		return committed
 	}
-	review := DispatchReview{
-		Request: work.DispatchRequest{Work: item, Provider: child.Provider, Model: child.Model},
-		Project: project, WorktreePath: child.Worktree, Warning: nativeHostWarning,
+	pendingReview := DispatchReview{
+		Request: work.DispatchRequest{Work: item, Provider: child.Provider, Model: child.Model, ConfirmedSourceRevision: review.Source.Revision},
+		Project: review.Project, Source: review.Source, Detection: review.Detection, Command: review.Command,
+		Queue: review.Queue, WorktreePath: child.Worktree, Warning: review.Warning,
+		exactCommand: true, reviewedBranch: review.Branch,
 	}
 	orchestrator.mu.Lock()
-	orchestrator.pending[child.ID] = review
+	orchestrator.pending[child.ID] = pendingReview
 	orchestrator.mu.Unlock()
 	orchestrator.wakeQueue()
 	return core.Ok(child)
@@ -871,28 +1029,28 @@ func (orchestrator *Orchestrator) startPreparingRun(preparation queuedPreparatio
 	run.Branch = prepared.Branch
 	run.Worktree = prepared.Path
 	run.ExecutionRevision = prepared.BaseRevision
-	continuationText := ""
-	if run.ParentRunID != "" {
-		continuationResult := orchestrator.continuation(run.ParentRunID)
-		if !continuationResult.OK {
-			orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, continuationResult.Error())
+	command := review.Command
+	if review.exactCommand {
+		if prepared.Path != review.WorktreePath || prepared.Path != command.Dir || prepared.Branch != review.reviewedBranch {
+			orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, "reconstructed child workspace differs from the confirmed launch review")
 			return core.Ok(true)
 		}
-		continuationText = renderContinuation(continuationResult.Value.(work.Continuation))
-	}
-	commandResult := adapter.Build(provider.Launch{
-		WorkID: run.WorkID, RunID: run.ID, Title: review.Request.Work.Title, Task: review.Request.Work.Task,
-		Worktree: prepared.Path, Branch: prepared.Branch, Model: run.Model, Continuation: continuationText,
-		UnsafeFlags: review.Request.UnsafeFlags,
-	})
-	if !commandResult.OK {
-		orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, commandResult.Error())
-		return core.Ok(true)
-	}
-	command, ok := commandResult.Value.(provider.Command)
-	if !ok {
-		orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, core.Sprintf("provider returned %T instead of command", commandResult.Value))
-		return core.Ok(true)
+	} else {
+		commandResult := adapter.Build(provider.Launch{
+			WorkID: run.WorkID, RunID: run.ID, Title: review.Request.Work.Title, Task: review.Request.Work.Task,
+			Worktree: prepared.Path, Branch: prepared.Branch, Model: run.Model,
+			UnsafeFlags: review.Request.UnsafeFlags,
+		})
+		if !commandResult.OK {
+			orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, commandResult.Error())
+			return core.Ok(true)
+		}
+		var commandOK bool
+		command, commandOK = commandResult.Value.(provider.Command)
+		if !commandOK {
+			orchestrator.finishWithoutProcess(run, work.RunPreparing, prepared, core.Sprintf("provider returned %T instead of command", commandResult.Value))
+			return core.Ok(true)
+		}
 	}
 	atResult := orchestrator.now()
 	if !atResult.OK {
@@ -1010,6 +1168,8 @@ func (orchestrator *Orchestrator) abortUntrackedProcess(execution *runExecution,
 }
 
 func (orchestrator *Orchestrator) finishWithoutProcess(run work.Run, expected work.RunStatus, prepared workspace.RunWorkspace, reason string) {
+	cleanupContext, cancelCleanup := orchestrator.cleanupContext()
+	defer cancelCleanup()
 	atResult := orchestrator.now()
 	if !atResult.OK {
 		return
@@ -1024,7 +1184,7 @@ func (orchestrator *Orchestrator) finishWithoutProcess(run work.Run, expected wo
 	run.UpdatedAt = run.FinishedAt
 	var capture workspace.Capture
 	if prepared.Path != "" {
-		captured := orchestrator.workspaces.CaptureRun(context.WithoutCancel(orchestrator.ctx), prepared)
+		captured := orchestrator.workspaces.CaptureRun(cleanupContext, prepared)
 		if captured.OK {
 			capturedValue, captureOK := captured.Value.(workspace.Capture)
 			if !captureOK {
@@ -1052,7 +1212,7 @@ func (orchestrator *Orchestrator) finishWithoutProcess(run work.Run, expected wo
 		return
 	}
 	if prepared.Path != "" && capture.Pushed {
-		released := orchestrator.workspaces.ReleaseRun(context.WithoutCancel(orchestrator.ctx), prepared)
+		released := orchestrator.workspaces.ReleaseRun(cleanupContext, prepared)
 		if !released.OK {
 			orchestrator.persistWorkspaceRetained(run, released.Error())
 		}
@@ -1084,6 +1244,8 @@ func (orchestrator *Orchestrator) monitorRun(execution *runExecution) {
 	go func() { waited <- execution.process.Wait() }()
 	ticker := time.NewTicker(orchestrator.logBatchDelay)
 	defer ticker.Stop()
+	timeout := time.NewTimer(orchestrator.attemptTimeout)
+	defer timeout.Stop()
 	for {
 		select {
 		case <-execution.signal:
@@ -1091,6 +1253,12 @@ func (orchestrator *Orchestrator) monitorRun(execution *runExecution) {
 		case <-ticker.C:
 			orchestrator.consumeLines(execution)
 			orchestrator.flushLogs(execution)
+		case <-timeout.C:
+			execution.timedOut = true
+			execution.failure = core.Concat("native provider attempt timeout after ", orchestrator.attemptTimeout.String())
+			if shutdown := execution.process.Shutdown(); !shutdown.OK {
+				execution.failure = core.Join("; ", execution.failure, shutdown.Error())
+			}
 		case result := <-waited:
 			orchestrator.consumeLines(execution)
 			orchestrator.flushLogs(execution)
@@ -1223,6 +1391,8 @@ func (orchestrator *Orchestrator) failExecution(execution *runExecution, reason 
 }
 
 func (orchestrator *Orchestrator) finishExecution(execution *runExecution, waited core.Result) {
+	cleanupContext, cancelCleanup := orchestrator.cleanupContext()
+	defer cancelCleanup()
 	runResult := orchestrator.store.Run(execution.run.ID)
 	run := execution.run
 	if runResult.OK {
@@ -1242,7 +1412,7 @@ func (orchestrator *Orchestrator) finishExecution(execution *runExecution, waite
 	}
 	run.ExitCode = exitCode
 
-	captured := orchestrator.workspaces.CaptureRun(context.WithoutCancel(orchestrator.ctx), execution.workspace)
+	captured := orchestrator.workspaces.CaptureRun(cleanupContext, execution.workspace)
 	var capture workspace.Capture
 	if captured.OK {
 		var captureOK bool
@@ -1325,6 +1495,9 @@ func (orchestrator *Orchestrator) finishExecution(execution *runExecution, waite
 	run.FinishedAt = atResult.Value.(time.Time)
 	run.UpdatedAt = run.FinishedAt
 	eventKind := string(status)
+	if status == work.RunFailed && execution.timedOut {
+		eventKind = "timeout"
+	}
 	if status == work.RunCompleted && title == "unclassified provider finish" {
 		eventKind = "unclassified_provider_finish"
 	}
@@ -1337,7 +1510,7 @@ func (orchestrator *Orchestrator) finishExecution(execution *runExecution, waite
 		return
 	}
 	if capture.Pushed {
-		released := orchestrator.workspaces.ReleaseRun(context.WithoutCancel(orchestrator.ctx), execution.workspace)
+		released := orchestrator.workspaces.ReleaseRun(cleanupContext, execution.workspace)
 		if !released.OK {
 			orchestrator.persistWorkspaceRetained(run, released.Error())
 		}
@@ -1555,6 +1728,27 @@ func sameDispatchReview(review, fresh DispatchReview) bool {
 		review.Queue.Allowed == fresh.Queue.Allowed && review.Queue.Reason == fresh.Queue.Reason &&
 		review.Queue.NotBefore.Equal(fresh.Queue.NotBefore) && review.WorktreePath == fresh.WorktreePath &&
 		review.Warning == fresh.Warning
+}
+
+func sameChildReview(review, fresh ChildReview) bool {
+	if review.Action != fresh.Action || review.AnswerID != fresh.AnswerID || review.RunID != fresh.RunID ||
+		review.Provider != fresh.Provider || review.Model != fresh.Model || review.Branch != fresh.Branch ||
+		core.JSONMarshalString(review.Work) != core.JSONMarshalString(fresh.Work) ||
+		core.JSONMarshalString(review.Parent) != core.JSONMarshalString(fresh.Parent) {
+		return false
+	}
+	return sameDispatchReview(childDispatchReview(review), childDispatchReview(fresh))
+}
+
+func childDispatchReview(review ChildReview) DispatchReview {
+	return DispatchReview{
+		Request: work.DispatchRequest{
+			Work: review.Work, Provider: review.Provider, Model: review.Model,
+			ConfirmedSourceRevision: review.Source.Revision,
+		},
+		Project: review.Project, Source: review.Source, Detection: review.Detection, Command: review.Command,
+		Queue: review.Queue, WorktreePath: review.WorktreePath, Warning: review.Warning,
+	}
 }
 
 func sameStrings(left, right []string) bool {

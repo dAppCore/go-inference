@@ -161,16 +161,17 @@ type sessionGeneration struct {
 }
 
 type appLifecycle struct {
-	once    sync.Once
-	result  core.Result
-	mu      sync.Mutex
-	stopped bool
-	cancel  context.CancelFunc
-	context context.Context
-	workers sync.WaitGroup
-	stopCh  chan struct{}
-	nextID  uint64
-	pending map[uint64]tea.Msg
+	shutdownMu       sync.Mutex
+	shutdownComplete bool
+	result           core.Result
+	mu               sync.Mutex
+	stopped          bool
+	cancel           context.CancelFunc
+	context          context.Context
+	workers          sync.WaitGroup
+	stopCh           chan struct{}
+	nextID           uint64
+	pending          map[uint64]tea.Msg
 }
 
 type lifecycleStoppedMsg struct{}
@@ -572,7 +573,7 @@ func (a *app) queueAgentAction(feature agentFeature) core.Result {
 		a.activeOverlay = overlayChangeReview
 		return core.Ok(nil)
 	}
-	if feature == agentFeatureDispatch || feature == agentFeatureChangesReview {
+	if feature == agentFeatureDispatch || feature == agentFeatureRetry || feature == agentFeatureResume || feature == agentFeatureChangesReview {
 		if feature == agentFeatureDispatch {
 			a.agentStage = agentReviewProject
 			a.launchReview = newAgentSelectionOverlay(request.Provider, request.Model)
@@ -624,7 +625,7 @@ func (a *app) resetAgentOperation() {
 func (a *app) agentReviewCommand(operationID uint64, request agentRequest, stage agentReviewStage) tea.Cmd {
 	return func() tea.Msg {
 		workID := request.WorkID
-		if request.Feature == agentFeatureChangesReview && request.RunID != "" {
+		if (request.Feature == agentFeatureChangesReview || request.Feature == agentFeatureRetry || request.Feature == agentFeatureResume) && request.RunID != "" {
 			workID = request.RunID
 		}
 		result := a.agent.Review(a.lifecycle.context, agentReviewRequest{
@@ -1921,40 +1922,52 @@ func (a *app) shutdown() core.Result {
 	if a.lifecycle == nil {
 		a.lifecycle = newAppLifecycle(context.Background(), nil)
 	}
-	a.lifecycle.once.Do(func() {
-		failures := make([]string, 0)
-		record := func(candidate core.Result) {
-			if !candidate.OK {
-				failures = append(failures, candidate.Error())
-			}
+	a.lifecycle.shutdownMu.Lock()
+	defer a.lifecycle.shutdownMu.Unlock()
+	if a.lifecycle.shutdownComplete {
+		return a.lifecycle.result
+	}
+	failures := make([]string, 0)
+	record := func(candidate core.Result) {
+		if !candidate.OK {
+			failures = append(failures, candidate.Error())
 		}
-		a.lifecycle.stop()
-		if a.jobs != nil {
-			record(a.jobs.CancelAll())
+	}
+	a.lifecycle.stop()
+	if a.jobs != nil {
+		record(a.jobs.CancelAll())
+	}
+	record(a.drainManagedGenerations())
+	agentClosed := true
+	if a.resources != nil {
+		closeResult := a.resources.closeAgent()
+		record(closeResult)
+		agentClosed = closeResult.OK
+	} else if a.agent != nil {
+		closeResult := a.agent.Close()
+		record(closeResult)
+		agentClosed = closeResult.OK
+		if closeResult.OK {
+			a.agent = nil
 		}
-		record(a.drainManagedGenerations())
-		if a.resources != nil {
-			record(a.resources.closeAgent())
-		} else if a.agent != nil {
-			record(a.agent.Close())
-		}
-		a.svc.teardown("stopped (quit)")
-		if a.lane != nil {
-			record(a.lane.Close())
-			a.lane = nil
-			a.model = nil
-		}
-		a.lifecycle.wait()
-		a.lifecycle.closePending()
-		if a.resources != nil {
-			record(a.resources.Close())
-		}
-		if len(failures) > 0 {
-			a.lifecycle.result = core.Fail(core.E("tui.app.shutdown", core.Join("; ", failures...), nil))
-			return
-		}
-		a.lifecycle.result = core.Ok(nil)
-	})
+	}
+	a.svc.teardown("stopped (quit)")
+	if a.lane != nil {
+		record(a.lane.Close())
+		a.lane = nil
+		a.model = nil
+	}
+	a.lifecycle.wait()
+	a.lifecycle.closePending()
+	if a.resources != nil && agentClosed {
+		record(a.resources.Close())
+	}
+	if len(failures) > 0 {
+		a.lifecycle.result = core.Fail(core.E("tui.app.shutdown", core.Join("; ", failures...), nil))
+		return a.lifecycle.result
+	}
+	a.lifecycle.result = core.Ok(nil)
+	a.lifecycle.shutdownComplete = true
 	return a.lifecycle.result
 }
 

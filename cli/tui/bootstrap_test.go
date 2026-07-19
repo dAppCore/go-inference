@@ -185,6 +185,34 @@ func TestAgentBootstrap_DurableQueueState_Good(t *testing.T) {
 	}
 }
 
+func TestAgentBootstrapPropagatesDispatchAttemptTimeout(t *testing.T) {
+	files := testWorkspaceFiles(t)
+	repository := openTestDuckRepository(t)
+	defer closeTestDuckRepository(t, repository)
+	engine := &fixtureNativeAgentEngine{}
+	factories := fixtureAgentBootstrapFactories(t, repository, engine, &fixtureGitServer{})
+	policy := queue.Policy{
+		Version:     1,
+		Dispatch:    queue.DispatchConfig{DefaultAgent: "codex", GlobalConcurrency: 1, TimeoutMinutes: 7},
+		Concurrency: map[string]queue.ConcurrencyLimit{"codex": {Total: 1}},
+		Rates:       map[string]queue.RateConfig{}, Providers: map[string]queue.NativeConfig{},
+	}
+	factories.LoadPolicy = func(coreio.Medium, string) core.Result { return core.Ok(policy) }
+	var captured orchestrator.Options
+	factories.NewOrchestrator = func(options orchestrator.Options) core.Result {
+		captured = options
+		return core.Ok(nativeAgentEngine(engine))
+	}
+	result := composeNativeAgent(context.Background(), agentBootstrapInput{Files: files, Repository: repository}, factories)
+	core.AssertTrue(t, result.OK, result.Error())
+	defer result.Value.(agentBootstrapResult).Provider.Close()
+	duration, available := agentOrchestratorDurationOption(captured, "AttemptTimeout")
+	if !available {
+		t.Skip("published standalone orchestrator contract predates attempt timeout")
+	}
+	core.AssertEqual(t, 7*time.Minute, duration)
+}
+
 func TestAgentBootstrap_DurableSnapshotFailure_Bad(t *testing.T) {
 	files := testWorkspaceFiles(t)
 	repository := openTestDuckRepository(t)
@@ -394,14 +422,47 @@ func TestAgentBootstrap_ResourceClosePreservesErrors_Ugly(t *testing.T) {
 		Repository: &failingCloseWorkspaceRepository{order: &order},
 	}
 	result := resources.Close()
-	if result.OK || strings.Join(order, ",") != "agent,state,repository" {
+	if result.OK || strings.Join(order, ",") != "agent" {
 		t.Fatalf("Close = %#v, order=%#v", result, order)
 	}
-	for _, reason := range []string{"agent close failed", "state close failed", "repository close failed"} {
-		if !strings.Contains(result.Error(), reason) {
-			t.Fatalf("Close error %q does not preserve %q", result.Error(), reason)
-		}
+	if !strings.Contains(result.Error(), "agent close failed") {
+		t.Fatalf("Close error %q does not preserve agent failure", result.Error())
 	}
+	if resources.State == nil || resources.Repository == nil {
+		t.Fatalf("Close destroyed retry dependencies after agent failure: %#v", resources)
+	}
+}
+
+func TestAgentBootstrapResourceCloseRetriesAgentOwnershipCleanup(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	state := &retryCloseReactiveState{}
+	agent := &retryCloseAgent{repository: repository}
+	resources := &workspaceResources{Agent: agent, State: state, Repository: repository}
+	first := resources.Close()
+	core.AssertFalse(t, first.OK)
+	core.AssertTrue(t, resources.Agent != nil)
+	core.AssertTrue(t, resources.State != nil)
+	core.AssertTrue(t, resources.Repository != nil)
+	core.AssertFalse(t, state.closed)
+	core.AssertTrue(t, repository.ListSessions(false).OK)
+	second := resources.Close()
+	core.AssertTrue(t, second.OK, second.Error())
+	core.AssertEqual(t, 2, agent.calls)
+	core.AssertTrue(t, resources.Agent == nil)
+	core.AssertTrue(t, resources.State == nil)
+	core.AssertTrue(t, resources.Repository == nil)
+	core.AssertTrue(t, state.closed)
+}
+
+func TestAgentBootstrapOwnedNativeLauncherCloseRetriesFailure(t *testing.T) {
+	inner := &fixtureAgentLauncher{closeFailures: 1}
+	launcher := &ownedNativeLauncher{launcher: inner, result: core.Ok(nil)}
+	first := launcher.Close()
+	core.AssertFalse(t, first.OK)
+	core.AssertEqual(t, 1, inner.closeCalls)
+	second := launcher.Close()
+	core.AssertTrue(t, second.OK, second.Error())
+	core.AssertEqual(t, 2, inner.closeCalls)
 }
 
 func TestOpenWorkspace_Bad(t *testing.T) {
@@ -634,7 +695,10 @@ func (adapter *fixtureNativeProvider) Build(provider.Launch) core.Result {
 
 func (*fixtureNativeProvider) ParseLine(string, string) []provider.Output { return nil }
 
-type fixtureAgentLauncher struct{ closeCalls int }
+type fixtureAgentLauncher struct {
+	closeCalls    int
+	closeFailures int
+}
 
 func (*fixtureAgentLauncher) DetectEnvironment([]string) core.Result { return core.Ok([]string{}) }
 
@@ -644,6 +708,10 @@ func (*fixtureAgentLauncher) Start(context.Context, provider.Command, func(strin
 
 func (launcher *fixtureAgentLauncher) Close() core.Result {
 	launcher.closeCalls++
+	if launcher.closeFailures > 0 {
+		launcher.closeFailures--
+		return core.Fail(core.E("test.launcher", "ownership cleanup pending", nil))
+	}
 	return core.Ok(nil)
 }
 
@@ -655,6 +723,44 @@ func (ids *fixtureAgentIdentifiers) New() string {
 }
 
 type failingCloseAgent struct{ order *[]string }
+
+type retryCloseAgent struct {
+	calls      int
+	repository workspaceRepository
+}
+
+func (*retryCloseAgent) Capabilities() []agentCapability      { return nil }
+func (*retryCloseAgent) Snapshot(context.Context) core.Result { return core.Ok(agentSnapshot{}) }
+func (*retryCloseAgent) Review(context.Context, agentReviewRequest) core.Result {
+	return core.Fail(core.E("test.retryAgent", "not used", nil))
+}
+func (*retryCloseAgent) Run(context.Context, agentRequest) core.Result {
+	return core.Fail(core.E("test.retryAgent", "not used", nil))
+}
+func (agent *retryCloseAgent) Close() core.Result {
+	agent.calls++
+	if agent.calls == 1 {
+		return core.Fail(core.E("test.retryAgent", "ownership cleanup pending", nil))
+	}
+	if agent.repository != nil {
+		if result := agent.repository.ListSessions(false); !result.OK {
+			return core.Fail(core.E("test.retryAgent", "repository unavailable during retry", result.Err()))
+		}
+	}
+	return core.Ok(nil)
+}
+
+type retryCloseReactiveState struct{ closed bool }
+
+func (*retryCloseReactiveState) Get(string, string) (string, core.Result) {
+	return "", core.Ok(nil)
+}
+func (*retryCloseReactiveState) Set(string, string, string) core.Result { return core.Ok(nil) }
+func (*retryCloseReactiveState) Delete(string, string) core.Result      { return core.Ok(nil) }
+func (state *retryCloseReactiveState) Close() core.Result {
+	state.closed = true
+	return core.Ok(nil)
+}
 
 func (*failingCloseAgent) Capabilities() []agentCapability { return nil }
 func (*failingCloseAgent) Snapshot(context.Context) core.Result {

@@ -641,22 +641,50 @@ func TestAppShutdownPreservesAllCloseErrors_Ugly(t *testing.T) {
 
 	result := a.shutdown()
 	if result.OK {
-		t.Fatal("shutdown with four close failures succeeded")
+		t.Fatal("shutdown with retained agent ownership succeeded")
 	}
 	want := core.E(
 		"tui.app.shutdown",
-		"test.agent.Close: agent close failed; test.model.Close: model close failed; tui.workspaceResources.Close: test.state.Close: state close failed; test.repository.Close: repository close failed",
+		"test.agent.Close: agent close failed; test.model.Close: model close failed",
 		nil,
 	).Error()
 	if result.Error() != want {
 		t.Fatalf("shutdown error = %q, want %q", result.Error(), want)
 	}
-	if got := strings.Join(order, ","); got != "agent,model,state,repository" {
+	if got := strings.Join(order, ","); got != "agent,model" {
 		t.Fatalf("shutdown close order = %q", got)
+	}
+	if resources.State == nil || resources.Repository == nil {
+		t.Fatal("shutdown destroyed retained-agent retry dependencies")
 	}
 	if model.closes.Load() != 1 {
 		t.Fatalf("underlying model Close calls = %d, want 1", model.closes.Load())
 	}
+}
+
+func TestAppShutdownRetriesAgentOwnershipBeforeClosingDependencies(t *testing.T) {
+	repository := openTestDuckRepository(t)
+	state := &retryCloseReactiveState{}
+	agent := &retryCloseAgent{repository: repository}
+	resources := &workspaceResources{Agent: agent, State: state, Repository: repository}
+	a := newApp("", 0, 64)
+	a.resources = resources
+	a.agent = agent
+
+	first := a.shutdown()
+	core.AssertFalse(t, first.OK)
+	core.AssertEqual(t, 1, agent.calls)
+	core.AssertFalse(t, state.closed)
+	core.AssertTrue(t, resources.State != nil)
+	core.AssertTrue(t, resources.Repository != nil)
+	core.AssertTrue(t, repository.ListSessions(false).OK)
+
+	second := a.shutdown()
+	core.AssertTrue(t, second.OK, second.Error())
+	core.AssertEqual(t, 2, agent.calls)
+	core.AssertTrue(t, state.closed)
+	core.AssertTrue(t, resources.State == nil)
+	core.AssertTrue(t, resources.Repository == nil)
 }
 
 func TestAppQuitPersistsPartialGeneration_Ugly(t *testing.T) {
@@ -1616,6 +1644,12 @@ func TestApp_AgentResumeUsesNativeResumeAndInterruptedRetry(t *testing.T) {
 			t.Fatalf("Resume: %v", result.Value)
 		}
 		driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+		if a.activeOverlay != overlayLaunchReview || countAgentCall(engine.calls, "resume") != 0 {
+			t.Fatalf("resume review = overlay %d calls %#v", a.activeOverlay, engine.calls)
+		}
+		model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		a = model.(app)
+		driveCorrectiveCommand(t, &a, command)
 		want := work.ResumeRequest{
 			Work:        nativeWorkItem(agentWorkRequest{ID: "work-1", ExternalID: "local:work-1", Title: "Ship", Task: "Implement the slice", Repository: "/src/project"}, "work-1", ""),
 			ParentRunID: "run-parent", AnswerID: "answer-exact", Provider: "codex", Model: "gpt-5",
@@ -1636,6 +1670,12 @@ func TestApp_AgentResumeUsesNativeResumeAndInterruptedRetry(t *testing.T) {
 			t.Fatalf("Resume interrupted: %v", result.Value)
 		}
 		driveCorrectiveCommand(t, &a, a.takeAgentCommand())
+		if a.activeOverlay != overlayLaunchReview || countAgentCall(engine.calls, "retry") != 0 {
+			t.Fatalf("interrupted retry review = overlay %d calls %#v", a.activeOverlay, engine.calls)
+		}
+		model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		a = model.(app)
+		driveCorrectiveCommand(t, &a, command)
 		if engine.retryParent != "run-interrupted" || engine.resumeRequest.ParentRunID != "" || engine.retryItem.ID != "work-1" {
 			t.Fatalf("interrupted Resume = retry item %#v parent %q resume %#v", engine.retryItem, engine.retryParent, engine.resumeRequest)
 		}

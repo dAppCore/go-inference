@@ -235,6 +235,7 @@ func (service *softServe) Close() core.Result {
 			}
 		case <-timer.C:
 			failures = append(failures, "SSH serve loop did not stop before timeout")
+			return core.Fail(core.NewError(core.Join("; ", failures...)))
 		}
 	}
 	if database != nil {

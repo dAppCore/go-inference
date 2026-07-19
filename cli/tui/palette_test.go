@@ -139,6 +139,23 @@ func TestCommandPalette_AgentWorkStatus(t *testing.T) {
 	}
 }
 
+func TestCommandPaletteAnsweredWaitingDisablesAnswerAndEnablesResume(t *testing.T) {
+	capabilities := []agentCapability{{Feature: agentFeatureAnswer, Available: true}, {Feature: agentFeatureResume, Available: true}}
+	selected := workItemRecord{ID: "work-1", Status: workStatusWaiting}
+	state := agentWorkSnapshot{
+		ExternalID: "work-1", NativeRunID: "waiting-1", QuestionID: "question-1",
+		AnswerID: "answer-1", ResumeRunID: "resume-1",
+	}
+	palette := newCommandPalette(newUIStyles(midnightTheme()))
+	palette.SetAgentContext(capabilities, &selected, state)
+	if palette.byID[agentCommandID(agentFeatureAnswer)].Available {
+		t.Fatal("Answer remains available after its durable response")
+	}
+	if !palette.byID[agentCommandID(agentFeatureResume)].Available {
+		t.Fatal("Resume is unavailable after its durable response")
+	}
+}
+
 func TestCommandPalette_AgentNativeRunAndReviewState(t *testing.T) {
 	caps := []agentCapability{{Feature: agentFeatureCancel, Available: true}, {Feature: agentFeatureChangesReview, Available: true}, {Feature: agentFeatureAccept, Available: true}, {Feature: agentFeatureReject, Available: true}}
 	selected := workItemRecord{ID: "local", Status: "completed"}

@@ -34,6 +34,20 @@ func ExampleManager_ReviewChanges() {
 	// Output: false
 }
 
+func ExampleManager_RetainReview() {
+	var manager *Manager
+	result := manager.RetainReview(ChangeReview{})
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleManager_AbandonReview() {
+	var manager *Manager
+	result := manager.AbandonReview(context.Background(), ChangeReview{})
+	core.Println(result.OK)
+	// Output: false
+}
+
 func ExampleManager_Apply() {
 	var manager *Manager
 	result := manager.Apply(context.Background(), AcceptRequest{Confirmed: true})

@@ -28,6 +28,26 @@ type workspaceTestRunner struct {
 	valueWhen func(Command) (any, bool)
 }
 
+type workspaceRunOnly struct {
+	result core.Result
+}
+
+func (runner workspaceRunOnly) Run(context.Context, Command) core.Result {
+	return runner.result
+}
+
+type workspaceDetailedProbeRunner struct {
+	result core.Result
+}
+
+func (runner workspaceDetailedProbeRunner) Run(context.Context, Command) core.Result {
+	return runner.result
+}
+
+func (runner workspaceDetailedProbeRunner) RunDetailed(context.Context, Command) core.Result {
+	return runner.result
+}
+
 func (runner *workspaceTestRunner) Run(ctx context.Context, command Command) core.Result {
 	runner.mu.Lock()
 	copyCommand := Command{
@@ -62,6 +82,34 @@ func (runner *workspaceTestRunner) Run(ctx context.Context, command Command) cor
 		return result
 	}
 	return core.Ok(string(result.Value.([]byte)))
+}
+
+func (runner *workspaceTestRunner) RunDetailed(ctx context.Context, command Command) core.Result {
+	runner.mu.Lock()
+	copyCommand := Command{
+		Dir:         command.Dir,
+		Executable:  command.Executable,
+		Args:        append([]string(nil), command.Args...),
+		Environment: append([]string(nil), command.Environment...),
+	}
+	runner.commands = append(runner.commands, copyCommand)
+	failWhen := runner.failWhen
+	valueWhen := runner.valueWhen
+	runner.mu.Unlock()
+	if failWhen != nil && failWhen(copyCommand) {
+		return core.Ok(CommandOutcome{ExitCode: -1, Failure: core.NewError("injected Git root probe failure")})
+	}
+	if valueWhen != nil {
+		if value, matched := valueWhen(copyCommand); matched {
+			text, ok := value.(string)
+			if !ok {
+				return core.Ok(CommandOutcome{ExitCode: 0, Output: core.Sprintf("%v", value)})
+			}
+			return core.Ok(CommandOutcome{ExitCode: 0, Output: text})
+		}
+	}
+	copyCommand.Environment = append([]string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "LC_ALL=C"}, copyCommand.Environment...)
+	return (ProcessRunner{}).RunDetailed(ctx, copyCommand)
 }
 
 func (runner *workspaceTestRunner) setFailPush(fail bool) {
@@ -514,6 +562,62 @@ func TestWorkspaceReviewGitFailures(t *testing.T) {
 	}
 }
 
+func TestWorkspaceManagerReviewSourceRejectsAmbiguousRepositoryRootFailures(t *testing.T) {
+	for _, existingRepository := range []bool{false, true} {
+		t.Run(core.Sprintf("existing=%t", existingRepository), func(t *testing.T) {
+			fixture := workspaceNewFixture(t)
+			source := core.PathJoin(t.TempDir(), "ambiguous repository root")
+			workspaceWriteFile(t, core.PathJoin(source, "file.txt"), "content\n")
+			if existingRepository {
+				workspaceCreateRepository(t, fixture.runner, source)
+			}
+			fixture.runner.setFailure(func(command Command) bool {
+				return workspaceCommandContains(command, "rev-parse\x00--show-toplevel")
+			})
+
+			result := fixture.manager.ReviewSource(context.Background(), source)
+			core.AssertFalse(t, result.OK)
+		})
+	}
+}
+
+func TestWorkspace_probeRepositoryRoot_Bad(t *testing.T) {
+	selectedPath := t.TempDir()
+	manager := &Manager{git: workspaceRunOnly{result: core.Ok(" /reviewed/root\n")}}
+	result := manager.probeRepositoryRoot(context.Background(), selectedPath)
+	core.AssertTrue(t, result.OK, result.Error())
+	core.AssertEqual(t, "/reviewed/root", result.Value.(string))
+
+	manager.git = workspaceRunOnly{result: core.Fail(core.NewError("injected root failure"))}
+	result = manager.probeRepositoryRoot(context.Background(), selectedPath)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "cannot classify")
+
+	manager.git = workspaceDetailedProbeRunner{result: core.Fail(core.NewError("injected detailed failure"))}
+	result = manager.probeRepositoryRoot(context.Background(), selectedPath)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "failed to inspect")
+
+	manager.git = workspaceDetailedProbeRunner{result: core.Ok("wrong outcome")}
+	result = manager.probeRepositoryRoot(context.Background(), selectedPath)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "instead of command outcome")
+
+	manager.git = workspaceDetailedProbeRunner{result: core.Ok(CommandOutcome{ExitCode: 0, Output: "  \n"})}
+	result = manager.probeRepositoryRoot(context.Background(), selectedPath)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "empty repository root")
+
+	loopRoot := t.TempDir()
+	core.AssertTrue(t, core.Symlink(".git", core.PathJoin(loopRoot, ".git")).OK)
+	manager.git = workspaceDetailedProbeRunner{result: core.Ok(CommandOutcome{
+		ExitCode: 128, Output: "fatal: not a git repository",
+	})}
+	result = manager.probeRepositoryRoot(context.Background(), loopRoot)
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "repository marker")
+}
+
 func TestWorkspaceAdHocReviewFailures(t *testing.T) {
 	stages := []string{"id", "stale-delete", "ensure", "init", "list", "list-cleanup", "cleanup", "hash"}
 	for _, stage := range stages {
@@ -839,6 +943,23 @@ func TestWorkspacePrepareRunFailures(t *testing.T) {
 	}
 }
 
+func TestWorkspacePrepareRunPostAddFailureCleansProvisionalWorktreeAndBranch(t *testing.T) {
+	fixture := workspaceNewRegisteredRunFixture(t)
+	branch := runBranch(fixture.run.WorkID, fixture.run.Number).Value.(string)
+	path := core.PathJoin(fixture.root, fixture.project.ID, "runs", fixture.run.ID, "worktree")
+	fixture.runner.setFailure(func(command Command) bool {
+		return command.Dir == path && workspaceCommandContains(command, "rev-parse\x00HEAD")
+	})
+
+	result := fixture.manager.PrepareRun(context.Background(), fixture.project, fixture.run)
+	core.AssertFalse(t, result.OK)
+	fixture.runner.setFailure(nil)
+	core.AssertFalse(t, core.Stat(path).OK)
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", branch))
+	_, leased := fixture.manager.leases[fixture.run.ID]
+	core.AssertFalse(t, leased)
+}
+
 func TestWorkspaceRunValidationEdges(t *testing.T) {
 	fixture := workspaceNewRegisteredRunFixture(t)
 	project := fixture.project
@@ -897,10 +1018,7 @@ func TestWorkspace_Manager_CaptureRun_Good(t *testing.T) {
 	workspaceWriteFile(t, core.PathJoin(prepared.Path, "README.md"), "agent change\n")
 	workspaceWriteFile(t, core.PathJoin(prepared.Path, "new.txt"), "new\n")
 	workspaceWriteFile(t, core.PathJoin(prepared.Path, "cache.ignored"), "ignored\n")
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	result := fixture.manager.CaptureRun(cancelled, prepared)
+	result := fixture.manager.CaptureRun(context.Background(), prepared)
 	core.AssertTrue(t, result.OK, result.Error())
 	capture := result.Value.(Capture)
 	core.AssertTrue(t, capture.Changed)
@@ -910,6 +1028,20 @@ func TestWorkspace_Manager_CaptureRun_Good(t *testing.T) {
 	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, prepared.Path, "ls-files", "cache.ignored"))
 	remote := fixture.server.EnsureRepository(context.Background(), project.RepositoryName).Value.(gitserver.Repository)
 	core.AssertEqual(t, capture.Revision, workspaceRunGit(t, fixture.runner, remote.CloneURL, "rev-parse", core.Concat("refs/heads/", prepared.Branch)))
+}
+
+func TestWorkspaceCaptureRunCancelledContextRetainsLease(t *testing.T) {
+	fixture := workspaceNewRunFixture(t)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := fixture.manager.CaptureRun(cancelled, fixture.prepared)
+	core.AssertTrue(t, result.OK, result.Error())
+	capture := result.Value.(Capture)
+	core.AssertTrue(t, capture.Retained)
+	core.AssertFalse(t, capture.Pushed)
+	core.AssertContains(t, capture.Summary, "context canceled")
+	core.AssertTrue(t, core.Stat(fixture.prepared.Path).OK)
+	core.AssertEqual(t, fixture.prepared.Path, fixture.manager.leases[fixture.prepared.RunID].Path)
 }
 
 func TestWorkspace_Manager_CaptureRun_Bad(t *testing.T) {
@@ -1581,13 +1713,28 @@ func TestWorkspaceLeaseValidationAndCleanup(t *testing.T) {
 
 	worktreeRelative := core.PathJoin("project", "runs", "failed", "worktree")
 	core.AssertTrue(t, fixture.files.EnsureDir(worktreeRelative) == nil)
-	cleaned := fixture.manager.cleanupFailedWorktree(context.Background(), lease.Project.ClonePath, core.PathJoin(fixture.root, worktreeRelative), worktreeRelative)
-	core.AssertTrue(t, cleaned.OK, cleaned.Error())
+	cleaned := fixture.manager.cleanupFailedWorktree(context.Background(), lease.Project.ClonePath, core.PathJoin(fixture.root, worktreeRelative), worktreeRelative, "", false)
+	core.AssertFalse(t, cleaned.OK)
 	core.AssertFalse(t, fixture.files.Exists(core.PathDir(worktreeRelative)))
 
 	fault := &workspaceFaultMedium{Medium: fixture.files, failDelete: core.PathDir(worktreeRelative)}
 	fixture.manager.files = fault
-	core.AssertFalse(t, fixture.manager.cleanupFailedWorktree(context.Background(), lease.Project.ClonePath, core.PathJoin(fixture.root, worktreeRelative), worktreeRelative).OK)
+	core.AssertFalse(t, fixture.manager.cleanupFailedWorktree(context.Background(), lease.Project.ClonePath, core.PathJoin(fixture.root, worktreeRelative), worktreeRelative, "", false).OK)
+
+	fixture.manager.files = fixture.files
+	branchRelative := core.PathJoin("project", "runs", "branch-failure", "worktree")
+	core.AssertTrue(t, fixture.files.EnsureDir(branchRelative) == nil)
+	fixture.runner.setValue(func(Command) (any, bool) { return "", true })
+	fixture.runner.setFailure(func(command Command) bool {
+		return workspaceCommandContains(command, "branch\x00--list")
+	})
+	branchCleanup := fixture.manager.cleanupFailedWorktree(
+		context.Background(), lease.Project.ClonePath, core.PathJoin(fixture.root, branchRelative), branchRelative,
+		"lem/work/work/run-1", true,
+	)
+	core.AssertFalse(t, branchCleanup.OK)
+	core.AssertContains(t, branchCleanup.Error(), "branch inspect")
+	core.AssertFalse(t, fixture.files.Exists(core.PathDir(branchRelative)))
 }
 
 func TestWorkspaceGitOutputShape(t *testing.T) {

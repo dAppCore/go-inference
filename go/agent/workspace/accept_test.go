@@ -168,6 +168,65 @@ func TestAccept_Manager_ReviewChanges_Ugly(t *testing.T) {
 	core.AssertFalse(t, fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).OK)
 }
 
+func TestAccept_Manager_RetainReview_Good(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "retained-review.txt", "retained\n", "retained review")
+	fixture.capture(t)
+	review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
+	result := fixture.manager.RetainReview(review)
+	core.AssertTrue(t, result.OK, result.Error())
+	core.AssertEqual(t, 0, len(fixture.manager.reviews))
+	core.AssertTrue(t, core.Stat(review.IntegrationPath).OK)
+}
+
+func TestAccept_Manager_RetainReview_Bad(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "forged-review.txt", "forged\n", "forged review")
+	fixture.capture(t)
+	review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
+	review.IntegrationBranch = "lem/integration/forged"
+	core.AssertFalse(t, fixture.manager.RetainReview(review).OK)
+	core.AssertEqual(t, 1, len(fixture.manager.reviews))
+}
+
+func TestAccept_Manager_RetainReview_Ugly(t *testing.T) {
+	var manager *Manager
+	core.AssertFalse(t, manager.RetainReview(ChangeReview{}).OK)
+	fixture := newAcceptanceFixture(t)
+	core.AssertFalse(t, fixture.manager.RetainReview(ChangeReview{}).OK)
+}
+
+func TestAccept_Manager_AbandonReview_Good(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "abandoned-review.txt", "abandoned\n", "abandoned review")
+	fixture.capture(t)
+	review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
+	result := fixture.manager.AbandonReview(context.Background(), review)
+	core.AssertTrue(t, result.OK, result.Error())
+	core.AssertFalse(t, core.Stat(review.IntegrationPath).OK)
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", review.IntegrationBranch))
+}
+
+func TestAccept_Manager_AbandonReview_Bad(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "mismatched-review.txt", "mismatched\n", "mismatched review")
+	fixture.capture(t)
+	review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
+	review.RunID = "different-run"
+	core.AssertFalse(t, fixture.manager.AbandonReview(context.Background(), review).OK)
+	core.AssertTrue(t, core.Stat(review.IntegrationPath).OK)
+}
+
+func TestAccept_Manager_AbandonReview_Ugly(t *testing.T) {
+	var manager *Manager
+	core.AssertFalse(t, manager.AbandonReview(context.Background(), ChangeReview{}).OK)
+	fixture := newAcceptanceFixture(t)
+	core.AssertFalse(t, fixture.manager.AbandonReview(nil, ChangeReview{}).OK)
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	core.AssertFalse(t, fixture.manager.AbandonReview(cancelled, ChangeReview{}).OK)
+}
+
 func TestAcceptManagerReviewChangesReportsGitAndBoundaryFailures(t *testing.T) {
 	ready := func(t *testing.T) acceptanceFixture {
 		t.Helper()
@@ -316,6 +375,21 @@ func TestAcceptManagerReviewChangesReportsGitAndBoundaryFailures(t *testing.T) {
 	})
 }
 
+func TestAcceptManagerReviewChangesPostAddFailureCleansProvisionalWorktreeAndBranch(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "cleanup.txt", "cleanup\n", "agent cleanup")
+	fixture.capture(t)
+	integrationPath := core.PathJoin(fixture.root, fixture.project.ID, "reviews", fixture.run.ID, "review-id", "worktree")
+	integrationBranch := core.Concat("lem/integration/", branchComponent(fixture.run.ID), "/", branchComponent("review-id"))
+	fixture.runner.setFailure(func(command Command) bool { return workspaceContainsArgument(command.Args, "log") })
+
+	result := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil)
+	core.AssertFalse(t, result.OK)
+	fixture.runner.setFailure(nil)
+	core.AssertFalse(t, core.Stat(integrationPath).OK)
+	core.AssertEqual(t, "", workspaceRunGit(t, fixture.runner, fixture.root, "--git-dir", fixture.project.ClonePath, "branch", "--list", integrationBranch))
+}
+
 func TestAcceptReviewReplaysDivergedMultiCommitRangeInOrder(t *testing.T) {
 	fixture := newAcceptanceFixture(t)
 	fixture.agentCommit(t, "ordered.txt", "one\n", "ordered one")
@@ -392,10 +466,21 @@ func TestAccept_Manager_Apply_Good(t *testing.T) {
 	core.AssertEqual(t, tip, workspaceRunGit(t, fixture.runner, fixture.source, "rev-parse", "HEAD"))
 	repeated := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
 	core.AssertTrue(t, repeated.OK, repeated.Error())
-	beforeRollback := acceptanceSourceSnapshot(t, fixture)
-	rolledBack := repeated.Value.(application).Rollback(context.Background())
-	core.AssertTrue(t, rolledBack.OK, rolledBack.Error())
-	core.AssertEqual(t, beforeRollback, acceptanceSourceSnapshot(t, fixture))
+	core.AssertEqual(t, tip, workspaceRunGit(t, fixture.runner, fixture.source, "rev-parse", "HEAD"))
+}
+
+func TestAcceptApplicationDoesNotExposeDestructiveRollback(t *testing.T) {
+	fixture := newAcceptanceFixture(t)
+	fixture.agentCommit(t, "retained.txt", "retained\n", "agent retained")
+	fixture.capture(t)
+	review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
+	applied := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
+	core.AssertTrue(t, applied.OK, applied.Error())
+	_, rollback := applied.Value.(interface {
+		Rollback(context.Context) core.Result
+	})
+	core.AssertFalse(t, rollback)
+	core.AssertEqual(t, review.ResultRevision, workspaceRunGit(t, fixture.runner, fixture.source, "rev-parse", "HEAD"))
 }
 
 func TestAccept_Manager_Apply_Bad(t *testing.T) {
@@ -503,54 +588,6 @@ func TestAcceptManagerApplyReportsFetchAndMergeFailures(t *testing.T) {
 		core.AssertFalse(t, fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true}).OK)
 		core.AssertEqual(t, before, acceptanceSourceSnapshot(t, fixture))
 	})
-}
-
-func TestAcceptApplicationRollbackRestoresOnlyMatchingAdvancedSource(t *testing.T) {
-	t.Run("restores", func(t *testing.T) {
-		fixture := newAcceptanceFixture(t)
-		fixture.agentCommit(t, "rollback.txt", "rollback\n", "agent rollback")
-		fixture.capture(t)
-		review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
-		applied := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
-		core.AssertTrue(t, applied.OK, applied.Error())
-		rolledBack := applied.Value.(application).Rollback(context.Background())
-		core.AssertTrue(t, rolledBack.OK, rolledBack.Error())
-		core.AssertEqual(t, review.SourceRevision, workspaceRunGit(t, fixture.runner, fixture.source, "rev-parse", "HEAD"))
-	})
-	t.Run("dirty source", func(t *testing.T) {
-		fixture := newAcceptanceFixture(t)
-		fixture.agentCommit(t, "rollback.txt", "rollback\n", "agent rollback")
-		fixture.capture(t)
-		review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
-		applied := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
-		core.AssertTrue(t, applied.OK, applied.Error())
-		workspaceWriteFile(t, core.PathJoin(fixture.source, "dirty.txt"), "dirty\n")
-		core.AssertFalse(t, applied.Value.(application).Rollback(context.Background()).OK)
-		core.AssertEqual(t, review.ResultRevision, workspaceRunGit(t, fixture.runner, fixture.source, "rev-parse", "HEAD"))
-	})
-	t.Run("missing source", func(t *testing.T) {
-		fixture := newAcceptanceFixture(t)
-		fixture.agentCommit(t, "rollback.txt", "rollback\n", "agent rollback")
-		fixture.capture(t)
-		review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
-		applied := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
-		core.AssertTrue(t, applied.OK, applied.Error())
-		application := applied.Value.(application)
-		application.state.sourcePath = core.PathJoin(t.TempDir(), "missing")
-		core.AssertFalse(t, application.Rollback(context.Background()).OK)
-	})
-	t.Run("reset failure", func(t *testing.T) {
-		fixture := newAcceptanceFixture(t)
-		fixture.agentCommit(t, "rollback.txt", "rollback\n", "agent rollback")
-		fixture.capture(t)
-		review := fixture.manager.ReviewChanges(context.Background(), fixture.project, fixture.run, nil).Value.(ChangeReview)
-		applied := fixture.manager.Apply(context.Background(), AcceptRequest{Review: review, Project: fixture.project, Confirmed: true})
-		core.AssertTrue(t, applied.OK, applied.Error())
-		fixture.runner.setFailure(func(command Command) bool { return workspaceContainsArgument(command.Args, "reset") })
-		core.AssertFalse(t, applied.Value.(application).Rollback(context.Background()).OK)
-	})
-	core.AssertFalse(t, (application{}).Rollback(context.Background()).OK)
-	core.AssertFalse(t, (application{manager: newAcceptanceFixture(t).manager}).Rollback(nil).OK)
 }
 
 func TestAcceptApplyRejectsMovedOrDirtySourceWithoutPreparingAnything(t *testing.T) {

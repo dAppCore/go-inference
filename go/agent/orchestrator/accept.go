@@ -12,7 +12,7 @@ import (
 )
 
 // ReviewChanges prepares a mutation-free integration and validation receipt.
-func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID string) core.Result {
+func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID string) (result core.Result) {
 	if orchestrator == nil {
 		return core.Fail(core.NewError("agent orchestrator is required"))
 	}
@@ -57,6 +57,23 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 	if !ok {
 		return core.Fail(core.Errorf("agent workspace returned %T instead of change review", reviewResult.Value))
 	}
+	provisional := true
+	defer func() {
+		if !provisional {
+			return
+		}
+		cleanupContext, cancelCleanup := orchestrator.cleanupContext()
+		cleaned := orchestrator.workspaces.AbandonReview(cleanupContext, review)
+		cancelCleanup()
+		if cleaned.OK {
+			return
+		}
+		if result.OK {
+			result = cleaned
+			return
+		}
+		result = core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", result.Error(), cleaned.Err()))
+	}()
 	reviewJSONResult := encodeChangeReview(review)
 	if !reviewJSONResult.OK {
 		return reviewJSONResult
@@ -90,6 +107,10 @@ func (orchestrator *Orchestrator) ReviewChanges(ctx context.Context, runID strin
 	}
 	if committed := commitStore(orchestrator.store, Commit{Event: &event, Acceptance: &receipt}); !committed.OK {
 		return committed
+	}
+	provisional = false
+	if retained := orchestrator.workspaces.RetainReview(review); !retained.OK {
+		return core.Fail(core.E("orchestrator.Orchestrator.ReviewChanges", "durable review receipt could not take ownership of integration worktree", retained.Err()))
 	}
 	return decodeChangeReview(reviewJSON)
 }
@@ -222,17 +243,7 @@ func (orchestrator *Orchestrator) Accept(ctx context.Context, request workspace.
 		if current.Status != work.RunCompleted {
 			return ambiguousAcceptanceResult(committed, core.Errorf("durable run has status %q after acceptance commit failure", current.Status))
 		}
-		rollback, rollbackOK := applied.Value.(interface {
-			Rollback(context.Context) core.Result
-		})
-		if !rollbackOK {
-			return core.Fail(core.E("orchestrator.Accept", committed.Error(), core.NewError("workspace did not return an acceptance rollback")))
-		}
-		restored := rollback.Rollback(context.WithoutCancel(ctx))
-		if !restored.OK {
-			return core.Fail(core.E("orchestrator.Accept", committed.Error(), restored.Err()))
-		}
-		return committed
+		return ambiguousAcceptanceResult(committed, core.NewError("authorized source result is retained for acceptance receipt reconciliation"))
 	}
 	return core.Ok(receipt)
 }

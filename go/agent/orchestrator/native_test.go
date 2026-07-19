@@ -673,7 +673,9 @@ func TestNativeInterruptionRecoveryAndResumeReceipt(t *testing.T) {
 	core.AssertFalse(t, core.Stat(core.PathJoin(project.RepositoryRoot, ".lem")).OK)
 
 	nativeReceiptRuntime(t, fixture, "codex", executable)
-	retried := fixture.orchestrator.Retry(context.Background(), item, interrupted.ID)
+	retryReview := fixture.orchestrator.ReviewRetry(context.Background(), item, interrupted.ID)
+	core.AssertTrue(t, retryReview.OK, retryReview.Error())
+	retried := fixture.orchestrator.ConfirmRetry(context.Background(), retryReview.Value.(ChildReview))
 	core.AssertTrue(t, retried.OK, retried.Error())
 	childRun := retried.Value.(work.Run)
 	core.AssertTrue(t, childRun.ID != interrupted.ID)

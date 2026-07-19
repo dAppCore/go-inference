@@ -51,6 +51,34 @@ func ExampleOrchestrator_Retry() {
 	// Output: false
 }
 
+func ExampleOrchestrator_ReviewRetry() {
+	var orchestrator *Orchestrator
+	result := orchestrator.ReviewRetry(context.Background(), work.Item{}, "run-1")
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleOrchestrator_ConfirmRetry() {
+	var orchestrator *Orchestrator
+	result := orchestrator.ConfirmRetry(context.Background(), ChildReview{})
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleOrchestrator_ReviewResume() {
+	var orchestrator *Orchestrator
+	result := orchestrator.ReviewResume(context.Background(), work.ResumeRequest{})
+	core.Println(result.OK)
+	// Output: false
+}
+
+func ExampleOrchestrator_ConfirmResume() {
+	var orchestrator *Orchestrator
+	result := orchestrator.ConfirmResume(context.Background(), ChildReview{})
+	core.Println(result.OK)
+	// Output: false
+}
+
 func ExampleOrchestrator_StartQueue() {
 	var orchestrator *Orchestrator
 	result := orchestrator.StartQueue(context.Background())

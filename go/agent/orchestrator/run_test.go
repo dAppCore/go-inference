@@ -599,6 +599,308 @@ func TestRun_Orchestrator_Answer_Ugly(t *testing.T) {
 	core.AssertEqual(t, 1, answerCount)
 }
 
+func TestRun_Orchestrator_ReviewRetry_Good(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunFailed, true)
+	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
+	beforeRuns := len(fixture.store.runs)
+
+	result := fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID)
+	core.AssertTrue(t, result.OK, result.Error())
+	review := result.Value.(ChildReview)
+	core.AssertEqual(t, "retry", review.Action)
+	core.AssertEqual(t, parent.ID, review.Parent.ID)
+	core.AssertEqual(t, project.ID, review.Project.ID)
+	core.AssertEqual(t, parent.Worktree, review.WorktreePath)
+	core.AssertEqual(t, parent.Branch, review.Branch)
+	core.AssertEqual(t, review.WorktreePath, review.Command.Dir)
+	core.AssertTrue(t, review.Detection.Available)
+	core.AssertNotEqual(t, "", review.RunID)
+	core.AssertEqual(t, beforeRuns, len(fixture.store.runs))
+}
+
+func TestRun_Orchestrator_ReviewRetry_Bad(t *testing.T) {
+	var orchestrator *Orchestrator
+	core.AssertFalse(t, orchestrator.ReviewRetry(context.Background(), work.Item{}, "run").OK)
+	fixture := newOrchestratorFixture(t)
+	item, _, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunWaiting, false)
+	core.AssertFalse(t, fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID).OK)
+}
+
+func TestRun_Orchestrator_ReviewRetry_Ugly(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	core.AssertFalse(t, fixture.orchestrator.ReviewRetry(nil, work.Item{}, "").OK)
+	core.AssertFalse(t, fixture.orchestrator.ReviewRetry(context.Background(), work.Item{}, "").OK)
+	core.AssertTrue(t, fixture.orchestrator.Close().OK)
+	core.AssertFalse(t, fixture.orchestrator.ReviewRetry(context.Background(), work.Item{}, "run").OK)
+}
+
+func TestRun_Orchestrator_ConfirmRetry_Good(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, _, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunFailed, true)
+	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
+	reviewResult := fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID)
+	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+	review := reviewResult.Value.(ChildReview)
+	confirmed := fixture.orchestrator.ConfirmRetry(context.Background(), review)
+	core.AssertTrue(t, confirmed.OK, confirmed.Error())
+	child := confirmed.Value.(work.Run)
+	core.AssertEqual(t, review.RunID, child.ID)
+	core.AssertEqual(t, review.Command.Receipt, child.CommandReceipt)
+	core.AssertEqual(t, parent.ID, child.ParentRunID)
+}
+
+func TestRun_Orchestrator_ConfirmRetry_Bad(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	core.AssertFalse(t, fixture.orchestrator.ConfirmRetry(context.Background(), "not a review").OK)
+	item, _, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunFailed, true)
+	review := fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID).Value.(ChildReview)
+	review.Command.Receipt = "tampered"
+	core.AssertFalse(t, fixture.orchestrator.ConfirmRetry(context.Background(), review).OK)
+	core.AssertEqual(t, 1, len(fixture.store.runs))
+}
+
+func TestRun_Orchestrator_ConfirmRetry_Ugly(t *testing.T) {
+	var orchestrator *Orchestrator
+	core.AssertFalse(t, orchestrator.ConfirmRetry(context.Background(), ChildReview{}).OK)
+	fixture := newOrchestratorFixture(t)
+	core.AssertFalse(t, fixture.orchestrator.ConfirmRetry(nil, ChildReview{}).OK)
+	core.AssertFalse(t, fixture.orchestrator.ConfirmRetry(context.Background(), ChildReview{Action: "resume", RunID: "run"}).OK)
+	core.AssertTrue(t, fixture.orchestrator.Close().OK)
+	core.AssertFalse(t, fixture.orchestrator.ConfirmRetry(context.Background(), ChildReview{Action: "retry", RunID: "run"}).OK)
+}
+
+func TestRun_Orchestrator_ReviewResume_Good(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunWaiting, false)
+	answer := fixture.orchestrator.Answer(context.Background(), parent.ID, "Use the reviewed continuation").Value.(work.Answer)
+	request := work.ResumeRequest{Work: item, ParentRunID: parent.ID, AnswerID: answer.ID, Provider: "fake", Model: "resume-model"}
+	beforeRuns := len(fixture.store.runs)
+	reviewed := fixture.orchestrator.ReviewResume(context.Background(), request)
+	core.AssertTrue(t, reviewed.OK, reviewed.Error())
+	review := reviewed.Value.(ChildReview)
+	core.AssertEqual(t, "resume", review.Action)
+	core.AssertEqual(t, answer.ResumeRunID, review.RunID)
+	core.AssertEqual(t, project.ID, review.Project.ID)
+	core.AssertContains(t, review.Command.Receipt, "redacted")
+	core.AssertEqual(t, beforeRuns, len(fixture.store.runs))
+}
+
+func TestRun_Orchestrator_ReviewResume_Bad(t *testing.T) {
+	var orchestrator *Orchestrator
+	core.AssertFalse(t, orchestrator.ReviewResume(context.Background(), work.ResumeRequest{}).OK)
+	fixture := newOrchestratorFixture(t)
+	item, _, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunWaiting, false)
+	core.AssertFalse(t, fixture.orchestrator.ReviewResume(context.Background(), work.ResumeRequest{
+		Work: item, ParentRunID: parent.ID, AnswerID: "missing", Provider: "fake",
+	}).OK)
+}
+
+func TestRun_Orchestrator_ReviewResume_Ugly(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	core.AssertFalse(t, fixture.orchestrator.ReviewResume(nil, work.ResumeRequest{}).OK)
+	core.AssertFalse(t, fixture.orchestrator.ReviewResume(context.Background(), work.ResumeRequest{}).OK)
+	core.AssertTrue(t, fixture.orchestrator.Close().OK)
+	core.AssertFalse(t, fixture.orchestrator.ReviewResume(context.Background(), work.ResumeRequest{}).OK)
+}
+
+func TestRun_Orchestrator_ConfirmResume_Good(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, _, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunWaiting, false)
+	answer := fixture.orchestrator.Answer(context.Background(), parent.ID, "Use the reviewed continuation").Value.(work.Answer)
+	review := fixture.orchestrator.ReviewResume(context.Background(), work.ResumeRequest{
+		Work: item, ParentRunID: parent.ID, AnswerID: answer.ID, Provider: "fake", Model: "resume-model",
+	}).Value.(ChildReview)
+	confirmed := fixture.orchestrator.ConfirmResume(context.Background(), review)
+	core.AssertTrue(t, confirmed.OK, confirmed.Error())
+	child := confirmed.Value.(work.Run)
+	core.AssertEqual(t, answer.ResumeRunID, child.ID)
+	core.AssertEqual(t, parent.ID, child.ParentRunID)
+}
+
+func TestRun_Orchestrator_ConfirmResume_Bad(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	core.AssertFalse(t, fixture.orchestrator.ConfirmResume(context.Background(), "not a review").OK)
+	item, _, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunWaiting, false)
+	answer := fixture.orchestrator.Answer(context.Background(), parent.ID, "Use the reviewed continuation").Value.(work.Answer)
+	review := fixture.orchestrator.ReviewResume(context.Background(), work.ResumeRequest{
+		Work: item, ParentRunID: parent.ID, AnswerID: answer.ID, Provider: "fake",
+	}).Value.(ChildReview)
+	review.Branch = "lem/tampered"
+	core.AssertFalse(t, fixture.orchestrator.ConfirmResume(context.Background(), review).OK)
+}
+
+func TestRun_Orchestrator_ConfirmResume_Ugly(t *testing.T) {
+	var orchestrator *Orchestrator
+	core.AssertFalse(t, orchestrator.ConfirmResume(context.Background(), ChildReview{}).OK)
+	fixture := newOrchestratorFixture(t)
+	core.AssertFalse(t, fixture.orchestrator.ConfirmResume(nil, ChildReview{}).OK)
+	core.AssertFalse(t, fixture.orchestrator.ConfirmResume(context.Background(), ChildReview{Action: "retry", RunID: "run"}).OK)
+}
+
+func TestRun_reviewChild_Bad(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	item, project, revision := fixture.registerRepository()
+	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunFailed, true)
+	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
+	reviewRetry := func(item work.Item, runID string) core.Result {
+		return fixture.orchestrator.reviewChild(context.Background(), "retry", item, parent.ID, "", "", "", runID)
+	}
+	assertRejected := func(result core.Result, fragment string) {
+		t.Helper()
+		core.AssertFalse(t, result.OK)
+		core.AssertContains(t, result.Error(), fragment)
+	}
+
+	fixture.store.overrideContinuation(core.Fail(core.NewError("injected continuation failure")))
+	assertRejected(reviewRetry(item, "retry-boundary"), "continuation failure")
+	fixture.store.clearContinuationOverride()
+
+	wrongWork := item
+	wrongWork.ID = "different-work"
+	assertRejected(reviewRetry(wrongWork, "retry-boundary"), "does not match the parent")
+	wrongTask := item
+	wrongTask.Task = "different task"
+	assertRejected(reviewRetry(wrongTask, "retry-boundary"), "durable parent task")
+
+	fixture.store.mu.Lock()
+	storedParent := fixture.store.runs[parent.ID]
+	storedParent.Status = work.RunCompleted
+	fixture.store.runs[parent.ID] = storedParent
+	fixture.store.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "cannot be retried")
+	fixture.store.mu.Lock()
+	fixture.store.runs[parent.ID] = parent
+	fixture.store.mu.Unlock()
+	assertRejected(reviewRetry(item, ""), "reserved run ID")
+	assertRejected(fixture.orchestrator.reviewChild(context.Background(), "unknown", item, parent.ID, "", "", "", "child"), "retry or resume")
+
+	missingWorkspace := parent
+	missingWorkspace.DurableRevision = ""
+	fixture.store.mu.Lock()
+	fixture.store.runs[parent.ID] = missingWorkspace
+	fixture.store.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "durable workspace identity")
+	fixture.store.mu.Lock()
+	fixture.store.runs[parent.ID] = parent
+	delete(fixture.store.projects, project.ID)
+	fixture.store.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "project not found")
+	fixture.store.mu.Lock()
+	fixture.store.projects[project.ID] = project
+	fixture.store.mu.Unlock()
+	fixture.store.overrideProjectID("wrong project")
+	assertRejected(reviewRetry(item, "retry-boundary"), "instead of project")
+	fixture.store.clearProjectIDOverride()
+
+	missingSource := item
+	missingSource.Repository = core.PathJoin(t.TempDir(), "missing source")
+	assertRejected(reviewRetry(missingSource, "retry-boundary"), "invalid source directory")
+	dirtyPath := core.PathJoin(item.Repository, "unreviewed.txt")
+	core.AssertTrue(t, core.WriteFile(dirtyPath, []byte("dirty\n"), 0o600).OK)
+	assertRejected(reviewRetry(item, "retry-boundary"), "clean attached Git")
+	core.AssertTrue(t, core.Remove(dirtyPath).OK)
+	driftedProject := project
+	driftedProject.SourceBranch = "different-branch"
+	fixture.store.mu.Lock()
+	fixture.store.projects[project.ID] = driftedProject
+	fixture.store.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "registration changed")
+	fixture.store.mu.Lock()
+	fixture.store.projects[project.ID] = project
+	missingProviderParent := parent
+	missingProviderParent.Provider = "missing"
+	fixture.store.runs[parent.ID] = missingProviderParent
+	fixture.store.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "missing")
+	fixture.store.mu.Lock()
+	fixture.store.runs[parent.ID] = parent
+	fixture.store.mu.Unlock()
+
+	fixture.adapter.mu.Lock()
+	fixture.adapter.failDetect = true
+	fixture.adapter.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "detection failure")
+	fixture.adapter.mu.Lock()
+	fixture.adapter.failDetect = false
+	fixture.adapter.detectSet = true
+	fixture.adapter.detectValue = "wrong detection"
+	fixture.adapter.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "instead of detection")
+	fixture.adapter.mu.Lock()
+	fixture.adapter.detectValue = provider.Detection{Provider: "fake", Available: false}
+	fixture.adapter.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "fake is unavailable")
+	fixture.adapter.mu.Lock()
+	fixture.adapter.detectSet = false
+	fixture.adapter.failBuild = true
+	fixture.adapter.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "build failure")
+	fixture.adapter.mu.Lock()
+	fixture.adapter.failBuild = false
+	fixture.adapter.buildSet = true
+	fixture.adapter.buildValue = "wrong command"
+	fixture.adapter.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "instead of command")
+	fixture.adapter.mu.Lock()
+	fixture.adapter.buildSet = false
+	fixture.adapter.mu.Unlock()
+
+	fixture.store.setSnapshotFailure(true)
+	assertRejected(reviewRetry(item, "retry-boundary"), "snapshot failure")
+	fixture.store.setSnapshotFailure(false)
+	fixture.store.overrideSnapshot("wrong snapshot")
+	assertRejected(reviewRetry(item, "retry-boundary"), "instead of snapshot")
+	fixture.store.clearSnapshotOverride()
+	fixture.store.mu.Lock()
+	fixture.store.runs["existing-child"] = work.Run{ID: "existing-child", WorkID: parent.WorkID, ParentRunID: parent.ID}
+	fixture.store.mu.Unlock()
+	assertRejected(reviewRetry(item, "retry-boundary"), "already has child attempt")
+	assertRejected(fixture.orchestrator.queueReviewedChild(ChildReview{Work: item, Parent: parent}), "already has child attempt")
+	fixture.store.mu.Lock()
+	delete(fixture.store.runs, "existing-child")
+	fixture.store.mu.Unlock()
+	fixture.clock.Set(time.Time{})
+	assertRejected(reviewRetry(item, "retry-boundary"), "clock")
+	fixture.clock.Set(fixture.at)
+
+	fixture.ids.mu.Lock()
+	fixture.ids.empty = true
+	fixture.ids.mu.Unlock()
+	assertRejected(fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID), "ID source")
+	fixture.ids.mu.Lock()
+	fixture.ids.empty = false
+	fixture.ids.mu.Unlock()
+
+	fixture.store.mu.Lock()
+	waitingParent := parent
+	waitingParent.Status = work.RunWaiting
+	fixture.store.runs[parent.ID] = waitingParent
+	fixture.store.mu.Unlock()
+	assertRejected(fixture.orchestrator.reviewChild(context.Background(), "resume", item, parent.ID, "answer", "fake", "", ""), "stored answer")
+	question := work.Question{ID: "question-review", RunID: parent.ID, Text: "Continue?", CreatedAt: fixture.at}
+	answer := work.Answer{ID: "answer-review", QuestionID: question.ID, ResumeRunID: "resume-review", Text: "Continue", CreatedAt: fixture.at}
+	fixture.store.mu.Lock()
+	fixture.store.questions = append(fixture.store.questions, question)
+	fixture.store.answers = append(fixture.store.answers, answer)
+	fixture.store.mu.Unlock()
+	assertRejected(fixture.orchestrator.reviewChild(context.Background(), "resume", item, parent.ID, "different", "fake", "", ""), "question linkage")
+	assertRejected(fixture.orchestrator.reviewChild(context.Background(), "resume", item, parent.ID, answer.ID, "", "", ""), "provider ID")
+	assertRejected(fixture.orchestrator.reviewChild(context.Background(), "resume", item, parent.ID, answer.ID, "fake", "", "different-run"), "answer reservation")
+	fixture.store.mu.Lock()
+	fixture.store.runs[parent.ID] = parent
+	fixture.store.mu.Unlock()
+	assertRejected(fixture.orchestrator.reviewChild(context.Background(), "resume", item, parent.ID, answer.ID, "fake", "", ""), "cannot be resumed")
+}
+
 func TestRun_Orchestrator_Resume_Good(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	item, _, revision := fixture.registerRepository()
@@ -609,9 +911,14 @@ func TestRun_Orchestrator_Resume_Good(t *testing.T) {
 	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
 	core.AssertFalse(t, core.Stat(parent.Worktree).OK)
 
-	result := fixture.orchestrator.Resume(context.Background(), work.ResumeRequest{
+	request := work.ResumeRequest{
 		Work: item, ParentRunID: parent.ID, AnswerID: answer.ID, Provider: "fake", Model: "resume-model",
-	})
+	}
+	core.AssertFalse(t, fixture.orchestrator.Resume(context.Background(), request).OK)
+	reviewResult := fixture.orchestrator.ReviewResume(context.Background(), request)
+	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+	review := reviewResult.Value.(ChildReview)
+	result := fixture.orchestrator.ConfirmResume(context.Background(), review)
 	core.AssertTrue(t, result.OK, result.Error())
 	child := result.Value.(work.Run)
 	orchestratorAssertImmutableChild(t, fixture, parent, child)
@@ -621,6 +928,7 @@ func TestRun_Orchestrator_Resume_Good(t *testing.T) {
 
 	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
 	launch := fixture.launcher.WaitStart(t)
+	core.AssertEqual(t, core.JSONMarshalString(review.Command), core.JSONMarshalString(launch.command))
 	core.AssertEqual(t, parent.Worktree, launch.command.Dir)
 	core.AssertTrue(t, core.Stat(parent.Worktree).OK)
 	fixture.adapter.mu.Lock()
@@ -660,7 +968,7 @@ func TestRun_Orchestrator_Resume_Bad(t *testing.T) {
 	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
 	request.AnswerID = answer.Value.(work.Answer).ID
 	request.Work.Task = "Tampered task for the same work ID"
-	tampered := fixture.orchestrator.Resume(context.Background(), request)
+	tampered := fixture.orchestrator.ReviewResume(context.Background(), request)
 	core.AssertFalse(t, tampered.OK)
 	core.AssertContains(t, tampered.Error(), "task")
 	core.AssertEqual(t, parent, fixture.store.Run(parent.ID).Value.(work.Run))
@@ -679,9 +987,12 @@ func TestRun_Orchestrator_Resume_Ugly(t *testing.T) {
 	request := work.ResumeRequest{
 		Work: item, ParentRunID: parent.ID, AnswerID: answer.Value.(work.Answer).ID, Provider: "fake",
 	}
-	first := fixture.orchestrator.Resume(context.Background(), request)
+	core.AssertFalse(t, fixture.orchestrator.Resume(context.Background(), request).OK)
+	reviewResult := fixture.orchestrator.ReviewResume(context.Background(), request)
+	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+	first := fixture.orchestrator.ConfirmResume(context.Background(), reviewResult.Value.(ChildReview))
 	core.AssertTrue(t, first.OK, first.Error())
-	duplicate := fixture.orchestrator.Resume(context.Background(), request)
+	duplicate := fixture.orchestrator.ConfirmResume(context.Background(), reviewResult.Value.(ChildReview))
 	core.AssertFalse(t, duplicate.OK)
 	core.AssertEqual(t, parent, fixture.store.Run(parent.ID).Value.(work.Run))
 	fixture.store.mu.Lock()
@@ -707,7 +1018,11 @@ func TestRun_Orchestrator_Retry_Good(t *testing.T) {
 				fixture.store.mu.Unlock()
 			}
 			core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
-			result := fixture.orchestrator.Retry(context.Background(), item, parent.ID)
+			core.AssertFalse(t, fixture.orchestrator.Retry(context.Background(), item, parent.ID).OK)
+			reviewResult := fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID)
+			core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+			review := reviewResult.Value.(ChildReview)
+			result := fixture.orchestrator.ConfirmRetry(context.Background(), review)
 			core.AssertTrue(t, result.OK, result.Error())
 			child := result.Value.(work.Run)
 			orchestratorAssertImmutableChild(t, fixture, parent, child)
@@ -720,6 +1035,7 @@ func TestRun_Orchestrator_Retry_Good(t *testing.T) {
 			core.AssertTrue(t, core.Stat(parent.Worktree).OK)
 			core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
 			launch := fixture.launcher.WaitStart(t)
+			core.AssertEqual(t, core.JSONMarshalString(review.Command), core.JSONMarshalString(launch.command))
 			core.AssertEqual(t, parent.Worktree, launch.command.Dir)
 			fixture.adapter.mu.Lock()
 			built := fixture.adapter.builds[len(fixture.adapter.builds)-1]
@@ -761,7 +1077,7 @@ func TestRun_Orchestrator_Retry_Bad(t *testing.T) {
 	fixture.store.mu.Unlock()
 	tamperedItem := item
 	tamperedItem.Task = "Tampered task for the same work ID"
-	tampered := fixture.orchestrator.Retry(context.Background(), tamperedItem, waiting.ID)
+	tampered := fixture.orchestrator.ReviewRetry(context.Background(), tamperedItem, waiting.ID)
 	core.AssertFalse(t, tampered.OK)
 	core.AssertContains(t, tampered.Error(), "task")
 	core.AssertEqual(t, waiting, fixture.store.Run(waiting.ID).Value.(work.Run))
@@ -775,9 +1091,12 @@ func TestRun_Orchestrator_Retry_Ugly(t *testing.T) {
 	item, _, revision := fixture.registerRepository()
 	parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunFailed, true)
 	core.AssertTrue(t, fixture.orchestrator.StopQueue(context.Background()).OK)
-	first := fixture.orchestrator.Retry(context.Background(), item, parent.ID)
+	core.AssertFalse(t, fixture.orchestrator.Retry(context.Background(), item, parent.ID).OK)
+	reviewResult := fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID)
+	core.AssertTrue(t, reviewResult.OK, reviewResult.Error())
+	first := fixture.orchestrator.ConfirmRetry(context.Background(), reviewResult.Value.(ChildReview))
 	core.AssertTrue(t, first.OK, first.Error())
-	duplicate := fixture.orchestrator.Retry(context.Background(), item, parent.ID)
+	duplicate := fixture.orchestrator.ConfirmRetry(context.Background(), reviewResult.Value.(ChildReview))
 	core.AssertFalse(t, duplicate.OK)
 	core.AssertEqual(t, parent, fixture.store.Run(parent.ID).Value.(work.Run))
 	orchestratorRunGit(t, parent.Worktree, "checkout", "-b", "wrong-retained-branch")
@@ -899,56 +1218,70 @@ func TestRunChildAttemptBoundaryFailures(t *testing.T) {
 	})
 
 	t.Run("child queue persistence", func(t *testing.T) {
-		newCase := func(t *testing.T) (*orchestratorFixture, work.Item, work.Run) {
-			return orchestratorSeedContinuation(t, work.RunFailed, false)
+		seedCase := func(t *testing.T) (*orchestratorFixture, work.Item, work.Run) {
+			fixture := newOrchestratorFixture(t)
+			item, _, revision := fixture.registerRepository()
+			parent := orchestratorTerminalParent(t, fixture, item, revision, work.RunFailed, true)
+			return fixture, item, parent
+		}
+		newCase := func(t *testing.T) (*orchestratorFixture, ChildReview) {
+			fixture, item, parent := seedCase(t)
+			reviewed := fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID)
+			core.AssertTrue(t, reviewed.OK, reviewed.Error())
+			return fixture, reviewed.Value.(ChildReview)
 		}
 		t.Run("workspace", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
-			parent.Branch = ""
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			fixture, review := newCase(t)
+			review.Parent.Branch = ""
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
 		})
 		t.Run("project missing", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
-			parent.ProjectID = "missing"
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			fixture, item, parent := seedCase(t)
+			fixture.store.mu.Lock()
+			delete(fixture.store.projects, parent.ProjectID)
+			fixture.store.mu.Unlock()
+			core.AssertFalse(t, fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID).OK)
 		})
 		t.Run("project shape", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
+			fixture, item, parent := seedCase(t)
 			fixture.store.overrideProjectID("wrong project")
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			core.AssertFalse(t, fixture.orchestrator.ReviewRetry(context.Background(), item, parent.ID).OK)
 			fixture.store.clearProjectIDOverride()
 		})
 		t.Run("snapshot failure", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
+			fixture, review := newCase(t)
 			fixture.store.setSnapshotFailure(true)
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
 		})
 		t.Run("snapshot shape", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
+			fixture, review := newCase(t)
 			fixture.store.overrideSnapshot("wrong snapshot")
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
 		})
 		t.Run("clock", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
+			fixture, review := newCase(t)
 			fixture.clock.Set(time.Time{})
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
 		})
 		t.Run("identity", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "", "fake", "").OK)
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "", "").OK)
+			fixture, review := newCase(t)
+			review.RunID = ""
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
+			review.RunID = "child"
+			review.Provider = ""
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
 		})
 		t.Run("event", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
+			fixture, review := newCase(t)
 			fixture.ids.mu.Lock()
 			fixture.ids.empty = true
 			fixture.ids.mu.Unlock()
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
 		})
 		t.Run("commit", func(t *testing.T) {
-			fixture, item, parent := newCase(t)
+			fixture, review := newCase(t)
 			fixture.store.failNext(func(commit Commit) bool { return commit.CreateRun })
-			core.AssertFalse(t, fixture.orchestrator.queueChildAttempt(item, parent, "child", "fake", "").OK)
+			core.AssertFalse(t, fixture.orchestrator.queueReviewedChild(review).OK)
 		})
 	})
 }
@@ -977,6 +1310,64 @@ func TestRun_Orchestrator_StartQueue_Good(t *testing.T) {
 	launch.callback("stdout", orchestratorCompletedEnvelope("done"))
 	launch.process.Finish(0)
 	orchestratorWaitRunStatus(t, fixture.store, run.ID, work.RunCompleted)
+}
+
+func TestRunOrchestratorAttemptTimeoutTerminatesAndPersistsFailure(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	fixture.orchestrator.attemptTimeout = 20 * time.Millisecond
+	item, _, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	launch := fixture.launcher.WaitStart(t)
+
+	failed := orchestratorWaitRunStatus(t, fixture.store, run.ID, work.RunFailed)
+	core.AssertContains(t, failed.FailureReason, "attempt timeout")
+	launch.process.mu.Lock()
+	shutdown := launch.process.shutdown
+	launch.process.mu.Unlock()
+	core.AssertTrue(t, shutdown)
+	foundAtomicTimeout := false
+	fixture.store.mu.Lock()
+	for _, commit := range fixture.store.commits {
+		if commit.Run != nil && commit.Event != nil && commit.Run.ID == run.ID && commit.Run.Status == work.RunFailed && commit.Event.Kind == "timeout" {
+			foundAtomicTimeout = true
+		}
+	}
+	fixture.store.mu.Unlock()
+	core.AssertTrue(t, foundAtomicTimeout)
+}
+
+func TestRunOrchestratorCloseBoundsCaptureAndRetainsRecoveryReceipt(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	fixture.orchestrator.cleanupTimeout = 30 * time.Millisecond
+	item, _, revision := fixture.registerRepository()
+	run := fixture.queueDispatch(item, revision)
+	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
+	fixture.launcher.WaitStart(t)
+	running := fixture.store.Run(run.ID).Value.(work.Run)
+	blocked := fixture.git.setBlock(func(command workspace.Command) bool {
+		return command.Dir == running.Worktree && orchestratorWorkspaceCommandHasArgument(command, "status")
+	})
+	done := make(chan core.Result, 1)
+	started := time.Now()
+	go func() { done <- fixture.orchestrator.Close() }()
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown capture did not reach the blocking Git command")
+	}
+	var closed core.Result
+	select {
+	case closed = <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("orchestrator Close exceeded bounded capture deadline")
+	}
+	core.AssertTrue(t, closed.OK, closed.Error())
+	core.AssertTrue(t, time.Since(started) < 500*time.Millisecond)
+	interrupted := fixture.store.Run(run.ID).Value.(work.Run)
+	core.AssertEqual(t, work.RunInterrupted, interrupted.Status)
+	core.AssertContains(t, interrupted.FailureReason, "deadline exceeded")
+	core.AssertTrue(t, core.Stat(running.Worktree).OK)
 }
 
 func TestRun_Orchestrator_StartQueue_Bad(t *testing.T) {

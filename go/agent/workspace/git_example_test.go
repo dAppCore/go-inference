@@ -17,3 +17,19 @@ func ExampleProcessRunner_Run() {
 	core.Println(result.Value)
 	// Output: git status --short
 }
+
+func ExampleProcessRunner_RunDetailed() {
+	runner := ProcessRunner{run: func(context.Context, process.RunOptions) core.Result {
+		return core.Fail(core.NewError("command exited"))
+	}}
+	result := runner.RunDetailed(context.Background(), Command{Executable: "git", Args: []string{"rev-parse", "--show-toplevel"}})
+	outcome := result.Value.(CommandOutcome)
+	core.Println(outcome.ExitCode, outcome.Failure != nil)
+	// Output: -1 true
+}
+
+func ExampleCommandOutcome() {
+	outcome := CommandOutcome{Output: "fatal: not a git repository", ExitCode: 128}
+	core.Println(outcome.ExitCode, outcome.Output)
+	// Output: 128 fatal: not a git repository
+}

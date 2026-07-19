@@ -409,7 +409,7 @@ func agentCommandAvailability(capability agentCapability, selected *workItemReco
 		allowed = (!hasSnapshotState || selectedState.NativeRunID != "") && (status == "queued" || status == "running")
 		reason = "selected Work is not queued or running"
 	case agentFeatureAnswer:
-		allowed = (!hasSnapshotState || (selectedState.NativeRunID != "" && selectedState.QuestionID != "")) && (status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input")
+		allowed = (!hasSnapshotState || (selectedState.NativeRunID != "" && selectedState.QuestionID != "" && selectedState.AnswerID == "")) && (status == workStatusWaiting || status == "question" || status == "blocked" || status == "needs_input")
 		reason = "selected Work is not waiting for an answer"
 	case agentFeatureRetry:
 		allowed = (!hasSnapshotState || selectedState.NativeRunID != "") && (status == workStatusFailed || status == "error" || status == "cancelled" || status == "canceled")

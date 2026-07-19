@@ -89,6 +89,16 @@ type Manager struct {
 	mu      sync.Mutex
 	leases  map[string]RunWorkspace
 	durable map[string]bool
+	reviews map[string]provisionalReview
+}
+
+type provisionalReview struct {
+	workID   string
+	runID    string
+	branch   string
+	path     string
+	clone    string
+	relative string
 }
 
 // NewManager validates the internal workspace boundary and its dependencies.
@@ -113,6 +123,7 @@ func NewManager(options ManagerOptions) core.Result {
 		now:     options.Now,
 		leases:  make(map[string]RunWorkspace),
 		durable: make(map[string]bool),
+		reviews: make(map[string]provisionalReview),
 	})
 }
 
@@ -336,22 +347,31 @@ func (manager *Manager) PrepareRun(ctx context.Context, project work.Project, ru
 		prepared.Path, project.SourceRevision,
 	)
 	if !added.OK {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, prepared.Path, worktreeRelative)
+		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, prepared.Path, worktreeRelative, prepared.Branch, true)
 		if !cleanup.OK {
 			return core.Fail(core.E("workspace.Manager.PrepareRun", added.Error(), cleanup.Err()))
 		}
 		return core.Fail(core.E("workspace.Manager.PrepareRun", "failed to create isolated worktree", added.Err()))
 	}
+	manager.leases[prepared.RunID] = prepared
+	manager.durable[prepared.RunID] = false
 	base := manager.gitOutput(ctx, prepared.Path, nil, "rev-parse", "HEAD")
 	if !base.OK {
+		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, prepared.Path, worktreeRelative, prepared.Branch, true)
+		if !cleanup.OK {
+			return core.Fail(core.E("workspace.Manager.PrepareRun", base.Error(), cleanup.Err()))
+		}
 		return core.Fail(core.E("workspace.Manager.PrepareRun", "failed to inspect prepared worktree", base.Err()))
 	}
 	prepared.BaseRevision = core.Trim(base.Value.(string))
 	if prepared.BaseRevision != project.SourceRevision {
+		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, prepared.Path, worktreeRelative, prepared.Branch, true)
+		if !cleanup.OK {
+			return core.Fail(core.E("workspace.Manager.PrepareRun", "prepared revision differs from the reviewed source", cleanup.Err()))
+		}
 		return core.Fail(core.NewError("agent workspace prepared revision differs from the reviewed source"))
 	}
 	manager.leases[prepared.RunID] = prepared
-	manager.durable[prepared.RunID] = false
 	return core.Ok(prepared)
 }
 
@@ -370,7 +390,10 @@ func (manager *Manager) CaptureRun(ctx context.Context, workspace RunWorkspace) 
 		return leaseResult
 	}
 	workspace = leaseResult.Value.(RunWorkspace)
-	captureContext := context.WithoutCancel(ctx)
+	if err := ctx.Err(); err != nil {
+		return core.Ok(Capture{DurableRevision: workspace.DurableRevision, Retained: true, Summary: core.Concat("capture context ended; worktree retained: ", err.Error())})
+	}
+	captureContext := ctx
 
 	repositoryResult := manager.server.EnsureRepository(captureContext, workspace.Project.RepositoryName)
 	if !repositoryResult.OK {
@@ -517,19 +540,24 @@ func (manager *Manager) ReconstructRun(ctx context.Context, project work.Project
 		"--git-dir", project.ClonePath, "worktree", "add", reconstructed.Path, reconstructed.Branch,
 	)
 	if !added.OK {
-		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, reconstructed.Path, worktreeRelative)
+		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, reconstructed.Path, worktreeRelative, reconstructed.Branch, false)
 		if !cleanup.OK {
 			return core.Fail(core.E("workspace.Manager.ReconstructRun", added.Error(), cleanup.Err()))
 		}
 		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to reconstruct run worktree", added.Err()))
 	}
+	manager.leases[reconstructed.RunID] = reconstructed
+	manager.durable[reconstructed.RunID] = false
 	revision := manager.gitOutput(ctx, reconstructed.Path, nil, "rev-parse", "HEAD")
 	if !revision.OK {
+		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, reconstructed.Path, worktreeRelative, reconstructed.Branch, false)
+		if !cleanup.OK {
+			return core.Fail(core.E("workspace.Manager.ReconstructRun", revision.Error(), cleanup.Err()))
+		}
 		return core.Fail(core.E("workspace.Manager.ReconstructRun", "failed to inspect reconstructed worktree", revision.Err()))
 	}
 	reconstructed.BaseRevision = core.Trim(revision.Value.(string))
 	manager.leases[reconstructed.RunID] = reconstructed
-	manager.durable[reconstructed.RunID] = false
 	return core.Ok(reconstructed)
 }
 
@@ -675,8 +703,12 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "invalid source directory", pathResult.Err()))
 	}
 	selectedPath := pathResult.Value.(string)
-	rootResult := manager.gitOutput(ctx, selectedPath, nil, "rev-parse", "--show-toplevel")
+	rootResult := manager.probeRepositoryRoot(ctx, selectedPath)
 	if !rootResult.OK {
+		return rootResult
+	}
+	root := rootResult.Value.(string)
+	if root == "" {
 		includedResult := manager.adHocIncluded(ctx, selectedPath)
 		if !includedResult.OK {
 			return includedResult
@@ -700,11 +732,11 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 			identityEmail:  identityEmail,
 		})
 	}
-	rootCanonical := canonicalDirectory(core.Trim(rootResult.Value.(string)))
+	rootCanonical := canonicalDirectory(root)
 	if !rootCanonical.OK {
 		return core.Fail(core.E("workspace.Manager.ReviewSource", "Git returned an invalid repository root", rootCanonical.Err()))
 	}
-	root := rootCanonical.Value.(string)
+	root = rootCanonical.Value.(string)
 	branchResult := manager.gitOutput(ctx, root, nil, "symbolic-ref", "--short", "HEAD")
 	branch := ""
 	detached := !branchResult.OK
@@ -748,6 +780,66 @@ func (manager *Manager) reviewSource(ctx context.Context, sourcePath string) cor
 		identityName:   identityName,
 		identityEmail:  identityEmail,
 	})
+}
+
+func (manager *Manager) probeRepositoryRoot(ctx context.Context, selectedPath string) core.Result {
+	runner, ok := manager.git.(detailedRunner)
+	if !ok {
+		root := manager.gitOutput(ctx, selectedPath, nil, "rev-parse", "--show-toplevel")
+		if root.OK {
+			return core.Ok(core.Trim(root.Value.(string)))
+		}
+		return core.Fail(core.E("workspace.Manager.ReviewSource", "Git runner cannot classify repository-root failure safely", root.Err()))
+	}
+	result := runner.RunDetailed(ctx, Command{
+		Dir: selectedPath, Executable: "git", Args: []string{"rev-parse", "--show-toplevel"},
+		Environment: []string{"LC_ALL=C"},
+	})
+	if !result.OK {
+		return core.Fail(core.E("workspace.Manager.ReviewSource", "failed to inspect repository root", result.Err()))
+	}
+	outcome, ok := result.Value.(CommandOutcome)
+	if !ok {
+		return core.Fail(core.Errorf("agent workspace Git root probe returned %T instead of command outcome", result.Value))
+	}
+	if outcome.ExitCode == 0 {
+		root := core.Trim(outcome.Output)
+		if root == "" {
+			return core.Fail(core.NewError("agent workspace Git root probe returned an empty repository root"))
+		}
+		return core.Ok(root)
+	}
+	markerResult := repositoryMarkerExists(selectedPath)
+	if !markerResult.OK {
+		return markerResult
+	}
+	definiteNotRepository := outcome.ExitCode == 128 && core.Contains(core.Lower(outcome.Output), "not a git repository")
+	if markerResult.Value.(bool) || !definiteNotRepository {
+		reason := "Git repository-root lookup failed ambiguously"
+		if outcome.Failure != nil {
+			reason = core.Concat(reason, ": ", outcome.Failure.Error())
+		}
+		return core.Fail(core.NewError(reason))
+	}
+	return core.Ok("")
+}
+
+func repositoryMarkerExists(selectedPath string) core.Result {
+	path := selectedPath
+	for {
+		marker := core.Stat(core.PathJoin(path, ".git"))
+		if marker.OK {
+			return core.Ok(true)
+		}
+		if !core.IsNotExist(marker.Err()) {
+			return core.Fail(core.E("workspace.Manager.ReviewSource", "failed to inspect repository marker", marker.Err()))
+		}
+		parent := core.PathDir(path)
+		if parent == path {
+			return core.Ok(false)
+		}
+		path = parent
+	}
 }
 
 func (manager *Manager) adHocIncluded(ctx context.Context, sourceRoot string) core.Result {
@@ -938,14 +1030,42 @@ func (manager *Manager) validLease(workspace RunWorkspace) core.Result {
 	return core.Ok(lease)
 }
 
-func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, worktreePath, worktreeRelative string) core.Result {
-	manager.gitOutput(context.WithoutCancel(ctx), manager.root, nil,
+func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, worktreePath, worktreeRelative, branch string, removeBranch bool) core.Result {
+	failures := make([]string, 0, 4)
+	removed := manager.gitOutput(ctx, manager.root, nil,
 		"--git-dir", clonePath, "worktree", "remove", "--force", worktreePath,
 	)
-	manager.gitOutput(context.WithoutCancel(ctx), manager.root, nil, "--git-dir", clonePath, "worktree", "prune")
-	if deleteErr := manager.files.DeleteAll(core.PathDir(worktreeRelative)); deleteErr != nil {
-		return core.Fail(core.E("workspace.cleanupFailedWorktree", "failed to clean incomplete worktree", deleteErr))
+	if !removed.OK {
+		failures = append(failures, core.Concat("worktree remove: ", removed.Error()))
 	}
+	pruned := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "worktree", "prune")
+	if !pruned.OK {
+		failures = append(failures, core.Concat("worktree prune: ", pruned.Error()))
+	}
+	if removeBranch && removed.OK && core.Trim(branch) != "" {
+		listed := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "branch", "--list", branch)
+		if !listed.OK {
+			failures = append(failures, core.Concat("branch inspect: ", listed.Error()))
+		} else if core.Trim(listed.Value.(string)) != "" {
+			deleted := manager.gitOutput(ctx, manager.root, nil, "--git-dir", clonePath, "branch", "--delete", "--force", branch)
+			if !deleted.OK {
+				failures = append(failures, core.Concat("branch remove: ", deleted.Error()))
+			}
+		}
+	}
+	if deleteErr := manager.files.DeleteAll(core.PathDir(worktreeRelative)); deleteErr != nil {
+		failures = append(failures, core.Concat("filesystem remove: ", deleteErr.Error()))
+	}
+	if len(failures) > 0 {
+		return core.Fail(core.E("workspace.cleanupFailedWorktree", core.Join("; ", failures...), nil))
+	}
+	for runID, lease := range manager.leases {
+		if lease.Path == worktreePath {
+			delete(manager.leases, runID)
+			delete(manager.durable, runID)
+		}
+	}
+	delete(manager.reviews, worktreePath)
 	return core.Ok(nil)
 }
 

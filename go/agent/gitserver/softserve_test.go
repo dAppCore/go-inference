@@ -436,8 +436,33 @@ func TestSoftserveCloseFailureEdges(t *testing.T) {
 	core.AssertTrue(t, listener.closed)
 	core.AssertContains(t, result.Error(), "listener close failed")
 	core.AssertContains(t, result.Error(), "serve loop")
-	core.AssertContains(t, result.Error(), "log close")
-	core.AssertContains(t, result.Error(), "serve failed")
+	core.AssertFalse(t, core.Contains(result.Error(), "log close"))
+	core.AssertFalse(t, core.Contains(result.Error(), "serve failed"))
+}
+
+func TestSoftserve_Close_FailClosedOnServeTimeout(t *testing.T) {
+	options := gitserverTestOptions(t)
+	options.ShutdownTimeout = time.Millisecond
+	service := NewSoftServe(options).Value.(*softServe)
+	core.AssertTrue(t, service.acquireOwner().OK)
+	done := make(chan struct{})
+	service.state = "running"
+	service.serveDone = done
+	service.setServeResult(core.Ok(nil))
+
+	result := service.Close()
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "serve loop")
+	core.AssertTrue(t, service.owned)
+	core.AssertEqual(t, "closing", service.state)
+	core.AssertTrue(t, service.serveDone == done)
+	core.AssertTrue(t, core.Stat(core.PathJoin(options.DataPath, ownerFilename)).OK)
+
+	close(done)
+	core.AssertTrue(t, service.Close().OK)
+	core.AssertEqual(t, "stopped", service.state)
+	core.AssertFalse(t, service.owned)
+	core.AssertFalse(t, core.Stat(core.PathJoin(options.DataPath, ownerFilename)).OK)
 }
 
 func TestSoftserveCloseOwnerMismatch(t *testing.T) {

@@ -58,33 +58,8 @@ type application struct {
 	advanced bool
 }
 
-// Rollback restores the clean reviewed source if the durable decision cannot commit.
-func (applied application) Rollback(ctx context.Context) core.Result {
-	if applied.manager == nil || ctx == nil {
-		return core.Fail(core.NewError("agent workspace acceptance rollback requires manager and context"))
-	}
-	if !applied.advanced {
-		return core.Ok(nil)
-	}
-	applied.manager.mu.Lock()
-	defer applied.manager.mu.Unlock()
-	sourceResult := applied.manager.reviewSource(ctx, applied.state.sourcePath)
-	if !sourceResult.OK {
-		return sourceResult
-	}
-	source := sourceResult.Value.(SourceReview)
-	if !source.Clean || source.Detached || source.Branch != applied.review.SourceBranch || source.Revision != applied.review.ResultRevision {
-		return core.Fail(core.NewError("agent workspace cannot safely restore source after failed durable acceptance"))
-	}
-	restored := applied.manager.gitOutput(ctx, applied.state.sourcePath, nil, "reset", "--hard", applied.review.SourceRevision)
-	if !restored.OK {
-		return core.Fail(core.E("workspace.application.Rollback", "failed to restore source revision", restored.Err()))
-	}
-	return core.Ok(nil)
-}
-
 // ReviewChanges integrates the exact durable agent range in an internal worktree.
-func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project, run work.Run, validation []queue.Command) core.Result {
+func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project, run work.Run, validation []queue.Command) (result core.Result) {
 	if manager == nil {
 		return core.Fail(core.NewError("agent workspace manager is required"))
 	}
@@ -178,8 +153,31 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 		"--git-dir", project.ClonePath, "worktree", "add", "-b", integrationBranch, integrationPath, sourceReference,
 	)
 	if !added.OK {
+		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, integrationPath, integrationRelativeResult.Value.(string), integrationBranch, true)
+		if !cleanup.OK {
+			return core.Fail(core.E("workspace.Manager.ReviewChanges", added.Error(), cleanup.Err()))
+		}
 		return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to create integration worktree", added.Err()))
 	}
+	manager.reviews[integrationPath] = provisionalReview{
+		workID: run.WorkID, runID: run.ID, branch: integrationBranch, path: integrationPath,
+		clone: project.ClonePath, relative: integrationRelativeResult.Value.(string),
+	}
+	provisional := true
+	defer func() {
+		if !provisional {
+			return
+		}
+		cleanup := manager.cleanupFailedWorktree(ctx, project.ClonePath, integrationPath, integrationRelativeResult.Value.(string), integrationBranch, true)
+		if cleanup.OK {
+			return
+		}
+		if result.OK {
+			result = cleanup
+			return
+		}
+		result = core.Fail(core.E("workspace.Manager.ReviewChanges", result.Error(), cleanup.Err()))
+	}()
 
 	review := ChangeReview{
 		WorkID: run.WorkID, RunID: run.ID, SourceBranch: source.Branch, SourceRevision: source.Revision,
@@ -209,13 +207,14 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 			arguments := append([]string{"cherry-pick"}, commits...)
 			integrated := manager.gitOutput(ctx, integrationPath, nil, arguments...)
 			if !integrated.OK {
-				conflicts := manager.gitOutput(context.WithoutCancel(ctx), integrationPath, nil, "diff", "--name-only", "--diff-filter=U")
+				conflicts := manager.gitOutput(ctx, integrationPath, nil, "diff", "--name-only", "--diff-filter=U")
 				if conflicts.OK {
 					review.Conflicts = core.Fields(conflicts.Value.(string))
 				}
 				if len(review.Conflicts) == 0 {
 					return core.Fail(core.E("workspace.Manager.ReviewChanges", "failed to replay exact agent range", integrated.Err()))
 				}
+				provisional = false
 				return core.Ok(cloneChangeReview(review))
 			}
 		}
@@ -231,7 +230,48 @@ func (manager *Manager) ReviewChanges(ctx context.Context, project work.Project,
 	}
 	review.Diff = diff.Value.(string)
 	review.Validation = runValidation(ctx, integrationPath, validation)
+	provisional = false
 	return core.Ok(cloneChangeReview(review))
+}
+
+// RetainReview transfers a provisional integration worktree to a durable review receipt.
+func (manager *Manager) RetainReview(review ChangeReview) core.Result {
+	if manager == nil {
+		return core.Fail(core.NewError("agent workspace manager is required"))
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	provisional, exists := manager.reviews[review.IntegrationPath]
+	if !exists || !matchesProvisionalReview(provisional, review) {
+		return core.Fail(core.NewError("agent workspace review does not match a provisional integration"))
+	}
+	delete(manager.reviews, review.IntegrationPath)
+	return core.Ok(cloneChangeReview(review))
+}
+
+// AbandonReview removes a provisional integration whose durable receipt was not committed.
+func (manager *Manager) AbandonReview(ctx context.Context, review ChangeReview) core.Result {
+	if manager == nil {
+		return core.Fail(core.NewError("agent workspace manager is required"))
+	}
+	if ctx == nil {
+		return core.Fail(core.NewError("agent workspace review cleanup context is required"))
+	}
+	if err := ctx.Err(); err != nil {
+		return core.Fail(core.E("workspace.Manager.AbandonReview", "review cleanup context is done", err))
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	provisional, exists := manager.reviews[review.IntegrationPath]
+	if !exists || !matchesProvisionalReview(provisional, review) {
+		return core.Fail(core.NewError("agent workspace review does not match a provisional integration"))
+	}
+	return manager.cleanupFailedWorktree(ctx, provisional.clone, provisional.path, provisional.relative, provisional.branch, true)
+}
+
+func matchesProvisionalReview(provisional provisionalReview, review ChangeReview) bool {
+	return provisional.workID == review.WorkID && provisional.runID == review.RunID &&
+		provisional.branch == review.IntegrationBranch && provisional.path == review.IntegrationPath
 }
 
 // Apply advances the unchanged reviewed source to the already validated result.

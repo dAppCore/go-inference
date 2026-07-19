@@ -56,3 +56,33 @@ func TestGit_ProcessRunner_Run_Ugly(t *testing.T) {
 	runner.run = func(context.Context, process.RunOptions) core.Result { return core.Ok(17) }
 	core.AssertFalse(t, runner.Run(context.Background(), Command{Executable: "git"}).OK)
 }
+
+func TestGit_ProcessRunner_RunDetailed_Good(t *testing.T) {
+	runner := ProcessRunner{run: func(context.Context, process.RunOptions) core.Result {
+		return core.Ok("main\n")
+	}}
+	result := runner.RunDetailed(context.Background(), Command{Executable: "git", Args: []string{"branch", "--show-current"}})
+	core.AssertTrue(t, result.OK, result.Error())
+	outcome := result.Value.(CommandOutcome)
+	core.AssertEqual(t, "main\n", outcome.Output)
+	core.AssertEqual(t, 0, outcome.ExitCode)
+	core.AssertTrue(t, outcome.Failure == nil)
+}
+
+func TestGit_ProcessRunner_RunDetailed_Bad(t *testing.T) {
+	runner := ProcessRunner{}
+	core.AssertFalse(t, runner.RunDetailed(nil, Command{Executable: "git"}).OK)
+	core.AssertFalse(t, runner.RunDetailed(context.Background(), Command{}).OK)
+	core.AssertFalse(t, runner.RunDetailed(context.Background(), Command{Executable: "git", Dir: "relative"}).OK)
+}
+
+func TestGit_ProcessRunner_RunDetailed_Ugly(t *testing.T) {
+	runner := ProcessRunner{run: func(context.Context, process.RunOptions) core.Result {
+		return core.Fail(core.NewError("injected process failure"))
+	}}
+	result := runner.RunDetailed(context.Background(), Command{Executable: "git", Args: []string{"status"}})
+	core.AssertTrue(t, result.OK, result.Error())
+	outcome := result.Value.(CommandOutcome)
+	core.AssertEqual(t, -1, outcome.ExitCode)
+	core.AssertContains(t, outcome.Failure.Error(), "injected process failure")
+}

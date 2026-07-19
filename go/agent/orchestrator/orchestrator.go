@@ -17,22 +17,26 @@ import (
 )
 
 const (
-	defaultLogBatchBytes = 32 * 1024
-	defaultLogBatchDelay = 250 * time.Millisecond
+	defaultLogBatchBytes  = 32 * 1024
+	defaultLogBatchDelay  = 250 * time.Millisecond
+	defaultAttemptTimeout = 60 * time.Minute
+	defaultCleanupTimeout = 5 * time.Second
 )
 
 // Options supplies every durable and native dependency owned by an Orchestrator.
 type Options struct {
-	Store         Store
-	GitServer     gitserver.Service
-	Workspaces    *workspace.Manager
-	Providers     *provider.Registry
-	Queue         *queue.Controller
-	Launcher      Launcher
-	Clock         Clock
-	IDs           Identifier
-	LogBatchBytes int
-	LogBatchDelay time.Duration
+	Store          Store
+	GitServer      gitserver.Service
+	Workspaces     *workspace.Manager
+	Providers      *provider.Registry
+	Queue          *queue.Controller
+	Launcher       Launcher
+	Clock          Clock
+	IDs            Identifier
+	LogBatchBytes  int
+	LogBatchDelay  time.Duration
+	AttemptTimeout time.Duration
+	CleanupTimeout time.Duration
 }
 
 // ProjectReview is a mutation-free source review awaiting registration consent.
@@ -53,6 +57,28 @@ type DispatchReview struct {
 	Queue        queue.Decision
 	WorktreePath string
 	Warning      string
+
+	exactCommand   bool
+	reviewedBranch string
+}
+
+// ChildReview is the exact immutable continuation launch awaiting confirmation.
+type ChildReview struct {
+	Action       string
+	Work         work.Item
+	Parent       work.Run
+	AnswerID     string
+	RunID        string
+	Provider     string
+	Model        string
+	Project      work.Project
+	Source       workspace.SourceReview
+	Detection    provider.Detection
+	Command      provider.Command
+	Queue        queue.Decision
+	WorktreePath string
+	Branch       string
+	Warning      string
 }
 
 // Orchestrator owns queue admission, native processes, worktrees, and shutdown.
@@ -66,17 +92,20 @@ type Orchestrator struct {
 	clock      Clock
 	ids        Identifier
 
-	logBatchBytes int
-	logBatchDelay time.Duration
-	ctx           context.Context
-	cancel        context.CancelFunc
-	wake          chan struct{}
-	workers       sync.WaitGroup
-	closeOnce     sync.Once
-	closeResult   core.Result
-	lifecycle     sync.RWMutex
-	queueMu       sync.Mutex
-	decisionMu    sync.Mutex
+	logBatchBytes  int
+	logBatchDelay  time.Duration
+	attemptTimeout time.Duration
+	cleanupTimeout time.Duration
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wake           chan struct{}
+	workers        sync.WaitGroup
+	closeMu        sync.Mutex
+	closeComplete  bool
+	closeResult    core.Result
+	lifecycle      sync.RWMutex
+	queueMu        sync.Mutex
+	decisionMu     sync.Mutex
 
 	mu         sync.Mutex
 	runs       map[string]Process
@@ -90,14 +119,20 @@ func New(options Options) core.Result {
 	if options.Store == nil || options.GitServer == nil || options.Workspaces == nil || options.Providers == nil || options.Queue == nil || options.Launcher == nil || options.Clock == nil || options.IDs == nil {
 		return core.Fail(core.NewError("agent orchestrator requires store, Git, workspace, provider, queue, launcher, clock, and ID dependencies"))
 	}
-	if options.LogBatchBytes < 0 || options.LogBatchDelay < 0 {
-		return core.Fail(core.NewError("agent orchestrator log batch limits cannot be negative"))
+	if options.LogBatchBytes < 0 || options.LogBatchDelay < 0 || options.AttemptTimeout < 0 || options.CleanupTimeout < 0 {
+		return core.Fail(core.NewError("agent orchestrator log batch limits and attempt timeout cannot be negative"))
 	}
 	if options.LogBatchBytes == 0 {
 		options.LogBatchBytes = defaultLogBatchBytes
 	}
 	if options.LogBatchDelay == 0 {
 		options.LogBatchDelay = defaultLogBatchDelay
+	}
+	if options.AttemptTimeout == 0 {
+		options.AttemptTimeout = defaultAttemptTimeout
+	}
+	if options.CleanupTimeout == 0 {
+		options.CleanupTimeout = defaultCleanupTimeout
 	}
 	at := options.Clock.Now()
 	if at.IsZero() {
@@ -123,13 +158,18 @@ func New(options Options) core.Result {
 		store: options.Store, gitServer: options.GitServer, workspaces: options.Workspaces,
 		providers: options.Providers, queue: options.Queue, launcher: options.Launcher,
 		clock: options.Clock, ids: options.IDs, logBatchBytes: options.LogBatchBytes,
-		logBatchDelay: options.LogBatchDelay, ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1),
+		logBatchDelay: options.LogBatchDelay, attemptTimeout: options.AttemptTimeout, cleanupTimeout: options.CleanupTimeout,
+		ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1),
 		runs: make(map[string]Process), pending: make(map[string]DispatchReview),
 		executions: make(map[string]*runExecution), closeResult: core.Ok(nil),
 	}
 	orchestrator.workers.Add(1)
 	go orchestrator.queueLoop()
 	return core.Ok(orchestrator)
+}
+
+func (orchestrator *Orchestrator) cleanupContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), orchestrator.cleanupTimeout)
 }
 
 // Capabilities reports the reusable native-agent feature catalogue.
@@ -297,11 +337,15 @@ func (orchestrator *Orchestrator) Close() core.Result {
 	if orchestrator == nil {
 		return core.Fail(core.NewError("agent orchestrator is required"))
 	}
-	orchestrator.closeOnce.Do(func() {
-		orchestrator.lifecycle.Lock()
-		defer orchestrator.lifecycle.Unlock()
-		orchestrator.closeResult = orchestrator.close()
-	})
+	orchestrator.closeMu.Lock()
+	defer orchestrator.closeMu.Unlock()
+	if orchestrator.closeComplete {
+		return orchestrator.closeResult
+	}
+	orchestrator.lifecycle.Lock()
+	orchestrator.closeResult = orchestrator.close()
+	orchestrator.lifecycle.Unlock()
+	orchestrator.closeComplete = orchestrator.closeResult.OK
 	return orchestrator.closeResult
 }
 

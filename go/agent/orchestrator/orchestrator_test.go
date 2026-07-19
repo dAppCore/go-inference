@@ -22,14 +22,28 @@ type orchestratorTestGitRunner struct {
 	mu        sync.Mutex
 	afterPush func(string)
 	failWhen  func(workspace.Command) bool
+	blockWhen func(workspace.Command) bool
+	blocked   chan struct{}
+	blockOnce sync.Once
 }
 
 func (runner *orchestratorTestGitRunner) Run(ctx context.Context, command workspace.Command) core.Result {
 	runner.mu.Lock()
 	failWhen := runner.failWhen
+	blockWhen := runner.blockWhen
+	blocked := runner.blocked
 	runner.mu.Unlock()
 	if failWhen != nil && failWhen(command) {
 		return core.Fail(core.NewError("injected Git failure"))
+	}
+	if blockWhen != nil && blockWhen(command) {
+		runner.blockOnce.Do(func() {
+			if blocked != nil {
+				close(blocked)
+			}
+		})
+		<-ctx.Done()
+		return core.Fail(core.E("test.GitRunner", "blocked Git command cancelled", ctx.Err()))
 	}
 	program := &coreprocess.Program{Name: command.Executable}
 	if found := program.Find(); !found.OK {
@@ -58,6 +72,16 @@ func (runner *orchestratorTestGitRunner) Run(ctx context.Context, command worksp
 	return result
 }
 
+func (runner *orchestratorTestGitRunner) RunDetailed(ctx context.Context, command workspace.Command) core.Result {
+	runner.mu.Lock()
+	failWhen := runner.failWhen
+	runner.mu.Unlock()
+	if failWhen != nil && failWhen(command) {
+		return core.Fail(core.NewError("injected detailed Git failure"))
+	}
+	return (workspace.ProcessRunner{}).RunDetailed(ctx, command)
+}
+
 func (runner *orchestratorTestGitRunner) setAfterPush(hook func(string)) {
 	runner.mu.Lock()
 	runner.afterPush = hook
@@ -68,6 +92,15 @@ func (runner *orchestratorTestGitRunner) setFailure(predicate func(workspace.Com
 	runner.mu.Lock()
 	runner.failWhen = predicate
 	runner.mu.Unlock()
+}
+
+func (runner *orchestratorTestGitRunner) setBlock(predicate func(workspace.Command) bool) <-chan struct{} {
+	runner.mu.Lock()
+	runner.blockWhen = predicate
+	runner.blocked = make(chan struct{})
+	blocked := runner.blocked
+	runner.mu.Unlock()
+	return blocked
 }
 
 func orchestratorWorkspaceCommandHasArgument(command workspace.Command, expected string) bool {
@@ -902,6 +935,8 @@ func TestOrchestrator_New_Good(t *testing.T) {
 	core.AssertTrue(t, result.OK, result.Error())
 	recovered := result.Value.(*Orchestrator)
 	t.Cleanup(func() { core.AssertTrue(t, recovered.Close().OK) })
+	core.AssertEqual(t, defaultAttemptTimeout, recovered.attemptTimeout)
+	core.AssertEqual(t, defaultCleanupTimeout, recovered.cleanupTimeout)
 	core.AssertEqual(t, fixture.at, fixture.store.recoveredAt)
 	core.AssertEqual(t, work.QueueFrozen, fixture.store.queue.Status)
 }
@@ -920,8 +955,14 @@ func TestOrchestrator_New_Ugly(t *testing.T) {
 		Clock: fixture.clock, IDs: fixture.ids, LogBatchBytes: -1,
 	}
 	core.AssertFalse(t, New(options).OK)
-	fixture.store.setRecoverFailure(true)
 	options.LogBatchBytes = 1
+	options.AttemptTimeout = -time.Second
+	core.AssertFalse(t, New(options).OK)
+	options.AttemptTimeout = time.Second
+	options.CleanupTimeout = -time.Second
+	core.AssertFalse(t, New(options).OK)
+	fixture.store.setRecoverFailure(true)
+	options.CleanupTimeout = time.Second
 	core.AssertFalse(t, New(options).OK)
 }
 
@@ -1332,6 +1373,14 @@ func TestOrchestratorCloseWithdrawsQueuedAndPreservesFailures(t *testing.T) {
 	core.AssertFalse(t, closed.OK)
 	core.AssertContains(t, closed.Error(), "launcher close")
 	core.AssertContains(t, closed.Error(), "Git close")
+	fixture.launcher.mu.Lock()
+	fixture.launcher.failClose = false
+	fixture.launcher.mu.Unlock()
+	fixture.server.mu.Lock()
+	fixture.server.failClose = false
+	fixture.server.mu.Unlock()
+	retried := fixture.orchestrator.Close()
+	core.AssertTrue(t, retried.OK, retried.Error())
 	stored := fixture.store.Run(run.ID)
 	core.AssertTrue(t, stored.OK, stored.Error())
 	core.AssertEqual(t, work.RunCancelled, stored.Value.(work.Run).Status)

@@ -343,6 +343,17 @@ func (store *duckAgentStore) Snapshot(workID string) core.Result {
 	if err != nil {
 		return agentStoreFailure("Snapshot", "read events", err)
 	}
+	answerEvents, err := queryAgentAnswerEvents(store.connection, workID)
+	if err != nil {
+		return agentStoreFailure("Snapshot", "read answer projections", err)
+	}
+	events = append(events, answerEvents...)
+	core.SliceSortFunc(events, func(left, right work.Event) bool {
+		if left.CreatedAt.Equal(right.CreatedAt) {
+			return left.ID < right.ID
+		}
+		return left.CreatedAt.Before(right.CreatedAt)
+	})
 	snapshot.Events = events
 	logs, err := querySnapshotLogs(store.connection, workID)
 	if err != nil {
@@ -370,6 +381,12 @@ func (store *duckAgentStore) Snapshot(workID string) core.Result {
 	}
 	snapshot.Providers = providers
 	return core.Ok(snapshot)
+}
+
+type agentAnswerProjection struct {
+	AnswerID    string `json:"answer_id"`
+	QuestionID  string `json:"question_id"`
+	ResumeRunID string `json:"resume_run_id"`
 }
 
 const runSelect = `SELECT id, work_id, project_id, parent_run_id, provider, model, source_revision,
@@ -469,6 +486,39 @@ func queryAgentEvents(connection *sql.DB, workID string) ([]work.Event, error) {
 			return nil, err
 		}
 		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
+func queryAgentAnswerEvents(connection *sql.DB, workID string) ([]work.Event, error) {
+	query := `SELECT agent_answers.id, agent_answers.question_id, agent_answers.resume_run_id,
+		agent_questions.run_id, agent_runs.work_id, agent_answers.created_at
+		FROM agent_answers
+		INNER JOIN agent_questions ON agent_questions.id = agent_answers.question_id
+		INNER JOIN agent_runs ON agent_runs.id = agent_questions.run_id`
+	arguments := make([]any, 0, 1)
+	if workID != "" {
+		query += " WHERE agent_runs.work_id = ?"
+		arguments = append(arguments, workID)
+	}
+	query += " ORDER BY agent_answers.created_at, agent_answers.id"
+	rows, err := connection.Query(query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	defer closeAgentRows(rows)
+	values := make([]work.Event, 0)
+	for rows.Next() {
+		var projection agentAnswerProjection
+		var runID, answerWorkID string
+		var createdAt time.Time
+		if err := rows.Scan(&projection.AnswerID, &projection.QuestionID, &projection.ResumeRunID, &runID, &answerWorkID, &createdAt); err != nil {
+			return nil, err
+		}
+		values = append(values, work.Event{
+			ID: core.Concat("answer:", projection.AnswerID), RunID: runID, WorkID: answerWorkID,
+			Kind: "answered", Title: "Agent question answered", DetailJSON: core.JSONMarshalString(projection), CreatedAt: createdAt,
+		})
 	}
 	return values, rows.Err()
 }

@@ -97,7 +97,7 @@ func TestAccept_Orchestrator_ReviewChanges_Bad(t *testing.T) {
 	core.AssertFalse(t, orchestrator.ReviewChanges(context.Background(), "run").OK)
 	fixture := newOrchestratorFixture(t)
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), "missing").OK)
-	_, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	project, run := orchestratorCompletedAcceptanceRun(t, fixture)
 	fixture.store.overrideRun("not a run")
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
 	fixture.store.clearRunOverride()
@@ -114,6 +114,10 @@ func TestAccept_Orchestrator_ReviewChanges_Bad(t *testing.T) {
 	fixture.store.overrideProjectID("not a project")
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
 	fixture.store.clearProjectIDOverride()
+	dirtyPath := core.PathJoin(project.RepositoryRoot, "unreviewed.txt")
+	core.AssertTrue(t, core.WriteFile(dirtyPath, []byte("dirty\n"), 0o600).OK)
+	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+	core.AssertTrue(t, core.Remove(dirtyPath).OK)
 	fixture.clock.Set(time.Time{})
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
 	fixture.clock.Set(fixture.at)
@@ -125,6 +129,40 @@ func TestAccept_Orchestrator_ReviewChanges_Bad(t *testing.T) {
 	fixture.orchestrator.ids = originalIDs
 	fixture.store.failNext(func(commit Commit) bool { return commit.Acceptance != nil })
 	core.AssertFalse(t, fixture.orchestrator.ReviewChanges(context.Background(), run.ID).OK)
+}
+
+func TestAccept_latestPreparedReview_Bad(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	fixture.store.mu.Lock()
+	fixture.store.acceptances = append(fixture.store.acceptances, work.Acceptance{
+		ID: "other-review", RunID: "other-run", Status: "prepared", UpdatedAt: fixture.at,
+	})
+	fixture.store.mu.Unlock()
+	result := fixture.orchestrator.latestPreparedReview("requested-run")
+	core.AssertFalse(t, result.OK)
+	core.AssertContains(t, result.Error(), "no durable prepared review")
+}
+
+func TestAcceptOrchestratorReviewCommitFailureAbandonsProvisionalIntegration(t *testing.T) {
+	fixture := newOrchestratorFixture(t)
+	project, run := orchestratorCompletedAcceptanceRun(t, fixture)
+	var review workspace.ChangeReview
+	fixture.store.beforeCommit = func(commit Commit) {
+		if commit.Acceptance == nil {
+			return
+		}
+		decoded := decodeChangeReview(commit.Acceptance.ValidationJSON)
+		core.AssertTrue(t, decoded.OK, decoded.Error())
+		review = decoded.Value.(workspace.ChangeReview)
+	}
+	fixture.store.failNext(func(commit Commit) bool { return commit.Acceptance != nil })
+
+	result := fixture.orchestrator.ReviewChanges(context.Background(), run.ID)
+	core.AssertFalse(t, result.OK)
+	core.AssertNotEqual(t, "", review.IntegrationPath)
+	workspaceRoot := core.PathDir(core.PathDir(project.ClonePath))
+	core.AssertFalse(t, core.Stat(review.IntegrationPath).OK)
+	core.AssertEqual(t, "", orchestratorRunGit(t, workspaceRoot, "--git-dir", project.ClonePath, "branch", "--list", review.IntegrationBranch))
 }
 
 func TestAccept_Orchestrator_ReviewChanges_Ugly(t *testing.T) {
@@ -310,15 +348,15 @@ func TestAcceptOrchestratorAcceptRequiresExistingIdempotentReceipt(t *testing.T)
 	fixture.store.clearSnapshotOverride()
 }
 
-func TestAcceptStoreFailureRestoresSourceAndCompletedRun(t *testing.T) {
+func TestAcceptStoreFailureRetainsAuthorizedSourceForReceiptReconciliation(t *testing.T) {
 	fixture := newOrchestratorFixture(t)
 	project, run := orchestratorCompletedAcceptanceRun(t, fixture)
 	review := fixture.orchestrator.ReviewChanges(context.Background(), run.ID).Value.(workspace.ChangeReview)
-	before := orchestratorAcceptanceSourceSnapshot(t, project.RepositoryRoot)
 	fixture.store.failNext(func(commit Commit) bool { return commit.Acceptance != nil })
 	result := fixture.orchestrator.Accept(context.Background(), workspace.AcceptRequest{Review: review, Confirmed: true})
 	core.AssertFalse(t, result.OK)
-	core.AssertEqual(t, before, orchestratorAcceptanceSourceSnapshot(t, project.RepositoryRoot))
+	core.AssertContains(t, result.Error(), "reconciliation")
+	core.AssertEqual(t, review.ResultRevision, orchestratorRunGit(t, project.RepositoryRoot, "rev-parse", "HEAD"))
 	core.AssertEqual(t, work.RunCompleted, fixture.store.runs[run.ID].Status)
 	core.AssertEqual(t, 0, orchestratorAcceptanceCount(fixture.store, "accepted"))
 	core.AssertEqual(t, 1, orchestratorAcceptanceCount(fixture.store, "prepared"))

@@ -100,6 +100,26 @@ func TestAgentStore_Good(t *testing.T) {
 	}
 }
 
+func TestAgentStoreSnapshotIncludesDurableAnswerResumeProjection(t *testing.T) {
+	_, repository, agentStore := openTestAgentStore(t)
+	defer closeTestDuckRepository(t, repository)
+	at := time.Date(2026, time.July, 19, 9, 0, 0, 0, time.UTC)
+	run := testAgentRun("waiting-run", work.RunWaiting, at)
+	question := work.Question{ID: "question-reopen", RunID: run.ID, Text: "Which target?", CreatedAt: at.Add(time.Second)}
+	answer := work.Answer{ID: "answer-reopen", QuestionID: question.ID, ResumeRunID: "resume-run", Text: "Target A", CreatedAt: at.Add(2 * time.Second)}
+	if result := agentStore.Commit(orchestrator.Commit{Run: &run, CreateRun: true, Question: &question, Answer: &answer}); !result.OK {
+		t.Fatalf("commit answered waiting run: %s", result.Error())
+	}
+
+	snapshot := requireAgentValue[work.Snapshot](t, "answered Snapshot", agentStore.Snapshot(run.WorkID))
+	for _, event := range snapshot.Events {
+		if event.RunID == run.ID && event.Kind == "answered" && strings.Contains(event.DetailJSON, answer.ID) && strings.Contains(event.DetailJSON, answer.ResumeRunID) {
+			return
+		}
+	}
+	t.Fatalf("snapshot events omit durable answer/resume projection: %#v", snapshot.Events)
+}
+
 func TestAgentStore_OrderedSnapshot(t *testing.T) {
 	_, repository, agentStore := openTestAgentStore(t)
 	defer closeTestDuckRepository(t, repository)
