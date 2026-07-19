@@ -62,3 +62,24 @@ sleep — each loudly.
 
 Until at least one of those lands with numbers, TurboQuant is a knob, not the
 default.
+
+## Quiet-box re-run (same day, all lanes drained)
+
+| mode | needle | decode tok/s | prefill tok/s (TTFT) | peak RSS |
+|---|---|---|---|---|
+| native (off) | retrieved | 131.6 | 158 (77.8 s) | 5.80 GB |
+| turboquant:4 | retrieved | 87.8 | 8,291 (1.49 s) | 5.68 GB |
+| turboquant:3.5 | retrieved | 86.1 | 8,391 (1.47 s) | 5.68 GB |
+
+Post peer-ICB fix + batched TQ prefill + single-pass fusion. Two findings:
+(1) the TQ batched landing prefil ls 52x faster than the native lane at 16k —
+and the native side of that ratio is its own pathology (158 tok/s on a quiet
+box is per-token-class, not batched; tracked separately). (2) the decode gap
+at 16k persists because kvLen>=1024 runs the UNFUSED 2-pass lane — the fusion
+receipt's +16% lives on single-pass only; the pass-2 runtime-dim port is the
+named lever for long-context decode parity.
+
+**Decision confirmed: the default stays `native`.** Needle passes everywhere;
+decode fails the parity bar at exactly the depths TQ targets; E2B residency
+delta is real but small (three global caches). The opt-in stands, now with a
+52x TTFT win at long context as its honest selling point.
