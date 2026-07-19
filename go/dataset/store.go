@@ -239,7 +239,11 @@ func ValidateItem(item Item) core.Result {
 }
 
 // ValidateScore checks the required fields a Store implementation must
-// enforce before persisting a Score.
+// enforce before persisting a Score. Scorer identity is a discriminated
+// either/or per the design ("scorer name + version OR judge model
+// fingerprint"): a heuristic row names ScorerName (+ usually
+// ScorerVersion); a judge-tier row names JudgeFingerprint instead — at
+// least one of the two is required, never neither.
 func ValidateScore(s Score) core.Result {
 	if core.Trim(s.ID) == "" {
 		return core.Fail(core.NewError("dataset: score id is required"))
@@ -250,8 +254,8 @@ func ValidateScore(s Score) core.Result {
 	if !knownScoreKind(s.Kind) {
 		return core.Fail(core.NewError("dataset: score kind is unknown"))
 	}
-	if core.Trim(s.ScorerName) == "" {
-		return core.Fail(core.NewError("dataset: score scorer name is required"))
+	if core.Trim(s.ScorerName) == "" && core.Trim(s.JudgeFingerprint) == "" {
+		return core.Fail(core.NewError("dataset: score requires a scorer name or a judge fingerprint"))
 	}
 	if s.CreatedAt.IsZero() {
 		return core.Fail(core.NewError("dataset: score created_at is required"))

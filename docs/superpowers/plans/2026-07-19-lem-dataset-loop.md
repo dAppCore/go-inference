@@ -41,11 +41,11 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 3: Welfare screen + scoring orchestration
 
-- [ ] Every ingest path routes through the welfare screen; a hit writes `quarantined` review (`auto:welfare`) and the item still lands (visible, reviewable).
-- [ ] Heuristic tier: `lek.ScorePair` per item → `lek` score row (composite value + full payload) + derived `hostility`/`sycophancy` rows; scorer identity = scorer name + version.
-- [ ] Auto-threshold expressions (`lek>=80`, `hostility>=0.7`): a tiny explicit parser (field, op, number — nothing more), applied ONLY when flags are passed; review rows carry `auto:threshold` + the expression text.
-- [ ] Judge contract: the interface a CLI-side driver implements (template name → prompt render → generation → parsed score); root defines + tests the contract with a fake judge, drivers live CLI-side.
-- [ ] Tests: quarantine visibility, score append-only (re-score adds), threshold parser Good/Bad/Ugly (reject anything beyond the grammar), fake-judge round-trip; Examples.
+- [x] Every ingest path routes through the welfare screen; a hit writes `quarantined` review (`auto:welfare`) and the item still lands (visible, reviewable).
+- [x] Heuristic tier: `lek.ScorePair` per item → `lek` score row (composite value + full payload) + derived `hostility`/`sycophancy` rows; scorer identity = scorer name + version.
+- [x] Auto-threshold expressions (`lek>=80`, `hostility>=0.7`): a tiny explicit parser (field, op, number — nothing more), applied ONLY when flags are passed; review rows carry `auto:threshold` + the expression text.
+- [x] Judge contract: the interface a CLI-side driver implements (template name → prompt render → generation → parsed score); root defines + tests the contract with a fake judge, drivers live CLI-side.
+- [x] Tests: quarantine visibility, score append-only (re-score adds), threshold parser Good/Bad/Ugly (reject anything beyond the grammar), fake-judge round-trip; Examples.
 
 ### Task 4: Export writers + manifests
 

@@ -84,13 +84,12 @@ func (report *IngestReport) tally(outcome IngestOutcome) {
 
 // ingestContent is the shared primitive every ingest path in this
 // package funnels through: validate the content shape, compute its
-// canonicalised hash, dedupe within the dataset, and append.
-//
-// The welfare screen is NOT yet wired in here — that lands with
-// screen.go, which wraps this function to route every ingest path
-// through the ingest-door hostility/slur check (design: "every ingest
-// path runs the welfare screen at the door").
-func ingestContent(store Store, kind ItemKind, content []byte, req IngestRequest) (IngestOutcome, error) {
+// canonicalised hash, dedupe within the dataset, run the welfare screen,
+// and append — "every ingest path runs the welfare screen at the door:
+// a hit sets status quarantined ... and the item still lands (visible,
+// reviewable)" per the design. screen is shared across a whole bulk
+// ingest call (see newWelfareScreen) rather than rebuilt per row.
+func ingestContent(store Store, kind ItemKind, content []byte, req IngestRequest, screen *welfareScreen) (IngestOutcome, error) {
 	if r := ValidateItemContent(kind, content); !r.OK {
 		return IngestOutcome{}, r.Err()
 	}
@@ -112,6 +111,8 @@ func ingestContent(store Store, kind ItemKind, content []byte, req IngestRequest
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
+	triggered, det := screen.screenItem(kind, content)
+
 	item := Item{
 		ID:               NewID(),
 		DatasetID:        req.DatasetID,
@@ -127,7 +128,15 @@ func ingestContent(store Store, kind ItemKind, content []byte, req IngestRequest
 	if !appendResult.OK {
 		return IngestOutcome{}, appendResult.Err()
 	}
-	return IngestOutcome{Item: appendResult.Value.(Item)}, nil
+	stored := appendResult.Value.(Item)
+
+	if triggered {
+		review := Review{ItemID: stored.ID, Status: StatusQuarantined, Reviewer: ReviewerAutoWelfare, Note: describeWelfareHit(det), CreatedAt: createdAt}
+		if r := store.ReviewAppend(review); !r.OK {
+			return IngestOutcome{}, r.Err()
+		}
+	}
+	return IngestOutcome{Item: stored, Quarantined: triggered}, nil
 }
 
 // IngestPair ingests one prompt/response pair as a KindPair Item —
@@ -151,7 +160,7 @@ func IngestPair(store Store, prompt, response string, req IngestRequest) core.Re
 	if !content.OK {
 		return core.Fail(core.E("dataset.IngestPair", "marshal pair content", content.Err()))
 	}
-	outcome, err := ingestContent(store, KindPair, content.Value.([]byte), req)
+	outcome, err := ingestContent(store, KindPair, content.Value.([]byte), req, newWelfareScreen())
 	if err != nil {
 		return core.Fail(core.E("dataset.IngestPair", "ingest pair", err))
 	}
@@ -229,6 +238,7 @@ func IngestJSONL(store Store, datasetID string, reader core.Reader, opts IngestO
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	screen := newWelfareScreen()
 
 	report := IngestReport{}
 	rowNum := 0
@@ -257,7 +267,7 @@ func IngestJSONL(store Store, datasetID string, reader core.Reader, opts IngestO
 			ModelFingerprint: opts.ModelFingerprint,
 			CreatedAt:        createdAt,
 		}
-		outcome, err := ingestContent(store, kind, content, req)
+		outcome, err := ingestContent(store, kind, content, req, screen)
 		if err != nil {
 			report.Skipped = append(report.Skipped, IngestSkip{Row: rowNum, Reason: err.Error()})
 			continue
@@ -307,6 +317,7 @@ func IngestChatSessions(store Store, datasetID string, sessions []ChatSession) c
 	}
 
 	report := IngestReport{}
+	screen := newWelfareScreen()
 	for i, session := range sessions {
 		row := i + 1
 		if len(session.Turns) == 0 {
@@ -334,7 +345,7 @@ func IngestChatSessions(store Store, datasetID string, sessions []ChatSession) c
 			ModelFingerprint: session.ModelID,
 			CreatedAt:        session.StartedAt,
 		}
-		outcome, err := ingestContent(store, KindMessages, content.Value.([]byte), req)
+		outcome, err := ingestContent(store, KindMessages, content.Value.([]byte), req, screen)
 		if err != nil {
 			report.Skipped = append(report.Skipped, IngestSkip{Row: row, Reason: err.Error()})
 			continue
