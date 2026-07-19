@@ -25,7 +25,7 @@ func HFModelPath(t testing.TB, repo string) string {
 		t.Skip("Hugging Face cache unavailable: no home directory")
 		return ""
 	}
-	hub := core.PathJoin(home.Value.(string), ".cache", "huggingface", "hub")
+	hub := core.PathJoin(home.String(), ".cache", "huggingface", "hub")
 
 	want := "models--" + repo
 	if parts := core.SplitN(repo, "/", 2); len(parts) == 2 {

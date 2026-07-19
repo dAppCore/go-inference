@@ -89,7 +89,7 @@ func readPackInfoFile(path string, requireAutoRound bool) (*PackInfo, error) {
 		return nil, read.Value.(error)
 	}
 	var info PackInfo
-	if result := core.JSONUnmarshal(read.Value.([]byte), &info); !result.OK {
+	if result := core.JSONUnmarshal(read.Bytes(), &info); !result.OK {
 		return nil, result.Value.(error)
 	}
 	info.Path = path

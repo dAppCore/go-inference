@@ -179,7 +179,7 @@ func (b *HTTPBackend) Chat(ctx context.Context, messages []Message, opts GenOpts
 
 		r := b.doRequest(ctx, body)
 		if r.OK {
-			text := r.Value.(string)
+			text := r.String()
 			return core.Ok(newResult(applyStopSequences(text, opts.StopSequences), nil))
 		}
 		err := r.Value.(error)

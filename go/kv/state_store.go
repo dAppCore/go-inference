@@ -33,7 +33,6 @@ var (
 	errUnsupportedStateKVSnapshotEncoding = core.NewError("mlx: unsupported State KV snapshot binary encoding")
 	errStateKVSnapshotHash                = core.NewError("mlx: State KV snapshot hash mismatch")
 	errStateKVPayloadLen                  = core.NewError("mlx: State KV payload length mismatch")
-	errStateKVPayloadNonByte              = core.NewError("mlx: State KV payload decoded to non-byte data")
 	errStateKVSnapshotKind                = core.NewError("mlx: invalid State KV snapshot kind")
 )
 
@@ -187,10 +186,7 @@ func decodeKVSnapshotStateEnvelope(envelope kvSnapshotStateEnvelope) ([]byte, er
 	if !decoded.OK {
 		return nil, core.E("LoadFromState", "decode State KV payload", decoded.Err())
 	}
-	data, ok := decoded.Value.([]byte)
-	if !ok {
-		return nil, errStateKVPayloadNonByte
-	}
+	data := decoded.Bytes()
 	if envelope.PayloadByteCount > 0 && len(data) != envelope.PayloadByteCount {
 		return nil, errStateKVPayloadLen
 	}

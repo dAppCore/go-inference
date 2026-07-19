@@ -48,7 +48,7 @@ func ReadSentencePieceModel(path string) ([]SentencePiece, error) {
 	if !read.OK {
 		return nil, core.E("ReadSentencePieceModel", "read tokenizer.model", read.Err())
 	}
-	return ParseSentencePieceModel(read.Value.([]byte))
+	return ParseSentencePieceModel(read.Bytes())
 }
 
 // ParseSentencePieceModel decodes the protobuf wire bytes of a SentencePiece

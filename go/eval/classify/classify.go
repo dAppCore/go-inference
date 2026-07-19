@@ -135,7 +135,7 @@ func ClassifyCorpus(ctx context.Context, model inference.TextModel,
 			if !mr.OK {
 				return golog.E("ClassifyCorpus", "marshal output", mr.Value.(error))
 			}
-			line := mr.Value.([]byte)
+			line := mr.Bytes()
 			// Write the marshalled bytes plus a newline directly: core.Print
 			// would route through fmt (a format+"\n" concat and a []byte→any box
 			// every record). AsString is zero-copy and safe — line is freshly

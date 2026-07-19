@@ -351,9 +351,7 @@ func welfareHostility(text string) float64 {
 // beside the conversation state store (never leaves the device).
 func welfareFeedbackPath() string {
 	if homeR := core.UserHomeDir(); homeR.OK {
-		if home, ok := homeR.Value.(string); ok {
-			return core.PathJoin(home, "Lethean", "lem", "welfare", "feedback.jsonl")
-		}
+		return core.PathJoin(homeR.String(), "Lethean", "lem", "welfare", "feedback.jsonl")
 	}
 	return ""
 }

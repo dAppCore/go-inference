@@ -158,7 +158,7 @@ func (h *History) StartConversation(c NewConversation) (string, error) {
 		if !marshalled.OK {
 			return "", core.E("chathistory.StartConversation", "marshal tags", marshalled.Value.(error))
 		}
-		tags = string(marshalled.Value.([]byte))
+		tags = string(marshalled.Bytes())
 	}
 	var metadata any
 	if len(c.Metadata) > 0 {

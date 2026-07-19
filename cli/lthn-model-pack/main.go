@@ -124,7 +124,7 @@ func runList(args []string) core.Result {
 	if !jr.OK {
 		return jr
 	}
-	core.Print(os.Stdout, "%s", string(jr.Value.([]byte)))
+	core.Print(os.Stdout, "%s", string(jr.Bytes()))
 	return core.Ok(nil)
 }
 
@@ -147,6 +147,6 @@ func runInspect(args []string) core.Result {
 	if !jr.OK {
 		return jr
 	}
-	core.Print(os.Stdout, "%s", string(jr.Value.([]byte)))
+	core.Print(os.Stdout, "%s", string(jr.Bytes()))
 	return core.Ok(nil)
 }

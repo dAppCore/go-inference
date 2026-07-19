@@ -60,7 +60,7 @@ func writeSFTRow(item Item, _ int) ([]byte, bool) {
 		if !encoded.OK {
 			return nil, false
 		}
-		return encoded.Value.([]byte), true
+		return encoded.Bytes(), true
 	case KindPair:
 		pc, ok := itemAsPair(item)
 		if !ok {
@@ -74,7 +74,7 @@ func writeSFTRow(item Item, _ int) ([]byte, bool) {
 		if !encoded.OK {
 			return nil, false
 		}
-		return encoded.Value.([]byte), true
+		return encoded.Bytes(), true
 	default:
 		return nil, false
 	}
@@ -91,7 +91,7 @@ func writePairsRow(item Item, _ int) ([]byte, bool) {
 	if !encoded.OK {
 		return nil, false
 	}
-	return encoded.Value.([]byte), true
+	return encoded.Bytes(), true
 }
 
 // writeCaptureRow renders item as one capture-jsonl row, round-tripping
@@ -108,7 +108,7 @@ func writeCaptureRow(item Item, ordinal int) ([]byte, bool) {
 	if !encoded.OK {
 		return nil, false
 	}
-	return encoded.Value.([]byte), true
+	return encoded.Bytes(), true
 }
 
 // rowWriter renders one Item as one export row, or reports it cannot be
@@ -283,7 +283,7 @@ func ExportDataset(store Store, medium coreio.Medium, req ExportRequest) core.Re
 		return core.Fail(core.E("dataset.Export", "marshal manifest", manifestBytes.Err()))
 	}
 	manifestPath := core.Concat(req.OutputPath, ".manifest.json")
-	if writeErr := medium.Write(manifestPath, core.AsString(manifestBytes.Value.([]byte))); writeErr != nil {
+	if writeErr := medium.Write(manifestPath, core.AsString(manifestBytes.Bytes())); writeErr != nil {
 		return core.Fail(core.E("dataset.Export", "write manifest", writeErr))
 	}
 

@@ -94,8 +94,8 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 			core.Print(stderr, "%s generate: read --prompt-file %s: %s", cliName(), *promptFile, read.Error())
 			return 1
 		}
-		bytes, ok := read.Value.([]byte)
-		if !ok || len(bytes) == 0 {
+		bytes := read.Bytes()
+		if len(bytes) == 0 {
 			core.Print(stderr, "%s generate: --prompt-file %s is empty", cliName(), *promptFile)
 			return 1
 		}

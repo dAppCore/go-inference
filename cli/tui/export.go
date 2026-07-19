@@ -95,7 +95,7 @@ func (exporter *workspaceSessionExporter) Export(
 	if !contentResult.OK {
 		return contentResult
 	}
-	content := contentResult.Value.(string)
+	content := contentResult.String()
 	if directory != "" {
 		if err := medium.EnsureDir(directory); err != nil {
 			return core.Fail(core.E(
@@ -205,7 +205,7 @@ func (exporter *workspaceSessionExporter) render(payload sessionExport, format e
 		if !marshaled.OK {
 			return core.Fail(core.E("tui.sessionExporter.render", "marshal JSON export", resultError(marshaled)))
 		}
-		return core.Ok(core.AsString(marshaled.Value.([]byte)) + "\n")
+		return core.Ok(core.AsString(marshaled.Bytes()) + "\n")
 	}
 	return core.Ok(renderSessionMarkdown(payload))
 }

@@ -122,7 +122,7 @@ func quantizeTransformerLane(spec TransformerLaneSpec, matches func(string) bool
 	if !tokenizerRead.OK {
 		return nil, nil, core.E("quantizeTransformerLane", "read tokenizer.json", tokenizerRead.Err())
 	}
-	tokenizer, err := transformerTokenizer(tokenizerRead.Value.([]byte), spec.TokenizerPre, cfg.BOSTokenID, cfg.EOSTokenID)
+	tokenizer, err := transformerTokenizer(tokenizerRead.Bytes(), spec.TokenizerPre, cfg.BOSTokenID, cfg.EOSTokenID)
 	if err != nil {
 		return nil, nil, err
 	}

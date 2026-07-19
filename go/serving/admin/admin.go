@@ -102,9 +102,7 @@ func MachineHash() string {
 
 func hostname() string {
 	if r := core.Hostname(); r.OK {
-		if h, ok := r.Value.(string); ok {
-			return h
-		}
+		return r.String()
 	}
 	return ""
 }
@@ -148,7 +146,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 		return
 	}
 	w.WriteHeader(status)
-	_, _ = w.Write(encoded.Value.([]byte))
+	_, _ = w.Write(encoded.Bytes())
 }
 
 // readJSONBody decodes the request body into target. The body is capped at 64KB

@@ -37,7 +37,7 @@ func WriteScores(path string, output *ScorerOutput) core.Result {
 		return core.Fail(core.E("score.WriteScores", "marshal scores", r.Value.(error)))
 	}
 
-	if err := coreio.Local.Write(path, string(r.Value.([]byte))); err != nil {
+	if err := coreio.Local.Write(path, string(r.Bytes())); err != nil {
 		return core.Fail(core.E("score.WriteScores", core.Sprintf("write %s", path), err))
 	}
 

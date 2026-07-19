@@ -157,10 +157,7 @@ func (s *RemoteSource) getJSON(ctx context.Context, target string, out any) erro
 	if !read.OK {
 		return core.E("RemoteSource", "read response", read.Err())
 	}
-	body, ok := read.Value.(string)
-	if !ok {
-		return core.E("RemoteSource", "read response", core.NewError("unexpected response body shape"))
-	}
+	body := read.String()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Avoid core.Sprintf — its fmt machinery is hot-path heavy for what
 		// is just an int + string assembly. strconv.Itoa+Concat is cheaper

@@ -53,9 +53,7 @@ func newJudgeDispatcher(modelPath string, maxTokens int) (dataset.JudgeDispatche
 
 	overrideDir := ""
 	if dirResult := tui.OpenJudgesDir(); dirResult.OK {
-		if dir, dok := dirResult.Value.(string); dok {
-			overrideDir = dir
-		}
+		overrideDir = dirResult.String()
 	}
 	inRepoDir, _ := defaultInRepoJudgesDir()
 

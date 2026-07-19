@@ -101,7 +101,7 @@ func ExportArtifact(ctx context.Context, payload any, opts ArtifactOptions) (*Ar
 		if !data.OK {
 			return nil, core.E("state.ExportArtifact", "marshal artifact", data.Err())
 		}
-		marshalled := data.Value.([]byte)
+		marshalled := data.Bytes()
 		putOpts := opts.Put
 		if putOpts.Kind == "" {
 			putOpts.Kind = opts.Kind

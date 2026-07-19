@@ -102,9 +102,5 @@ func parseConfigDuration(s string) (time.Duration, error) {
 	if !r.OK {
 		return 0, r.Err()
 	}
-	d, ok := r.Value.(time.Duration)
-	if !ok {
-		return 0, core.E("serving.parseConfigDuration", core.Sprintf("duration %q not a time.Duration", s), nil)
-	}
-	return d, nil
+	return r.Duration(), nil
 }

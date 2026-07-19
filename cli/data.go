@@ -137,7 +137,7 @@ func printJSON(w io.Writer, v any) {
 		core.Print(w, "error: %s", data.Error())
 		return
 	}
-	core.WriteString(w, core.AsString(data.Value.([]byte)))
+	core.WriteString(w, core.AsString(data.Bytes()))
 	core.WriteString(w, "\n")
 }
 
@@ -478,8 +478,8 @@ func runDataImportChats(store dataset.Store, ds dataset.Dataset, userID, session
 		core.Print(stderr, "%s data import: resolve user home: %s", cliName(), homeResult.Error())
 		return 1
 	}
-	home, ok := homeResult.Value.(string)
-	if !ok || core.Trim(home) == "" {
+	home := homeResult.String()
+	if core.Trim(home) == "" {
 		core.Print(stderr, "%s data import: user home is empty", cliName())
 		return 1
 	}

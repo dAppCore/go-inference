@@ -48,7 +48,7 @@ func runStateTurn(ctx context.Context, cfg Config, loadOpts []inference.LoadOpti
 		if !homeR.OK {
 			return core.E("generate.state", "resolve home for default -state-store", nil)
 		}
-		home, _ := homeR.Value.(string)
+		home := homeR.String()
 		storePath = core.PathJoin(home, "Lethean", "lem", "state", "agent.kv")
 	}
 	store, err := openStateStore(ctx, storePath)

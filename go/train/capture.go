@@ -51,7 +51,7 @@ func appendCaptureRows(path string, evals []SFTEvalResult) int {
 		if !encoded.OK {
 			continue
 		}
-		out = append(out, encoded.Value.([]byte)...)
+		out = append(out, encoded.Bytes()...)
 		out = append(out, '\n')
 		rows++
 	}

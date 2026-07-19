@@ -59,8 +59,8 @@ func runBenchCommand(ctx context.Context, args []string, stdout, stderr io.Write
 			core.Print(stderr, "%s bench: read --config %s: %s", cliName(), *configPath, read.Error())
 			return 1
 		}
-		data, ok := read.Value.([]byte)
-		if !ok || len(data) == 0 {
+		data := read.Bytes()
+		if len(data) == 0 {
 			core.Print(stderr, "%s bench: --config %s is empty", cliName(), *configPath)
 			return 1
 		}
@@ -101,7 +101,7 @@ func runBenchCommand(ctx context.Context, args []string, stdout, stderr io.Write
 			core.Print(stderr, "%s bench: encode report: %s", cliName(), data.Error())
 			return 1
 		}
-		if w := core.WriteFile(*jsonOut, data.Value.([]byte), 0o644); !w.OK {
+		if w := core.WriteFile(*jsonOut, data.Bytes(), 0o644); !w.OK {
 			core.Print(stderr, "%s bench: write --json %s: %s", cliName(), *jsonOut, w.Error())
 			return 1
 		}

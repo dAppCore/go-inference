@@ -103,7 +103,7 @@ func quantizeGemma3ModelPack(source basegguf.Source, configJSON []byte, tensors 
 		metadata = append(metadata, basegguf.MetadataEntry{
 			Key:       "tokenizer.chat_template",
 			ValueType: basegguf.ValueTypeString,
-			Value:     core.AsString(tmpl.Value.([]byte)),
+			Value:     core.AsString(tmpl.Bytes()),
 		})
 	}
 	return quantized, metadata, nil

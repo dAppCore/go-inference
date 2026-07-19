@@ -142,7 +142,7 @@ func Load(path string) (*Policy, error) {
 	if !r.OK {
 		return nil, core.E("policy.Load", core.Sprintf("read policy file %q", path), r.Err())
 	}
-	return Compile(r.Value.([]byte))
+	return Compile(r.Bytes())
 }
 
 // Compile parses and compiles a policy from JSON bytes — the load path without

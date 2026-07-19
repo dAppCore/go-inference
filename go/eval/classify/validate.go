@@ -87,7 +87,7 @@ func ValidateArticle(ctx context.Context, m inference.TextModel, noun string, ar
 	if !generated.OK {
 		return failResult(golog.E("ValidateArticle", "validate: "+noun, core.NewError(generated.Error())))
 	}
-	predicted := generated.Value.(string)
+	predicted := generated.String()
 	given := core.Trim(core.Lower(article))
 	return core.Ok(ArticleResult{
 		Noun:      noun,
@@ -107,7 +107,7 @@ func ValidateIrregular(ctx context.Context, m inference.TextModel, verb string, 
 	if !generated.OK {
 		return failResult(golog.E("ValidateIrregular", "validate: "+verb+" ("+tense+")", core.NewError(generated.Error())))
 	}
-	predicted := generated.Value.(string)
+	predicted := generated.String()
 	given := core.Trim(core.Lower(form))
 	return core.Ok(IrregularResult{
 		Verb:      verb,

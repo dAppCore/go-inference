@@ -50,7 +50,7 @@ type Evaluator interface {
 // errored. AggregateFeedback then yields the mean score per key.
 //
 //	r := e.RunExperiment(ctx, "ethics-probes", target, []experiments.Evaluator{exactMatch{}, lekScore{}})
-//	expID := r.Value.(string)
+//	expID := r.String()
 //	means := e.AggregateFeedback(expID).Value.(map[string]float64)
 func (e *Eval) RunExperiment(ctx context.Context, datasetID string, target Target, evaluators []Evaluator) core.Result {
 	if target == nil {

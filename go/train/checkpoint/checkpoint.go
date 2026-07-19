@@ -48,7 +48,7 @@ func Save(sidecarPath string, meta any) error {
 	if !data.OK {
 		return core.E("CheckpointMetadata.Save", "marshal metadata", data.Err())
 	}
-	if result := core.WriteFile(sidecarPath, data.Value.([]byte), 0o600); !result.OK {
+	if result := core.WriteFile(sidecarPath, data.Bytes(), 0o600); !result.OK {
 		return core.E("CheckpointMetadata.Save", "write metadata", result.Err())
 	}
 	return nil
@@ -67,7 +67,7 @@ func Load[T any](sidecarPath string) (*T, error) {
 		return nil, read.Err()
 	}
 	var meta T
-	if result := core.JSONUnmarshal(read.Value.([]byte), &meta); !result.OK {
+	if result := core.JSONUnmarshal(read.Bytes(), &meta); !result.OK {
 		return nil, core.E("LoadCheckpointMetadata", "parse metadata", result.Err())
 	}
 	return &meta, nil
@@ -91,7 +91,7 @@ func LoadResume[T any](sidecarPath string) (*T, error) {
 		return nil, err
 	}
 	var meta T
-	if result := core.JSONUnmarshal(read.Value.([]byte), &meta); !result.OK {
+	if result := core.JSONUnmarshal(read.Bytes(), &meta); !result.OK {
 		return nil, core.E("LoadResumeMetadata", "parse metadata", result.Err())
 	}
 	return &meta, nil

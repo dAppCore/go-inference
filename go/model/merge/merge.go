@@ -248,7 +248,7 @@ func prepare(ctx context.Context, opts Options) (prepared, error) {
 
 	output := opts.OutputPath
 	if abs := core.PathAbs(output); abs.OK {
-		output = abs.Value.(string)
+		output = abs.String()
 	}
 	if err := ensureEmptyDestination(output); err != nil {
 		return prepared{}, err

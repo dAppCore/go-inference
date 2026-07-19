@@ -1335,7 +1335,7 @@ func (orchestrator *Orchestrator) persistProviderOutput(execution *runExecution,
 	if output.Kind == "rate_limit" && core.Trim(output.RetryAfter) != "" {
 		parsed := core.ParseDuration(output.RetryAfter)
 		if parsed.OK {
-			if duration, ok := parsed.Value.(time.Duration); ok && duration > 0 {
+			if duration := parsed.Duration(); duration > 0 {
 				atResult := orchestrator.now()
 				if !atResult.OK {
 					orchestrator.failExecution(execution, atResult.Error())

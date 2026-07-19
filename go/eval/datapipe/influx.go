@@ -72,7 +72,7 @@ func (c *InfluxClient) WriteLp(lines []string) core.Result {
 		rBody := readAll(resp.Body)
 		var bodyStr string
 		if rBody.OK {
-			bodyStr = string(rBody.Value.([]byte))
+			bodyStr = string(rBody.Bytes())
 		}
 		return core.Fail(core.E("datapipe.InfluxClient.WriteLp", core.Sprintf("write failed %d: %s", resp.StatusCode, bodyStr), nil))
 	}
@@ -113,7 +113,7 @@ func (c *InfluxClient) QuerySQL(sql string) core.Result {
 	if !rBody.OK {
 		return core.Fail(core.E("datapipe.InfluxClient.QuerySQL", "read query response", rBody.Value.(error)))
 	}
-	respBody := rBody.Value.([]byte)
+	respBody := rBody.Bytes()
 
 	if resp.StatusCode != http.StatusOK {
 		return core.Fail(core.E("datapipe.InfluxClient.QuerySQL", core.Sprintf("query failed %d: %s", resp.StatusCode, string(respBody)), nil))

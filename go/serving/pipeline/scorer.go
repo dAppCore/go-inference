@@ -34,5 +34,5 @@ func (scorerAdapter) Score(req chat.Request, resp chat.Response) map[string]stri
 	if !encoded.OK {
 		return nil
 	}
-	return map[string]string{"score": string(encoded.Value.([]byte))}
+	return map[string]string{"score": string(encoded.Bytes())}
 }

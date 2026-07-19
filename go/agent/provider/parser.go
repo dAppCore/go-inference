@@ -3,8 +3,6 @@
 package provider
 
 import (
-	"time"
-
 	core "dappco.re/go"
 )
 
@@ -231,8 +229,7 @@ func validDuration(value string) string {
 	if !parsed.OK {
 		return ""
 	}
-	duration, ok := parsed.Value.(time.Duration)
-	if !ok || duration <= 0 {
+	if parsed.Duration() <= 0 {
 		return ""
 	}
 	return candidate

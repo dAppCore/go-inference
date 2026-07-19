@@ -114,7 +114,7 @@ func ggufKeyOfInterest(key string) bool {
 func DiscoverModels(basePath string) []DiscoveredModel {
 	resolvedPath := basePath
 	if abs := core.PathAbs(basePath); abs.OK {
-		resolvedPath = abs.Value.(string)
+		resolvedPath = abs.String()
 	}
 	stat := core.Stat(resolvedPath)
 	if !stat.OK {

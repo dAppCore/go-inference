@@ -59,15 +59,15 @@ func ScoreHeuristic(item Item) core.Result {
 	scores := []Score{
 		{
 			ID: NewID(), ItemID: item.ID, Kind: ScoreKindLEK, Value: diff.Response.LEK.LEKScore,
-			Payload: diffPayload.Value.([]byte), ScorerName: heuristicScorerName, ScorerVersion: heuristicScorerVersion, CreatedAt: now,
+			Payload: diffPayload.Bytes(), ScorerName: heuristicScorerName, ScorerVersion: heuristicScorerVersion, CreatedAt: now,
 		},
 		{
 			ID: NewID(), ItemID: item.ID, Kind: ScoreKindHostility, Value: diff.Response.Hostility.Score,
-			Payload: hostilityPayload.Value.([]byte), ScorerName: heuristicScorerName, ScorerVersion: heuristicScorerVersion, CreatedAt: now,
+			Payload: hostilityPayload.Bytes(), ScorerName: heuristicScorerName, ScorerVersion: heuristicScorerVersion, CreatedAt: now,
 		},
 		{
 			ID: NewID(), ItemID: item.ID, Kind: ScoreKindSycophancy, Value: diff.Response.Sycophancy.Composite,
-			Payload: sycophancyPayload.Value.([]byte), ScorerName: heuristicScorerName, ScorerVersion: heuristicScorerVersion, CreatedAt: now,
+			Payload: sycophancyPayload.Bytes(), ScorerName: heuristicScorerName, ScorerVersion: heuristicScorerVersion, CreatedAt: now,
 		},
 	}
 	return core.Ok(scores)

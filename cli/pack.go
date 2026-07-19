@@ -142,7 +142,7 @@ func runPackInspect(args []string, stdout, stderr io.Writer) int {
 			core.Print(stderr, "%s pack inspect: %s", cliName(), data.Error())
 			return 1
 		}
-		core.WriteString(stdout, string(data.Value.([]byte)))
+		core.WriteString(stdout, string(data.Bytes()))
 		core.WriteString(stdout, "\n")
 		return 0
 	}
@@ -185,7 +185,7 @@ func runPackList(args []string, stdout, stderr io.Writer) int {
 			core.Print(stderr, "%s pack list: %s", cliName(), data.Error())
 			return 1
 		}
-		core.WriteString(stdout, string(data.Value.([]byte)))
+		core.WriteString(stdout, string(data.Bytes()))
 		core.WriteString(stdout, "\n")
 		return 0
 	}

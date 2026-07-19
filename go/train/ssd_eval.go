@@ -138,7 +138,7 @@ func LoadSSDCodeBenchmarkJSONLFile(path string) ([]SSDCodeBenchmarkSample, error
 	if !read.OK {
 		return nil, read.Value.(error)
 	}
-	return LoadSSDCodeBenchmarkJSONL(core.AsString(read.Value.([]byte)))
+	return LoadSSDCodeBenchmarkJSONL(core.AsString(read.Bytes()))
 }
 
 // LoadSSDLiveCodeBenchV6JSONLFile loads the LiveCodeBench-v6
@@ -148,7 +148,7 @@ func LoadSSDLiveCodeBenchV6JSONLFile(path string) ([]SSDCodeBenchmarkSample, err
 	if !read.OK {
 		return nil, read.Value.(error)
 	}
-	return LoadSSDLiveCodeBenchV6JSONL(core.AsString(read.Value.([]byte)))
+	return LoadSSDLiveCodeBenchV6JSONL(core.AsString(read.Bytes()))
 }
 
 // LoadSSDCodeBenchmarkJSONL loads LiveCodeBench-style JSONL
@@ -607,7 +607,7 @@ func writeSSDCodeBenchmarkReport(path string, report *SSDCodeBenchmarkReport) er
 			return result.Value.(error)
 		}
 	}
-	if result := core.WriteFile(path, data.Value.([]byte), 0o644); !result.OK {
+	if result := core.WriteFile(path, data.Bytes(), 0o644); !result.OK {
 		return result.Value.(error)
 	}
 	return nil

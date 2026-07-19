@@ -307,7 +307,7 @@ func writeProvenance(path string, provenance Provenance) error {
 	if !data.OK {
 		return core.E("Packs", "marshal merge provenance", data.Err())
 	}
-	if result := core.WriteFile(path, data.Value.([]byte), 0o644); !result.OK {
+	if result := core.WriteFile(path, data.Bytes(), 0o644); !result.OK {
 		return core.E("Packs", "write merge provenance", result.Err())
 	}
 	return nil

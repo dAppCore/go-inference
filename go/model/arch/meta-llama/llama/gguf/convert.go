@@ -50,13 +50,13 @@ func quantizeLlamaModelPack(source basegguf.Source, configJSON []byte, tensors [
 	if !tokenizerRead.OK {
 		return nil, nil, core.E("quantizeLlamaModelPack", "read tokenizer.json", tokenizerRead.Err())
 	}
-	tokenizerMetadata, err := llamaTokenizer(tokenizerRead.Value.([]byte), config)
+	tokenizerMetadata, err := llamaTokenizer(tokenizerRead.Bytes(), config)
 	if err != nil {
 		return nil, nil, err
 	}
 	metadata = append(metadata, tokenizerMetadata...)
 	if template := core.ReadFile(core.PathJoin(source.Root, "chat_template.jinja")); template.OK {
-		metadata = append(metadata, basegguf.MetadataEntry{Key: "tokenizer.chat_template", ValueType: basegguf.ValueTypeString, Value: core.AsString(template.Value.([]byte))})
+		metadata = append(metadata, basegguf.MetadataEntry{Key: "tokenizer.chat_template", ValueType: basegguf.ValueTypeString, Value: core.AsString(template.Bytes())})
 	}
 	return quantized, metadata, nil
 }

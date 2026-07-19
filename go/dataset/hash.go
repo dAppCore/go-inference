@@ -30,7 +30,7 @@ const (
 // shape" error from a hashing call site.
 //
 //	r := dataset.ContentHash(dataset.KindPair, content)
-//	hash := r.Value.(string)
+//	hash := r.String()
 func ContentHash(kind ItemKind, content []byte) core.Result {
 	switch kind {
 	case KindPair:

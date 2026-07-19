@@ -11,5 +11,5 @@ func mmapGGUFFile(path string) ([]byte, func() error, error) {
 	if !read.OK {
 		return nil, nil, core.Errorf("gguf.LoadTensors: read %s: %w", path, read.Value.(error))
 	}
-	return read.Value.([]byte), nil, nil
+	return read.Bytes(), nil, nil
 }
