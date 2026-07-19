@@ -1,0 +1,40 @@
+{
+  "wav": "hello16k.wav",
+  "detected_language_token": "<|en|>",
+  "detected_language_id": 50259,
+  "init_tokens": [
+    50258,
+    50259,
+    50359,
+    50363
+  ],
+  "full_ids": [
+    50258,
+    50259,
+    50359,
+    50363,
+    264,
+    1702,
+    6292,
+    21026,
+    16704,
+    670,
+    264,
+    14847,
+    3000,
+    13
+  ],
+  "content_ids": [
+    264,
+    1702,
+    6292,
+    21026,
+    16704,
+    670,
+    264,
+    14847,
+    3000,
+    13
+  ],
+  "text": " the quick brown fox jumps over the lazy dog."
+}

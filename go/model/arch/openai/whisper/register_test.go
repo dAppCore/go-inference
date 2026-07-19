@@ -12,7 +12,10 @@ import (
 // TestWhisperRefusal mirrors composed.TestComposedMTPRefusal: whisper is a REGISTERED model_type
 // (model.LookupArch succeeds — a user pointing lem at a Whisper checkpoint gets direction, not "unknown
 // model architecture"), and its real config parses cleanly, but deriving a decode Arch from it refuses with
-// a message that says WHY — it is an ASR encoder-decoder, not a decoder-only causal-LM.
+// a message that says WHY — it is an ASR encoder-decoder, not a decoder-only causal-LM, so `lem
+// generate`/`serve` cannot drive one. Transcription itself IS implemented (Load/Model.Transcribe in
+// transcribe.go, driven by `lem transcribe`) — Arch's refusal is a permanent shape mismatch, not a
+// "not yet done" placeholder, so the message redirects to the working verb instead of apologising.
 func TestWhisperRefusal(t *testing.T) {
 	spec, ok := model.LookupArch("whisper")
 	if !ok {
@@ -39,8 +42,8 @@ func TestWhisperRefusal(t *testing.T) {
 	if !core.Contains(err.Error(), "encoder-decoder") {
 		t.Fatalf("refusal message %q must identify whisper as an encoder-decoder ASR model", err.Error())
 	}
-	if !core.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("refusal message %q must say the ASR forward is not yet implemented", err.Error())
+	if !core.Contains(err.Error(), "lem transcribe") {
+		t.Fatalf("refusal message %q must redirect to the working `lem transcribe` verb", err.Error())
 	}
 }
 

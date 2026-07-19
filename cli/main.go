@@ -72,6 +72,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runBenchCommand(ctx, args[1:], stdout, stderr)
 	case "generate":
 		return runGenerateCommand(ctx, args[1:], stdout, stderr)
+	case "transcribe":
+		return runTranscribeCommand(ctx, args[1:], stdout, stderr)
 	case "ssd":
 		return runSSDCommand(ctx, args[1:], stdout, stderr)
 	case "sft":
@@ -110,6 +112,7 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "Run inference\n")
 	core.WriteString(w, "  serve               host OpenAI/Anthropic/Ollama HTTP API for a loaded model\n")
 	core.WriteString(w, "  generate            one-shot generate + decode tok/s (no serve; like-for-like bench)\n")
+	core.WriteString(w, "  transcribe          transcribe a WAV clip through a loaded Whisper checkpoint (ASR)\n")
 	core.WriteString(w, "  tui                 chat with a model in the terminal (picker, streaming, thinking channel)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Train\n")
