@@ -256,6 +256,89 @@ func TestDevicePagedKVCache_LoadRowsFromLinear_Bad(t *testing.T) {
 	}
 }
 
+func TestDevicePagedKVCache_LinearSnapshot_Incremental_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	const nKVHeads, headDim, maxLen, pageSize = 1, 64, 6, 2
+	kvBytes := nKVHeads * headDim * bf16Size
+	cache, err := newDevicePagedKVCache(nKVHeads, headDim, maxLen, pageSize)
+	if err != nil {
+		t.Fatalf("newDevicePagedKVCache: %v", err)
+	}
+	defer cache.Close()
+	kRef, vRef := deltaTestFillRows(t, cache, 4, kvBytes)
+
+	if _, _, kp, vp, err := cache.linearSnapshot(maxLen); err != nil {
+		t.Fatalf("first linearSnapshot: %v", err)
+	} else {
+		eqBytes(t, "first snapshot K", unsafe.Slice(kp, 4*kvBytes), kRef)
+		eqBytes(t, "first snapshot V", unsafe.Slice(vp, 4*kvBytes), vRef)
+	}
+	if cache.snapshotValidRows != 4 {
+		t.Fatalf("snapshotValidRows after first materialise = %d, want 4", cache.snapshotValidRows)
+	}
+
+	// overwrite row 1 (below the watermark) and append row 4: the second
+	// snapshot must carry BOTH — the overwrite via the slot() lowering, the
+	// append via the [valid, length) sweep.
+	newRow1K := toBF16Bytes(syntheticFloat32(nKVHeads*headDim, 2003))
+	newRow1V := toBF16Bytes(syntheticFloat32(nKVHeads*headDim, 2011))
+	kPage, vPage, rowOff, err := cache.slot(1)
+	if err != nil {
+		t.Fatalf("slot(1): %v", err)
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Add(kPage.Contents(), uintptr(rowOff))), kvBytes), newRow1K)
+	copy(unsafe.Slice((*byte)(unsafe.Add(vPage.Contents(), uintptr(rowOff))), kvBytes), newRow1V)
+	row4K := toBF16Bytes(syntheticFloat32(nKVHeads*headDim, 2017))
+	row4V := toBF16Bytes(syntheticFloat32(nKVHeads*headDim, 2027))
+	kPage, vPage, rowOff, err = cache.slot(4)
+	if err != nil {
+		t.Fatalf("slot(4): %v", err)
+	}
+	copy(unsafe.Slice((*byte)(unsafe.Add(kPage.Contents(), uintptr(rowOff))), kvBytes), row4K)
+	copy(unsafe.Slice((*byte)(unsafe.Add(vPage.Contents(), uintptr(rowOff))), kvBytes), row4V)
+
+	_, _, kp, vp, err := cache.linearSnapshot(maxLen)
+	if err != nil {
+		t.Fatalf("second linearSnapshot: %v", err)
+	}
+	got := unsafe.Slice(kp, 5*kvBytes)
+	eqBytes(t, "row 0 kept", got[:kvBytes], kRef[:kvBytes])
+	eqBytes(t, "row 1 overwrite", got[kvBytes:2*kvBytes], newRow1K)
+	eqBytes(t, "rows 2-3 kept", got[2*kvBytes:4*kvBytes], kRef[2*kvBytes:4*kvBytes])
+	eqBytes(t, "row 4 append", got[4*kvBytes:5*kvBytes], row4K)
+	gotV := unsafe.Slice(vp, 5*kvBytes)
+	eqBytes(t, "V row 1 overwrite", gotV[kvBytes:2*kvBytes], newRow1V)
+	eqBytes(t, "V row 4 append", gotV[4*kvBytes:5*kvBytes], row4V)
+	if cache.snapshotValidRows != 5 {
+		t.Fatalf("snapshotValidRows after second materialise = %d, want 5", cache.snapshotValidRows)
+	}
+}
+
+func TestDevicePagedKVCache_LinearSnapshot_TruncateZeroesTail_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	const nKVHeads, headDim, maxLen, pageSize = 1, 64, 6, 2
+	kvBytes := nKVHeads * headDim * bf16Size
+	cache, err := newDevicePagedKVCache(nKVHeads, headDim, maxLen, pageSize)
+	if err != nil {
+		t.Fatalf("newDevicePagedKVCache: %v", err)
+	}
+	defer cache.Close()
+	deltaTestFillRows(t, cache, 5, kvBytes)
+	if _, _, _, _, err := cache.linearSnapshot(maxLen); err != nil {
+		t.Fatalf("first linearSnapshot: %v", err)
+	}
+	if err := cache.truncate(2); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	_, _, kp, vp, err := cache.linearSnapshot(maxLen)
+	if err != nil {
+		t.Fatalf("post-truncate linearSnapshot: %v", err)
+	}
+	zero := make([]byte, 3*kvBytes)
+	eqBytes(t, "truncated K tail zeroed", unsafe.Slice(kp, 5*kvBytes)[2*kvBytes:], zero)
+	eqBytes(t, "truncated V tail zeroed", unsafe.Slice(vp, 5*kvBytes)[2*kvBytes:], zero)
+}
+
 func TestDevicePagedKVCache_LinearSyncedAbs_Good(t *testing.T) {
 	requireNativeRuntime(t)
 	const nKVHeads, headDim, window, pageSize = 1, 64, 4, 2

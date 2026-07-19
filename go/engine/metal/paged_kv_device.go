@@ -66,7 +66,15 @@ type devicePagedKVCache struct {
 	// (syncLinearKVFromDevicePaged / reloadDevicePagedKVFromLinear); lowered by
 	// slot() overwrites and truncate(); zeroed by loadLinearSnapshot, whose
 	// callers (state restore) write page rows of unknown lb provenance.
-	linearSyncedAbs   int
+	linearSyncedAbs int
+	// snapshotValidRows: snapshot rows [0, n) (CACHE-POS space — slot space on
+	// rings) mirror the pages' current content, so linearSnapshot re-copies
+	// only [n, length) instead of clearing + rebuilding the whole extent. The
+	// MTP drafter export refreshes 2 winner caches per draft block (#355) —
+	// the full rebuild cost O(extent) clear + O(position) q8 dequant per
+	// block, growing with position (#53). Lowered by slot() overwrites and
+	// truncate(); zeroed when the snapshot buffers are reallocated.
+	snapshotValidRows int
 	sdpaScratch       []*sdpaPagedDecodeScratch
 	sdpaScratchCursor int
 }
@@ -211,6 +219,7 @@ func (c *devicePagedKVCache) Close() {
 	c.offset = 0
 	c.linearSynced = 0
 	c.linearSyncedAbs = 0
+	c.snapshotValidRows = 0
 }
 
 func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff uint, err error) {
@@ -250,6 +259,9 @@ func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff
 	}
 	if pos < c.linearSyncedAbs { // an overwrite below the absolute mirror watermark stales the lb twin
 		c.linearSyncedAbs = pos
+	}
+	if cachePos < c.snapshotValidRows { // an overwrite stales the materialised snapshot mirror
+		c.snapshotValidRows = cachePos
 	}
 	return c.kPages[page], c.vPages[page], uint(slot * c.kvDim * c.rowElemBytes()), nil
 }
@@ -341,6 +353,7 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 	if nBytes == 0 {
 		return nil, nil, nil, nil, core.NewError("native.devicePagedKVCache.linearSnapshot: empty snapshot")
 	}
+	fresh := c.snapshotK == nil || c.snapshotV == nil || c.snapshotBytes != nBytes || c.snapshotKPtr == nil || c.snapshotVPtr == nil
 	if c.snapshotK == nil || c.snapshotBytes != nBytes {
 		c.snapshotK = device.NewBufferWithLengthOptions(uint(nBytes), metal.MTLResourceStorageModeShared)
 	}
@@ -350,17 +363,34 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 	if c.snapshotK == nil || c.snapshotK.GetID() == 0 || c.snapshotV == nil || c.snapshotV.GetID() == 0 {
 		return nil, nil, nil, nil, core.NewError("native.devicePagedKVCache.linearSnapshot: failed to allocate snapshot buffers")
 	}
-	if c.snapshotBytes != nBytes || c.snapshotKPtr == nil || c.snapshotVPtr == nil {
+	if fresh {
 		c.snapshotKPtr = (*byte)(c.snapshotK.Contents())
 		c.snapshotVPtr = (*byte)(c.snapshotV.Contents())
 		c.snapshotBytes = nBytes
+		c.snapshotValidRows = 0
 	}
 	kPtr = c.snapshotKPtr
 	vPtr = c.snapshotVPtr
 	kBytes := unsafe.Slice(kPtr, nBytes)
 	vBytes := unsafe.Slice(vPtr, nBytes)
-	clear(kBytes)
-	clear(vBytes)
+	// Incremental re-materialisation (#53): rows [0, snapshotValidRows) of the
+	// mirror already hold the pages' content — the MTP drafter export refreshes
+	// winner caches EVERY draft block, and the full clear+rebuild here cost
+	// O(extent) + an O(position) q8 dequant per block, growing with position.
+	// Fresh buffers clear once (rows beyond the populated pages stay zero for
+	// the buffer's life — truncate() re-zeroes a shrunk tail); repeat calls
+	// copy only [snapshotValidRows, length). slot() overwrites lower the
+	// watermark, so ring wraps and speculative rollbacks re-copy exactly the
+	// slots they dirtied.
+	valid := c.snapshotValidRows
+	if valid < 0 {
+		valid = 0
+	}
+	if fresh {
+		clear(kBytes)
+		clear(vBytes)
+		valid = 0
+	}
 	for pageIdx, pageLen := range c.pageLens {
 		if pageLen <= 0 {
 			continue
@@ -372,23 +402,37 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 		if start+pageLen > rows {
 			pageLen = rows - start
 		}
-		dstOff := start * rowBytes
+		if start+pageLen <= valid {
+			continue // page fully inside the valid mirror prefix
+		}
+		rowFrom := 0
+		if valid > start {
+			rowFrom = valid - start
+		}
+		dstOff := (start + rowFrom) * rowBytes
 		if c.quantQ8 {
-			elems := pageLen * c.kvDim
-			srcK := unsafe.Slice((*int8)(unsafe.Pointer(c.kPagePtrs[pageIdx])), elems)
-			srcV := unsafe.Slice((*int8)(unsafe.Pointer(c.vPagePtrs[pageIdx])), elems)
-			scales := pageLen * c.kvDim / kvQ8GroupSize
-			sK := unsafe.Slice((*float32)(unsafe.Pointer(c.kScalePtrs[pageIdx])), scales)
-			sV := unsafe.Slice((*float32)(unsafe.Pointer(c.vScalePtrs[pageIdx])), scales)
-			kvQ8DequantRows(kBytes[dstOff:dstOff+pageLen*rowBytes], srcK, sK)
-			kvQ8DequantRows(vBytes[dstOff:dstOff+pageLen*rowBytes], srcV, sV)
+			elems := (pageLen - rowFrom) * c.kvDim
+			srcK := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[pageIdx]), uintptr(rowFrom*c.kvDim))), elems)
+			srcV := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[pageIdx]), uintptr(rowFrom*c.kvDim))), elems)
+			scales := elems / kvQ8GroupSize
+			sK := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.kScalePtrs[pageIdx]), uintptr(rowFrom*c.scaleRowBytes()))), scales)
+			sV := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.vScalePtrs[pageIdx]), uintptr(rowFrom*c.scaleRowBytes()))), scales)
+			kvQ8DequantRows(kBytes[dstOff:dstOff+(pageLen-rowFrom)*rowBytes], srcK, sK)
+			kvQ8DequantRows(vBytes[dstOff:dstOff+(pageLen-rowFrom)*rowBytes], srcV, sV)
 			continue
 		}
-		copyBytes := pageLen * rowBytes
-		srcK := unsafe.Slice(c.kPagePtrs[pageIdx], copyBytes)
-		srcV := unsafe.Slice(c.vPagePtrs[pageIdx], copyBytes)
+		copyBytes := (pageLen - rowFrom) * rowBytes
+		srcK := unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[pageIdx]), uintptr(rowFrom*rowBytes))), copyBytes)
+		srcV := unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[pageIdx]), uintptr(rowFrom*rowBytes))), copyBytes)
 		copy(kBytes[dstOff:dstOff+copyBytes], srcK)
 		copy(vBytes[dstOff:dstOff+copyBytes], srcV)
+	}
+	// the mirror now covers every populated slot: length on rings counts slots,
+	// and on linear caches pageLens cover exactly [0, length).
+	if c.length > valid {
+		c.snapshotValidRows = c.length
+	} else {
+		c.snapshotValidRows = valid
 	}
 	return c.snapshotK, c.snapshotV, kPtr, vPtr, nil
 }
@@ -642,6 +686,7 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 		})
 		c.linearSynced = tokens
 		c.linearSyncedAbs = 0 // caller-provided rows: lb-mirror provenance unknown (state restore)
+		c.snapshotValidRows = 0
 		return nil
 	}
 	for pos := range tokens {
@@ -656,6 +701,7 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 	}
 	c.linearSynced = tokens
 	c.linearSyncedAbs = 0 // caller-provided rows: lb-mirror provenance unknown (state restore)
+	c.snapshotValidRows = 0
 	return nil
 }
 
@@ -853,6 +899,19 @@ func (c *devicePagedKVCache) truncate(tokens int) error {
 	}
 	if c.linearSyncedAbs > tokens {
 		c.linearSyncedAbs = tokens
+	}
+	if c.ring {
+		// slot-space contents shift meaning under a ring truncate — force the
+		// next linearSnapshot to re-copy the (window-bounded) mirror.
+		c.snapshotValidRows = 0
+	} else if c.snapshotValidRows > tokens {
+		// the full snapshot path cleared rows beyond the populated pages; keep
+		// that contract for the incremental mirror by zeroing the shrunk tail.
+		if rowBytes := c.kvDim * bf16Size; c.snapshotKPtr != nil && c.snapshotVPtr != nil && c.snapshotBytes >= c.snapshotValidRows*rowBytes {
+			clear(unsafe.Slice(c.snapshotKPtr, c.snapshotBytes)[tokens*rowBytes : c.snapshotValidRows*rowBytes])
+			clear(unsafe.Slice(c.snapshotVPtr, c.snapshotBytes)[tokens*rowBytes : c.snapshotValidRows*rowBytes])
+		}
+		c.snapshotValidRows = tokens
 	}
 	return nil
 }
