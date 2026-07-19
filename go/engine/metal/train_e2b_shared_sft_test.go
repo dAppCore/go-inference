@@ -113,27 +113,20 @@ func TestLoRATrainerE2BSharedKVSFT_Good(t *testing.T) {
 		t.Logf("B=0 worst %-16s cosine=%.6f", class, cos)
 	}
 	t.Logf("B=0 host-chain vs engine-capture: worst layer %d cosine=%.6f over %d layers", worstL, worst, len(tapes))
-	if worst < 0.999 {
-		// KNOWN ENGINE DIVERGENCE (#44 — NOT a capture-path bug, updated 2026-07-19): originally
-		// suspected as the #391 capture-bug class (a carve/fence/route defect in
-		// ForwardCaptureHiddens), but that is now DISPROVEN by elimination — see
-		// TestForwardCaptureHiddensE2BVsOracle, which compares the capture directly against the
-		// independent numpy oracle (testdata/e2b_mirror_oracle.py) with NO host mirror in between,
-		// and sees the SAME divergence on the SAME layers (8-14, worst at 11). Ruled out in turn:
-		// Q8 KV caching (LTHN_KV_Q8_ICB=0 — identical numbers), the recorded-ICB replay vs the fully
-		// serial re-encode route (LTHN_DECODE_ICB=0 — identical numbers, so it is not the split-
-		// command-buffer capture mechanism either), the LoRA effective-weight fold (raw frozen
-		// weights give identical numbers — expected, since B starts at zero and LoRAEffectiveWeightF32
-		// is then an exact identity), and per-layer shape drift (MatFormer dFF and CacheIndex are both
-		// uniform/sequential across the affected layers). The host chain itself is freshly reconfirmed
-		// ≡ the oracle at cosine 1.000000 on all 35 layers (train_real_globals_probe_test.go). What
-		// remains is a genuine divergence in the shared bf16 forward core (decode_forward_arch.go /
-		// decode_forward_arch_icb.go) that BOTH engine routes agree on with each other and disagree on
-		// with ground truth — i.e. the engine itself, not the measuring stick. The anchor stays a
-		// LOGGED diagnostic until that lands; loss-fall and the adapter round-trip below remain the
-		// hard gates for training itself (training's own forward never consumes this capture's
-		// per-layer output — only embeds — so it is unaffected).
-		t.Logf("KNOWN #44: engine-capture anchor below bar (worst layer %d cosine=%.6f) — a real engine bf16-forward divergence (layers 8-14), not a capture/measuring-stick defect (see TestForwardCaptureHiddensE2BVsOracle)", worstL, worst)
+	// HARD ANCHOR at the #49 bf16-chaos envelope. The host chain keeps f32 stations
+	// (proven ≡ the f64 oracle at cosine 1.000000 — train_real_globals_probe_test.go);
+	// the engine capture stores its residual stream in bf16, and E2B's layer-8 MLP +
+	// per-layer-input gelu cliffs chaotically amplify that correctly-rounded storage
+	// dust for particular tokens (#49 — every engine sublayer is proven arithmetically
+	// faithful; mlx-lm's own bf16 forward shows the SAME worst-layer ~0.83 vs this
+	// ground truth). So bf16-capture-vs-f32-mirror CANNOT sit at 0.999 on the chaos
+	// layers (8-14, worst 11 ≈ 0.83-0.84) and a bar there would red-light physics; a
+	// STRUCTURAL defect (wrong per-layer table, boundary, kernel) craters the worst
+	// layer far below this envelope. The precise per-layer instrument is
+	// TestForwardCaptureHiddensE2BVsOracle (bf16-reference parity + oracle envelope);
+	// this anchor is its coarse tripwire.
+	if worst < 0.80 {
+		t.Fatalf("B=0 anchor: worst layer %d cosine=%.6f below the #49 bf16-chaos envelope (≥0.80) — a structural engine/capture defect, see TestForwardCaptureHiddensE2BVsOracle", worstL, worst)
 	}
 
 	// the short SFT: a handful of steps on one short sequence, loss must fall.
