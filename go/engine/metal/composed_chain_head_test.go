@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
+	_ "dappco.re/go/inference/model/arch/Qwen/qwen35" // registers qwen3_5/qwen3_5_moe — the ids moved out of composed's own spec (#18); the real-checkpoint chain tests load through the registry like the binary does
 	"dappco.re/go/inference/model/composed"
 )
 

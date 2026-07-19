@@ -939,6 +939,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		state.bindGatedDeltaQuant(g.Layers) // MixerGatedDelta recurrence weights (#18); no-op for an all-attention model
 		state.attnOutputGate = arch.AttnOutputGate
 		state.bindGatedAttnQuant(g.Layers) // gated full-attention layers (Qwen3.5 attn_output_gate); no-op unless the Arch declares it
+		state.bindQwenFusedDense(g.Layers) // fused device lane for the Qwen holders (whole-layer, dense FFN); no-op elsewhere
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return
@@ -5138,9 +5139,11 @@ func (s *ArchSession) generateFromHiddenInPool(hidden []byte, maxNew, eosID int,
 	// re-encoded live each token. PLE archs need the per-layer tensor produced per token too
 	// (the ICB chain's plumbing), so they stay on their existing lanes.
 	if s.encNextInputsGPU != nil && s.plScratchNew != nil && s.state.icb == nil && s.headEnc != nil &&
-		s.canUseDirectHeadGreedy() && len(s.state.ple) == 0 &&
+		s.canUseDirectHeadGreedy() && len(s.state.ple) == 0 && !s.state.hasRecurrentLayers() &&
 		!stepGreedyChainDisabled && !chainedGPUInputsDisabled && transform == nil &&
 		s.state.gpuProf == nil && !s.state.trace && layerSpanProbeForTest == nil && !captureLayerHiddens {
+		// hasRecurrentLayers: a gated-delta/gated-attention session cannot unwind the speculative
+		// links the submit-ahead tail keeps in flight (the recurrence has no rollback) — serial only.
 		return s.generateChainedLiveTail(gen, maxNew, eosID, suppress, yield, stop)
 	}
 

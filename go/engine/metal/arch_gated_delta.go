@@ -27,7 +27,17 @@ type gatedDeltaLayer struct {
 	w           *model.GatedDeltaWeights
 	cfg         model.GatedDeltaConfig
 	sc          *attn.GatedDeltaScratch
-	conv, delta []float32 // the conv ring + delta state, advanced each decode token
+	conv, delta []float32 // the conv ring + delta state, advanced each decode token (host path)
+
+	// fused device lane (arch_qwen_fused.go): the whole layer through gatedDeltaQuantLayerRun.
+	// fusedDense latches weight-side eligibility at bind (dense FFN, packed projections);
+	// devChecked/devOK latch device-side usability on first use. y is the reused layer output row.
+	inNorm, ffNorm       []float32
+	ffGate, ffUp, ffDown *model.QuantWeight
+	dff                  int
+	fusedDense           bool
+	devChecked, devOK    bool
+	y                    []float32
 }
 
 // bf16BufToF32 widens n bf16 elements at a device buffer's offset to a fresh []float32.

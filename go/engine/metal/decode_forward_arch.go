@@ -230,6 +230,9 @@ type archDecodeState struct {
 	gatedDelta     []*gatedDeltaLayer // MixerGatedDelta layers' recurrence weights + state (nil for attention layers) — #18
 	gatedAttn      []*gatedAttnLayer  // gated full-attention layers' weights + host KV (Qwen3.5 attn_output_gate); nil for a plain-attention/gemma session — #18
 	attnOutputGate bool               // the Arch declares attn_output_gate → attention layers gate their output on the host path
+	// qwenChainChecked/qwenChainAll: the whole-token chain-walk latch (arch_qwen_fused.go) — every
+	// layer fused-eligible AND device-servable, pre-flighted once before the first walk.
+	qwenChainChecked, qwenChainAll bool
 	moeWeights     []*MoELayerWeights
 	pagedKV        []*devicePagedKVCache
 	asc            attnScratch
@@ -1502,6 +1505,11 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 	var trWorstAbs float32
 	trWorstLayer, trFirstBad, trBadLayers := -1, -1, 0
 	cbBroken := false // a mid-token cb swap (MoE break-out / test probes) invalidates chainTail
+	// prevQwenFused: the previous layer ran entirely on a fused Qwen seam (its own command buffer,
+	// committed + waited inside) and nothing has been encoded into the loop's cb since — so a
+	// consecutive fused layer can skip the empty flush/commit/reopen dance (the dominant loop
+	// overhead when every layer is fused, e.g. the dense 0.8B hybrid).
+	prevQwenFused := false
 	// encConc: enc is an OPEN CONCURRENT encoder carried between passes (#341
 	// phase 1.5) — the attn pass, the MoE block and the per-layer scalar ride ONE
 	// encoder per layer stack with barriers at the true edges instead of paying
@@ -1515,7 +1523,20 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		enc = computeCommandEncoderFast(cb)
 		encConc = false
 	}
-	for li := 0; li < len(s.specs); li++ {
+	// Whole-token chain walk (arch_qwen_fused.go): a pure Qwen hybrid stack encodes EVERY layer into
+	// one command buffer with resident state — the per-layer loop is skipped wholesale. The loop's cb
+	// stays empty and open; the head encodes into it below as usual.
+	startLayer := 0
+	if sink == nil && layerSpanProbeForTest == nil && !s.trace && s.qwenChainReady() {
+		fin, cerr := s.stepTokenQwenChain(inputBuf, out, pos)
+		if cerr != nil {
+			endEncodingFast(enc)
+			return nil, cerr
+		}
+		in = fin
+		startLayer = len(s.specs)
+	}
+	for li := startLayer; li < len(s.specs); li++ {
 		if li > 0 {
 			enc = s.profSeam(cb, enc, "attn")
 		}
@@ -1533,36 +1554,62 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		} else if s.globalRopeFreqs != nil {
 			layerRopeFreqs, rotDim = s.globalRopeFreqs, lhd
 		}
+		// qwenWholeLayer: a fused Qwen device lane ran the ENTIRE layer (mixer + FFN tail) into `out`
+		// in one command buffer — the loop's FFN half is skipped for this layer.
+		qwenWholeLayer := false
 		if s.specs[li].Mixer == model.MixerGatedDelta {
-			// MixerGatedDelta: host recurrence (correctness-first) — flush the device work into `in`,
-			// compute the mixer + residual into hBuf on the host, resume on a fresh command buffer. The
-			// composed lane's per-seam round-trip, now inside the ONE factory decode (#18). Attention
-			// layers below are untouched, so gemma4 is byte-identical. Device fusion is a later slice.
-			endEncodingFast(enc)
-			encConc = false
-			commitCommandBufferFast(cb)
-			waitUntilCompletedFast(cb)
-			if err := s.encGatedDeltaHalf(li, in); err != nil {
+			// MixerGatedDelta: flush the device work into `in`, then the fused device lane
+			// (gatedDeltaQuantLayerRun — the whole layer, state resident, one command buffer) or the
+			// host recurrence fallback into hBuf. When the previous layer already ran fused, the
+			// loop's cb is empty and the flush/reopen dance is skipped. Attention layers below are
+			// untouched, so gemma4 is byte-identical (#18).
+			fused := s.gatedDeltaFusedReady(li)
+			skipFlush := fused && prevQwenFused
+			if !skipFlush {
+				endEncodingFast(enc)
+				encConc = false
+				commitCommandBufferFast(cb)
+				waitUntilCompletedFast(cb)
+			}
+			if fused {
+				if err := s.encGatedDeltaFusedLayer(li, in, out); err != nil {
+					return nil, err
+				}
+				qwenWholeLayer = true
+			} else if err := s.encGatedDeltaHalf(li, in); err != nil {
 				return nil, err
 			}
-			cb = commandBufferFast(queue)
-			enc = computeCommandEncoderFast(cb)
-			cbBroken = true
+			if !skipFlush {
+				cb = commandBufferFast(queue)
+				enc = computeCommandEncoderFast(cb)
+				cbBroken = true
+			}
 		} else if s.gatedAttn != nil && s.gatedAttn[li] != nil {
-			// Gated full-attention (Qwen3.5 attn_output_gate) — host path, correctness-first, same
-			// flush/resume shape as the gated-delta mixer. The device attention path can't split the
-			// [q ; gate] q_proj, so a gated attention layer decodes here; a plain attention layer (gemma4,
-			// dense qwen) keeps the device path below, byte-identical (#18).
-			endEncodingFast(enc)
-			encConc = false
-			commitCommandBufferFast(cb)
-			waitUntilCompletedFast(cb)
-			if err := s.encGatedAttnHalf(li, pos, s.nHeads, lkv, lhd, rotDim, rbase, slideW, in); err != nil {
+			// Gated full-attention (Qwen3.5 attn_output_gate) — the fused device lane
+			// (AttnQuantFullLayerDevice: resident device KV, σ gate, one command buffer) or the host
+			// fallback, same flush/resume shape as the gated-delta mixer. A plain attention layer
+			// (gemma4, dense qwen) keeps the device path below, byte-identical (#18).
+			fused := s.gatedAttnFusedReady(li, s.nHeads, lkv, lhd, rotDim)
+			skipFlush := fused && prevQwenFused
+			if !skipFlush {
+				endEncodingFast(enc)
+				encConc = false
+				commitCommandBufferFast(cb)
+				waitUntilCompletedFast(cb)
+			}
+			if fused {
+				if err := s.encGatedAttnFusedLayer(li, pos, s.nHeads, lkv, lhd, rotDim, rbase, slideW, in, out); err != nil {
+					return nil, err
+				}
+				qwenWholeLayer = true
+			} else if err := s.encGatedAttnHalf(li, pos, s.nHeads, lkv, lhd, rotDim, rbase, slideW, in); err != nil {
 				return nil, err
 			}
-			cb = commandBufferFast(queue)
-			enc = computeCommandEncoderFast(cb)
-			cbBroken = true
+			if !skipFlush {
+				cb = commandBufferFast(queue)
+				enc = computeCommandEncoderFast(cb)
+				cbBroken = true
+			}
 		} else if s.specs[li].OwnsCache() {
 			if cache := s.layerPagedKV(li); cache != nil {
 				var aerr error
@@ -1604,7 +1651,10 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		if li < len(s.moeQuant) {
 			moeQ = s.moeQuant[li]
 		}
-		if moeQ != nil && len(moeQ.SharedGate.Packed) > 0 {
+		if qwenWholeLayer {
+			// the fused Qwen device lane already applied the FFN tail and wrote the layer output to
+			// `out` — no FFN half runs for this layer.
+		} else if moeQ != nil && len(moeQ.SharedGate.Packed) > 0 {
 			// qwen3_5_moe — host MoE forward (SiLU switch-MLP experts + the always-on shared expert),
 			// correctness-first, same flush/resume shape as the gated mixer. The gemma device MoE below
 			// assumes gemma's five sandwich norms / GELU / router.scale, none of which qwen has, so a qwen
@@ -1805,6 +1855,7 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 			enc = computeCommandEncoderFast(cb)
 			cbBroken = true
 		}
+		prevQwenFused = qwenWholeLayer // a fused whole-layer leaves the loop's cb empty for the next layer
 		if in == inputBuf && inputBuf != s.xA {
 			in, out = out, s.xB
 		} else {

@@ -30,7 +30,18 @@ type gatedAttnLayer struct {
 	bq, bk, bv   []float32   // optional additive q/k/v biases (widened bf16); nil ⇒ bias-free (qwen3_5)
 
 	kCache, vCache []float32 // host KV cache [n · kvHeads·headDim], grown one token per decode step
-	n              int       // cached positions
+	n              int       // cached positions (host path)
+
+	// fused device lane (arch_qwen_fused.go): the whole layer through AttnQuantFullLayerDevice with
+	// resident device KV on dev. fusedDense latches weight-side eligibility at bind; devChecked/devOK
+	// latch device-side usability on first use.
+	inNorm, ffNorm       []float32
+	mq, mk, mv, mo       *model.QuantWeight
+	ffGate, ffUp, ffDown *model.QuantWeight
+	dff                  int
+	fusedDense           bool
+	devChecked, devOK    bool
+	dev                  any
 }
 
 // bf16VecToF32 widens a bf16 []byte vector (a norm/bias tensor) to a fresh []float32; nil for empty.
