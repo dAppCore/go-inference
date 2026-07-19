@@ -61,15 +61,15 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 6: `lem data` verbs
 
-- [ ] `create|list|stats|import|score|export|archive` + `review` (prints how to open the TUI Data panel); `--json` for scripting; honest per-row import counts; score/export flags per the design.
-- [ ] Wires the concrete lek scorer + welfare screen + DuckDB store; exit codes truthful.
-- [ ] Tests: verb-level Good/Bad/Ugly against a temp `~/.lem` root (the existing CLI test idiom).
+- [x] `create|list|stats|import|score|export|archive` + `review` (prints how to open the TUI Data panel); `--json` for scripting; honest per-row import counts; score/export flags per the design.
+- [x] Wires the concrete lek scorer + welfare screen + DuckDB store; exit codes truthful.
+- [x] Tests: verb-level Good/Bad/Ugly against a temp `~/.lem` root (the existing CLI test idiom).
 
 ### Task 7: Capture taps
 
-- [ ] `lem serve --capture <slug>`: tee completed (prompt, response) pairs with the serving model's fingerprint; OFF without the flag; capture failures log-and-continue (never break serving).
-- [ ] `lem ssd --dataset <slug>`: land sampled traces as `trace` items.
-- [ ] Tests: default-off proven; tap writes with fingerprint; serve path unaffected when capture errors.
+- [x] `lem serve --capture <slug>`: tee completed (prompt, response) pairs with the serving model's fingerprint; OFF without the flag; capture failures log-and-continue (never break serving).
+- [x] `lem ssd --dataset <slug>`: land sampled traces as `trace` items.
+- [x] Tests: default-off proven; tap writes with fingerprint; serve path unaffected when capture errors.
 
 ### Task 8: TUI Data panel
 

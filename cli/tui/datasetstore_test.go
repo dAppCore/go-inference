@@ -395,3 +395,59 @@ func TestDuckDatasetStore_TempRootIsolation(t *testing.T) {
 		t.Fatalf("opening the dataset store must not create lem.duckdb: stat err = %v", err)
 	}
 }
+
+// ---- OpenDatasetStore: the CLI-facing entry point (cli/data.go, the
+// serve/ssd capture taps) ----
+
+// TestOpenDatasetStore_Good proves the exported entry point resolves the
+// $HOME/.lem root (no --home flag surface — HOME is the only seam,
+// exactly as cli/serve_test.go redirects the admin-token path), creates
+// datasets.duckdb there, and that a second open against the SAME HOME
+// reopens the same file rather than a fresh one (migrations are
+// idempotent on reopen; a dataset created in the first open is still
+// there in the second).
+func TestOpenDatasetStore_Good(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	first := OpenDatasetStore()
+	core.RequireTrue(t, first.OK, "OpenDatasetStore first open")
+	store1, ok := first.Value.(DatasetStore)
+	if !ok {
+		t.Fatalf("OpenDatasetStore value = %T, want DatasetStore", first.Value)
+	}
+
+	at := time.Date(2026, time.July, 19, 17, 0, 0, 0, time.UTC)
+	core.RequireTrue(t, store1.DatasetCreate(dataset.Dataset{ID: dataset.NewID(), Slug: "reopen-proof", Title: "Reopen proof", CreatedAt: at}).OK)
+	core.RequireTrue(t, store1.Close().OK)
+
+	wantPath := core.Path(home, ".lem", "datasets.duckdb")
+	if _, err := os.Stat(wantPath); err != nil {
+		t.Fatalf("datasets.duckdb missing at the resolved default path %s: %v", wantPath, err)
+	}
+
+	second := OpenDatasetStore()
+	core.RequireTrue(t, second.OK, "OpenDatasetStore second open")
+	store2, ok := second.Value.(DatasetStore)
+	if !ok {
+		t.Fatalf("OpenDatasetStore value = %T, want DatasetStore", second.Value)
+	}
+	defer func() { core.RequireTrue(t, store2.Close().OK) }()
+
+	core.RequireTrue(t, store2.DatasetBySlug("reopen-proof").OK, "the dataset created through the first handle must survive a reopen")
+}
+
+// TestOpenDatasetStore_Bad proves a root that cannot be prepared (HOME
+// points at a regular file, so $HOME/.lem cannot be created) fails
+// closed rather than opening a bogus store — mirrors
+// TestAppFiles_Ugly's fixture trick one layer up.
+func TestOpenDatasetStore_Bad(t *testing.T) {
+	blocker := core.Path(t.TempDir(), "home-is-a-file")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write blocker fixture: %v", err)
+	}
+	t.Setenv("HOME", blocker)
+
+	result := OpenDatasetStore()
+	core.AssertFalse(t, result.OK, "OpenDatasetStore over a blocked root must fail")
+}

@@ -31,6 +31,7 @@ func runSSDCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 	scoreSamples := fs.Bool("score-samples", false, "score every self-sample at birth with the LEK scorer (writes birth-scores alongside the captured trace)")
 	checkpointDir := fs.String("checkpoint-dir", "", "output dir for the scored trace — ssd-captures.jsonl")
 	contextLen := fs.Int("context", 0, "model context override; 0 uses the model default")
+	datasetSlug := fs.String("dataset", "", "land the sampled trace as `trace` items in this `lem data` dataset, fingerprinted to the base model; requires --checkpoint-dir (the capture sidecar this tap reads); empty (the default) captures nothing")
 	fs.Usage = func() {
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s ssd --model <base> --data <prompts.jsonl> [flags]\n", name))
@@ -52,6 +53,10 @@ func runSSDCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	if *modelPath == "" || *dataPath == "" {
 		fs.Usage()
+		return 2
+	}
+	if core.Trim(*datasetSlug) != "" && core.Trim(*checkpointDir) == "" {
+		core.Print(stderr, "%s ssd: --dataset requires --checkpoint-dir (the capture sidecar `lem data` ingests)", cliName())
 		return 2
 	}
 
@@ -76,6 +81,18 @@ func runSSDCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if err != nil {
 		core.Print(stderr, "%s ssd: %v", cliName(), err)
 		return 1
+	}
+
+	// Dataset capture — opt-in only (empty --dataset never touches the
+	// dataset store). A failure here is logged, never fatal: the sampling
+	// run's checkpoint is already safe on disk by this point, and an hours-
+	// long GPU run must never turn into a failure exit purely because the
+	// LAST step — teeing its trace into `lem data` — hit a hiccup. The
+	// operator can always `lem data import --jsonl` the sidecar later.
+	if core.Trim(*datasetSlug) != "" {
+		if tapErr := ingestSSDTrace(*checkpointDir, *datasetSlug, *modelPath, stderr); tapErr != nil {
+			core.Print(stderr, "%s ssd: --dataset: %v (the sampling run itself already completed; its checkpoint is on disk regardless)", cliName(), tapErr)
+		}
 	}
 	return 0
 }
