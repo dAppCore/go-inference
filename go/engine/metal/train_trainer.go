@@ -24,13 +24,15 @@ import (
 // mirrors go-mlx pkg/metal.LoRAAdapter (Step / StepAccumulated / Loss / Save), with the no-cgo gradient
 // kernels (train_lora.go / train_optim.go) standing in for mlx autodiff.
 //
-// Scope note (the honest boundary): this trains the HEAD LoRA, the seam that is EXACT over any real base
-// via the frozen capture. A LoRA on the per-LAYER projections would need a backward through the engine's
-// real (PLE / QK-norm / post-norm) forward — the host block backwards (train_backward.go) model a
-// simplified gemma layer only, so that is a separate engine train-step follow-up, not this seam. A config
-// that requests per-layer projection targets (LoRA.TargetKeys naming anything but the head) is REFUSED at
-// open (validateHeadLoRATargets, #31) rather than silently trained as head-only; the host-side correctness
-// reference for the per-layer backward lives in train_lora_layer.go, awaiting the real-arch layer backward.
+// Scope note (the honest boundary, #31 → #40): the HEAD LoRA trains on EVERY shape — the seam is
+// exact over any real base via the frozen capture. Per-LAYER projection targets (TargetKeys naming
+// q_proj/v_proj/…) train through the FD-gated real-arch layer reference (train_real_layer.go +
+// train_trainer_layers.go) — but ONLY on shapes whose every layer feature that reference covers
+// (validatePerLayerLoRAShape): dense attention layers with QK-norm / sandwich norms / value-norm /
+// K==V / PLE / sliding+partial+proportional rope / layer scalars. Any other feature — MoE,
+// KV-cache-sharing (the gemma4 E2B/E4B tail), recurrent mixers, projection biases, logit
+// soft-caps, non-rotary positions — REFUSES per-layer targets at open, naming the blocking
+// feature, exactly the #31 shape: never silently train less (or wronger) than asked.
 
 // loraTargetHead is the one adapter target this trainer trains: the output head. It is the tensor-name
 // prefix LoRATrainer.Save writes (lm_head.lora_a / lm_head.lora_b), the name the load path reads back
@@ -74,7 +76,7 @@ type LoRATrainer struct {
 	sess      *ArchSession
 	finalNorm []float32 // [dModel] bf16→f32, the frozen final RMSNorm weight
 	lmHead    []float32 // [vocab,dModel] bf16→f32, the frozen output head
-	a, b      []float32 // trainable: A [rank,dModel], B [vocab,rank] (B starts at zero → adapter is a no-op)
+	a, b      []float32 // trainable (head mode): A [rank,dModel], B [vocab,rank] (B starts at zero → adapter is a no-op)
 	optA      *AdamW
 	optB      *AdamW
 	dModel    int
@@ -83,6 +85,13 @@ type LoRATrainer struct {
 	alpha     float32
 	scaling   float32 // alpha/rank
 	eps       float32
+
+	// per-layer projection mode (#40 stage 3) — set when TargetKeys name layer projections and the
+	// shape passed validatePerLayerLoRAShape; the head factors above are then unused (nil).
+	perLayer bool
+	layers   []*RealTrainLayerF32 // frozen per-layer templates (T + PLEInput filled per sequence)
+	adapters []*layerLoRAAdapter  // the trainable (layer, projection) adapters + optimiser state
+	hasPLE   bool                 // the session computes per-layer inputs (gemma4 E2B/E4B)
 }
 
 // NewLoRATrainer opens a head-LoRA trainer over tm: it takes a fresh frozen base session, widens the
@@ -92,9 +101,22 @@ type LoRATrainer struct {
 // this trainer trains the head only (validateHeadLoRATargets, #31). The trainer OWNS the base
 // session — Close releases it.
 func NewLoRATrainer(tm *NativeTokenModel, cfg inference.TrainingConfig) (*LoRATrainer, error) {
-	// The honesty gate first (#31): a config this trainer will not honour is refused before any
-	// resource is touched, so a per-layer projection request can never silently train head-only.
-	if err := validateHeadLoRATargets(cfg.LoRA); err != nil {
+	// The honesty gates first (#31/#40): a config this trainer will not honour is refused before
+	// any resource is touched. TargetKeys naming per-layer projections open the PER-LAYER path —
+	// but ONLY for shapes whose every layer feature has a green FD gate (validatePerLayerLoRAShape);
+	// any other shape keeps the refusal, naming the blocking feature, so a per-layer request can
+	// never silently train head-only OR train through an unmodelled feature.
+	perLayer, err := loraTargetMode(cfg.LoRA)
+	if err != nil {
+		return nil, err
+	}
+	if perLayer {
+		if err := validatePerLayerLoRAShape(tm); err != nil {
+			return nil, core.NewError(core.Concat(
+				"native.NewLoRATrainer: LoRA TargetKeys ", core.Sprintf("%v", cfg.LoRA.TargetKeys),
+				" request a per-layer projection adapter; ", err.Error()))
+		}
+	} else if err := validateHeadLoRATargets(cfg.LoRA); err != nil {
 		return nil, err
 	}
 	if tm == nil || tm.bf16 == nil {
@@ -132,21 +154,36 @@ func NewLoRATrainer(tm *NativeTokenModel, cfg inference.TrainingConfig) (*LoRATr
 		return nil, core.NewError("native.NewLoRATrainer: token model does not open an ArchSession")
 	}
 
-	return &LoRATrainer{
+	t := &LoRATrainer{
 		sess:      sess,
 		finalNorm: bf16ToF32Slice(tm.bf16.FinalNorm),
 		lmHead:    bf16ToF32Slice(tm.bf16.LMHead),
-		a:         initLoRAFactorA(rank*dModel, dModel),
-		b:         make([]float32, vocab*rank),
-		optA:      NewAdamW(rank*dModel, lr, 0),
-		optB:      NewAdamW(vocab*rank, lr, 0),
 		dModel:    dModel,
 		vocab:     vocab,
 		rank:      rank,
 		alpha:     alpha,
 		scaling:   alpha / float32(rank),
 		eps:       eps,
-	}, nil
+	}
+	if perLayer {
+		layers, lerr := buildRealLayerTemplates(tm.bf16, tm.arch)
+		if lerr == nil {
+			t.adapters, lerr = buildLayerAdapters(layers, cfg.LoRA.TargetKeys, rank, lr)
+		}
+		if lerr != nil {
+			_ = sess.Close()
+			return nil, lerr
+		}
+		t.perLayer = true
+		t.layers = layers
+		t.hasPLE = sess.perLayerInput != nil
+		return t, nil
+	}
+	t.a = initLoRAFactorA(rank*dModel, dModel)
+	t.b = make([]float32, vocab*rank)
+	t.optA = NewAdamW(rank*dModel, lr, 0)
+	t.optB = NewAdamW(vocab*rank, lr, 0)
+	return t, nil
 }
 
 // initLoRAFactorA fills the LoRA A factor with small deterministic pseudo-random values (Kaiming-style
@@ -364,6 +401,19 @@ func (t *LoRATrainer) Step(batch inference.Batch) (float64, error) {
 	if len(batch.TokenIDs) == 0 {
 		return 0, core.NewError("native.LoRATrainer.Step: empty batch")
 	}
+	if t.perLayer {
+		lossSum, sumDA, sumDB, n, err := t.perLayerAccumulate(batch)
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			return 0, core.NewError("native.LoRATrainer.Step: batch produced no trainable sequences (a set LossMask masks every position)")
+		}
+		if err := t.perLayerApplyMeanStep(sumDA, sumDB, n); err != nil {
+			return 0, err
+		}
+		return lossSum / float64(n), nil
+	}
 	lossSum, sumDA, sumDB, n, err := t.accumulate(batch)
 	if err != nil {
 		return 0, err
@@ -382,6 +432,39 @@ func (t *LoRATrainer) Step(batch inference.Batch) (float64, error) {
 func (t *LoRATrainer) StepAccumulated(batches []inference.Batch) (float64, error) {
 	if len(batches) == 0 {
 		return 0, core.NewError("native.LoRATrainer.StepAccumulated: no batches")
+	}
+	if t.perLayer {
+		totalDA := make([][]float32, len(t.adapters))
+		totalDB := make([][]float32, len(t.adapters))
+		for ai, ad := range t.adapters {
+			totalDA[ai] = make([]float32, len(ad.a))
+			totalDB[ai] = make([]float32, len(ad.b))
+		}
+		var lossSum float64
+		total := 0
+		for _, batch := range batches {
+			ls, sumDA, sumDB, n, err := t.perLayerAccumulate(batch)
+			if err != nil {
+				return 0, err
+			}
+			for ai := range totalDA {
+				for i := range totalDA[ai] {
+					totalDA[ai][i] += sumDA[ai][i]
+				}
+				for i := range totalDB[ai] {
+					totalDB[ai][i] += sumDB[ai][i]
+				}
+			}
+			lossSum += ls
+			total += n
+		}
+		if total == 0 {
+			return 0, core.NewError("native.LoRATrainer.StepAccumulated: batches produced no trainable sequences (a set LossMask masks every position)")
+		}
+		if err := t.perLayerApplyMeanStep(totalDA, totalDB, total); err != nil {
+			return 0, err
+		}
+		return lossSum / float64(total), nil
 	}
 	totalDA := make([]float32, len(t.a))
 	totalDB := make([]float32, len(t.b))
@@ -417,6 +500,9 @@ func (t *LoRATrainer) StepAccumulated(batches []inference.Batch) (float64, error
 func (t *LoRATrainer) Loss(batch inference.Batch) (float64, error) {
 	if len(batch.TokenIDs) == 0 {
 		return 0, core.NewError("native.LoRATrainer.Loss: empty batch")
+	}
+	if t.perLayer {
+		return t.perLayerLoss(batch)
 	}
 	var lossSum float64
 	n := 0
@@ -485,6 +571,9 @@ func (t *LoRATrainer) Loss(batch inference.Batch) (float64, error) {
 // (lm_head.lora_a / lm_head.lora_b); the native load path honours it via AdapterPath (lora_apply.go).
 // Implements engine.Trainer.
 func (t *LoRATrainer) Save(path string) error {
+	if t.perLayer {
+		return t.perLayerSave(path)
+	}
 	if path == "" {
 		return core.NewError("native.LoRATrainer.Save: path is required")
 	}
