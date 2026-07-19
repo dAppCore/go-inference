@@ -100,6 +100,82 @@ func TestParseConfig_Ugly(t *testing.T) {
 	}
 }
 
+// TestParseConfig_ZLabNative recognises the z-lab-native DFlash export convention —
+// the shape every PUBLISHED z-lab/*-DFlash checkpoint actually uses (no
+// speculators_model_type at all; the marker is architectures:["DFlashDraftModel"]
+// beside a dflash_config object). The fields below are copied verbatim (trimmed to
+// what ParseConfig reads) from the real config.json at
+// hf.co/z-lab/Qwen3-4B-DFlash-b16 — never guessed (see docs/design-dflash-survey.md).
+func TestParseConfig_ZLabNative(t *testing.T) {
+	data := []byte(`{
+		"architectures": ["DFlashDraftModel"],
+		"attention_bias": false,
+		"block_size": 16,
+		"bos_token_id": 151643,
+		"dflash_config": {"mask_token_id": 151669, "target_layer_ids": [1, 9, 17, 25, 33]},
+		"hidden_size": 2560,
+		"model_type": "qwen3",
+		"num_hidden_layers": 5,
+		"num_target_layers": 36
+	}`)
+	cfg, ok := dflash.ParseConfig(data)
+	if !ok {
+		t.Fatal("a z-lab-native architectures:[DFlashDraftModel] config must be recognised")
+	}
+	if cfg.BlockSize != 16 {
+		t.Fatalf("block_size: want 16, got %d", cfg.BlockSize)
+	}
+	if !eqInts(cfg.AuxHiddenLayerIDs, []int{1, 9, 17, 25, 33}) {
+		t.Fatalf("dflash_config.target_layer_ids: got %v", cfg.AuxHiddenLayerIDs)
+	}
+	if cfg.MaskTokenID != 151669 {
+		t.Fatalf("dflash_config.mask_token_id: want 151669, got %d", cfg.MaskTokenID)
+	}
+	if cfg.Verifier != "" {
+		t.Fatalf("z-lab-native config declares no verifier field: want \"\", got %q", cfg.Verifier)
+	}
+}
+
+// TestParseConfig_SpeculatorsRealShape gates the speculators-convention parse
+// against a REAL checkpoint's config.json (trimmed to the fields ParseConfig
+// reads, copied verbatim from hf.co/RedHatAI/NVIDIA-Nemotron-3-Super-120B-A12B-
+// speculator.dflash — never guessed): the verifier lives at
+// speculators_config.verifier.name_or_path, NOT .name (TestParseConfig_Good's
+// fixture used the wrong key — no real checkpoint found uses .name — kept there
+// only as a documented fallback), and mask_token_id is top-level, not nested
+// under dflash_config as z-lab's own convention has it.
+func TestParseConfig_SpeculatorsRealShape(t *testing.T) {
+	data := []byte(`{
+		"architectures": ["DFlashDraftModel"],
+		"aux_hidden_state_layer_ids": [7, 16, 25, 47, 69],
+		"block_size": 8,
+		"draft_vocab_size": 32000,
+		"mask_token_id": 11,
+		"speculators_config": {
+			"algorithm": "dflash",
+			"proposal_methods": [{"speculative_tokens": 7, "proposal_type": "greedy"}],
+			"verifier": {"architectures": [], "name_or_path": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"}
+		},
+		"speculators_model_type": "dflash"
+	}`)
+	cfg, ok := dflash.ParseConfig(data)
+	if !ok {
+		t.Fatal("a real speculators_model_type=dflash config must be recognised")
+	}
+	if cfg.BlockSize != 8 {
+		t.Fatalf("block_size: want 8 (top-level, not nested speculative_tokens 7), got %d", cfg.BlockSize)
+	}
+	if !eqInts(cfg.AuxHiddenLayerIDs, []int{7, 16, 25, 47, 69}) {
+		t.Fatalf("aux_hidden_state_layer_ids: got %v", cfg.AuxHiddenLayerIDs)
+	}
+	if cfg.MaskTokenID != 11 {
+		t.Fatalf("top-level mask_token_id: want 11, got %d", cfg.MaskTokenID)
+	}
+	if cfg.Verifier != "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8" {
+		t.Fatalf("speculators_config.verifier.name_or_path: got %q", cfg.Verifier)
+	}
+}
+
 // TestLookupProposer_Good is the canonical block-lookup case: the trailing token
 // recurred earlier, so the drafter proposes the block of tokens that followed it.
 func TestLookupProposer_Good(t *testing.T) {

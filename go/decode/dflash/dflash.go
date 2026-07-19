@@ -31,44 +31,77 @@
 //	_ = stats.AcceptRate() // drafter tokens the target kept / tokens offered
 package dflash
 
-import core "dappco.re/go"
+import (
+	"slices"
 
-// Config carries the drafter-facing fields of a real DFlash speculator checkpoint
-// (config.json with speculators_model_type "dflash"): the block the drafter
-// proposes per parallel forward, the verifier layers whose hidden states are fused
-// to condition it, and the target ("verifier") model the drafter was trained
-// against. BlockSize is clamped to ≥ 1 so a zero Config is a usable single-token
-// drafter rather than a dead one; the hidden-layer ids and verifier are metadata
-// the loader and the serve notice reason about (the pure-Go verify driver needs
-// only BlockSize).
+	core "dappco.re/go"
+)
+
+// Config carries the drafter-facing fields of a real DFlash speculator checkpoint:
+// the block the drafter proposes per parallel forward, the verifier layers whose
+// hidden states are fused to condition it, the mask-token id a block's
+// not-yet-drafted positions start from, and the target ("verifier") model the
+// drafter was trained against. BlockSize is clamped to ≥ 1 so a zero Config is a
+// usable single-token drafter rather than a dead one; the hidden-layer ids,
+// mask token and verifier are metadata the loader and the serve notice reason
+// about (the pure-Go verify driver needs only BlockSize).
+//
+// Recognised from EITHER real export convention (see ParseConfig): the
+// speculators-library shape (speculators_model_type "dflash", e.g. RedHatAI's
+// NVIDIA-Nemotron-3-*-speculator.dflash checkpoints) or the z-lab-native shape
+// every published z-lab/*-DFlash checkpoint actually uses (architectures
+// ["DFlashDraftModel"], dflash_config.{target_layer_ids,mask_token_id} —
+// z-lab/Qwen3-4B-DFlash-b16, z-lab/gemma-4-26B-A4B-it-DFlash, ...).
 //
 //	dflash.Config{BlockSize: 8, AuxHiddenLayerIDs: []int{3, 13, 23, 32, 42}}
 type Config struct {
 	BlockSize         int    // γ — candidate tokens proposed per block (clamped ≥ 1); real default 8
 	AuxHiddenLayerIDs []int  // verifier layer ids fused into the drafter's KV conditioning
-	Verifier          string // the target model the drafter verifies against (speculators_config.verifier.name)
+	MaskTokenID       int    // the block's not-yet-drafted positions start as this token's embedding
+	Verifier          string // the target model the drafter verifies against, when the checkpoint declares one
 }
 
 // dflashConfigJSON is the parse shape of a DFlash checkpoint's config.json — only
-// the fields the drafter contract needs. speculators_model_type is the marker;
-// block_size falls back to speculators_config.speculative_tokens when absent.
+// the fields the drafter contract needs, across BOTH real export conventions
+// (evidenced against downloaded checkpoints, never guessed — see
+// docs/design-dflash-survey.md):
+//
+//   - speculators (RedHatAI): speculators_model_type "dflash", block_size falling
+//     back to speculators_config.speculative_tokens, aux_hidden_state_layer_ids,
+//     top-level mask_token_id, speculators_config.verifier.name_or_path (the real
+//     key — .name is kept as a fallback for a hand-built/older config).
+//   - z-lab-native: architectures contains "DFlashDraftModel", block_size,
+//     dflash_config.target_layer_ids, dflash_config.mask_token_id. No verifier
+//     field exists in this convention (Verifier stays "").
+//
+// Both conventions set architectures:["DFlashDraftModel"], so that alone is
+// enough to recognise either; the field-reads below try each convention's own
+// path and fall back to the other's where they overlap.
 type dflashConfigJSON struct {
-	SpeculatorsModelType string `json:"speculators_model_type"`
-	BlockSize            int    `json:"block_size"`
-	AuxHiddenStateLayers []int  `json:"aux_hidden_state_layer_ids"`
-	SpeculatorsConfig    struct {
+	SpeculatorsModelType string   `json:"speculators_model_type"`
+	Architectures        []string `json:"architectures"`
+	BlockSize            int      `json:"block_size"`
+	AuxHiddenStateLayers []int    `json:"aux_hidden_state_layer_ids"`
+	MaskTokenID          *int     `json:"mask_token_id"` // speculators: top-level
+	DFlashConfig         struct {
+		MaskTokenID    *int  `json:"mask_token_id"` // z-lab-native: nested
+		TargetLayerIDs []int `json:"target_layer_ids"`
+	} `json:"dflash_config"`
+	SpeculatorsConfig struct {
 		SpeculativeTokens int `json:"speculative_tokens"`
 		Verifier          struct {
-			Name string `json:"name"`
+			Name       string `json:"name"`         // fallback key (no real checkpoint found uses this)
+			NameOrPath string `json:"name_or_path"` // the real speculators-library key
 		} `json:"verifier"`
 	} `json:"speculators_config"`
 }
 
 // ParseConfig recognises a DFlash checkpoint from its config.json BYTES and reads
-// the drafter contract. ok is true only when speculators_model_type == "dflash";
-// any other model (or unparseable data) returns ok=false so a caller can fall
-// through to the next drafter kind. It reads config only — never weights — the
-// same posture as the reactive assistant/model config parsers.
+// the drafter contract, across either real export convention (see Config's doc).
+// ok is true when speculators_model_type == "dflash" OR architectures contains
+// "DFlashDraftModel"; any other model (or unparseable data) returns ok=false so a
+// caller can fall through to the next drafter kind. It reads config only — never
+// weights — the same posture as the reactive assistant/model config parsers.
 //
 //	if cfg, ok := dflash.ParseConfig(data); ok { /* a DFlash drafter */ }
 func ParseConfig(data []byte) (Config, bool) {
@@ -76,17 +109,33 @@ func ParseConfig(data []byte) (Config, bool) {
 	if r := core.JSONUnmarshal(data, &raw); !r.OK {
 		return Config{}, false
 	}
-	if raw.SpeculatorsModelType != "dflash" {
+	if raw.SpeculatorsModelType != "dflash" && !slices.Contains(raw.Architectures, "DFlashDraftModel") {
 		return Config{}, false
 	}
 	block := raw.BlockSize
 	if block <= 0 {
 		block = raw.SpeculatorsConfig.SpeculativeTokens
 	}
+	auxLayers := raw.AuxHiddenStateLayers
+	if len(auxLayers) == 0 {
+		auxLayers = raw.DFlashConfig.TargetLayerIDs
+	}
+	verifier := raw.SpeculatorsConfig.Verifier.NameOrPath
+	if verifier == "" {
+		verifier = raw.SpeculatorsConfig.Verifier.Name
+	}
+	mask := 0
+	switch {
+	case raw.MaskTokenID != nil:
+		mask = *raw.MaskTokenID
+	case raw.DFlashConfig.MaskTokenID != nil:
+		mask = *raw.DFlashConfig.MaskTokenID
+	}
 	cfg := Config{
 		BlockSize:         max(block, 1),
-		AuxHiddenLayerIDs: append([]int(nil), raw.AuxHiddenStateLayers...),
-		Verifier:          raw.SpeculatorsConfig.Verifier.Name,
+		AuxHiddenLayerIDs: append([]int(nil), auxLayers...),
+		MaskTokenID:       mask,
+		Verifier:          verifier,
 	}
 	return cfg, true
 }
