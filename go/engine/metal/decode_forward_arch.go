@@ -1356,10 +1356,11 @@ func bufMaxAbsNaN(buf metal.MTLBuffer, dModel int) (maxAbs float32, bad int) {
 // layer's output hidden (dModel bf16 bytes) to capturedLayerHiddens — the native half of
 // the per-layer cross-engine diff. Reset capturedLayerHiddens to nil before the step.
 var (
-	captureLayerHiddens  bool
-	capturedLayerHiddens [][]byte
-	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
-	capturedLayer5MLP    []capturedMLPInternal
+	captureLayerHiddens   bool
+	capturedLayerHiddens  [][]byte
+	capturedAttnHiddens   [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
+	capturedMLPResHiddens [][]byte // post-MLP hidden (attn_res + FFN) per layer — isolates the MLP from the PLE gate + scalar
+	capturedLayer5MLP     []capturedMLPInternal
 )
 
 type capturedMLPInternal struct {
@@ -1797,6 +1798,16 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 				endEncodingFast(enc)
 				return nil, err
 			}
+		}
+		if captureLayerHiddens { // post-MLP hidden (attn_res + FFN) — isolates the MLP from the PLE gate + scalar
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			capturedMLPResHiddens = append(capturedMLPResHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
 		}
 		// gemma4 per-layer-input gate (E2B/E4B): keep the gate chain in the live command buffer.
 		// The per-token PLE tensor is pinned once at step entry, and each layer binds its pliDim row

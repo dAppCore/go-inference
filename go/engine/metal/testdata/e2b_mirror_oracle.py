@@ -13,10 +13,14 @@
 # (consumers attend the last owner of their class), PLE gate, layer scalar.
 #
 # Usage:  python3 e2b_mirror_oracle.py <E2B_BF16_SNAPSHOT_DIR> <DUMP_DIR>
-# then:   E2B_BF16_DIR=<snapshot> E2B_MIRROR_ORACLE_DIR=<DUMP_DIR> \
+# then:   e2b_mlx_reference.py into the SAME dump dir (the bf16 reference the #49
+#         discriminator hard-gates against), and:
+#         E2B_BF16_DIR=<snapshot> E2B_MIRROR_ORACLE_DIR=<DUMP_DIR> \
 #         MLX_METALLIB_PATH=<lib> go test -run TestRealChainE2BMirrorVsReference_Good ...
 # Dumps f32 little-endian: embeds_scaled.f32 [T,H], pli.f32 [T,NL,PLID],
-# layer_out.f32 [NL,T,H], attn_res.f32 [NL,T,H] (residual after attention).
+# layer_out.f32 [NL,T,H], attn_res.f32 [NL,T,H] (residual after attention),
+# mlp_res.f32 [NL,T,H] (residual after the MLP, before the PLE gate — the #49
+# sublayer probe's station between attn_res and layer_out).
 import json, struct, sys, glob, os
 import numpy as np
 
@@ -129,6 +133,7 @@ for j in range(M, NL):
 
 layer_out = np.zeros((NL, T, H), dtype=np.float32)
 attn_res = np.zeros((NL, T, H), dtype=np.float32)
+mlp_res = np.zeros((NL, T, H), dtype=np.float32)
 kv_bank = {}
 
 for li in range(NL):
@@ -188,6 +193,7 @@ for li in range(NL):
     dn = (gelu_tanh(gate) * up) @ W[P + "mlp.down_proj.weight"].T
     dn = rms(dn, W[P + "post_feedforward_layernorm.weight"])
     h = residual + dn
+    mlp_res[li] = h
 
     # PLE gate
     residual = h
@@ -206,5 +212,6 @@ embeds_scaled.tofile(os.path.join(OUT, "embeds_scaled.f32"))
 pli.astype(np.float32).tofile(os.path.join(OUT, "pli.f32"))
 layer_out.tofile(os.path.join(OUT, "layer_out.f32"))
 attn_res.tofile(os.path.join(OUT, "attn_res.f32"))
+mlp_res.tofile(os.path.join(OUT, "mlp_res.f32"))
 json.dump({"ids": IDS, "T": T, "H": H, "NL": NL, "PLID": PLID}, open(os.path.join(OUT, "manifest.json"), "w"))
 print("dumped to", OUT)
