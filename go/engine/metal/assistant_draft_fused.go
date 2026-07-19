@@ -82,14 +82,18 @@ type assistantFusedDraft struct {
 	// build so each step's logits qmv reads ~134MB instead of the 537MB bf16
 	// scan. Non-nil only for non-ordered assistants with the lane armed.
 	qheadPacked, qheadScales, qheadBiases metal.MTLBuffer
-	kv                                    map[string]*fusedDraftKV
-	inConcat                              metal.MTLBuffer // [2*backbone] bf16 — concat(emb, hidden)
-	h, resid, normed, ffIn                metal.MTLBuffer // [hidden]
-	q, qr, attn                           metal.MTLBuffer // [nHeads*maxHeadDim]
-	gate, up, gated                       metal.MTLBuffer // [dFF]
-	ff                                    metal.MTLBuffer // [hidden]
-	outNormed                             metal.MTLBuffer // [hidden]
-	outHidden                             metal.MTLBuffer // [backbone]
+	// chained-block scratch (#53 rows-head device-direct): lazily built by
+	// chainScratchFor when the whole draft block runs in one command buffer
+	// (assistant_draft_chain.go).
+	chain                  *draftChainScratch
+	kv                     map[string]*fusedDraftKV
+	inConcat               metal.MTLBuffer // [2*backbone] bf16 — concat(emb, hidden)
+	h, resid, normed, ffIn metal.MTLBuffer // [hidden]
+	q, qr, attn            metal.MTLBuffer // [nHeads*maxHeadDim]
+	gate, up, gated        metal.MTLBuffer // [dFF]
+	ff                     metal.MTLBuffer // [hidden]
+	outNormed              metal.MTLBuffer // [hidden]
+	outHidden              metal.MTLBuffer // [backbone]
 }
 
 // fusedTensorBuf resolves a named bf16 tensor to a resident buffer, failing
@@ -316,6 +320,60 @@ func (f *assistantFusedDraft) loadKV(targetKVs AssistantTargetKVByType) error {
 	return nil
 }
 
+// encodeStepBody encodes one drafter forward into the caller's live encoder:
+// pre_projection over f.inConcat → the layers → final norm → post_projection →
+// the logits head (ordered gemvs / quantised qmv / plain gemv — whichever is
+// armed), leaving outNormed/outHidden/vocabLogits current. ONE emitter behind
+// both the per-step path (step) and the chained draft block
+// (assistant_draft_chain.go), so the chained encode is the per-step encode by
+// construction — kernels, order and operands identical, never parallel logic.
+func (f *assistantFusedDraft) encodeStepBody(enc metal.MTLComputeCommandEncoderObject) error {
+	var encErr error
+	emit := func(err error) {
+		if err != nil && encErr == nil {
+			encErr = err
+		}
+	}
+	emit(encGemvBF16(enc, f.preProjW, f.inConcat, f.h, f.hidden, 2*f.backbone))
+	for i := range f.layers {
+		l := &f.layers[i]
+		kv := f.kv[l.layerType]
+		if kv == nil || kv.length <= 0 {
+			emit(core.NewError("native.assistant fused draft missing KV for " + l.layerType))
+			break
+		}
+		emit(encRMSNormBF16(enc, f.h, l.inputNormW, f.normed, 0, f.hidden, f.eps))
+		emit(encGemvBF16(enc, l.qProjW, f.normed, f.q, l.nHeads*l.headDim, f.hidden))
+		emit(encRMSNormRowsBF16(enc, f.q, l.qNormW, f.q, 0, 0, 0, l.nHeads, l.headDim, f.eps))
+		emit(encRopeDecodeAt(enc, f.q, f.qr, 0, 0, scalarI32(kv.qPos), 0, l.ropeFreqs, l.nHeads, l.headDim, l.rotaryDim, l.ropeBase, f.ropeScale))
+		emit(encSDPA(enc, f.qr, kv.k, kv.v, f.attn, l.nHeads, kv.kvHeads, l.headDim, kv.length, f.attnScale))
+		emit(encGemvBF16(enc, l.oProjW, f.attn, f.ff, f.hidden, l.nHeads*l.headDim))
+		emit(encRMSNormBF16(enc, f.ff, l.postAttnNormW, f.normed, 0, f.hidden, f.eps))
+		emit(encAddBF16(enc, f.h, f.normed, f.resid, f.hidden))
+		emit(encRMSNormBF16(enc, f.resid, l.preFFNormW, f.ffIn, 0, f.hidden, f.eps))
+		emit(encGemvBF16(enc, l.gateW, f.ffIn, f.gate, f.dFF, f.hidden))
+		emit(encGemvBF16(enc, l.upW, f.ffIn, f.up, f.dFF, f.hidden))
+		emit(encGeluGateMulFused(enc, f.gate, f.up, f.gated, f.dFF))
+		emit(encGemvBF16(enc, l.downW, f.gated, f.ff, f.hidden, f.dFF))
+		emit(encRMSNormBF16(enc, f.ff, l.postFFNormW, f.normed, 0, f.hidden, f.eps))
+		emit(encAddBF16(enc, f.resid, f.normed, f.h, f.hidden))
+		if l.layerScalar != nil {
+			emit(encMulScalarBF16(enc, f.h, l.layerScalar, f.h, 0, f.hidden))
+		}
+	}
+	emit(encRMSNormBF16(enc, f.h, f.finalNormW, f.outNormed, 0, f.hidden, f.eps))
+	emit(encGemvBF16(enc, f.postProjW, f.outNormed, f.outHidden, f.backbone, f.hidden))
+	if f.centroidsW != nil {
+		emit(encGemvBF16(enc, f.centroidsW, f.outNormed, f.centroidScores, f.numCentroids, f.hidden))
+		emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
+	} else if f.qheadPacked != nil { // quantised plain head: one affine qmv, same CB (#53)
+		emit(encQMVBF16(enc, f.qheadPacked, f.qheadScales, f.qheadBiases, f.outNormed, f.vocabLogits, 0, 0, 0, 0, f.vocab, f.hidden, assistantQHeadGroupSize, 4))
+	} else if f.embedW != nil { // plain tied-embedding head: one gemv, same CB
+		emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
+	}
+	return encErr
+}
+
 // step runs one fused drafter step: concat(emb, hidden) → pre_projection →
 // four layers → final norm → post_projection, all in one command buffer with
 // one wait. normedOut receives the final-normed drafter hidden (the logits
@@ -333,48 +391,7 @@ func (f *assistantFusedDraft) step(tokenEmbedding, previousHidden, normedOut, hi
 	withAutoreleasePool(func() {
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		emit := func(err error) {
-			if err != nil && encErr == nil {
-				encErr = err
-			}
-		}
-		emit(encGemvBF16(enc, f.preProjW, f.inConcat, f.h, f.hidden, 2*f.backbone))
-		for i := range f.layers {
-			l := &f.layers[i]
-			kv := f.kv[l.layerType]
-			if kv == nil || kv.length <= 0 {
-				emit(core.NewError("native.assistant fused draft missing KV for " + l.layerType))
-				break
-			}
-			emit(encRMSNormBF16(enc, f.h, l.inputNormW, f.normed, 0, f.hidden, f.eps))
-			emit(encGemvBF16(enc, l.qProjW, f.normed, f.q, l.nHeads*l.headDim, f.hidden))
-			emit(encRMSNormRowsBF16(enc, f.q, l.qNormW, f.q, 0, 0, 0, l.nHeads, l.headDim, f.eps))
-			emit(encRopeDecodeAt(enc, f.q, f.qr, 0, 0, scalarI32(kv.qPos), 0, l.ropeFreqs, l.nHeads, l.headDim, l.rotaryDim, l.ropeBase, f.ropeScale))
-			emit(encSDPA(enc, f.qr, kv.k, kv.v, f.attn, l.nHeads, kv.kvHeads, l.headDim, kv.length, f.attnScale))
-			emit(encGemvBF16(enc, l.oProjW, f.attn, f.ff, f.hidden, l.nHeads*l.headDim))
-			emit(encRMSNormBF16(enc, f.ff, l.postAttnNormW, f.normed, 0, f.hidden, f.eps))
-			emit(encAddBF16(enc, f.h, f.normed, f.resid, f.hidden))
-			emit(encRMSNormBF16(enc, f.resid, l.preFFNormW, f.ffIn, 0, f.hidden, f.eps))
-			emit(encGemvBF16(enc, l.gateW, f.ffIn, f.gate, f.dFF, f.hidden))
-			emit(encGemvBF16(enc, l.upW, f.ffIn, f.up, f.dFF, f.hidden))
-			emit(encGeluGateMulFused(enc, f.gate, f.up, f.gated, f.dFF))
-			emit(encGemvBF16(enc, l.downW, f.gated, f.ff, f.hidden, f.dFF))
-			emit(encRMSNormBF16(enc, f.ff, l.postFFNormW, f.normed, 0, f.hidden, f.eps))
-			emit(encAddBF16(enc, f.resid, f.normed, f.h, f.hidden))
-			if l.layerScalar != nil {
-				emit(encMulScalarBF16(enc, f.h, l.layerScalar, f.h, 0, f.hidden))
-			}
-		}
-		emit(encRMSNormBF16(enc, f.h, f.finalNormW, f.outNormed, 0, f.hidden, f.eps))
-		emit(encGemvBF16(enc, f.postProjW, f.outNormed, f.outHidden, f.backbone, f.hidden))
-		if f.centroidsW != nil {
-			emit(encGemvBF16(enc, f.centroidsW, f.outNormed, f.centroidScores, f.numCentroids, f.hidden))
-			emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
-		} else if f.qheadPacked != nil { // quantised plain head: one affine qmv, same CB (#53)
-			emit(encQMVBF16(enc, f.qheadPacked, f.qheadScales, f.qheadBiases, f.outNormed, f.vocabLogits, 0, 0, 0, 0, f.vocab, f.hidden, assistantQHeadGroupSize, 4))
-		} else if f.embedW != nil { // plain tied-embedding head: one gemv, same CB
-			emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
-		}
+		encErr = f.encodeStepBody(enc)
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
 		waitUntilCompletedFast(cb)
