@@ -53,11 +53,48 @@ func qmvRowsIndexBuffers() (metal.MTLBuffer, metal.MTLBuffer, bool) {
 	return qmvRowsLHS, qmvRowsRHS, qmvRowsLHS != nil && qmvRowsRHS != nil
 }
 
-// lthnQMVRowsMaxM caps the register-tiled kernel: each thread holds M x-slices
+// lthnQMVRowsMaxM caps the FLAT register tile: each thread holds M x-slices
 // plus M×4 accumulators, and past M=4 the register pressure collapses
 // occupancy — measured on the 12B verify: M=3 gpuTotal 18.7ms (vs 20 gather),
-// M=5 35.3ms (vs 27.6 gather). Wider rows ride the gather fallback.
+// M=5 35.3ms (vs 27.6 gather). Rows past it ride the WIDE halved tile below
+// (kernel cases 5..8), or the gather fallback when the wide lane is off.
 const lthnQMVRowsMaxM = 4
+
+// lthnQMVRowsWideMaxM caps the halved-tile wide kernel (#53): only ceil(M/2)
+// x-slices stay register-live per k-block, which is what the M=5 occupancy
+// collapse was about, at the cost of the second half re-touching the k-block's
+// weight bytes from L1. 8 covers the MTP verify band (draft block + carry at
+// the shipped -draft-block defaults); wider rows keep the gather.
+const lthnQMVRowsWideMaxM = 8
+
+var (
+	qmvRowsWideOnce sync.Once
+	qmvRowsWideOn   bool
+)
+
+// qmvRowsWideEnabled reads the LTHN_QMV_ROWS_WIDE lever once. OPT-IN ("1"
+// arms rows 5..8 onto the wide tile): the halved tile is byte-identical to
+// the per-row qmv (TestLthnQMVRowsWideByteBand) but LOST its live A/B on the
+// 26B MTP pair — 400-tok greedy 3-run medians 2026-07-19, wide on 120.2 vs
+// off 122.7 tok/s with the chained draft armed — the gather's grid-Z L2
+// amortisation still wins at these dims (the small-dims pattern the chunked
+// tier hit first). The kernel + gate stay as the banked instrument: re-probe
+// per geometry before re-defaulting.
+func qmvRowsWideEnabled() bool {
+	qmvRowsWideOnce.Do(func() { qmvRowsWideOn = os.Getenv("LTHN_QMV_ROWS_WIDE") == "1" })
+	return qmvRowsWideOn
+}
+
+// qmvRowsTiledCap is the live register-tiled band: the flat tile's 4, or the
+// wide tile's 8 when the lane is armed. Every tiled-band decision (the plan
+// gate, the byte tier, the fold entry) consults THIS so live, byte-tier and
+// ICB-recorded routing stay one rule.
+func qmvRowsTiledCap() int {
+	if qmvRowsWideEnabled() {
+		return lthnQMVRowsWideMaxM
+	}
+	return lthnQMVRowsMaxM
+}
 
 type lthnQMVRowsKey struct {
 	groupSize, bits, m int
@@ -105,7 +142,7 @@ func lthnQMVRowsPipeline(key lthnQMVRowsKey) (metal.MTLComputePipelineState, boo
 // records exactly the dispatch the live path encodes (record==live by
 // construction, never by parallel logic).
 type qmvRowsPlan struct {
-	tiled     bool // register-tiled lthn_qmv_rows, one dispatch (rows ≤ lthnQMVRowsMaxM)
+	tiled     bool // register-tiled lthn_qmv_rows, one dispatch (rows ≤ qmvRowsTiledCap())
 	tiledKey  lthnQMVRowsKey
 	gatherKey lthnGatherQMVKey
 }
@@ -192,7 +229,8 @@ func qmvRowsPlanFor(rows, outDim, inDim, gs, bits int) (qmvRowsPlan, bool) {
 	// inDim%512==0, the qmvBF16KernelName rule (which also keeps the plain
 	// k-loop tail-free at packs=2). Other dims route per-row to the qmv_impl
 	// twin this kernel does not reproduce; they keep the gather fallback.
-	if rows <= lthnQMVRowsMaxM && outDim%8 == 0 && inDim%512 == 0 {
+	// Rows 5..8 resolve the WIDE halved-tile cases behind the same host name.
+	if rows <= qmvRowsTiledCap() && outDim%8 == 0 && inDim%512 == 0 {
 		key := lthnQMVRowsKey{groupSize: gs, bits: bits, m: rows}
 		if _, ok := lthnQMVRowsPipeline(key); ok {
 			return qmvRowsPlan{tiled: true, tiledKey: key}, true
@@ -271,11 +309,12 @@ func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, 
 // encQMVRowsBF16At encodes the multi-row qmv, reporting handled=false (no
 // encode) when the geometry has no kernel so the caller keeps its
 // qmm_t/per-row route. in rows are contiguous bf16 at inOff + z·inDim·2; out
-// rows land at outOff + z·outDim·2. Rows 2..lthnQMVRowsMaxM take one
-// register-tiled lthn_qmv_rows dispatch (the weight stream read ONCE); wider
-// rows ride the lean gather kernel (grid-Z, qmv_fast bytes, weight re-streamed
-// per row — the THROUGHPUT winner at small dims; the byte-tier chunked variant
-// is encQMVRowsBF16ChunkedAt, fold-only).
+// rows land at outOff + z·outDim·2. Rows 2..qmvRowsTiledCap() take one
+// register-tiled lthn_qmv_rows dispatch (flat tile to 4, halved wide tile to
+// 8 — the weight stream read ONCE); wider rows ride the lean gather kernel
+// (grid-Z, qmv_fast bytes, weight re-streamed per row — the THROUGHPUT winner
+// at small dims; the byte-tier chunked variant is encQMVRowsBF16ChunkedAt,
+// fold-only).
 // Byte identity: the tiled kernel is qmv_fast_impl's M-variant and the plan
 // gate admits it only on fast-twin dims (outDim%8==0 && inDim%512==0 — the
 // same rule qmvBF16KernelName routes the per-row decode by), so a tiled encode

@@ -1233,6 +1233,31 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 			mtpDiagDraftCalls, lastToken, fused != nil, len(target.finalNorm) == len(currentHidden),
 			diagKVMs, float64(time.Since(diagT0).Microseconds())/1000-diagKVMs, mtpDiagBF16Stats(currentHidden)))
 	}
+	// Device-chained block (#53 rows-head device-direct): the whole K-step
+	// draft in one command buffer — one wait, one readback — proposing the
+	// same tokens as the per-step loop below (assistant_draft_chain.go). The
+	// conf-capture lever keeps the loop: it needs the full host logits row.
+	if fused != nil && confProbs == nil {
+		hiddenScratch := target.mtpDraftScratch(&target.mtpDraftHidden, pair.TargetArch.Hidden*bf16Size)
+		var chainT0 time.Time
+		if diagDraft {
+			chainT0 = time.Now()
+		}
+		ctokens, chidden, chained, cerr := fused.draftBlockChained(target, currentToken, maxDraftTokens, tokens, hiddenScratch, suppress)
+		if cerr != nil {
+			return AssistantDraftBlockResult{}, cerr
+		}
+		if chained {
+			if diagDraft {
+				nativeTraceLog(core.Sprintf("mtp-diag draft chain: K=%d %.1fms tokens=%v\n",
+					maxDraftTokens, float64(time.Since(chainT0).Microseconds())/1000, ctokens))
+			}
+			if !copyTokens {
+				target.mtpDraftTokens = ctokens
+			}
+			return AssistantDraftBlockResult{Tokens: ctokens, Hidden: chidden}, nil
+		}
+	}
 	for len(tokens) < maxDraftTokens {
 		tokenEmbedding, err := target.embedID(currentToken)
 		if err != nil {
@@ -1369,6 +1394,23 @@ func (pair *AssistantPair) draftBlockSampledFromSessionWithSuppress(target *Arch
 	if fused != nil {
 		if err := fused.loadKV(targetKVs); err != nil {
 			fused = nil
+		}
+	}
+	// Device-chained block (#53 rows-head device-direct): drafts are ALWAYS
+	// the drafter's argmax (see the comment in the loop below), so the
+	// sampled lane chains exactly like the greedy one — proposal picks stay
+	// identical, and sampling remains entirely the target verify's concern.
+	if fused != nil {
+		hiddenScratch := target.mtpDraftScratch(&target.mtpDraftHidden, pair.TargetArch.Hidden*bf16Size)
+		ctokens, chidden, chained, cerr := fused.draftBlockChained(target, currentToken, maxDraftTokens, tokens, hiddenScratch, params.SuppressTokens)
+		if cerr != nil {
+			return AssistantDraftBlockResult{}, cerr
+		}
+		if chained {
+			if !copyTokens {
+				target.mtpDraftTokens = ctokens
+			}
+			return AssistantDraftBlockResult{Tokens: ctokens, Hidden: chidden}, nil
 		}
 	}
 	for len(tokens) < maxDraftTokens {
