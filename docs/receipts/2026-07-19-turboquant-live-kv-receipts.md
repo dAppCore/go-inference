@@ -83,3 +83,14 @@ named lever for long-context decode parity.
 decode fails the parity bar at exactly the depths TQ targets; E2B residency
 delta is real but small (three global caches). The opt-in stands, now with a
 52x TTFT win at long context as its honest selling point.
+
+## Addendum (same day): #54 landed — the native side of the TTFT ratio is fixed
+
+The 158 tok/s native prefill above was the resident-session q8
+canonical-landing guard forcing per-token prefill on one-shot callers
+(`DisablePromptReuse` opt-out, merged 819957a1). Native E2B 12k prefill now
+measures **9,585 tok/s median / 1.24s TTFT** (3 runs, idle box, <1.1%
+variance) — faster than TQ's own 8,291–8,391. TQ's honest selling point is
+therefore **memory** (codes-resident KV, 5.68 vs 5.80GB) and needle-clean
+long-context storage, NOT TTFT; the 52x ratio is retired. The 2-pass decode
+lever remains the open item.
