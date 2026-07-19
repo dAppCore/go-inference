@@ -9,14 +9,16 @@ import (
 )
 
 // init registers deepseek_vl_v2 — the DeepSeek-VL2 architecture DeepSeek-OCR / OCR-2 reuse
-// unchanged (https://huggingface.co/deepseek-ai/DeepSeek-OCR) — as a RECOGNISED model_type with
-// a clean refusal, not an "unknown model architecture": a user pointing lem at a DeepSeek-OCR
-// checkpoint gets direction (this IS deepseek_vl_v2, here is what's missing), never a mystery.
-// Both loader entry points refuse: Parse succeeds and Arch refuses (the model.Load path), and
-// Composed refuses directly (the model.LoadComposedDir path engine/metal tries first) — so
-// whichever entry point a backend reaches, the refusal surfaces with the same explanation. This
-// mirrors ../deepseek's deepseek_v2/deepseek_v3 registration for the identical "recognised, not
-// yet implemented" contract.
+// unchanged (https://huggingface.co/deepseek-ai/DeepSeek-OCR) — as a RECOGNISED model_type with a
+// clean, ACCURATE refusal from the decoder-only causal-LM path, not an "unknown model
+// architecture" and not a stale "not yet implemented" once OCR itself IS implemented (ocr.go).
+// Both loader entry points refuse the SAME way: Parse succeeds and Arch refuses (the model.Load
+// path — config.go), and Composed refuses directly (the model.LoadComposedDir path engine/metal
+// tries first) — so whichever entry point a backend reaches, the refusal names the real reason
+// (a dual-tower vision encoder + MoE decoder is not the decoder-only shape either path assembles)
+// and redirects to `lem ocr`. Mirrors whisper's registration shape: Arch/Composed refuse
+// permanently (architecturally different, not "not yet implemented"), the real forward lives in
+// its own loader (ocr.go's Load/Model.OCR) driven by its own verb.
 func init() {
 	model.RegisterArch(model.ArchSpec{
 		ModelTypes: []string{"deepseek_vl_v2"},
@@ -28,7 +30,7 @@ func init() {
 			if mt == "" {
 				mt = "deepseek_vl_v2"
 			}
-			return nil, core.NewError(mt + " (DeepSeek-OCR) is a recognised OCR vision-language arch; its vision encoder + OCR decoder forward is not yet implemented in this engine")
+			return nil, core.NewError(mt + " (DeepSeek-OCR) is a dual-tower vision encoder + MoE decoder OCR architecture, not a decoder-only causal-LM — use `lem ocr --model <dir> <image>` instead")
 		},
 	})
 }

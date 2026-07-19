@@ -28,6 +28,20 @@ func TestConfig_ParseConfig_Good(t *testing.T) {
 	if cfg.VisionConfig == nil || cfg.VisionConfig.ModelName != "deeplip_b_l" {
 		t.Fatalf("VisionConfig = %+v, want the parsed dual-tower vision config noted", cfg.VisionConfig)
 	}
+	// The TOP-LEVEL fields are what weights.go/decoder.go actually load geometry from (see
+	// Config's doc comment) — pin them too, not just the vestigial nested LanguageConfig above.
+	if cfg.HiddenSize != 1280 || cfg.NumHiddenLayers != 12 || cfg.VocabSize != 129280 {
+		t.Fatalf("top-level hidden/layers/vocab = %d/%d/%d, want 1280/12/129280", cfg.HiddenSize, cfg.NumHiddenLayers, cfg.VocabSize)
+	}
+	if cfg.NRoutedExperts != 64 || cfg.NSharedExperts != 2 || cfg.NumExpertsPerTok != 6 || cfg.MoEIntermediateSize != 896 {
+		t.Fatalf("MoE geometry = routed %d shared %d perTok %d moeIntermediate %d, want 64/2/6/896", cfg.NRoutedExperts, cfg.NSharedExperts, cfg.NumExpertsPerTok, cfg.MoEIntermediateSize)
+	}
+	if cfg.FirstKDenseReplace != 1 || cfg.UseMLA {
+		t.Fatalf("FirstKDenseReplace/UseMLA = %d/%v, want 1/false", cfg.FirstKDenseReplace, cfg.UseMLA)
+	}
+	if cfg.NumAttentionHeads != 10 || cfg.NumKeyValueHeads != 10 || cfg.IntermediateSize != 6848 {
+		t.Fatalf("heads/intermediate = %d/%d/%d, want 10/10/6848", cfg.NumAttentionHeads, cfg.NumKeyValueHeads, cfg.IntermediateSize)
+	}
 }
 
 func TestConfig_ParseConfig_Bad(t *testing.T) {
@@ -51,8 +65,8 @@ func TestConfig_ParseConfig_Ugly(t *testing.T) {
 
 // TestConfig_Arch_Good pins the documented "happy path" for an
 // always-refuses arch: a well-formed, realistic DeepSeek-OCR config still
-// refuses, but the refusal names the arch and says the forward isn't
-// implemented — the expected, correctly-shaped behaviour.
+// refuses the decoder-only causal-LM path, but the refusal names the arch
+// and redirects to `lem ocr` — the expected, correctly-shaped behaviour.
 func TestConfig_Arch_Good(t *testing.T) {
 	cfg, err := ParseConfig([]byte(testConfigJSON))
 	if err != nil {
@@ -62,8 +76,8 @@ func TestConfig_Arch_Good(t *testing.T) {
 	if err == nil {
 		t.Fatal("Arch: expected a clean forward refusal, got a resolved architecture")
 	}
-	if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("Arch refusal %q must name deepseek_vl_v2 and say the forward is not yet implemented", err.Error())
+	if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not a decoder-only causal-LM") {
+		t.Fatalf("Arch refusal %q must name deepseek_vl_v2 and say it is not a decoder-only causal-LM", err.Error())
 	}
 }
 

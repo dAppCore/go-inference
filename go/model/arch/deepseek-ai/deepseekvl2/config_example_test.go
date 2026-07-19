@@ -19,7 +19,7 @@ func ExampleConfig_InferFromWeights() {
 
 func ExampleConfig_Arch() {
 	c := &Config{ModelType: "deepseek_vl_v2"}
-	_, err := c.Arch() // the vision-language forward is not yet implemented; Arch always refuses
+	_, err := c.Arch() // not a decoder-only causal-LM; Arch always refuses — OCR runs via lem ocr instead
 	core.Println(err != nil)
 	// Output: true
 }
