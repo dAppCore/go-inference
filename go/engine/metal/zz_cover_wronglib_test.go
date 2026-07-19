@@ -129,8 +129,16 @@ func TestCoverMainBuilderKernelNotFound(t *testing.T) {
 		if _, err := RoPEFreqsBF16(xb, 1, nHeads, headDim, headDim, invFreqs, 1, 0, false); err == nil {
 			t.Fatal("ropeFreqsPipelineBF16: expected kernel-not-found")
 		}
-		if _, err := SDPA(xb, kb, vb, 1, nHeads, nKV, headDim, kvLen, 0.125); err == nil {
-			t.Fatal("sdpaVectorPipeline: expected kernel-not-found")
+		// #28 changed this contract: with the MAIN library wrong but the lthn
+		// customLibrary live, an absent fixed width no longer errors — the
+		// runtime-dim fallback serves it. The error leg now needs BOTH gone.
+		withNulledCustomLibrary(t, func() {
+			if _, err := SDPA(xb, kb, vb, 1, nHeads, nKV, headDim, kvLen, 0.125); err == nil {
+				t.Fatal("sdpaVectorPipeline: expected kernel-not-found with custom library nulled")
+			}
+		})
+		if _, err := SDPA(xb, kb, vb, 1, nHeads, nKV, headDim, kvLen, 0.125); err != nil {
+			t.Fatalf("sdpaVector runtime-dim fallback: expected success with live custom library, got %v", err)
 		}
 	})
 }
