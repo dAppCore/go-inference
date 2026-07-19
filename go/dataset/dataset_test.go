@@ -216,7 +216,10 @@ func TestNewID_Good(t *core.T) {
 	core.AssertEqual(t, 36, len(a), "a v4 UUID string is 36 characters")
 }
 
-// timeAt is a small determinism helper shared by this package's tests.
+// timeAt and timeZero are small determinism helpers shared by this
+// package's tests.
 func timeAt(unix int64) time.Time {
 	return time.Unix(unix, 0).UTC()
 }
+
+var timeZero time.Time

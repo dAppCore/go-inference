@@ -35,9 +35,9 @@ CLI module: `tui/datasetstore.go` (DuckDB Store impl + migrations for `datasets.
 
 ### Task 2: Store contract + ingest normalisation
 
-- [ ] `Store` interface: dataset CRUD-by-flag, item append/get/list with filters (dataset, status, kind, source, score expressions, archived), score append, review append (latest-wins reads), export record append. An in-memory fake Store for root-module tests.
-- [ ] Ingest: `{messages}` JSONL, `{prompt,response}` JSONL, `CaptureRow` JSONL (`{step,prompt,text,at_unix}`), and chathistory session/turn rows → normalised Items with source refs + fingerprints; dedupe by content_hash within a dataset (a duplicate ingest is a counted no-op, not an error).
-- [ ] Tests: each shape round-trips; malformed rows are loud per-row errors with honest counts (ingested/skipped/dedup); Examples.
+- [x] `Store` interface: dataset CRUD-by-flag, item append/get/list with filters (dataset, status, kind, source, score expressions, archived), score append, review append (latest-wins reads), export record append. An in-memory fake Store for root-module tests.
+- [x] Ingest: `{messages}` JSONL, `{prompt,response}` JSONL, `CaptureRow` JSONL (`{step,prompt,text,at_unix}`), and chathistory session/turn rows → normalised Items with source refs + fingerprints; dedupe by content_hash within a dataset (a duplicate ingest is a counted no-op, not an error).
+- [x] Tests: each shape round-trips; malformed rows are loud per-row errors with honest counts (ingested/skipped/dedup); Examples.
 
 ### Task 3: Welfare screen + scoring orchestration
 
