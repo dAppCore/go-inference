@@ -178,6 +178,9 @@ does not block the forward.
 
 ## 7. Remainder (the glue lane — sibling-owned files, in order)
 
+**Round policy reconfirmed 2026-07-20 (§7a) — no contradiction with the landed
+v1 forward's single-call-per-block shape. Arming proceeds.**
+
 1. Live `DFlashAuxSource` for the real convention: per-layer aux hiddens at
    `target_layer_ids` via the existing non-corrupting live tap, PLUS the
    borrowed target embedding for block seeding (per-position mask-token
@@ -186,10 +189,105 @@ does not block the forward.
    forward + the borrowed target lm_head for block readout (no reduced head,
    no d2t for z-lab); keep the speculators-convention reduced-head posture as
    a separate arm if that family is ever wanted.
-3. Reconfirm the `spec_generate` round policy against the reference (§5's
-   named gap) before arming.
+3. ~~Reconfirm the `spec_generate` round policy against the reference (§5's
+   named gap) before arming.~~ **Done — see §7a.**
 4. Flip `DFlashEngineProbe` ONLY once a live draft→verify round trip against
    a real paired target lands an accept-rate receipt (survey §6 item 6-7's
    posture, unchanged).
 5. Perf follow-ups: resident bf16 weights + fused device chain; skip re-fusing
    unchanged context rows across rounds.
+
+## 7a. Round-policy reconfirmation (banked evidence, 2026-07-20)
+
+Fetched directly from the hub repo `z-lab/Qwen3-4B-DFlash-b16` (the checkpoint's
+own current files, via the HF filesystem tool — not the stale local cache,
+which held only a weightless `refs/main` stub). Repo listing: `assets/`,
+`.gitattributes`, `README.md`, `config.json`, `dflash.py` (12,340 bytes),
+`model.safetensors` (1,074,860,568 bytes ≈ 1.075GB — confirms design doc §3's
+"~538M parameters → ~1.1GB bf16" estimate), `modeling_dflash.py` (13,271
+bytes), `utils.py` (5,731 bytes). No separate eval/generate script exists in
+the repo — `spec_generate` is the only generation loop.
+
+`config.json`'s `"auto_map": {"AutoModel": "dflash.DFlashDraftModel"}` makes
+**`dflash.py`** the config-declared canonical load path for
+`trust_remote_code=True`. The repo also carries a byte-different but
+semantically-identical `modeling_dflash.py` (imports inlined instead of
+sourced from `utils.py`; `dflash.py` reads `target_layer_ids`/`mask_token_id`
+from `config.dflash_config` with a computed `build_target_layer_ids` fallback,
+`modeling_dflash.py` always recomputes `target_layer_ids` and takes
+`mask_token_id` as an explicit `spec_generate` argument). For this checkpoint's
+config the fallback formula reproduces the declared `[1, 9, 17, 25, 33]`
+exactly, so both files behave identically here; both were read in full and the
+round policy below holds in both. `README.md`'s Transformers quick-start
+confirms `spec_generate` as the checkpoint's own documented entry point:
+
+> ```python
+> generate_ids = model.spec_generate(
+>     input_ids=model_inputs["input_ids"], max_new_tokens=2048,
+>     temperature=0.0, target=target, stop_token_ids=[tokenizer.eos_token_id]
+> )
+> ```
+
+Answering §5's three named unknowns, from `DFlashDraftModel.spec_generate`:
+
+1. **Denoise rounds per block: exactly ONE.** The decode loop
+   (`while start < max_length:`) calls the drafter forward exactly once per
+   block:
+   > `draft_logits = target.lm_head(self(target_hidden=target_hidden,`
+   > `noise_embedding=noise_embedding, ..., use_cache=True,`
+   > `is_causal=False)[:, -block_size+1:, :])`
+   > `block_output_ids[:, 1:] = sample(draft_logits)`
+   No inner loop re-feeds the block through the drafter — "block diffusion"
+   here is one parallel forward predicting the whole masked block at once
+   (single-shot block-parallel drafting, closer to Medusa/EAGLE-style block
+   drafting than iterative denoising), exactly the single-call shape
+   `DFlashZLabForward` already has. **Confirms, not contradicts, the landed
+   v1 primitive** (and matches `decode/dflash.BlockProposer.ProposeBlock`,
+   already a single `context → []int` call, and `Generate`'s one
+   `ProposeBlock` call per loop iteration).
+2. **Re-seeding is between BLOCKS, not "between rounds" within one** (there is
+   one round per block). `output_ids` is globally pre-filled with
+   `mask_token_id` (`torch.full((1, max_length+block_size), mask_token_id,
+   ...)`); each new block window `block_output_ids =
+   output_ids[:, start:start+block_size].clone()` has position 0 = the
+   just-verified real token (previous round's accepted/corrected/bonus
+   token), positions `1..block_size-1` = the literal, unwritten
+   `mask_token_id`. `noise_embedding = target.model.embed_tokens(
+   block_output_ids)` — sourced from the TARGET's own embedding table,
+   confirming §2/§3's "no embedding of its own; borrowed from target".
+3. **KV-cache bookkeeping**: target KV (`past_key_values_target`) accumulates
+   through prefill + every verify call, then `.crop(start)` drops
+   rejected-tail entries to the new accept boundary each round. Draft KV
+   (`past_key_values_draft`) is genuinely incremental, not reset per round:
+   `target_hidden` is reassigned each round to only
+   `[:acceptance_length+1]` of the just-verified target hidden states (NOT
+   the full growing context), fused via `fc`/`hidden_norm` and appended to
+   the draft cache alongside the block's own noise rows; then
+   > `past_key_values_draft.crop(start)`
+   (using `start` BEFORE this round's `start += acceptance_length + 1`)
+   discards exactly the current block's speculative noise-row K/V while
+   KEEPING the newly-fused context-gap K/V. The persistent draft cache thus
+   accumulates one round's worth of context rows at a time — the mechanism
+   §7 item 5 already names as the perf follow-up ("skip re-fusing unchanged
+   context rows across rounds"). The v1 engine forward instead recomputes the
+   full context every call; **the two are mathematically equivalent** given
+   matching absolute RoPE positions (context rows `[0, ctxLen)`, block rows
+   `[ctxLen, ctxLen+blockLen)` — confirmed against `apply_rotary_pos_emb`'s
+   tail-slice for q, `cos[..., -q_len:, :]`, vs full-width for k), just less
+   efficient. **No correction to the landed maths is needed.**
+
+**Acceptance-rule cross-check** (reference vs the already-landed Go driver):
+the reference's
+> `acceptance_length = (block_output_ids[:, 1:] ==`
+> `posterior[:, :-1]).cumprod(dim=1).sum(dim=1)[0].item()`
+> `output_ids[:, start:start+acceptance_length+1] = block_output_ids[:, :acceptance_length+1]`
+> `output_ids[:, start+acceptance_length+1] = posterior[:, acceptance_length]`
+is longest-common-prefix-then-bonus-token — the same rule `decode/dflash.
+AcceptBlock` (`go/decode/dflash/dflash.go:230-245`) already implements: walk
+while `proposed[i] == next(seq)`, commit the target's own token each step,
+stop and commit the correction at first divergence, else commit one bonus
+token after a full match.
+
+**Verdict: no contradiction anywhere in the chain (reference round policy ↔
+landed engine-forward call shape ↔ landed Go verify driver). Arming (§7
+items 1, 2, 4) proceeds.**
