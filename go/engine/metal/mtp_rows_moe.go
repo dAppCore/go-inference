@@ -31,17 +31,22 @@ import (
 // incidentally be safe, because the risk of a batching-order regression in the selection stage is
 // not worth the (small) router cost.
 //
-// LIVE WIRING BOUNDARY (read before assuming this speeds up a live pair): this file does NOT
-// change verifyAssistantDraftHiddens or any other call site — the lever below is recognised but
-// not yet consulted by the live verify path. Wiring it in requires a layer-major driver that
-// interleaves K rows' attention (sequential — each row's SDPA depends on the K/V the PRECEDING
-// rows in the SAME block just wrote) with this batched MoE step BETWEEN layers, which in turn
-// requires reimplementing stepTokenEncode's per-layer attention dispatch (decode_forward_arch.go)
-// outside that file — decode_forward_arch.go and moe_batch.go (the existing K-row prompt-prefill
-// MoE fold, encMoEBlockQuantBatched, which is NOT byte-identical in its expert stage — an
-// all-pairs gather, not grouped-by-expert) are both outside this lane's file fence. That
-// integration is the follow-up; this file ships the grouped-by-expert primitive itself, proven
-// byte-identical against the per-row reference (mtp_rows_moe_test.go).
+// LIVE WIRING: mtp_rows_driver.go consults mtpRowsMoEForced from the byte-exact greedy verify
+// lane (verifyAssistantDraftHiddens, assistant_load.go) via a layer-major driver that interleaves
+// K rows' attention (sequential — each row's SDPA depends on the K/V the PRECEDING rows in the
+// SAME block just wrote) with this batched MoE step BETWEEN layers — reusing the SAME single-row
+// attention kernels stepTokenEncode itself calls (encAttnHalfKV's offset-capable twin for the
+// plain linear cache, encAttnHalfKVPaged for the device-paged cache, which is the LIVE DEFAULT
+// for a quant MoE session — see mtp_rows_driver.go's header). moe_batch.go's own K-row
+// prompt-prefill MoE fold (encMoEBlockQuantBatched) is a DIFFERENT, NOT byte-identical mechanism
+// (an all-pairs gather, not grouped-by-expert, used only by the sampled verify tier) and stays
+// untouched.
+//
+// Both expert gate/up layouts are supported (mtpRowsMoEEligible/mtpRowsMoEBatchedInPool): split
+// (ExpGate/ExpUp) and fused (ExpGateUp). Fused is not an edge case — gemma4 declares
+// Arch.FuseExpertGateUp, so loadedToQuant ALWAYS synthesises ExpGateUp and drops the split halves
+// for every checkpoint (TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts); a lane that only
+// served split geometry would never engage on any real loaded gemma4 26B-A4B session.
 
 // mtpRowsMoEForced arms the grouped-by-expert MoE lane (LTHN_MTP_ROWS_MOE=1) — default OFF, the
 // #53 lever, mirroring the LTHN_MTP_VERIFY_FOLD idiom (mtp.go). Read once at package init like
@@ -56,19 +61,20 @@ var mtpRowsMoEMaxGroupSize atomic.Int64
 
 // mtpRowsMoEEligible reports whether mtpRowsMoEBatched can serve this MoE layer's geometry at
 // all — mirrors batchedMoEUsable's discriminators (moe_batch.go): gpt_oss (ClampedSwiGLU) and
-// qwen (a bound SharedGate) decode on entirely different host paths and never reach here; a
-// fused ExpGateUp checkpoint is a real geometry this lane does not yet implement (declines
-// cleanly rather than guessing at the fused layout). false always means "the caller keeps the
-// per-row path" — never a wrong answer forced through.
+// qwen (a bound SharedGate) decode on entirely different host paths and never reach here. Both
+// expert gate/up layouts are supported: split (ExpGate/ExpUp) and fused (ExpGateUp) — the LATTER
+// is not an edge case: gemma4 declares Arch.FuseExpertGateUp, so loadedToQuant (load_shared.go's
+// moeToQuant) ALWAYS synthesises ExpGateUp and drops the split halves, for every checkpoint,
+// split-shipped or not (TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts pins this) — a lane
+// that declined fused ExpGateUp would never engage on any real loaded gemma4 26B-A4B session, only
+// on a hand-built split fixture. false always means "the caller keeps the per-row path" — never a
+// wrong answer forced through.
 func mtpRowsMoEEligible(w MoEQuantLayerWeights, dModel, dFF int) bool {
 	if w.ClampedSwiGLU || len(w.SharedGate.Packed) > 0 {
 		return false
 	}
 	if w.NumExperts <= 0 || w.TopK <= 0 || w.ExpertDFF <= 0 || dModel <= 0 || dFF <= 0 {
 		return false
-	}
-	if len(w.ExpGateUp.Packed) > 0 {
-		return false // fused gate_up experts: not yet supported by the grouped lane
 	}
 	size := dModel * bf16Size
 	if len(w.PreFFNormW) != size || len(w.PreFFNorm2W) != size ||
@@ -103,11 +109,20 @@ func mtpRowsMoEEligible(w MoEQuantLayerWeights, dModel, dFF int) bool {
 	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits); err != nil {
 		return false
 	}
-	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: expert gate", w.ExpGate, w.NumExperts*w.ExpertDFF, dModel, w.ExpertGroupSize, w.ExpertBits); err != nil {
-		return false
-	}
-	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: expert up", w.ExpUp, w.NumExperts*w.ExpertDFF, dModel, w.ExpertGroupSize, w.ExpertBits); err != nil {
-		return false
+	if len(w.ExpGateUp.Packed) > 0 {
+		// fused: [numExperts × 2·expertDFF, dModel] — expert e's gate rows at [e·2·expertDFF,
+		// e·2·expertDFF+expertDFF), up rows immediately after (fuseExpertGateUpQuant's own layout,
+		// load_shared.go — "gate's packed/scales/biases ahead of up's").
+		if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: expert gate_up", w.ExpGateUp, w.NumExperts*2*w.ExpertDFF, dModel, w.ExpertGroupSize, w.ExpertBits); err != nil {
+			return false
+		}
+	} else {
+		if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: expert gate", w.ExpGate, w.NumExperts*w.ExpertDFF, dModel, w.ExpertGroupSize, w.ExpertBits); err != nil {
+			return false
+		}
+		if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: expert up", w.ExpUp, w.NumExperts*w.ExpertDFF, dModel, w.ExpertGroupSize, w.ExpertBits); err != nil {
+			return false
+		}
 	}
 	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: expert down", w.ExpDown, w.NumExperts*dModel, w.ExpertDFF, w.ExpertGroupSize, w.ExpertBits); err != nil {
 		return false
@@ -237,14 +252,29 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 	copy(expertNormHost, unsafe.Slice((*byte)(expertNormBuf.Contents()), K*rowBytes))
 
 	// 3. EXPERT MLP — group (row, slot) pairs by routed expert; each touched expert's gate/up/down
-	// weight is read ONCE across every pair sharing it, not once per pair.
-	expGateView, expGateScales, expGateBiases, expGateGS, expGateBits, err := quantWeightViewsForShape("native.mtpRowsMoEBatched: expert gate", w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
-	if err != nil {
-		return nil, false, err
-	}
-	expUpView, expUpScales, expUpBiases, expUpGS, expUpBits, err := quantWeightViewsForShape("native.mtpRowsMoEBatched: expert up", w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
-	if err != nil {
-		return nil, false, err
+	// weight is read ONCE across every pair sharing it, not once per pair. fusedExperts mirrors
+	// encMoEBlockQuantDevice's OWN fused handling (moe_block.go, emitGatherInAll): two separate
+	// GEMV dispatches against the SAME ExpGateUp tensor, gate at each expert's block start and up
+	// expertDFF rows further in — never a single "gemv-then-split" kernel.
+	fusedExperts := len(w.ExpGateUp.Packed) > 0
+	var expGateView, expGateScales, expGateBiases bufView
+	var expUpView, expUpScales, expUpBiases bufView
+	var expGateUpView, expGateUpScales, expGateUpBiases bufView
+	var expGateGS, expGateBits, expUpGS, expUpBits, expGateUpGS, expGateUpBits int
+	if fusedExperts {
+		expGateUpView, expGateUpScales, expGateUpBiases, expGateUpGS, expGateUpBits, err = quantWeightViewsForShape("native.mtpRowsMoEBatched: expert gate_up", w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return nil, false, err
+		}
+	} else {
+		expGateView, expGateScales, expGateBiases, expGateGS, expGateBits, err = quantWeightViewsForShape("native.mtpRowsMoEBatched: expert gate", w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return nil, false, err
+		}
+		expUpView, expUpScales, expUpBiases, expUpGS, expUpBits, err = quantWeightViewsForShape("native.mtpRowsMoEBatched: expert up", w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	expDownView, expDownScales, expDownBiases, expDownGS, expDownBits, err := quantWeightViewsForShape("native.mtpRowsMoEBatched: expert down", w.ExpDown, numExperts*dModel, expertDFF, w.ExpertGroupSize, w.ExpertBits)
 	if err != nil {
@@ -275,8 +305,21 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 			r := p / topK
 			copy(gatherIn[i*rowBytes:(i+1)*rowBytes], expertNormHost[r*rowBytes:(r+1)*rowBytes])
 		}
-		gPacked, gScales, gBiases := moeExpertQuantOffsets(expGateView, expGateScales, expGateBiases, int(e), expertDFF, dModel, expGateGS, expGateBits)
-		uPacked, uScales, uBiases := moeExpertQuantOffsets(expUpView, expUpScales, expUpBiases, int(e), expertDFF, dModel, expUpGS, expUpBits)
+		var gPacked, gScales, gBiases, uPacked, uScales, uBiases bufView
+		var gGS, gBits, uGS, uBits int
+		if fusedExperts {
+			// expert e's fused block is rows [e·2·expertDFF, (e+1)·2·expertDFF) of ExpGateUp: gate
+			// is the block's own start (the "2e"th expertDFF-sized slice), up is the very next
+			// expertDFF-sized slice ("2e+1"th) — moeExpertQuantOffsets' rowOff=e·rowsPerExpert
+			// formula gives exactly that when fed the DOUBLED expert index at expertDFF-row stride.
+			gPacked, gScales, gBiases = moeExpertQuantOffsets(expGateUpView, expGateUpScales, expGateUpBiases, int(e)*2, expertDFF, dModel, expGateUpGS, expGateUpBits)
+			uPacked, uScales, uBiases = moeExpertQuantOffsets(expGateUpView, expGateUpScales, expGateUpBiases, int(e)*2+1, expertDFF, dModel, expGateUpGS, expGateUpBits)
+			gGS, gBits, uGS, uBits = expGateUpGS, expGateUpBits, expGateUpGS, expGateUpBits
+		} else {
+			gPacked, gScales, gBiases = moeExpertQuantOffsets(expGateView, expGateScales, expGateBiases, int(e), expertDFF, dModel, expGateGS, expGateBits)
+			uPacked, uScales, uBiases = moeExpertQuantOffsets(expUpView, expUpScales, expUpBiases, int(e), expertDFF, dModel, expUpGS, expUpBits)
+			gGS, gBits, uGS, uBits = expGateGS, expGateBits, expUpGS, expUpBits
+		}
 		dPacked, dScales, dBiases := moeExpertQuantOffsets(expDownView, expDownScales, expDownBiases, int(e), dModel, expertDFF, expDownGS, expDownBits)
 
 		inBuf := sharedBytes(gatherIn)
@@ -290,11 +333,11 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 
 		gcb := commandBufferFast(queue)
 		genc := computeCommandEncoderFast(gcb)
-		if hOK, herr := encQMVRowsGroupAt(genc, gPacked, gScales, gBiases, inBuf, gateBuf, 0, 0, m, expertDFF, dModel, expGateGS, expGateBits); herr != nil || !hOK {
+		if hOK, herr := encQMVRowsGroupAt(genc, gPacked, gScales, gBiases, inBuf, gateBuf, 0, 0, m, expertDFF, dModel, gGS, gBits); herr != nil || !hOK {
 			endEncodingFast(genc)
 			return nil, false, herr
 		}
-		if hOK, herr := encQMVRowsGroupAt(genc, uPacked, uScales, uBiases, inBuf, upBuf, 0, 0, m, expertDFF, dModel, expUpGS, expUpBits); herr != nil || !hOK {
+		if hOK, herr := encQMVRowsGroupAt(genc, uPacked, uScales, uBiases, inBuf, upBuf, 0, 0, m, expertDFF, dModel, uGS, uBits); herr != nil || !hOK {
 			endEncodingFast(genc)
 			return nil, false, herr
 		}
