@@ -94,3 +94,78 @@ variance) — faster than TQ's own 8,291–8,391. TQ's honest selling point is
 therefore **memory** (codes-resident KV, 5.68 vs 5.80GB) and needle-clean
 long-context storage, NOT TTFT; the 52x ratio is retired. The 2-pass decode
 lever remains the open item.
+
+## #48 long-context slice (2026-07-20): pass 2 folds the output unrotation — the named lever, closed
+
+The 2-pass decode gap above (kvLen ≥ 1024, `sdpa2PassMinKV`) was the unfused
+TQ tax: q pre-rotation, pass 1, pass 2, output unrotation — 4 recorded
+ops/layer/token, where the single-pass lane (below the knee) pays 1. Pass 2
+was MLX's shipped, precompiled `sdpa_vector_2pass_2` — shared kernel code
+this lane could not add an epilogue to — so the unrotation stayed a fourth,
+separate `lthn_tq_unrot_rows_bf16` dispatch reading a rotated-space bf16
+scratch (`attnRotTQ`) pass 2 had just written.
+
+**Mechanism**: `lthn_sdpa_vector_2pass_2_tq` (`kernels/lthn_tq_kv.metal`) —
+TQ's OWNED fork of MLX's `sdpa_vector_2pass_2`, ported verbatim from the
+vendored source (`external/mlx/mlx/backend/metal/kernels/sdpa_vector.h`) with
+ONE addition: after the stock merge reduction produces the per-head
+ROTATED-space output, the kernel stages it into threadgroup memory and folds
+Πᵀ once before writing the FINAL value straight to `out` — no rotated-space
+scratch, no fourth dispatch. The fold is legal under the house fusion rule
+(O(output)-only folds) because this kernel dispatches ONE threadgroup per
+head — grid `(nHeads,1,1)`, 1024 threads — identical geometry to the
+single-pass kernel's own fused epilogue, so Πᵀy costs the same O(d²) once per
+head, never once per block. Pass 1 (`blocks` threadgroups per kv-head) stays
+genuinely unfused — the q pre-rotation remains the caller's separate
+`lthn_tq_rot_rows_bf16` dispatch before it, exactly as before, because
+folding it into pass 1 would multiply that O(d²) work by the block count.
+Net: **4 recorded ops → 3** (rotate, pass 1, pass 2) for every TQ global
+layer past the 2-pass knee.
+
+The port was safe to write from scratch (no MLX header to cross-check
+against previously blocked an unrelated runtime-dim port attempt at this
+same seam, see `sdpa_rtdim.go`) because (a) `external/mlx` is vendored in
+this tree, giving a byte-exact reference for the merge math, and (b) our OWN
+pass 1 already defines the `(partials, sums, maxs)` contract pass 2 reads —
+not reverse-engineered from MLX's binary.
+
+**Correctness** (scoped gate, this box, `MLX_METALLIB_PATH` at
+`build/dist/lib/mlx.metallib`, `go test -tags metal_runtime -run
+'TQ|TurboQuant|Turboquant|SDPA|Sdpa' ./engine/metal/`): all cases green.
+The 2-pass parity band vs the f64 dequantised-rows oracle **tightened** to
+≤0.0006 across all 12 deep cases (hd ∈ {128,256,512}, modes 4/4-4/3-3/3-2/2)
+— was ≤0.0008 when pass 2 wrote a rotated-space bf16 intermediate for a
+separate dispatch to re-read; removing that round-trip is a strict precision
+win, the same pattern the single-pass fusion measured. Shallow-N (mostly
+empty pass-1 blocks) measures ≤0.0044, still ~18× inside the 0.08 assert.
+Single-pass band unchanged (≤0.0020, untouched by this change). `go vet
+./engine/metal/` clean; gofmt clean on all touched files.
+
+**16k live A/B** (`mlx-community/gemma-4-e2b-it-4bit`, greedy, needle-prompt
+16,507-token prefill, fact planted ~10% in, `--kv-cache turboquant:4`,
+3-run medians, same session/box, idle at measurement time — no sibling
+`lem`/`go test` processes observed before or after):
+
+| lane | decode tok/s | needle |
+|---|---|---|
+| native (off, same-session reference) | 144.4 | retrieved |
+| turboquant:4, unfused (base 7084cf14) | 102.5 | retrieved |
+| turboquant:4, fused pass 2 (this change) | 113.9 | retrieved |
+
+**+11.1% decode** (102.5 → 113.9 tok/s) at 16.5k, needle-clean before and
+after. The native gap closes from 29.0% to 21.1% (7.9 points recovered) —
+same-session numbers throughout, not a cross-day comparison against the
+131.6/87.8 figures above (those ran on a different day under different load;
+this table's three rows are the only mutually comparable set). The
+remaining ~21% gap is pass 1's own per-block fan cost plus the q pre-rotation
+dispatch — both already at the O(output) floor the fusion rule allows; the
+receipts owner should treat this as the lane's steady state absent a
+different pass-1 strategy, not a further "3 dispatches should equal 1"
+target.
+
+Files: `kernels/lthn_tq_kv.metal` (new kernel), `sdpa_vector_tq.go`
+(pipeline resolver + emitter + `TurboQuantSDPADevice` rewire),
+`decode_forward_arch_icb_tq.go` (ICB pipeline resolver),
+`decode_forward_arch_icb.go` (TQ 2-pass emission site, `nTQOps` accounting,
+`attnRotTQ` scratch removed), `sdpa_vector_tq_test.go` (new ABI test,
+re-measured band doc).

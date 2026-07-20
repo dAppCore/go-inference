@@ -1400,19 +1400,23 @@ func recordArchICB(
 		}
 	}
 	// TurboQuant KV layers (#41 S3): resolve the rotate-quantise stores, the
-	// q-rotation/output-unrotation pair, and the code-reading SDPA pipelines up
-	// front — a TQ cache with a missing kernel is a hard error at record time,
-	// never a silent bf16 misread of packed codes. The rot/unrot pair is only
-	// EMITTED below when sdpa2PassICBBlocks>0 (the 2-pass lane) — the
-	// single-pass lane's SDPA kernel folds both itself (#48) — but resolving
-	// the pipelines here unconditionally keeps this block a single early-error
-	// gate regardless of which lane a given session lands on.
+	// q pre-rotation kernel, and the code-reading SDPA pipelines (single-pass,
+	// 2-pass pass 1, and — 2-pass only — pass 2) up front — a TQ cache with a
+	// missing kernel is a hard error at record time, never a silent bf16
+	// misread of packed codes. The q pre-rotation is only EMITTED below when
+	// sdpa2PassICBBlocks>0 (the 2-pass lane) — the single-pass lane's SDPA
+	// kernel folds it itself (#48) — but resolving the pipeline here
+	// unconditionally keeps this block a single early-error gate regardless of
+	// which lane a given session lands on. There is no output-unrotation
+	// pipeline to resolve any more: pass 2 (lthn_sdpa_vector_2pass_2_tq) folds
+	// that into its own epilogue.
 	tqOn := func(li int) bool { return kvTQ.on(li) }
 	nTQOps := 0
 	var tqStoreKICB, tqStoreVICB metal.MTLComputePipelineState
-	var tqRotICB, tqUnrotICB metal.MTLComputePipelineState
+	var tqRotICB metal.MTLComputePipelineState
 	sdpaTQPSOByHd := make(map[int]metal.MTLComputePipelineState)
 	sdpaTQP1PSOByHd := make(map[int]metal.MTLComputePipelineState)
+	sdpa2Pass2TQPSOByHd := make(map[int]metal.MTLComputePipelineState)
 	if kvTQ.any() {
 		var terr error
 		if tqStoreKICB, terr = tqKVStorePipelineICB(kvTQ.kBits); terr != nil {
@@ -1422,9 +1426,6 @@ func recordArchICB(
 			return nil, terr
 		}
 		if tqRotICB, terr = tqRotRowsPipelineICB(false); terr != nil {
-			return nil, terr
-		}
-		if tqUnrotICB, terr = tqRotRowsPipelineICB(true); terr != nil {
 			return nil, terr
 		}
 		for li := range nLayers {
@@ -1438,7 +1439,7 @@ func recordArchICB(
 				continue
 			}
 			if sdpa2PassICBBlocks > 0 {
-				nTQOps += 2 // 2-pass lane only: the SEPARATE q pre-rotation + output unrotation around this layer's SDPA (single-pass fuses both into its SDPA op, +0 here)
+				nTQOps++ // 2-pass lane only: the SEPARATE q pre-rotation before pass 1 (single-pass fuses it into its SDPA op, +0 here). The output unrotation folds into pass 2's own epilogue now (lthn_sdpa_vector_2pass_2_tq) — no separate op, so this is +1, not +2.
 			}
 			hd := hdOf(li)
 			if _, ok := sdpaTQPSOByHd[hd]; !ok {
@@ -1453,6 +1454,11 @@ func recordArchICB(
 						return nil, e1
 					}
 					sdpaTQP1PSOByHd[hd] = p1
+					p2, e2 := sdpaVector2Pass2TQPipelineICB(hd)
+					if e2 != nil {
+						return nil, e2
+					}
+					sdpa2Pass2TQPSOByHd[hd] = p2
 				}
 			}
 		}
@@ -1699,26 +1705,26 @@ func recordArchICB(
 				resident = append(resident, scalarI32(int32(kvdOf(li))))
 			}
 		}
-		// TurboQuant staging + (2-pass lane only) rotated-q/rotated-out scratch
-		// (#41 S3): the K rope/norm and V projection land in the bf16 staging
-		// rows (fixed binds; the store ops rotate+quantise staging into the code
+		// TurboQuant staging + (2-pass lane only) rotated-q scratch (#41 S3):
+		// the K rope/norm and V projection land in the bf16 staging rows
+		// (fixed binds; the store ops rotate+quantise staging into the code
 		// cache + γ rows). Below the 2-pass knee the SDPA kernel fuses the q
-		// pre-rotation and output unrotation itself (#48) — qRotTQ/attnRotTQ
-		// exist ONLY for the 2-pass lane, which still stages Πq into qRotTQ and
-		// the SDPA's rotated output into attnRotTQ for the separate unrotation
-		// op (kernels/lthn_tq_kv.metal's header has the full reasoning). Shared
-		// across TQ layers — the recorded barriers serialise the stack on them,
-		// exactly as the attention scratch. Π and centroid tables are
-		// process-resident.
-		var kStageTQ, vStageTQ, qRotTQ, attnRotTQ metal.MTLBuffer
+		// pre-rotation and output unrotation itself (#48) — qRotTQ exists ONLY
+		// for the 2-pass lane, which still stages Πq into it before pass 1.
+		// There is no rotated-OUTPUT scratch any more: pass 2
+		// (lthn_sdpa_vector_2pass_2_tq) folds the unrotation into its own
+		// epilogue and writes attn directly (kernels/lthn_tq_kv.metal's header
+		// has the full reasoning). Shared across TQ layers — the recorded
+		// barriers serialise the stack on them, exactly as the attention
+		// scratch. Π and centroid tables are process-resident.
+		var kStageTQ, vStageTQ, qRotTQ metal.MTLBuffer
 		if kvTQ.any() {
 			kStageTQ = device.NewBufferWithLengthOptions(uint(maxKvd*bf16Size), metal.MTLResourceStorageModeShared)
 			vStageTQ = device.NewBufferWithLengthOptions(uint(maxKvd*bf16Size), metal.MTLResourceStorageModeShared)
 			resident = append(resident, kStageTQ, vStageTQ)
 			if sdpa2PassICBBlocks > 0 {
 				qRotTQ = device.NewBufferWithLengthOptions(uint(maxQd*bf16Size), metal.MTLResourceStorageModeShared)
-				attnRotTQ = device.NewBufferWithLengthOptions(uint(maxQd*bf16Size), metal.MTLResourceStorageModeShared)
-				resident = append(resident, qRotTQ, attnRotTQ)
+				resident = append(resident, qRotTQ)
 			}
 			for li := range nLayers {
 				if tqOn(li) {
@@ -2165,22 +2171,26 @@ func recordArchICB(
 				kb, vb := int64(tqBytesPerRow(kvTQ.kBits, hd)), int64(tqBytesPerRow(kvTQ.vBits, hd))
 				kCent, vCent := tqKVCentroidsBuffer(hd, kvTQ.kBits), tqKVCentroidsBuffer(hd, kvTQ.vBits)
 				if sdpa2PassICBBlocks > 0 && specs[li].Attention == model.GlobalAttention {
-					// 2-pass: the rotation stays TWO SEPARATE dispatches around the
-					// pass-1/pass-2 pair (#48 perf recovery decline, reasoned in
-					// kernels/lthn_tq_kv.metal's header): pass 1 runs `blocks`
-					// threadgroups per kv-head (up to 512, sdpa2PassBlocks), so
-					// folding Πq there would redo that O(d²) work once per BLOCK
-					// instead of once per head; pass 2 (which owns the merged
-					// output vector) is shared MLX kernel code this lane does not
-					// touch, so it cannot fold Πᵀy either.
+					// 2-pass: the q pre-rotation stays a SEPARATE dispatch before
+					// pass 1 (#48 perf recovery, reasoned in kernels/lthn_tq_kv.metal's
+					// header): pass 1 runs `blocks` threadgroups per kv-head (up to
+					// 512, sdpa2PassBlocks), so folding Πq there would redo that
+					// O(d²) work once per BLOCK instead of once per head. Pass 2
+					// (lthn_sdpa_vector_2pass_2_tq — TQ's OWNED fork of MLX's
+					// sdpa_vector_2pass_2, ported because pass 2 is MLX's shipped,
+					// precompiled kernel and this lane cannot add an epilogue to
+					// code it does not build from source) now folds Πᵀy into its
+					// own epilogue: it dispatches ONE threadgroup per head, exactly
+					// like the single-pass kernel, so that fold is the same
+					// once-per-head O(d²) cost, never per-block. attn receives the
+					// FINAL output directly — 3 recorded ops, not 4.
 					emitTQRotRows(fastICBSink{emit()}, tqRotICB, qr, tqKVPiBuffer(hd), qRotTQ, nHeads, hd)
 					emitSDPAVector2Pass1TQ(fastICBSink{emit()}, sdpaTQP1PSOByHd[hd], qRotTQ, attendK, attendV,
 						p2Partials, p2Sums, p2Maxs, kvTQ.kGammas[ownerIdx], kvTQ.vGammas[ownerIdx], kCent, vCent,
 						nBufForLayer, nHeads, kv, 0, sdpa2PassICBBlocks, kb, int64(kv)*kb, vb, int64(kv)*vb, scale)
 					sdpaIdx[li] = opIdx - 1
-					emitSDPA2Pass2(fastICBSink{emit()}, sdpa2Pass2PSOByHd[hd], p2Partials, p2Sums, p2Maxs,
-						attnRotTQ, 1, nHeads, sdpa2PassICBBlocks)
-					emitTQRotRows(fastICBSink{emit()}, tqUnrotICB, attnRotTQ, tqKVPiBuffer(hd), attn, nHeads, hd)
+					emitSDPA2Pass2TQ(fastICBSink{emit()}, sdpa2Pass2TQPSOByHd[hd], p2Partials, p2Sums, p2Maxs,
+						attn, nHeads, sdpa2PassICBBlocks, tqKVPiBuffer(hd))
 				} else {
 					// single-pass: lthn_sdpa_vector_tq FUSES both folds itself
 					// (#48) — one threadgroup per head computes Πq once at

@@ -28,12 +28,16 @@ import (
 // sdpa2PassMinKV) that SDPA is the FUSED single-pass kernel
 // (lthn_sdpa_vector_tq, #48 perf recovery): q pre-rotation and output
 // unrotation happen INSIDE it, one op, no separate lthn_tq_rot_rows dispatch
-// either side. At/past the knee the recorded op stays the 2-pass pair with
-// q pre-rotated once per step and the output unrotated once per step
-// (lthn_tq_rot_rows — the O(output) fold) bracketing it, same as before —
-// fusing the rotation into a kernel that runs `blocks` threadgroups per
-// kv-head would redo that O(d²) work per block, not per head (see
-// kernels/lthn_tq_kv.metal's header).
+// either side. At/past the knee the recorded op is the 2-pass TRIO: q
+// pre-rotated once per step (lthn_tq_rot_rows — the O(output) fold; fusing
+// it into pass 1 would redo that O(d²) work per block, not per head, since
+// pass 1 runs `blocks` threadgroups per kv-head), pass 1 itself, then pass 2
+// (lthn_sdpa_vector_2pass_2_tq, TQ's owned fork of MLX's sdpa_vector_2pass_2)
+// which now folds the output unrotation into its own epilogue — it dispatches
+// one threadgroup per head, same as the single-pass kernel, so that fold is
+// exactly as cheap there as it is here (see kernels/lthn_tq_kv.metal's
+// header). 3 recorded ops, not 4 — the trailing lthn_tq_rot_rows unrotate
+// dispatch this file used to emit after pass 2 is gone.
 //
 // Coherence: most lanes that would read or write these caches as bf16 rows
 // DECLINE — prompt reuse falls back to the whole prefill, KV snapshot / -state
@@ -169,6 +173,7 @@ var (
 	tqRotRowsICBPSOs  = map[bool]metal.MTLComputePipelineState{}
 	sdpaTQICBPSOCache = map[[3]int]metal.MTLComputePipelineState{}
 	sdpaTQP1ICBPSOs   = map[[4]int]metal.MTLComputePipelineState{}
+	sdpaTQP2ICBPSOs   = map[int]metal.MTLComputePipelineState{}
 )
 
 func tqKVStorePipelineICB(bits int) (metal.MTLComputePipelineState, error) {
@@ -282,5 +287,39 @@ func sdpaVector2Pass1TQPipelineICB(headDim, kBits, vBits int, blocks int32) (met
 		return nil, perr
 	}
 	sdpaTQP1ICBPSOs[key] = pso
+	return pso, nil
+}
+
+// sdpaVector2Pass2TQPipelineICB is sdpaVector2Pass2TQPipeline's ICB-recordable
+// twin — lthn_sdpa_vector_2pass_2_tq, TQ's owned fork of MLX's
+// sdpa_vector_2pass_2 folding the output unrotation into its epilogue
+// (kernels/lthn_tq_kv.metal's header). No function constants — blocks arrives
+// as a runtime buffer bind — so, like the plain resolver, one pipeline per
+// headDim serves every block count.
+func sdpaVector2Pass2TQPipelineICB(headDim int) (metal.MTLComputePipelineState, error) {
+	if !tqKVHeadDimOK(headDim) {
+		return nil, core.NewError("native.sdpaVector2Pass2TQPipelineICB: unsupported head dim")
+	}
+	tqKVICBPSOMu.Lock()
+	defer tqKVICBPSOMu.Unlock()
+	if pso, ok := sdpaTQP2ICBPSOs[headDim]; ok {
+		return pso, nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass2TQPipelineICB: custom library unavailable")
+	}
+	name := core.Sprintf("lthn_sdpa_vector_2pass_2_tq_bf16_%d", headDim)
+	fn := customLibrary.NewFunctionWithName(name)
+	if fn == nil || fn.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass2TQPipelineICB: kernel " + name + " not found")
+	}
+	desc := metal.NewMTLComputePipelineDescriptor()
+	desc.SetComputeFunction(fn)
+	desc.SetSupportIndirectCommandBuffers(true)
+	pso, perr := device.NewComputePipelineStateWithDescriptorOptionsReflectionError(desc, 0, nil)
+	if perr != nil {
+		return nil, perr
+	}
+	sdpaTQP2ICBPSOs[headDim] = pso
 	return pso, nil
 }

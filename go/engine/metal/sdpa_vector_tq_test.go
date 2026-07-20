@@ -26,20 +26,25 @@ import (
 //
 // Measured bands (this box, 2026-07-19, n=64/96 single-pass + n=knee+512
 // 2-pass, hd ∈ {128, 256, 512}, modes (4,4)/(4,3)/(3,3)/(2,2), kv ∈ {1, 2}):
-// post-#48 fusion (single-pass folds Πq/Πᵀy INTO lthn_sdpa_vector_tq, no
+// post-#48 single-pass fusion (folds Πq/Πᵀy INTO lthn_sdpa_vector_tq, no
 // intermediate bf16 rotated-q / rotated-out buffers) max |Δ| vs the f64
-// oracle is ≤ 0.0020 across all 24 single-pass cases and ≤ 0.0008 across all
-// 12 2-pass cases (2-pass is unfused — see kernels/lthn_tq_kv.metal's header
-// — so its band is arithmetically the same computation as before this
-// change). The single-pass band TIGHTENED versus the pre-fusion measurement
-// (was ≤0.0041 typical, 0.0369 worst case): removing the pre-fusion q
-// rotation's and SDPA output's intermediate bf16 round-trips (the separate
-// dispatches wrote/read a real bf16 buffer between rotate and read/unrotate;
-// the fused kernel keeps both in f32 threadgroup memory throughout) is a
-// strict precision win, not a wash — consistent with "a fused kernel that
-// widens the band is a bug, not a tolerance update" holding in the tighter
-// direction. The asserted band 0.08 carries ~40× margin over the worst
-// measured case now.
+// oracle is ≤ 0.0020 across all 24 single-pass cases.
+//
+// Post-#48 LONG-CONTEXT slice (lthn_sdpa_vector_2pass_2_tq folds the output
+// unrotation into pass 2's own epilogue — TQ's owned fork of MLX's
+// sdpa_vector_2pass_2, kernels/lthn_tq_kv.metal's header has the full
+// reasoning) the 2-pass band TIGHTENED to ≤ 0.0006 across all 12 deep cases
+// (was ≤ 0.0008 when pass 2 was MLX's stock kernel writing a rotated-space
+// bf16 intermediate for a separate lthn_tq_unrot_rows_bf16 dispatch to read
+// back) — the SAME "one fewer bf16 round-trip, strict precision win" pattern
+// the single-pass fusion measured, not a coincidence: the fold removes
+// exactly the same class of intermediate quantisation step. The shallow-N
+// case (TestTurboQuantSDPADevice_TwoPassShallow_Good, almost every pass-1
+// block empty) measures ≤ 0.0044, well inside the same 0.08 assert. Neither
+// band widened — a fused kernel that widens the band is a bug, not a
+// tolerance update, and this fold holds that in the tighter direction again.
+// The asserted band 0.08 carries ~18× margin over the worst measured case
+// now (the shallow-N 2-pass case, not the single-pass one).
 
 func tqKVRequire(t *testing.T, kBits, vBits, headDim int) {
 	t.Helper()
@@ -259,8 +264,9 @@ func TestTurboQuantSDPADevice_Good(t *testing.T) {
 }
 
 // TestTurboQuantSDPADevice_TwoPass_Good is the same oracle gate through the
-// 2-pass pair (lthn_sdpa_vector_2pass_1_tq + MLX's unchanged pass-2 merge) at
-// a depth past the 2-pass knee.
+// 2-pass trio (lthn_sdpa_vector_2pass_1_tq + lthn_sdpa_vector_2pass_2_tq, TQ's
+// owned fork of MLX's merge kernel that now folds the output unrotation into
+// its epilogue) at a depth past the 2-pass knee.
 func TestTurboQuantSDPADevice_TwoPass_Good(t *testing.T) {
 	for _, d := range []int{128, 256, 512} {
 		for _, mode := range tqKVModes {
@@ -466,6 +472,24 @@ func TestEmitSDPAVector2Pass1TQ_Good(t *testing.T) {
 	}
 	if got := rec.i32[7]; got != 4096 {
 		t.Fatalf("N(7) = %d, want 4096", got)
+	}
+}
+
+// TestEmitSDPA2Pass2TQ_Good asserts the TQ-owned merge+unrotate pass 2 ABI:
+// the SAME 0..4 layout emitSDPA2Pass2 uses against MLX's stock kernel
+// (partials/sums/maxs/out/blocks), plus the fused unrotation's Π bind at 5 —
+// the ONLY addition. blocks(4) is a plain scalar (no ICB N-buffer rebind —
+// unlike pass 1's N, blocks never varies per token for a fixed record).
+func TestEmitSDPA2Pass2TQ_Good(t *testing.T) {
+	rec := &recordingDispatchSink{}
+	emitSDPA2Pass2TQ(rec, nil, nil, nil, nil, nil, 8, 64, nil)
+	for _, idx := range []uint{0, 1, 2, 3, 5} {
+		if !rec.boundBuf(idx) {
+			t.Fatalf("emitSDPA2Pass2TQ did not bind buffer(%d)", idx)
+		}
+	}
+	if got := rec.i32[4]; got != 64 {
+		t.Fatalf("blocks(4) = %d, want 64", got)
 	}
 }
 
