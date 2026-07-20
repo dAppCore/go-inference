@@ -42,6 +42,47 @@ type ropeParameters struct {
 	PartialRotaryFactor float32 `json:"partial_rotary_factor"`
 }
 
+// TokenID parses a HF token-id config field that ships as EITHER a scalar or a list (a multimodal
+// wrapper's eos_token_id is [id, …] while the nested text_config's is a plain int) — keeping the first
+// id. An absent/null/unreadable field stays 0 rather than failing the whole parse (the composed
+// loader's tokenID contract, ported with the vision wiring).
+type TokenID int32
+
+// UnmarshalJSON accepts a JSON number or the first element of a JSON array.
+func (t *TokenID) UnmarshalJSON(b []byte) error {
+	var n float64
+	if r := core.JSONUnmarshal(b, &n); r.OK {
+		*t = TokenID(n)
+		return nil
+	}
+	var arr []float64
+	if r := core.JSONUnmarshal(b, &arr); r.OK && len(arr) > 0 {
+		*t = TokenID(arr[0])
+	}
+	return nil
+}
+
+// VisionArchConfig is the multimodal wrapper's sibling vision_config. Only PatchSize is load-bearing
+// (pixel geometry has no tensor to derive it from); Hidden/Depth/OutHiddenSize are carried for
+// documentation — LoadVisionTower (vision_loader.go) DERIVES the tower geometry from the checkpoint's
+// own tensor shapes and cross-validates the config fields that overlap (SpatialMergeSize, NumHeads as
+// the head-dim fallback), the same weight-derived stance the text schedule takes on the gated-delta
+// geometry.
+type VisionArchConfig struct {
+	ModelType        string  `json:"model_type"`
+	Depth            int     `json:"depth"`
+	HiddenSize       int     `json:"hidden_size"`
+	OutHiddenSize    int     `json:"out_hidden_size"`
+	PatchSize        int     `json:"patch_size"`
+	InChannels       int     `json:"in_channels"`
+	TemporalPatch    int     `json:"temporal_patch_size"`
+	NumHeads         int     `json:"num_heads"`
+	NumKeyValueHeads int     `json:"num_key_value_heads"`
+	SpatialMergeSize int     `json:"spatial_merge_size"`
+	RMSNormEps       float32 `json:"rms_norm_eps"`
+	RopeTheta        float32 `json:"rope_theta"`
+}
+
 // Config is the architecture-relevant subset of a Qwen 3.6 config.json. The multimodal wrapper nests the
 // text fields under text_config (effective() resolves the nesting); rope lives under rope_parameters.
 type Config struct {
@@ -76,6 +117,17 @@ type Config struct {
 	TieWordEmbeddings *bool              `json:"tie_word_embeddings"`
 	Quantization      *model.QuantConfig `json:"quantization"`
 	TextConfig        *Config            `json:"text_config"`
+
+	// Multimodal wrapper fields (the vision-towered releases). ImageTokenID is the id one image
+	// soft-token occupies in the prompt (`<|image_pad|>`); the vision start/end ids bracket the run.
+	// All zero on a text-only config — the tower-presence probe (LoadVisionTower) is the real gate,
+	// these are carried facts. TokenID because HF ships the wrapper-root ids polymorphically
+	// (scalar or list).
+	ImageTokenID       TokenID           `json:"image_token_id"`
+	VideoTokenID       TokenID           `json:"video_token_id"`
+	VisionStartTokenID TokenID           `json:"vision_start_token_id"`
+	VisionEndTokenID   TokenID           `json:"vision_end_token_id"`
+	VisionConfig       *VisionArchConfig `json:"vision_config"`
 }
 
 // effective returns the text config (self, or the nested text_config for the multimodal wrapper).
