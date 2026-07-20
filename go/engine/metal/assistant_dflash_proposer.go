@@ -100,3 +100,59 @@ func ExtractAuxHiddens(target *ArchSession, ids []int32, auxLayers []int) ([][]b
 	}
 	return out, nil
 }
+
+// ExtractAuxHiddensAllRaw taps the verifier's hidden states at auxLayers for
+// EVERY position of ids (not just the last, unlike ExtractAuxHiddens) and
+// returns them as ONE f32 array [len(ids), len(auxLayers)*hidden] — each row
+// the concatenation, in auxLayers order, of that position's hidden at every
+// aux layer (extract_context_feature's torch.cat, the real z-lab convention —
+// docs/design-dflash-forward.md §2-§3's targetHiddenRaw, the shape
+// DFlashZLabForward and zLabDFlashProposer (assistant_dflash_zlab.go)
+// consume).
+//
+// Reuses the SAME throwaway full-replay primitive ExtractAuxHiddens does
+// (ForwardCaptureHiddens: resets pos to 0, re-runs the whole sequence — safe
+// for a fresh/throwaway extraction, NOT for a live incrementally-decoding
+// session), matching the existing DFlash verify oracle's own full-prefix-
+// replay posture (speculativeModel.generateDFlash's/generateDFlashZLab's
+// next(), which already re-PrefillTokens the whole prefix every call) rather
+// than mixing replay tiers within one round. Moving both the aux tap and the
+// verify oracle to the incremental live-session primitives together
+// (ExtractAuxHiddensLive, assistant_dflash_livetap.go) is the named perf
+// follow-up (docs/design-dflash-forward.md §7 item 5 — "skip re-fusing
+// unchanged context rows across rounds"), not required for this lane's
+// correctness gate.
+func ExtractAuxHiddensAllRaw(target *ArchSession, ids []int32, auxLayers []int) ([]float32, error) {
+	if target == nil {
+		return nil, core.NewError("native.dflash: aux extraction target session is nil")
+	}
+	if len(ids) == 0 {
+		return nil, core.NewError("native.dflash: aux extraction needs a non-empty prefix")
+	}
+	if len(auxLayers) == 0 {
+		return nil, core.NewError("native.dflash: aux extraction requested no aux layers")
+	}
+	_, perLayerOut, err := target.ForwardCaptureHiddens(ids)
+	if err != nil {
+		return nil, core.E("native.dflash", "capture verifier hiddens", err)
+	}
+	hidden := target.arch.Hidden
+	rowBytes := hidden * bf16Size
+	ctxLen := len(ids)
+	numAux := len(auxLayers)
+	out := make([]float32, ctxLen*numAux*hidden)
+	for i, layer := range auxLayers {
+		if layer < 0 || layer >= len(perLayerOut) {
+			return nil, core.NewError(core.Sprintf("native.dflash: aux layer %d out of range [0,%d)", layer, len(perLayerOut)))
+		}
+		row := perLayerOut[layer]
+		if len(row) < ctxLen*rowBytes {
+			return nil, core.NewError("native.dflash: captured hidden row is short")
+		}
+		for t := 0; t < ctxLen; t++ {
+			dstOff := (t*numAux + i) * hidden
+			copy(out[dstOff:dstOff+hidden], bf16ToF32Slice(row[t*rowBytes:(t+1)*rowBytes]))
+		}
+	}
+	return out, nil
+}
