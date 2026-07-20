@@ -5,75 +5,27 @@
 package native
 
 import (
-	"os"
 	"unsafe"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
-	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
-// composed_quant_backend.go binds the composed hybrid lane's quant matvec seam — composed.ProjQuantMatMulInto
-// and its gated-delta twin attn.ProjQuantMatMulInto — to the metallib's MLX affine BF16 kernels. A quant
-// Qwen 3.6 checkpoint keeps its 2-D projections PACKED on device; this is the op that serves them without
-// widening a 27B weight to f32 (~110 GB). M=1 (decode) dispatches affine_qmv_bfloat16_t (the pooled-scratch
-// decode hot path QMVBF16 already drives); M>1 (prompt prefill) dispatches affine_qmm_t_bfloat16_t, one
-// weight pass scoring all M rows.
+// composed_quant_backend.go binds the packed-projection quant matvec seam — attn.ProjQuantMatMulInto
+// (the factory host path's projection op: arch_gated_attn.go's projQuantAttn and model/attn's
+// gated-delta projections) — to the metallib's MLX affine BF16 kernels. A quant checkpoint keeps its
+// 2-D projections PACKED on device; this is the op that serves them without widening a 27B weight to
+// f32 (~110 GB). M=1 (decode) dispatches affine_qmv_bfloat16_t (the pooled-scratch decode hot path
+// QMVBF16 already drives); M>1 (prompt prefill) dispatches affine_qmm_t_bfloat16_t, one weight pass
+// scoring all M rows.
 //
-// bf16 activations + the checkpoint's own bf16 scales/biases (mlx_lm.convert writes them bf16): the composed
-// model's serve boundary is already bf16 (token_model.go), and bf16's 8-bit mantissa is FINER than the 4-bit
-// (or 2-bit) weights, so the weight quantisation — not the activation dtype — bounds the error. This avoids
-// the f32-scale duplication the affine_qmv_FLOAT kernels would force (they template scales as float32; the
-// checkpoint ships bf16), keeping the resident set to the packed weights + their bf16 scales.
-//
-// The f32 fused-tail hooks (composed.ResidualNormMLPProj*Device) stay f32-only and are bypassed for a quant
-// model (composed.ComposedModel.Quantised) — quant fused tails are a later slice. This seam is the whole
-// stage-1 quant forward: every big matmul (q/k/v/o, in_proj/out_proj, gate/up/down, the LM head) rides it.
+// bf16 activations + the checkpoint's own bf16 scales/biases (mlx_lm.convert writes them bf16): the
+// serve boundary is bf16, and bf16's 8-bit mantissa is FINER than the 4-bit (or 2-bit) weights, so
+// the weight quantisation — not the activation dtype — bounds the error. The composed engine's
+// bindings that used to live beside this one were retired with it (#50).
 func init() {
-	composed.ProjQuantMatMulInto = MatMulQuantF32NTInto
 	attn.ProjQuantMatMulInto = MatMulQuantF32NTInto
-	// #8-B slice 1: the packed-weight FFN-tail fold — residual + norm + SwiGLU-over-codes +
-	// residual in ONE command buffer where the bypass paid three quant-seam round trips.
-	composed.ResidualNormMLPQuantDevice = ResidualNormMLPQuantDevice
-	// The batched routed-MoE kernel: the whole top-K MoE (select + SwiGLU + weighted combine) in ONE
-	// dispatch, where the composed host loop fired topK×3 per-projection quant-seam submits per layer.
-	// Kill-switch LTHN_COMPOSED_MOE_DEVICE=0 leaves the seam nil so forward runs the per-expert host
-	// loop — the revert-safety A/B lever (default on, one lever per commit).
-	if os.Getenv("LTHN_COMPOSED_MOE_DEVICE") != "0" {
-		composed.MoEExpertsDevice = MoEExpertsQuantDevice
-	}
-}
-
-// MoEExpertsQuantDevice binds composed.MoEExpertsDevice to the metallib's batched packed-expert MoE kernel
-// (MoEExpertsQuantSiLU — the composed hybrid is a SwiGLU/SiLU MoE, qwen3_5_moe; the GELU MoEExpertsQuant is
-// gemma's): the whole routed MoE — select the topK experts, run each expert's SwiGLU over the
-// quantised gate/up/down, and combine by the router weights — in ONE device dispatch, where the composed
-// host loop pays three quant-seam round trips per routed expert. It marshals the composed lane's f32/host
-// types to the kernel's bf16/native ones: xt→bf16 bytes, sel→int32, the combine weights→bf16 bytes, each
-// batched *model.QuantWeight→the native QuantWeight, then decodes the returned dModel bf16 back to f32.
-// gate/up/down share the pack's (bits, groupSize), read off gate. A kernel error propagates so the caller
-// falls back to the per-expert host loop for that token.
-func MoEExpertsQuantDevice(xt []float32, sel []int, weights []float64, gate, up, down *model.QuantWeight, numExperts, topK, dModel, dFF int) ([]float32, error) {
-	xb := f32sToBF16Bytes(xt)
-	idx := make([]int32, len(sel))
-	for k, e := range sel {
-		idx[k] = int32(e)
-	}
-	wb := make([]byte, len(weights)*bf16Size)
-	for k, w := range weights {
-		r := f32ToBF16(float32(w))
-		wb[2*k], wb[2*k+1] = byte(r), byte(r>>8)
-	}
-	qw := func(w *model.QuantWeight) QuantWeight {
-		return QuantWeight{Packed: w.Packed, Scales: w.Scales, Biases: w.Biases, GroupSize: w.GroupSize, Bits: w.Bits}
-	}
-	ob, err := MoEExpertsQuantSiLU(xb, idx, wb, qw(gate), qw(up), qw(down), numExperts, topK, dModel, dFF, gate.GroupSize, gate.Bits)
-	if err != nil {
-		return nil, err
-	}
-	return bf16ToF32Slice(ob), nil
 }
 
 // MatMulQuantF32NTInto computes out[M,N] = x[M,K] @ dequant(w)ᵀ for an MLX affine-packed weight with f32

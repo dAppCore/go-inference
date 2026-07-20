@@ -21,7 +21,7 @@ import (
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/rwkv7"
-	"dappco.re/go/inference/model/composed"
+	"dappco.re/go/inference/model/arch/Qwen/qwen35"
 )
 
 func init() { inference.Register(metalBackend{}) }
@@ -135,8 +135,8 @@ func loadServeTokenizer(path string, tm model.TokenModel) (hfTok *tokenizer.Toke
 }
 
 // sessionModelShape is the optional capability a model.SessionModel MAY additionally implement to report
-// its layer/hidden geometry for inference.ModelInfo: model/composed.ComposedTokenModel and the
-// standalone-recurrent arch wrappers (rwkv7.RWKV7TokenModel, mamba2.MambaTokenModel) all do. A future
+// its layer/hidden geometry for inference.ModelInfo: the standalone-recurrent arch wrappers
+// (rwkv7.RWKV7TokenModel, mamba2.MambaTokenModel) do. A future
 // model.SessionModel that doesn't leaves ModelInfo.NumLayers/HiddenSize honestly at 0 rather than
 // guessing. Mirrors engine/hip's identical hipComposedModelShape probe.
 type sessionModelShape interface {
@@ -164,12 +164,11 @@ func (metalBackend) LoadSpeculativePair(targetPath, draftPath string, draftBlock
 
 // sessionTextModel adapts a loaded model.SessionModel to engine.TokenModel, so metalBackend.LoadModel
 // returns it as an inference.TextModel through the shared engine.TextModel wrapper exactly like the
-// native decode model. Two families ride this ONE adapter: a config-composed hybrid (host-f32 — Qwen
-// 3.6's gated-delta / full-attention stack) and a standalone-recurrent SSM (rwkv7, mamba2 — no attention,
-// no KV cache, a fixed per-layer state) — neither is the native decode struct, and both already speak
-// nothing but the neutral model.SessionModel contract, so one bridge serves both rather than two
-// near-identical copies. It additionally DECLARES its chat dialect (engine.ChatTemplateDeclarer): ChatML
-// for the Qwen model_types (composed.ChatMLDialect), the honest plain-completion dialect for the
+// native decode model. The standalone-recurrent SSMs (rwkv7, mamba2 — no attention,
+// no KV cache, a fixed per-layer state) ride this adapter: neither is the native decode struct, and
+// both speak nothing but the neutral model.SessionModel contract. (The retired composed engine's
+// hybrids were this adapter's other family — #50.) It additionally DECLARES its chat dialect (engine.ChatTemplateDeclarer): ChatML
+// for the Qwen model_types (qwen35.ChatMLDialect), the honest plain-completion dialect for the
 // standalone-recurrent archs, the gemma fallback for anything else. The declared template WINS over
 // engine.TextModel's tokenizer detection, so a Qwen checkpoint frames <|im_start|>/<|im_end|> turns even
 // though its tokenizer carries no <|turn> marker. Named for what it bridges (any served
@@ -202,12 +201,12 @@ var (
 	_ engine.VisionTokenModel     = (*sessionTextModel)(nil)
 )
 
-// visionModel probes the underlying session model for the vision capability.
-// model/composed implements the engine.VisionTokenModel method set BY SHAPE
-// (it cannot import engine — AX-8), so the bridge forwards each method through
-// this one assertion. A text-only model (or a build predating the vision
-// tower, or any standalone-recurrent arch — none carries a vision tower)
-// answers false and the serve path's image-refusal is unchanged.
+// visionModel probes the underlying session model for the vision capability
+// (the engine.VisionTokenModel method set, satisfiable BY SHAPE — a model
+// package cannot import engine, AX-8). No surviving SessionModel carries a
+// vision tower (the retired composed engine's qwen tower was the one user,
+// #50), so today this answers false and the serve path's image-refusal is
+// unchanged; the seam stays for the factory vision port.
 func (m *sessionTextModel) visionModel() (engine.VisionTokenModel, bool) {
 	if m == nil || m.sm == nil {
 		return nil, false
@@ -285,7 +284,7 @@ func (m *sessionTextModel) SessionsReusePrompts() bool { return true }
 func (m *sessionTextModel) Close() error { return nil }
 
 // DeclaredChatTemplate declares the checkpoint's chat dialect (engine.ChatTemplateDeclarer): the ChatML
-// family for the Qwen model_types (config-driven via composed.ChatMLDialect); a plain-completion dialect
+// family for the Qwen model_types (config-driven via qwen35.ChatMLDialect); a plain-completion dialect
 // — no bracket markers, no role labels — for the standalone-recurrent archs (rwkv7, mamba2), because
 // neither ChatML nor gemma is a template either checkpoint was tuned on (rwkv7-world ships its own
 // "User: …\n\nAssistant: …\n\n" role-prefix jinja in tokenizer_config.json, which this engine's
@@ -295,7 +294,7 @@ func (m *sessionTextModel) Close() error { return nil }
 // declared template wins over engine.TextModel's detected gemma dialect, so the declaration is the
 // precedence-setting seam.
 func (m *sessionTextModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
-	if m != nil && composed.ChatMLDialect(m.modelType) {
+	if m != nil && qwen35.ChatMLDialect(m.modelType) {
 		return chatMLChatTemplate(), true
 	}
 	if m != nil && standaloneRecurrentArch(m.modelType) {
@@ -355,8 +354,8 @@ func chatMLChatTemplate() engine.ChatTemplate {
 	}
 }
 
-// composedEngineSession bridges a model.SessionModel — a config-composed hybrid (composed.composedStepper)
-// or a standalone-recurrent SSM (rwkv7, mamba2) — to engine.Session for the serve path
+// composedEngineSession bridges a model.SessionModel — a standalone-recurrent SSM (rwkv7, mamba2;
+// the retired composed engine's hybrids were the name-giving first family, #50) — to engine.Session for the serve path
 // (engine.TextModel.Generate / Chat) as a STATEFUL session (#25): it holds ONE open recurrent stepper
 // across calls, driven purely through the neutral model.SessionModel/model.DecodeStepper contract, so
 // the same session type serves either family unchanged. PrefillTokens batch-prefills the prompt through

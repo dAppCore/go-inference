@@ -11,14 +11,13 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
-	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
 // arch_gated_attn.go decodes a GATED full-attention layer (Qwen3.5 attn_output_gate) in the arch (factory)
 // session — the host attention twin of encGatedDeltaHalf. Correctness-first: the whole attention forward
 // (input RMSNorm → q/k/v proj → per-head QK-norm + partial rotary → causal softmax over a host KV cache →
-// σ-gate → o_proj → residual) runs on the HOST, ported from model/composed's continueFromQKV. Only the
+// σ-gate → o_proj → residual) runs on the HOST, ported verbatim from the retired composed engine's continueFromQKV (#50). Only the
 // full_attention layers of a checkpoint that DECLARES attn_output_gate take this path; a plain (ungated)
 // attention layer keeps the device encAttnHalfKV, so gemma4 is byte-identical. This host path is now the
 // FALLBACK — the fused device lanes (arch_qwen_fused.go) are the default for servable geometries; this
@@ -43,7 +42,7 @@ type gatedAttnLayer struct {
 	mq, mk, mv, mo       *model.QuantWeight
 	ffGate, ffUp, ffDown *model.QuantWeight
 	dff                  int
-	moe                  *composed.MoEMLP
+	moe                  *chainMoE
 	fusedDense, fusedMoE bool
 	devChecked, devOK    bool
 	dev                  any
@@ -61,8 +60,9 @@ func bf16VecToF32(b []byte) []float32 {
 	return out
 }
 
-// rmsNormHeadF32 / applyRotaryHalfF32 are the per-head QK-norm + partial rotary, ported from
-// model/composed (rmsNormHead / applyRotaryHalf) so the factory attention is bit-for-bit the composed math.
+// rmsNormHeadF32 / applyRotaryHalfF32 are the per-head QK-norm + partial rotary, ported verbatim
+// from the retired composed engine (rmsNormHead / applyRotaryHalf) so the factory attention kept
+// its math bit-for-bit (#50).
 func rmsNormHeadF32(x, w []float32, eps float32) {
 	if len(w) == 0 {
 		return
@@ -129,7 +129,7 @@ func (s *archDecodeState) bindGatedAttnQuant(layers []QuantizedLayerWeights) {
 
 // encGatedAttnHalf computes one gated full-attention layer for a single decode token (position pos) and
 // writes the residual output (in + σ(gate)·attn(RMSNorm(in))·o_proj) to hBuf — the gated twin of
-// encAttnHalfKV. Host path (correctness-first), ported from composed.continueFromQKV at L=1. Grows the
+// encAttnHalfKV. Host path (correctness-first), the retired composed engine's continueFromQKV at L=1. Grows the
 // layer's host KV cache. heads/kvHeads/headDim/rotDim/theta/slideW are the loop's per-layer geometry.
 func (s *archDecodeState) encGatedAttnHalf(li, pos, heads, kvHeads, headDim, rotDim int, theta float32, slideW int, in metal.MTLBuffer) error {
 	ga := s.gatedAttn[li]

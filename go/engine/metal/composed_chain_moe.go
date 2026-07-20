@@ -9,12 +9,11 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
-// composed_chain_moe.go — the composed hybrid's Mixture-of-Experts FFN tail in chainTarget form,
-// so a qwen3_5_moe layer RECORDS into the composed whole-token chain instead of firing its own
+// composed_chain_moe.go — the Qwen hybrid's Mixture-of-Experts FFN tail in chainTarget form,
+// so a qwen3_5_moe layer rides the factory's whole-token chain instead of firing its own
 // per-expert command buffers. The dense SwiGLU tail (chainResidualNormMLPQuantTail) already rides
 // the chain; this is its MoE twin — residual add → RMSNorm → cast bf16 → [router → gather experts →
 // SiLU SwiGLU → weighted combine → shared expert] → residual add — every op emitted through the
@@ -30,28 +29,53 @@ import (
 // ULP (gated in composed_chain_moe_test.go). The activation is SiLU (encSiLUGateMulBF16's ops), never
 // gemma's GELU — a GELU variant would DIFFER, which is the one fact a greedy model A/B cannot show.
 //
-// LIVE-only: like the bf16 chain layers, the MoE tail declines the ICB recording pass (the custom
-// router/combine/scale kernels have no ICB-specialised pipeline yet) — the RE-ENCODE chain still
-// collapses the ~378 per-token command buffers into ONE, which is the bulk of the win; the recorded
-// replay is a later increment.
+// LIVE-only: the MoE tail declines the ICB recording pass (the custom router/combine/scale kernels
+// have no ICB-specialised pipeline yet) — the RE-ENCODE chain still collapses the ~378 per-token
+// command buffers into ONE, which is the bulk of the win; the recorded replay is a later increment.
+
+// chainMoEShared is the shared expert's packed SwiGLU trio — nil projections decline the chain
+// (a fused GateUpQ or dense shared expert is not chain-servable).
+type chainMoEShared struct {
+	GateQ, UpQ, DownQ *model.QuantWeight
+}
+
+// chainMoE is the minimal MoE view the fused whole-token chain resolves its weights from — the
+// native port (#50) of the retired composed engine's MoEMLP, carrying exactly the fields the chain
+// emitters read. qwenChainMoE (arch_qwen_fused.go) builds it from the factory's native MoE holder:
+// batched switch_mlp experts, a softmax top-k router dequantised to f32 once, the shared expert
+// trio and its optional sigmoid gate.
+type chainMoE struct {
+	Router       []float32 // [NumExperts, D] dequantised router rows
+	NumExperts   int
+	TopK         int
+	NormTopKProb bool // renormalise the top-k router weights over the selection
+	Gating       model.MoEGating
+
+	// GateBatchedQ/UpBatchedQ/DownBatchedQ are the WHOLE switch_mlp.{gate,up,down}_proj tensors as
+	// one packed [numExperts, …] quant weight each — the batched form the gather kernels consume.
+	GateBatchedQ, UpBatchedQ, DownBatchedQ *model.QuantWeight
+
+	Shared     *chainMoEShared // nil ⇒ no shared expert
+	SharedGate []float32       // [D] shared_expert_gate weight; nil ⇒ shared added ungated
+}
 
 // moeChainWeights are one MoE layer's weights resolved to the views the chain emitters bind: the
 // router narrowed to a bf16 device buffer, the batched routed experts as native QuantWeights (every
 // expert concatenated — the gather offsets by the device idx), the shared expert's packed SwiGLU,
 // and the optional shared-expert sigmoid gate narrowed to bf16. resolveMoEChainWeights builds it
-// from the composed *MoEMLP; the byte-identity test builds it directly from a fixture.
+// from the *chainMoE view; the byte-identity test builds it directly from a fixture.
 type moeChainWeights struct {
-	routerBF metal.MTLBuffer // [numExperts, D] bf16 (the dequant f32 router, narrowed once)
-	routerBacker []byte      // holds routerBF's bytes alive (residentBytes is no-copy)
+	routerBF     metal.MTLBuffer // [numExperts, D] bf16 (the dequant f32 router, narrowed once)
+	routerBacker []byte          // holds routerBF's bytes alive (residentBytes is no-copy)
 
 	numExperts, topK, expertDFF, groupSize, bits int
 	gate, up, down                               QuantWeight // batched [numExperts, …] routed experts
 
-	hasShared            bool
-	sGate, sUp, sDown    QuantWeight // the shared expert's packed SwiGLU (unfused)
-	sharedFF             int
-	sharedGateBF         metal.MTLBuffer // [D] bf16 shared_expert_gate; nil ⇒ shared added ungated
-	sharedGateBacker     []byte
+	hasShared         bool
+	sGate, sUp, sDown QuantWeight // the shared expert's packed SwiGLU (unfused)
+	sharedFF          int
+	sharedGateBF      metal.MTLBuffer // [D] bf16 shared_expert_gate; nil ⇒ shared added ungated
+	sharedGateBacker  []byte
 }
 
 // moeChainScratch is the MoE tail's device staging — the router/gather/combine slabs plus the
@@ -374,11 +398,11 @@ type moeTailBufs struct {
 	sc                       *moeChainScratch
 }
 
-// resolveMoEChainWeights bridges a composed *MoEMLP to the chain emitters' native views, returning
+// resolveMoEChainWeights bridges a *chainMoE view to the chain emitters' native views, returning
 // ok=false when the layer cannot ride the MoE chain (missing batched experts, an unsupported gating
 // or top-k policy, a fused shared expert, or an absent lean gather kernel for its geometry). The
 // router + shared gate are narrowed to bf16 ONCE here (owned backers keep them resident).
-func resolveMoEChainWeights(moe *composed.MoEMLP) (*moeChainWeights, bool) {
+func resolveMoEChainWeights(moe *chainMoE) (*moeChainWeights, bool) {
 	if moe == nil || moe.GateBatchedQ == nil || moe.UpBatchedQ == nil || moe.DownBatchedQ == nil {
 		return nil, false
 	}
@@ -391,10 +415,10 @@ func resolveMoEChainWeights(moe *composed.MoEMLP) (*moeChainWeights, bool) {
 	gb, ub, db := moe.GateBatchedQ, moe.UpBatchedQ, moe.DownBatchedQ
 	expertDFF, D := gb.OutDim, gb.InDim
 	gs, bits := gb.GroupSize, gb.Bits
-	if expertDFF <= 0 || D <= 0 || gs <= 0 || D%gs != 0 || moe.TopK <= 0 || moe.TopK > len(moe.Experts) {
+	if expertDFF <= 0 || D <= 0 || gs <= 0 || D%gs != 0 || moe.TopK <= 0 || moe.TopK > moe.NumExperts {
 		return nil, false
 	}
-	if len(moe.Router) != len(moe.Experts)*D {
+	if len(moe.Router) != moe.NumExperts*D {
 		return nil, false
 	}
 	// the lean gather must exist for both projection geometries (else the chain can neither record
@@ -409,7 +433,7 @@ func resolveMoEChainWeights(moe *composed.MoEMLP) (*moeChainWeights, bool) {
 		return nil, false
 	}
 	w := &moeChainWeights{
-		numExperts: len(moe.Experts), topK: moe.TopK, expertDFF: expertDFF, groupSize: gs, bits: bits,
+		numExperts: moe.NumExperts, topK: moe.TopK, expertDFF: expertDFF, groupSize: gs, bits: bits,
 		gate: nativeQuant(gb), up: nativeQuant(ub), down: nativeQuant(db),
 	}
 	w.routerBacker = f32sToBF16Bytes(moe.Router)
@@ -433,15 +457,14 @@ func resolveMoEChainWeights(moe *composed.MoEMLP) (*moeChainWeights, bool) {
 	return w, true
 }
 
-// nativeQuant lifts a model.QuantWeight (the composed lane's packed form) to the engine's QuantWeight
-// view — the same marshalling MoEExpertsQuantDevice performs.
+// nativeQuant lifts a model.QuantWeight (the loader's packed form) to the engine's QuantWeight view.
 func nativeQuant(q *model.QuantWeight) QuantWeight {
 	return QuantWeight{Packed: q.Packed, Scales: q.Scales, Biases: q.Biases, GroupSize: q.GroupSize, Bits: q.Bits}
 }
 
-// moeChainRecordable reports whether this MoE layer can ride the composed chain — resolveMoEChainWeights
-// succeeds. The composed chainable() gate consults it (bound as composed.MoEChainRecordable).
-func moeChainRecordable(moe *composed.MoEMLP) bool {
+// moeChainRecordable reports whether this MoE layer can ride the whole-token chain —
+// resolveMoEChainWeights succeeds. qwenChainReady (arch_qwen_fused.go) consults it per layer.
+func moeChainRecordable(moe *chainMoE) bool {
 	_, ok := resolveMoEChainWeights(moe)
 	return ok
 }

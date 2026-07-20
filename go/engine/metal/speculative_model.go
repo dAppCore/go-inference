@@ -30,6 +30,7 @@ import (
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/arch/Qwen/qwen35"
 	"dappco.re/go/inference/model/mtp"
 	coreio "dappco.re/go/io"
 )
@@ -101,11 +102,12 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 	if draftBlock <= 0 {
 		draftBlock = 5
 	}
-	// Family dispatch: a composed/hybrid TARGET (Qwen 3.5/3.6 — gated-delta recurrent state, no
-	// shareable KV streams) cannot be an ArchSession, so its pairing binds through the composed arm.
-	// The route stays ONE: same loader shape, same TextModel surfaces, different physics underneath.
-	if spec, ok := model.LookupArch(probeModelType(targetPath)); ok && spec.Composed != nil {
-		return loadComposedSpeculativePair(targetPath, draftPath, draftBlock, opts...)
+	// A gated-delta hybrid TARGET (Qwen 3.5/3.6) cannot be an ArchSession — its recurrent layers
+	// thread state, not KV streams an AssistantPair could share. The retired composed engine used
+	// to serve this pairing (composed.LoadSpeculativePairDirs); a factory pair route does not exist
+	// yet, so the load declines with the gap named rather than mis-pairing (#50).
+	if mt := probeModelType(targetPath); qwen35.HybridModelType(mt) {
+		return nil, core.NewError("native.LoadSpeculativePair: " + mt + " is a gated-delta hybrid — its MTP pairing rode the retired composed engine (#50) and the factory pair route is pending; serve the base model without -draft")
 	}
 	target, err := LoadDir(targetPath, maxLen)
 	if err != nil {

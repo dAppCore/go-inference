@@ -13,7 +13,7 @@ import (
 // lane dispatches each expert projection through the bound quant seam (composed.ProjQuantMatMulInto =
 // MatMulQuantF32NTInto), so fuseExpertGateUp turns a routed expert's TWO gate/up matvecs into ONE over the
 // [gate‖up] concat — one GPU submit per expert instead of two. Here that fusion is exercised against the
-// real Metal affine_qmv kernel: the host byte-identity (model/composed.TestSwigluExpertQuantInto_-
+// real Metal affine_qmv kernel: the host byte-identity (the retired composed engine's TestSwigluExpertQuantInto_-
 // FusedMatchesUnfused) is re-proven on the DEVICE, and the timing win the host cannot show (no per-submit
 // overhead there) is measured in composed_moe_fuse_bench_test.go.
 

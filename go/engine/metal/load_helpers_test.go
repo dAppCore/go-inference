@@ -42,8 +42,8 @@ func TestNativeTokenModelSpecialLoaderErrors(t *testing.T) {
 	if _, err := loadMamba2TokenModel(t.TempDir(), []byte(`{}`)); err == nil {
 		t.Fatal("loadMamba2TokenModel(empty dir) error = nil")
 	}
-	if _, err := loadComposedTokenModel(t.TempDir(), []byte(`{}`)); err == nil {
-		t.Fatal("loadComposedTokenModel(empty dir) error = nil")
+	if _, err := loadRWKV7TokenModel(t.TempDir(), []byte(`{}`)); err == nil {
+		t.Fatal("loadRWKV7TokenModel(empty dir) error = nil")
 	}
 }
 
