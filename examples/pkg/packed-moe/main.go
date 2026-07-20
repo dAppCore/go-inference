@@ -279,15 +279,18 @@ type tokenizerAddedToken struct {
 
 // buildTokenizerJSON returns a minimal HF tokenizer.json: a flat character-level vocabulary (ids
 // 0-30 = a-z0-4) covering every OTHER id embed_tokens/lm_head can produce, no merges, and id
-// vocabSize-1 explicitly reserved as "<eos>". The explicit reservation matters:
-// decode/tokenizer's Tokenizer.EOS() returns the tokenizer's eosToken field UNCONDITIONALLY, not
-// gated on whether an "<eos>" was ever declared (tokenizer.go's HasEOSToken is a separate, unused-
-// by-EOS() bool) — so a tokenizer.json that declares no EOS at all leaves eosToken at its zero
-// value, id 0, which engine.TextModel's buildStopTokens then arms as a real stop token. This
-// checkpoint's synthetic weights reach greedy id 0 on their very first decode step, so leaving
-// "<eos>" undeclared would silently truncate every Generate call to one token. Real subword
-// tokenisation is irrelevant here — this checkpoint's weights are synthetic noise, so the only
-// thing worth proving is that the text ⇄ token-id plumbing round-trips.
+// vocabSize-1 explicitly reserved as "<eos>". The explicit reservation is kept as good practice —
+// every real checkpoint declares one — though it is no longer load-bearing here: this example
+// originally found that decode/tokenizer's Tokenizer.EOS() returned the tokenizer's eosToken field
+// UNCONDITIONALLY, not gated on whether an "<eos>" was ever declared, so a tokenizer.json without
+// this reservation left eosToken at its zero value, id 0, which engine.TextModel's buildStopTokens
+// then armed as a real stop token — and this checkpoint's synthetic weights reach greedy id 0 on
+// their very first decode step, so Generate silently truncated to one token. #64 fixed
+// buildStopTokens (and the doc comments on EOSToken/EOS) to gate the arm on HasEOSToken(), so an
+// undeclared EOS no longer truncates generation — but this fixture still declares "<eos>" anyway,
+// matching what every real checkpoint ships. Real subword tokenisation is irrelevant here — this
+// checkpoint's weights are synthetic noise, so the only thing worth proving is that the text ⇄
+// token-id plumbing round-trips.
 func buildTokenizerJSON() ([]byte, error) {
 	vocab := make(map[string]int32, vocabSize)
 	for i, r := range "abcdefghijklmnopqrstuvwxyz01234" { // 31 content symbols -> ids 0..30
