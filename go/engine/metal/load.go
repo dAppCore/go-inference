@@ -6,6 +6,7 @@ package native
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/decode/dflash"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/arch/rwkv7"
@@ -381,7 +382,19 @@ func mamba2EpsFromConfig(cfg []byte) float32 {
 // load; returns the neutral LoadedModel + the DirMapping its byte views reference (the caller binds device
 // buffers from it, then it lives on the session/token-model via shardBuffers). The backend holds no
 // per-arch knowledge — the model package owns its config + weight-name declaration, model.Load reacts.
+//
+// One typed decline lives here rather than in a model package: a DFlash speculative DRAFTER dir
+// (architectures ["DFlashDraftModel"]) must not resolve as a primary model — its model_type is literally
+// "qwen3", so the reactive route would accept it and then fail on the missing embed_tokens (the drafter
+// borrows the target's embedding and head — model/arch/z-lab/dflash). Naming the real situation beats
+// that bewildering missing-tensor error; the assistant/-draft loaders do not route through here, so the
+// drafter paths are unaffected.
 func loadRegistered(dir string) (*model.LoadedModel, *safetensors.DirMapping, error) {
+	if _, cfg, err := model.ProbeDirArch(dir); err == nil {
+		if _, isDrafter := dflash.ParseConfig(cfg); isDrafter {
+			return nil, nil, core.NewError("native: " + dir + " is a DFlash speculative drafter (architectures [\"DFlashDraftModel\"]), not a standalone model — pass it as -draft beside its verifier target (serving is pending the DFlash glue lane; see docs/design-dflash-forward.md)")
+		}
+	}
 	return model.Load(dir)
 }
 

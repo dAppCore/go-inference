@@ -291,6 +291,39 @@ func TestDFlashZLabForward_Ugly(t *testing.T) {
 	dzAssertClose(t, "final", got, want, 1e-5, 1e-4)
 }
 
+// TestLoadTokenModelDir_DFlashDrafterDecline_Bad: the MAIN-model loaders must
+// refuse a DFlash drafter dir with the NAMED decline (loadRegistered), never
+// the bewildering missing-embed_tokens error the reactive qwen3 route would
+// otherwise die on — the drafter's model_type is literally "qwen3" and it
+// carries no embedding/head of its own (borrowed from the target).
+func TestLoadTokenModelDir_DFlashDrafterDecline_Bad(t *testing.T) {
+	dir := t.TempDir()
+	if r := core.WriteFile(core.PathJoin(dir, "config.json"), []byte(`{
+		"architectures": ["DFlashDraftModel"],
+		"block_size": 16,
+		"dflash_config": {"mask_token_id": 151669, "target_layer_ids": [1, 9, 17, 25, 33]},
+		"head_dim": 128,
+		"hidden_size": 2560,
+		"intermediate_size": 9728,
+		"model_type": "qwen3",
+		"num_attention_heads": 32,
+		"num_hidden_layers": 5,
+		"num_key_value_heads": 8
+	}`), 0o644); !r.OK {
+		t.Fatalf("write config.json: %v", r.Err())
+	}
+	if _, err := LoadTokenModelDir(dir, 64); err == nil {
+		t.Fatal("a DFlash drafter dir must decline as a primary model")
+	} else if !core.Contains(err.Error(), "DFlash") || !core.Contains(err.Error(), "-draft") {
+		t.Fatalf("the decline must name DFlash and point at -draft, got: %v", err)
+	}
+	if _, err := LoadDir(dir, 64); err == nil {
+		t.Fatal("LoadDir must decline a DFlash drafter dir too")
+	} else if !core.Contains(err.Error(), "DFlash") {
+		t.Fatalf("LoadDir decline must name DFlash, got: %v", err)
+	}
+}
+
 // --- real-checkpoint gate (env-gated; skips cleanly without it) ---
 
 // dzOracleFixture mirrors decode/dflash's zlabOracleFixture — the pinned
