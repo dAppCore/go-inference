@@ -37,6 +37,12 @@ func TestQwenmoe_Config_Arch_Good(t *testing.T) {
 	if arch.MoEGating != model.MoEGatingSoftmax || arch.NormaliseMoETopK || arch.SharedExperts != 1 || !arch.HasMoE() {
 		t.Fatalf("Qwen2-MoE router = score %q normalise %v shared %d MoE %v", arch.MoEGating, arch.NormaliseMoETopK, arch.SharedExperts, arch.HasMoE())
 	}
+	// #57: shared_expert_intermediate_size (5632) is DISTINCT from moe_intermediate_size (1408, ExpertFF
+	// above) on real Qwen1.5-MoE-A2.7B — SharedExpertFF must carry the shared expert's OWN width, not
+	// silently equal ExpertFF.
+	if arch.SharedExpertFF != 5632 {
+		t.Fatalf("Qwen2-MoE SharedExpertFF = %d, want 5632 (shared_expert_intermediate_size, distinct from ExpertFF %d)", arch.SharedExpertFF, arch.ExpertFF)
+	}
 }
 
 func TestQwenmoe_Config_Arch_Bad(t *testing.T) {
@@ -89,5 +95,11 @@ func TestQwenmoe_Config_Arch_Qwen3(t *testing.T) {
 	}
 	if arch.Experts != 128 || arch.TopK != 8 || arch.ExpertFF != 768 || !arch.NormaliseMoETopK || arch.SharedExperts != 0 {
 		t.Fatalf("Qwen3-MoE router = experts %d top-k %d FF %d normalise %v shared %d", arch.Experts, arch.TopK, arch.ExpertFF, arch.NormaliseMoETopK, arch.SharedExperts)
+	}
+	// #57: Qwen3-MoE's config.json carries no shared_expert_intermediate_size key at all, so the parsed
+	// Config.SharedExpertIntermediateSize (and the derived SharedExpertFF) stays Go's int zero value —
+	// consistent with SharedExperts == 0 above (no shared expert to derive a width for).
+	if arch.SharedExpertFF != 0 {
+		t.Fatalf("Qwen3-MoE SharedExpertFF = %d, want 0 (no shared_expert_intermediate_size in the config)", arch.SharedExpertFF)
 	}
 }

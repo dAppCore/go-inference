@@ -88,6 +88,18 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 // arch (Activation "gpt_oss_clamped_swiglu") additionally carries the ClampedSwiGLU marker +
 // SwigluLimit and the additive router/expert biases the checkpoint ships (each already captured on
 // its Linear.Bias by the shared loader; nil for every other arch — byte-identical mapping).
+//
+// #57 VERIFIED (no change needed here): SharedGate/SharedUp/SharedDown's GroupSize/Bits below come
+// from qw(), which reads each model.Linear's OWN geometry verbatim — never re-derived from arch.ExpertFF
+// or any other arch-wide value. The pre-#57 bug (SharedDown's affine geometry silently wrong for a
+// shared expert whose width differs from the routed experts') lived entirely upstream, in
+// model.assembleMoE's SharedDown InDim (fixed via the new arch.SharedExpertFF field); this mapping was
+// always geometry-agnostic pass-through, so it inherits the fix with zero lines changed. See
+// TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good for the pinning proof. STILL OPEN: ExpertDFF
+// below is the ROUTED width only — engine/metal has no shared-width field on MoEQuantLayerWeights, and
+// arch_qwen_moe.go's non-fused decode dispatch (encQwenMoEHalf) sizes its shared-expert matvec off this
+// same ExpertDFF, a decode-time gap #57 does not close (out of this change's file fence — see
+// qwenmoe/weights.go's "STILL OPEN" doc for the full trace).
 func moeToQuant(e *model.LoadedMoE, arch model.Arch) *MoEQuantLayerWeights {
 	experts, topK, expertFF, dModel, fuseGateUp := arch.Experts, arch.TopK, arch.ExpertFF, arch.Hidden, arch.FuseExpertGateUp
 	q := &MoEQuantLayerWeights{

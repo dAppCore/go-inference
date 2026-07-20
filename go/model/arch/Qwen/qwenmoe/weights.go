@@ -30,18 +30,25 @@ const packedExpertsPrefix = ".mlp.experts_packed"
 // declared unconditionally here because LoadLinear is nil-safe on an absent name, exactly like
 // QNorm/KNorm above.
 //
-// KNOWN LIMITATION (flagged, not fixed — out of this package's scope): SharedDown's declared inDim is
-// arch.ExpertFF (the ROUTED experts' intermediate size) — model.Arch carries no separate shared-expert-FF
-// field, so assembleMoE's generic shared-expert mechanism (first wired for qwen3_5_moe) assumes shared and
-// routed experts share one FF width. Real Qwen2-MoE checkpoints do NOT: Qwen1.5-MoE-A2.7B ships
+// FIXED (#57, was a KNOWN LIMITATION here): SharedDown's declared inDim now derives from
+// arch.SharedExpertFF (populated below from shared_expert_intermediate_size) instead of assuming it
+// equals arch.ExpertFF (the ROUTED experts' intermediate size) — model.Arch carries a distinct
+// shared-expert-FF field precisely because real Qwen2-MoE checkpoints need one: Qwen1.5-MoE-A2.7B ships
 // moe_intermediate_size=1408 but shared_expert_intermediate_size=5632 (testdata/
-// Qwen-Qwen1.5-MoE-A2.7B-config.json) — a 4x mismatch. For a DENSE (bf16) checkpoint this is harmless
-// (engine/metal's qw() carries only Weight/Scales/Biases/GroupSize/Bits through a QuantWeight, dropping
-// Linear.InDim entirely — verified against engine/metal/load_shared.go); for a QUANTISED shared expert the
-// wrong inDim would derive the wrong affine GroupSize/Bits (model.LoadLinear's affineGeometry). Correcting
-// this needs a model.Arch schema change (a distinct SharedExpertFF) beyond this change's file fence.
-// Numeric parity against a real checkpoint is out of scope for this change regardless (host-side
+// Qwen-Qwen1.5-MoE-A2.7B-config.json) — a 4x mismatch. For a DENSE (bf16) checkpoint the old assumption
+// was harmless (engine/metal's qw() carries only Weight/Scales/Biases/GroupSize/Bits through a
+// QuantWeight, dropping Linear.InDim entirely); for a QUANTISED shared expert the wrong inDim derived
+// the wrong affine GroupSize/Bits (model.LoadLinear's affineGeometry) — see
+// TestTinyQwen2MoEFactoryLoad_QuantisedSharedExpert_Good (load_test.go) for the byte-level regression
+// proof. Numeric parity against a real checkpoint stays out of scope regardless (host-side
 // synthetic-tensor tests only, per the #50 archzoo brief).
+//
+// STILL OPEN (out of THIS change's file fence — #57 follow-up): engine/metal's non-fused shared-expert
+// decode (arch_qwen_moe.go's encQwenMoEHalf) independently hardcodes "shared FF == moe.ExpertDFF" when
+// sizing its MoEExpertsQuantSiLU dispatch — a decode-time correctness gap for a checkpoint whose shared
+// and routed FF genuinely differ, separate from (and not fixed by) the InDim/GroupSize/Bits correction
+// above. arch_qwen_fused.go's chain lane is UNAFFECTED (qwenChainMoE already derives sharedFF from the
+// packed byte stride, never from arch.ExpertFF).
 func FactoryWeightNames() model.WeightNames {
 	w := model.StandardWeightNames()
 	w.MLPNorm = ".post_attention_layernorm.weight"

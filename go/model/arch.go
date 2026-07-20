@@ -179,28 +179,35 @@ type Arch struct {
 	RopeOriginalContext                                      int       // positions below this boundary use RopeShortFreqs; 0 = one static table
 	SoftCap                                                  float32   // final logit soft-cap (0 = none)
 	SlidingWindow                                            int
-	PerLayerInputVocab, PerLayerInputHidden                  int             // per-layer-input aux embedding (0 = absent)
-	AttentionKEqV                                            bool            // K == V (shared projection)
-	AttnOutputGate                                           bool            // Qwen3.5 attn_output_gate: full-attention layers emit [q ; gate] from q_proj and sigmoid-gate the attention output before o_proj; other arches leave it false
-	ValueNorm                                                bool            // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
-	ParallelResidual                                         bool            // attention and MLP consume the same normalised input, then both outputs join the residual
-	ALiBi                                                    bool            // attention uses linear position bias instead of rotary embeddings
-	TieWordEmbeddings                                        *bool           // nil = checkpoint presence decides; non-nil validates lm_head against config.json
-	LearnedAbsolutePositions                                 bool            // token embeddings are offset by a learned position table
-	PositionOffset                                           int             // learned-position table offset (OPT reserves positions 0 and 1)
-	NormaliseMoETopK                                         bool            // renormalise selected router weights to sum to one
-	SharedExperts                                            int             // always-on shared expert count; zero means routed experts only
-	LayerNormBefore                                          bool            // attention and MLP are pre-norm; false declares post-norm
-	NoFinalNorm                                              bool            // layer stack has no final norm (OPT post-norm checkpoints)
-	MultiQueryAttention                                      bool            // one K/V head is shared by every query head
-	Activation                                               string          // declared feed-forward activation (for example gelu_new)
-	SwigluLimit                                              float32         // gpt_oss clamped-SwiGLU clip bound (config swiglu_limit, 7.0 on every published checkpoint); zero = activation has no clamp
-	QKNormalization                                          QKNormalization // per-head Q/K normalisation before position encoding
-	QKVClip                                                  float32         // symmetric clamp applied to projected Q/K/V; zero disables it
-	LayerNorm                                                bool            // centred LayerNorm for block and final norms instead of RMSNorm
-	NormPlacement                                            NormPlacement   // declared norm-placement strategy (OLMo generations differ)
-	NonParametricLayerNorm                                   bool            // LayerNorm has no learned scale or bias (OLMo 1)
-	Layer                                                    []LayerSpec
+	PerLayerInputVocab, PerLayerInputHidden                  int   // per-layer-input aux embedding (0 = absent)
+	AttentionKEqV                                            bool  // K == V (shared projection)
+	AttnOutputGate                                           bool  // Qwen3.5 attn_output_gate: full-attention layers emit [q ; gate] from q_proj and sigmoid-gate the attention output before o_proj; other arches leave it false
+	ValueNorm                                                bool  // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	ParallelResidual                                         bool  // attention and MLP consume the same normalised input, then both outputs join the residual
+	ALiBi                                                    bool  // attention uses linear position bias instead of rotary embeddings
+	TieWordEmbeddings                                        *bool // nil = checkpoint presence decides; non-nil validates lm_head against config.json
+	LearnedAbsolutePositions                                 bool  // token embeddings are offset by a learned position table
+	PositionOffset                                           int   // learned-position table offset (OPT reserves positions 0 and 1)
+	NormaliseMoETopK                                         bool  // renormalise selected router weights to sum to one
+	SharedExperts                                            int   // always-on shared expert count; zero means routed experts only
+	// SharedExpertFF is the always-on shared expert's OWN intermediate size (#57 — qwenmoe's
+	// shared_expert_intermediate_size, distinct from the routed experts' ExpertFF: real Qwen1.5-MoE-A2.7B
+	// ships moe_intermediate_size=1408 but shared_expert_intermediate_size=5632, a 4x mismatch). Zero is
+	// the "no distinct width declared" default — assembleMoE falls back to ExpertFF, so every arch that
+	// doesn't populate this field (which is every arch but qwenmoe's shared-expert family, today) is
+	// byte-identical to before this field existed.
+	SharedExpertFF         int
+	LayerNormBefore        bool            // attention and MLP are pre-norm; false declares post-norm
+	NoFinalNorm            bool            // layer stack has no final norm (OPT post-norm checkpoints)
+	MultiQueryAttention    bool            // one K/V head is shared by every query head
+	Activation             string          // declared feed-forward activation (for example gelu_new)
+	SwigluLimit            float32         // gpt_oss clamped-SwiGLU clip bound (config swiglu_limit, 7.0 on every published checkpoint); zero = activation has no clamp
+	QKNormalization        QKNormalization // per-head Q/K normalisation before position encoding
+	QKVClip                float32         // symmetric clamp applied to projected Q/K/V; zero disables it
+	LayerNorm              bool            // centred LayerNorm for block and final norms instead of RMSNorm
+	NormPlacement          NormPlacement   // declared norm-placement strategy (OLMo generations differ)
+	NonParametricLayerNorm bool            // LayerNorm has no learned scale or bias (OLMo 1)
+	Layer                  []LayerSpec
 }
 
 // MaxHeadDim is the larger of the sliding and full head_dim — the head_dim a backend

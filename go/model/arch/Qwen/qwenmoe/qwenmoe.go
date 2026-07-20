@@ -99,7 +99,13 @@ func (c *Config) Arch() (model.Arch, error) {
 		FF: c.IntermediateSize, Vocab: c.VocabSize, Experts: c.NumExperts,
 		TopK: c.NumExpertsPerTok, ExpertFF: c.MoEIntermediateSize,
 		MoEGating: model.MoEGatingSoftmax, NormaliseMoETopK: c.NormTopKProb,
-		SharedExperts: sharedExperts, Eps: eps,
+		// SharedExpertFF (#57): direct pass-through of shared_expert_intermediate_size, distinct from
+		// ExpertFF above (real Qwen1.5-MoE-A2.7B: 5632 vs 1408). Zero on Qwen3-MoE configs (the field is
+		// absent from the JSON, so c.SharedExpertIntermediateSize stays Go's int zero value), matching
+		// sharedExperts == 0 there — assembleMoE's fallback-to-ExpertFF is moot when there's no shared
+		// expert to derive a width for.
+		SharedExpertFF: c.SharedExpertIntermediateSize,
+		SharedExperts:  sharedExperts, Eps: eps,
 		AttnScale: float32(1 / core.Pow(float64(headDim), 0.5)), EmbedScale: 1,
 		RopeBase: rope, RopeLocalBase: rope, RopeScale: 1,
 		RotaryDim: headDim, RotaryDimLocal: headDim,
