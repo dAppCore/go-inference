@@ -61,6 +61,52 @@ var mtpRowsMoEArmed = os.Getenv("LTHN_MTP_ROWS_MOE") != "0"
 // nothing about the grouping. Diagnostic only.
 var mtpRowsMoEMaxGroupSize atomic.Int64
 
+// mtpRowsMoEGroupHist1..mtpRowsMoEGroupHist4Plus tally ONE verify round's expert-group sizes for
+// the #53 diagnostic (mtp_rows_driver.go's "mtp-diag rows-moe" per-round trace line): how many of
+// the touched experts this MoE batch grouped got exactly 1, 2, 3, or 4-or-more (row, slot) pairs.
+// A histogram dominated by size-1 groups means real routing scattered the K·topK pairs across
+// mostly distinct experts — the batched gather/scatter pays its overhead without the matching
+// per-expert weight-read saving that made the unit fixtures' tiny-expert-count grouping a clean
+// win (hypothesis B in #53's write-up: mtp_rows_driver.go's header). NOT reset per layer —
+// mtp_rows_driver.go's stepRowsMoEBatched resets them ONCE at the start of a verify round
+// (mtpRowsMoEGroupHistReset), before its per-layer loop, so by the round's last layer they hold
+// the SUM across every layer processed so far; verifyRowsMoEBatchedHiddens reads them into that
+// round's diagnostic snapshot the moment the round completes. Package-level like
+// mtpRowsMoEMaxGroupSize: a decode session drives one goroutine (mtp.go's own contract), so
+// there is no concurrent-round hazard.
+var (
+	mtpRowsMoEGroupHist1     atomic.Int64
+	mtpRowsMoEGroupHist2     atomic.Int64
+	mtpRowsMoEGroupHist3     atomic.Int64
+	mtpRowsMoEGroupHist4Plus atomic.Int64
+)
+
+// mtpRowsMoEGroupHistReset zeroes the round histogram — called once per verify round
+// (mtp_rows_driver.go's stepRowsMoEBatched, before the per-layer loop starts) so sums from a
+// PRIOR round never leak into the next one.
+func mtpRowsMoEGroupHistReset() {
+	mtpRowsMoEGroupHist1.Store(0)
+	mtpRowsMoEGroupHist2.Store(0)
+	mtpRowsMoEGroupHist3.Store(0)
+	mtpRowsMoEGroupHist4Plus.Store(0)
+}
+
+// mtpRowsMoEGroupHistBump tallies one touched expert group of size m (row,slot) pairs into the
+// round histogram — called once per group from mtpRowsMoEBatchedInPool's grouping loop, beside
+// its existing maxGroup tracking.
+func mtpRowsMoEGroupHistBump(m int) {
+	switch {
+	case m <= 1:
+		mtpRowsMoEGroupHist1.Add(1)
+	case m == 2:
+		mtpRowsMoEGroupHist2.Add(1)
+	case m == 3:
+		mtpRowsMoEGroupHist3.Add(1)
+	default:
+		mtpRowsMoEGroupHist4Plus.Add(1)
+	}
+}
+
 // mtpRowsMoEEligible reports whether mtpRowsMoEBatched can serve this MoE layer's geometry at
 // all — mirrors batchedMoEUsable's discriminators (moe_batch.go): gpt_oss (ClampedSwiGLU) and
 // qwen (a bound SharedGate) decode on entirely different host paths and never reach here. Both
@@ -360,6 +406,7 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 		if m > maxGroup {
 			maxGroup = m
 		}
+		mtpRowsMoEGroupHistBump(m)
 		gatherIn := make([]byte, m*rowBytes)
 		for i, p := range group {
 			r := p / topK

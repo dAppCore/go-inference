@@ -2513,6 +2513,12 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 		mtpDiagVerifyRowsCalls++
 		diagT0 = time.Now()
 	}
+	// #53 diag (mtp-diag rows-moe, mtp_rows_driver.go): default to "not reached" BEFORE calling
+	// down — verifyAssistantDraftHiddens only reaches verifyRowsMoEBatchedHiddens when exact AND
+	// mtpRowsMoEArmed AND the earlier dense-batched lane (verifyBatchedHiddens) declined; on any
+	// OTHER round shape this default is what the log below reports, instead of silently reusing a
+	// STALE snapshot left over from a previous round.
+	mtpRowsDiagLast = mtpRowsDiagSnapshot{K: len(draftTokens), Reason: "rows-moe-seam-not-reached"}
 	// The greedy verify is the byte-exact lane (#55): the block forward runs
 	// per-row (exact=true — the fold's batched numerics can flip a near-tied
 	// argmax) and the rows head defaults to the per-row canonical qmv tier the
@@ -2530,6 +2536,11 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	if len(hiddens) != len(draftTokens) {
 		return nil, nil, core.NewError("native.assistant verify target rows are incomplete")
 	}
+	// #53 diag: the head/greedy stage below is the ONE macro-stage the layer-major driver has no
+	// visibility into (it runs on the hiddens the driver already returned) — timed here and
+	// combined with THIS round's attention/MoE wall + expert-group histogram, captured moments ago
+	// inside verifyAssistantDraftHiddens above (mtpRowsDiagLast).
+	headT0 := time.Now()
 	if mtpRowsHeadForced {
 		if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
 			return nil, nil, gerr
@@ -2541,6 +2552,7 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 			if mtpDiagForTest {
 				s.mtpDiagCrossCheckRows(hiddens, suppress, rows)
 			}
+			mtpRowsDiagEmitRound(time.Since(headT0))
 			return rows, hiddens, nil
 		}
 	}
@@ -2555,6 +2567,7 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 		nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms perrow-head=%.1fms\n",
 			len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
 	}
+	mtpRowsDiagEmitRound(time.Since(headT0))
 	return rows, hiddens, nil
 }
 
