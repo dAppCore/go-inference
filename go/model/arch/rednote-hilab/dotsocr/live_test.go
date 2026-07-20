@@ -259,6 +259,11 @@ func float32AbsDiff(a, b float32) float32 {
 // comment in golden_test.go) with greedy selection; greedy decode is deterministic, so exact
 // string equality is the right assertion.
 func TestLive_RealCheckpoint_OCR_Good(t *testing.T) {
+	if os.Getenv("DOTS_OCR_E2E") == "" {
+		t.Skip("full real-checkpoint decode runs ~10 minutes and overruns go test's default " +
+			"-timeout inside wholesale ./model/... gates (#58) — set DOTS_OCR_E2E=1 (with " +
+			"-timeout raised) to run it deliberately")
+	}
 	dir := resolveDotsOCRDir(t)
 	m, err := Load(dir)
 	if err != nil {
