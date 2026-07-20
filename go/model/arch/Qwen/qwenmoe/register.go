@@ -19,6 +19,19 @@ func init() {
 			}
 			return &cfg, nil
 		},
+		// Weights + NormalizeConfig give Qwen2-MoE/Qwen3-MoE the factory route (model.Assemble +
+		// arch_session — the #18 unification target), dual-registered alongside the Composed hook below
+		// exactly as mixtral/qwen35/granitemoe carry both: Composed stays the A/B reference + the route a
+		// caller that deliberately bypasses model.Load still reaches, while model.Load now succeeds
+		// instead of rejecting Qwen2-MoE/Qwen3-MoE as composed-only.
+		Weights: FactoryWeightNames(),
+		NormalizeConfig: func(tensors map[string]safetensors.Tensor, ac model.ArchConfig) map[string]safetensors.Tensor {
+			cfg := ac.(*Config)
+			if packed, err := packExperts(tensors, cfg.NumHiddenLayers, cfg.NumExperts); err == nil {
+				return packed
+			}
+			return tensors // malformed/absent experts — Assemble's nil-safe load surfaces the gap downstream
+		},
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
 			var cfg Config
 			if r := core.JSONUnmarshal(configJSON, &cfg); !r.OK {

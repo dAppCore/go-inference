@@ -50,6 +50,14 @@ func init() {
 			}
 			return r.Value.(*Config), nil
 		},
+		// Weights gives GraniteMoE the factory route (model.Assemble + arch_session — the #18
+		// unification target), dual-registered alongside the Composed hook below exactly as
+		// mixtral/qwen35 carry both: Composed stays the A/B reference + the route a caller that
+		// deliberately bypasses model.Load still reaches, while model.Load now succeeds instead of
+		// rejecting GraniteMoE as composed-only. No NormalizeConfig needed — see FactoryWeightNames'
+		// doc: the checkpoint already ships its packed expert tensors in the exact byte layout the
+		// factory MoE loader expects.
+		Weights: FactoryWeightNames(),
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
 			r := ParseConfig(configJSON)
 			if !r.OK {
