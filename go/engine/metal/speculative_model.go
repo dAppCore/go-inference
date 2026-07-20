@@ -31,6 +31,7 @@ import (
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/Qwen/qwen35"
+	zlabdflash "dappco.re/go/inference/model/arch/z-lab/dflash"
 	"dappco.re/go/inference/model/mtp"
 	coreio "dappco.re/go/io"
 )
@@ -42,10 +43,18 @@ import (
 // speculative loop and record inference.SpeculativeMetrics for the -draft
 // bench read (printMTPMetrics).
 type speculativeModel struct {
-	target     *ArchSession
-	pair       *AssistantPair
-	dflash     *DFlashDrafter
-	tok        *tokenizer.Tokenizer
+	target *ArchSession
+	pair   *AssistantPair
+	dflash *DFlashDrafter
+	// zlab is set instead of pair+dflash for a z-lab-convention DFlash
+	// pairing (assistant_dflash_zlab.go) — the real published-checkpoint
+	// convention, which cannot load through AssistantPair at all (see that
+	// file's header). pair stays nil in that case; every method that used to
+	// read pair.TargetArch falls back to target.arch (identical data, the
+	// same target checkpoint, just not re-derived through the AssistantPair
+	// path).
+	zlab *zLabDFlashDrafter
+	tok  *tokenizer.Tokenizer
 	info       inference.ModelInfo
 	modelType  string
 	draftBlock int
@@ -122,6 +131,21 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 	target, err := LoadDir(targetPath, maxLen)
 	if err != nil {
 		return nil, core.E("native.LoadSpeculativePair", "load target checkpoint", err)
+	}
+	// The z-lab DFlash convention (every published checkpoint — unprefixed
+	// layers.N.* tensors, no embedding/head/d2t of its own) cannot load
+	// through LoadAssistantPairDirs below: it demands model.embed_tokens
+	// .weight, which this convention architecturally lacks
+	// (assistant_dflash_zlab.go's header, docs/design-dflash-forward.md §1/§3).
+	// Recognise it FIRST, from config.json alone (no weights touched yet —
+	// the same "read config only" posture DetectDFlashDraft uses), and take
+	// the wholly separate z-lab load path. A draftPath that is not this
+	// convention (including a non-DFlash drafter, or the speculators
+	// convention) falls through to the existing flow untouched.
+	if cfgStr, readErr := coreio.Local.Read(core.PathJoin(draftPath, "config.json")); readErr == nil {
+		if _, ok := zlabdflash.ParseConfig([]byte(cfgStr)); ok {
+			return loadZLabSpeculativePair(target, targetPath, draftPath, draftBlock)
+		}
 	}
 	pair, err := LoadAssistantPairDirs(targetPath, draftPath)
 	if err != nil {
@@ -202,6 +226,11 @@ func (m *speculativeModel) Chat(ctx context.Context, messages []inference.Messag
 	targetHeads := 0
 	if m.pair != nil {
 		targetHeads = m.pair.TargetArch.Heads
+	} else if m.target != nil {
+		// A z-lab DFlash pairing carries no AssistantPair (loadZLabSpeculativePair
+		// leaves m.pair nil — see that function's header); the target session's
+		// own arch is the same checkpoint pair.TargetArch would otherwise mirror.
+		targetHeads = m.target.arch.Heads
 	}
 	prompt := speculativeChatPrompt(m.tok, m.turns, targetHeads, messages, cfg.EnableThinking)
 	return m.speculate(ctx, m.tok.Encode(prompt), cfg)
@@ -294,9 +323,18 @@ func (m *speculativeModel) speculate(ctx context.Context, ids []int32, cfg infer
 			}
 			return m.pair.GenerateFromSessionEach(m.target, ids, maxNew, int(eos), m.draftBlock, cfg.SuppressTokens, sink)
 		}
-		res, gerr = speculativeMethodRoute(m.pair, mtp, func() (AssistantGenerateResult, error) {
-			return m.generateDFlash(ids, maxNew, stop, cfg.SuppressTokens, sink)
-		})
+		if m.zlab != nil {
+			// A z-lab pairing has no AssistantPair to route through
+			// speculativeMethodRoute (m.pair is nil — see
+			// loadZLabSpeculativePair); it is unconditionally the
+			// block-diffusion lane, the only method this drafter shape
+			// supports.
+			res, gerr = m.generateDFlashZLab(ids, maxNew, stop, cfg.SuppressTokens, sink)
+		} else {
+			res, gerr = speculativeMethodRoute(m.pair, mtp, func() (AssistantGenerateResult, error) {
+				return m.generateDFlash(ids, maxNew, stop, cfg.SuppressTokens, sink)
+			})
+		}
 		m.record(res, len(ids), time.Since(start), gerr)
 	}
 }
@@ -353,6 +391,93 @@ func (m *speculativeModel) generateDFlash(ids []int32, maxNew int, stop, suppres
 		id, err := greedyBF16Suppressed(logits, m.target.arch.Vocab, suppress)
 		if err != nil {
 			runErr = core.E("native.speculativeModel.DFlash", "select verifier token", err)
+			return 0
+		}
+		return int(id)
+	}
+	tokens, stats := dflash.Generate(prompt, maxNew, proposer, next)
+	res := AssistantGenerateResult{
+		Tokens:            make([]int32, 0, len(tokens)),
+		DraftTokens:       stats.ProposedTokens,
+		AcceptedTokens:    stats.AcceptedTokens,
+		RejectedTokens:    stats.ProposedTokens - stats.AcceptedTokens,
+		TargetVerifyCalls: stats.Rounds,
+		TargetCalls:       stats.TargetCalls,
+		DraftCalls:        stats.Rounds,
+	}
+	for _, token := range tokens {
+		id := int32(token)
+		res.Tokens = append(res.Tokens, id)
+		if runErr != nil || (sink != nil && !sink(id)) || speculativeTokenInSet(id, stop) {
+			break
+		}
+	}
+	return res, runErr
+}
+
+// generateDFlashZLab drives the REAL z-lab block-diffusion proposer
+// (model/arch/z-lab/dflash + dflash_zlab.go's DFlashZLabForward) through the
+// same model-free, lossless DFlash verifier generateDFlash uses — the z-lab
+// twin, for the drafter shape assistant_dflash_zlab.go loads. Both the aux
+// source (ExtractAuxHiddensAllRaw) and the target verify oracle (next, below)
+// deliberately replay the full prefix every call — the SAME posture
+// generateDFlash's own next() already has (PrefillTokens always resets pos to
+// 0), not a regression. Moving both to the incremental live-session taps
+// (ExtractAuxHiddensLive) together is the named follow-up
+// (docs/design-dflash-forward.md §7 item 5), not required for this lane's
+// correctness gate.
+func (m *speculativeModel) generateDFlashZLab(ids []int32, maxNew int, stop, suppress []int32, sink AssistantTokenSink) (AssistantGenerateResult, error) {
+	if m.zlab == nil {
+		return AssistantGenerateResult{}, core.NewError("native.speculativeModel: DFlash pair has no z-lab drafter")
+	}
+	maskEmbed, err := m.target.embedID(m.zlab.MaskTokenID())
+	if err != nil {
+		return AssistantGenerateResult{}, core.E("native.speculativeModel.DFlashZLab", "embed mask token", err)
+	}
+	maskEmbed = append([]byte(nil), maskEmbed...) // embedID hands back shared scratch — pin it
+	prompt := speculativeInts(ids)
+	var runErr error
+	proposer := &zLabDFlashProposer{
+		drafter:   m.zlab,
+		maskEmbed: maskEmbed,
+		source: func(context []int) ([]float32, int, []byte, bool) {
+			prefix := speculativeInt32s(context)
+			raw, err := ExtractAuxHiddensAllRaw(m.target, prefix, m.zlab.AuxLayers())
+			if err != nil {
+				runErr = core.E("native.speculativeModel.DFlashZLab", "extract aux hiddens", err)
+				return nil, 0, nil, false
+			}
+			anchor, err := m.target.embedID(prefix[len(prefix)-1])
+			if err != nil {
+				runErr = core.E("native.speculativeModel.DFlashZLab", "embed anchor", err)
+				return nil, 0, nil, false
+			}
+			return raw, len(prefix), append([]byte(nil), anchor...), true
+		},
+		head: func(hidden []byte) (int32, error) {
+			logits, herr := m.target.headLogitsScratch(hidden, false)
+			if herr != nil {
+				return 0, herr
+			}
+			return greedyBF16Suppressed(logits, m.target.arch.Vocab, suppress)
+		},
+	}
+	next := func(prefix []int) int {
+		if runErr != nil {
+			return 0
+		}
+		if err := m.target.PrefillTokens(speculativeInt32s(prefix)); err != nil {
+			runErr = core.E("native.speculativeModel.DFlashZLab", "prefill verifier", err)
+			return 0
+		}
+		logits, err := m.target.BoundaryLogits()
+		if err != nil {
+			runErr = core.E("native.speculativeModel.DFlashZLab", "read verifier logits", err)
+			return 0
+		}
+		id, err := greedyBF16Suppressed(logits, m.target.arch.Vocab, suppress)
+		if err != nil {
+			runErr = core.E("native.speculativeModel.DFlashZLab", "select verifier token", err)
 			return 0
 		}
 		return int(id)
