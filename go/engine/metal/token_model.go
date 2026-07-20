@@ -11,6 +11,7 @@ import (
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/arch/Qwen/qwen35"
 	"dappco.re/go/inference/model/vision"
 )
 
@@ -69,6 +70,11 @@ type NativeTokenModel struct {
 	// unifiedVision is the encoder-free vision embedder (gemma4_unified, 12B):
 	// packs carry either the SigLIP tower (vision) or this — never both.
 	unifiedVision *vision.Unified
+	// qwenVision is the qwen35 factory vision tower (#59 item 1) — the third, mutually-exclusive
+	// vision payload: qwen hybrids never ship the SigLIP/unified payloads and vice versa. Attached
+	// by the load seam (loadQwenVisionTower); nil for every other checkpoint. Projection runs the
+	// tower's own patchify policy (qwen_vision.go), not the gemma feature config.
+	qwenVision *qwen35.VisionTower
 	// visionFeatureCfg is the image_processor preprocessing config (patch size,
 	// soft-token budget, pooling, rescale) read from processor_config.json at load
 	// time — ProjectImage needs it to patchify before the tower. nil for a
@@ -164,6 +170,9 @@ func (m *NativeTokenModel) AcceptsImageInput() bool {
 	if m.unifiedVision != nil {
 		return unifiedVisionEnabled
 	}
+	if m.qwenVision != nil {
+		return true
+	}
 	return m.vision != nil
 }
 
@@ -235,6 +244,11 @@ func (m *NativeTokenModel) projectImageWithCfg(image []byte, cfg *VisionImageFea
 		}
 		return features, n, nil
 	}
+	if m.qwenVision != nil {
+		// The qwen tower's grid is image-native (its own crop/patchify policy); the gemma feature
+		// config — including a per-request soft-token budget — does not apply to it.
+		return projectQwenImage(m.qwenVision, image)
+	}
 	patches, gridH, gridW, softTokens, err := VisionImagePatchesGrid(image, cfg)
 	if err != nil {
 		return nil, 0, core.E("native.vision", "preprocess image", err)
@@ -255,6 +269,8 @@ func (m *NativeTokenModel) ImagePlaceholderTokenID() int32 {
 		return 0
 	case m.unifiedVision != nil:
 		return m.unifiedVision.Cfg.ImageTokenID
+	case m.qwenVision != nil:
+		return m.qwenVision.Cfg.ImageTokenID
 	case m.vision != nil:
 		return m.vision.Cfg.ImageTokenID
 	}
@@ -268,6 +284,12 @@ func (m *NativeTokenModel) ImagePlaceholderBlock(softTokens int) string {
 	if m.unifiedVision != nil {
 		cfg := m.unifiedVision.Cfg
 		return nativeVisionPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
+	}
+	if m.qwenVision != nil {
+		// The Qwen-VL family's stable spellings — <|vision_start|> + <|image_pad|>×n +
+		// <|vision_end|> — are the arch package's constants; the numeric id the run must tokenise
+		// back to is the config's image_token_id (chatMultimodal verifies the round-trip).
+		return nativeVisionPlaceholderBlock(qwen35.VisionBeginToken, qwen35.VisionPadToken, qwen35.VisionEndToken, softTokens)
 	}
 	if m.vision == nil {
 		return ""
