@@ -71,7 +71,44 @@ var mtpRowsMoEMaxGroupSize atomic.Int64
 // that declined fused ExpGateUp would never engage on any real loaded gemma4 26B-A4B session, only
 // on a hand-built split fixture. false always means "the caller keeps the per-row path" — never a
 // wrong answer forced through.
-func mtpRowsMoEEligible(w MoEQuantLayerWeights, dModel, dFF int) bool {
+// qmvByteExactServable is encQMVByteExactAt's route decision WITHOUT the encode — the pure
+// probe eligibility uses so the driver can never start a verify it cannot finish. It MUST
+// mirror encQMVByteExactAt exactly (same helpers, same order); the driver's in-flight tripwire
+// error fires if they ever drift. Real-26B lesson (2026-07-20): expert dFF not %512 has NO
+// multi-row byte-exact route at any rows>=2 (tiled and chunked both require outDim%8 &&
+// inDim%512), and the coarse eligibility missed it — the pair hard-errored mid-verify on the
+// real checkpoint while every synthetic fixture chose aligned dims.
+func qmvByteExactServable(rows, outDim, inDim, gs, bits int) bool {
+	if rows <= 0 {
+		return false
+	}
+	if rows == 1 {
+		_, err := pipelineFor(qmvBF16KernelName(outDim, inDim, gs, bits))
+		return err == nil
+	}
+	if rows <= qmvRowsTiledCap() {
+		plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
+		if !ok || !plan.tiled {
+			return false
+		}
+		_, ok = lthnQMVRowsPipeline(plan.tiledKey)
+		return ok
+	}
+	if rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
+		return false
+	}
+	for _, m := range qmvRowsChunks(rows) {
+		if _, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: m}); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mtpRowsMoEEligible(w MoEQuantLayerWeights, dModel, dFF, maxRows int) bool {
+	if maxRows < 1 {
+		return false
+	}
 	if w.ClampedSwiGLU || len(w.SharedGate.Packed) > 0 {
 		return false
 	}
@@ -129,6 +166,20 @@ func mtpRowsMoEEligible(w MoEQuantLayerWeights, dModel, dFF int) bool {
 	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEEligible: expert down", w.ExpDown, w.NumExperts*dModel, w.ExpertDFF, w.ExpertGroupSize, w.ExpertBits); err != nil {
 		return false
 	}
+	// Every dispatch shape the batched path pushes through encQMVRowsGroupAt must have a
+	// byte-exact route at EVERY row count a K-row verify can produce (expert groups run 1..K,
+	// group chunking caps at qmvRowsMax): expert gate/up (expertDFF x dModel) + expert down
+	// (dModel x expertDFF) at the expert quant, local gate/up (dFF x dModel) + local down
+	// (dModel x dFF) at the local quant. Probing up front is what makes the driver's
+	// mid-verify decline impossible.
+	for r := 1; r <= min(maxRows, qmvRowsMax); r++ {
+		if !qmvByteExactServable(r, w.ExpertDFF, dModel, w.ExpertGroupSize, w.ExpertBits) ||
+			!qmvByteExactServable(r, dModel, w.ExpertDFF, w.ExpertGroupSize, w.ExpertBits) ||
+			!qmvByteExactServable(r, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
+			!qmvByteExactServable(r, dModel, dFF, w.LocalGroupSize, w.LocalBits) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -157,7 +208,7 @@ func mtpRowsMoEBatched(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, K int,
 	if len(hSlab) != K*rowBytes {
 		return nil, false, core.NewError("native.mtpRowsMoEBatched: hSlab must be K*dModel bf16 bytes")
 	}
-	if !mtpRowsMoEEligible(w, dModel, dFF) {
+	if !mtpRowsMoEEligible(w, dModel, dFF, K) {
 		return nil, false, nil
 	}
 	withAutoreleasePool(func() {

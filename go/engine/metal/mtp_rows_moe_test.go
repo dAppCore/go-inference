@@ -64,7 +64,7 @@ func TestMTPRowsMoEBatchedMatchesPerRow_Good(t *testing.T) {
 	const dModel, dFF, K = mtpRowsMoETestDModel, mtpRowsMoETestDFF, 4
 	w := mtpRowsMoETestWeights(t)
 
-	if !mtpRowsMoEEligible(w, dModel, dFF) {
+	if !mtpRowsMoEEligible(w, dModel, dFF, 4) {
 		t.Fatal("fixture geometry declined mtpRowsMoEEligible — the fixture must exercise the batched lane")
 	}
 
@@ -168,7 +168,7 @@ func TestMTPRowsMoEBatchedMatchesPerRow_FusedGateUp_Good(t *testing.T) {
 	const dModel, dFF, K = mtpRowsMoETestDModel, mtpRowsMoETestDFF, 4
 	w := mtpRowsMoETestWeightsFused(t)
 
-	if !mtpRowsMoEEligible(w, dModel, dFF) {
+	if !mtpRowsMoEEligible(w, dModel, dFF, 4) {
 		t.Fatal("fused fixture geometry declined mtpRowsMoEEligible — the fixture must exercise the fused-expert branch")
 	}
 
@@ -228,19 +228,19 @@ func TestMTPRowsMoEEligible_Ugly(t *testing.T) {
 
 	gptOSS := base
 	gptOSS.ClampedSwiGLU = true
-	if mtpRowsMoEEligible(gptOSS, dModel, dFF) {
+	if mtpRowsMoEEligible(gptOSS, dModel, dFF, 4) {
 		t.Fatal("gpt_oss (ClampedSwiGLU) must decline — it decodes on encGptOssMoEHalf, not this lane")
 	}
 
 	qwen := base
 	qwen.SharedGate = QuantWeight{Packed: []byte{1}, Scales: []byte{1}, Biases: []byte{1}, GroupSize: 1, Bits: 4}
-	if mtpRowsMoEEligible(qwen, dModel, dFF) {
+	if mtpRowsMoEEligible(qwen, dModel, dFF, 4) {
 		t.Fatal("qwen (bound SharedGate) must decline — it decodes on encQwenMoEHalf, not this lane")
 	}
 
 	malformedFused := base
 	malformedFused.ExpGateUp = QuantWeight{Packed: []byte{1}, Scales: []byte{1}, Biases: []byte{1}, GroupSize: 1, Bits: 4}
-	if mtpRowsMoEEligible(malformedFused, dModel, dFF) {
+	if mtpRowsMoEEligible(malformedFused, dModel, dFF, 4) {
 		t.Fatal("a wrong-shaped fused ExpGateUp tensor must decline — quantWeightViewsForShape validates the [numExperts*2*expertDFF, dModel] geometry")
 	}
 }

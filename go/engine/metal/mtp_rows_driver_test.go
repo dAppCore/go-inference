@@ -112,7 +112,7 @@ func TestMTPRowsDriverVerifyMatchesRowMajor_Good(t *testing.T) {
 	ts := moeQuantTensors(t, arch, quant)
 
 	probe := mtpRowsDriverNewSession(t, arch, quant, ts, nil)
-	if !mtpRowsDriverEligible(&probe.state) {
+	if !mtpRowsDriverEligible(&probe.state, 4) {
 		t.Fatal("fixture geometry declined mtpRowsDriverEligible — the fixture must exercise the layer-major driver")
 	}
 
@@ -219,13 +219,13 @@ func TestMTPRowsDriverEligible_Bad(t *testing.T) {
 	}
 	ts := moeQuantTensors(t, arch, quant)
 	sess := mtpRowsDriverNewSession(t, arch, quant, ts, []int32{1})
-	if !mtpRowsDriverEligible(&sess.state) {
+	if !mtpRowsDriverEligible(&sess.state, 4) {
 		t.Fatal("fixture session should be eligible before mutation")
 	}
 	saved := sess.state.moeQuant[0]
 	sess.state.moeQuant[0] = nil
 	defer func() { sess.state.moeQuant[0] = saved }()
-	if mtpRowsDriverEligible(&sess.state) {
+	if mtpRowsDriverEligible(&sess.state, 4) {
 		t.Fatal("a dense (non-MoE) layer must decline the whole block")
 	}
 }
@@ -233,10 +233,10 @@ func TestMTPRowsDriverEligible_Bad(t *testing.T) {
 // TestMTPRowsDriverEligible_Ugly pins the defensive nil/shape guards — no metallib required,
 // since both decline before any GPU-dependent check runs.
 func TestMTPRowsDriverEligible_Ugly(t *testing.T) {
-	if mtpRowsDriverEligible(nil) {
+	if mtpRowsDriverEligible(nil, 4) {
 		t.Fatal("nil state must decline")
 	}
-	if mtpRowsDriverEligible(&archDecodeState{}) {
+	if mtpRowsDriverEligible(&archDecodeState{}, 4) {
 		t.Fatal("an empty state (no layers) must decline")
 	}
 }

@@ -65,7 +65,7 @@ var mtpRowsDriverEngaged atomic.Int64
 // weights — can take the layer-major batched driver. false always means "the caller keeps the
 // row-major per-row lane" — this function is the ONLY gate; stepRowsMoEBatched trusts it and
 // treats any mid-block inconsistency as an error, not a fallback (see stepRowsMoEBatched's doc).
-func mtpRowsDriverEligible(s *archDecodeState) bool {
+func mtpRowsDriverEligible(s *archDecodeState, maxRows int) bool {
 	if s == nil || len(s.specs) == 0 || len(s.lb) != len(s.specs) || s.dModel <= 0 || s.dFF <= 0 {
 		return false
 	}
@@ -96,7 +96,7 @@ func mtpRowsDriverEligible(s *archDecodeState) bool {
 		if moeQ == nil {
 			return false // uniform-MoE only: a dense or bf16-MoE layer is out of scope
 		}
-		if !mtpRowsMoEEligible(*moeQ, s.dModel, s.dFF) {
+		if !mtpRowsMoEEligible(*moeQ, s.dModel, s.dFF, maxRows) {
 			return false
 		}
 	}
@@ -192,7 +192,7 @@ func (s *archDecodeState) stepRowsMoEBatched(embs []byte, startPos, K int) ([]by
 			return nil, err
 		}
 		if !ok {
-			return nil, core.NewError("native.archDecodeState.stepRowsMoEBatched: mtpRowsMoEBatched declined a layer after mtpRowsDriverEligible passed")
+			return nil, core.NewError("native.archDecodeState.stepRowsMoEBatched: mtpRowsMoEBatched declined a layer after mtpRowsDriverEligible passed — qmvByteExactServable is out of sync with encQMVByteExactAt (fix the probe, they must mirror)")
 		}
 
 		if s.lb[li].layerScalar != nil {
@@ -322,7 +322,7 @@ func (s *archDecodeState) applyLayerScalarRows(rowsHost []byte, layerScalar meta
 // work) unless mtpRowsDriverEligible already passed.
 func (s *ArchSession) verifyRowsMoEBatchedHiddens(draftTokens []int32, rowBytes int) ([][]byte, bool, error) {
 	K := len(draftTokens)
-	if K < 1 || s.perLayerInput != nil || !mtpRowsDriverEligible(&s.state) {
+	if K < 1 || s.perLayerInput != nil || !mtpRowsDriverEligible(&s.state, K) {
 		return nil, false, nil
 	}
 	embs := make([]byte, K*rowBytes)
