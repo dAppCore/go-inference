@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"github.com/tmc/apple/metal"
 )
 
 // gpu_busy_probe.go — the GPU duty-cycle instrument for the host-orchestrated lanes (the composed
@@ -62,11 +63,10 @@ func init() {
 
 // chargeGPUBusy adds a completed command buffer's GPU-execution span to the duty-cycle accumulator.
 // Called from waitUntilCompletedFast after the wait returns (GPU timestamps are then valid). Nil-cheap
-// when the probe is unarmed — a single relaxed bool load, no objc round-trip.
-func chargeGPUBusy(cb interface {
-	GPUStartTime() float64
-	GPUEndTime() float64
-}) {
+// when the probe is unarmed — a single relaxed bool load, no objc round-trip. The parameter must stay
+// the concrete struct type: an interface parameter boxes the struct on the heap at every call site
+// BEFORE the armed check, taxing all encode paths +1 alloc per wait (#56).
+func chargeGPUBusy(cb metal.MTLCommandBufferObject) {
 	if !gpuBusyArmed {
 		return
 	}
