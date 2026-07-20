@@ -144,13 +144,16 @@ func TestUnalignedNoCopyGPURead(t *testing.T) {
 
 // TestLthnQMVRowsParity gates the multi-row qmv routes against the production
 // per-row qmv on synthetic quant weights with per-group VARYING scales/biases
-// (uniform values are blind to group/row indexing defects). At fast-twin dims
-// (outDim%8, inDim%512) rows ≤ 4 take the register-tiled lthn_qmv_rows —
-// qmv_fast_impl's M-variant — through encQMVRowsBF16At and must be
-// BYTE-identical to the per-row qmv; rows 5..8 byte-assert through the
+// (uniform values are blind to group/row indexing defects). Rows ≤ 4 take the
+// register-tiled lthn_qmv_rows[_general] — the per-row oracle's OWN M-variant,
+// fast or general per qmvRowsTiledKeyFor's envelope rule — through
+// encQMVRowsBF16At and must be BYTE-identical to the per-row qmv on BOTH
+// envelopes (the general tier's own dim sweep is TestLthnQMVRowsGeneralParity,
+// qmv_rows_test.go). At fast-twin dims rows 5..8 byte-assert through the
 // byte-tier chunked route (encQMVRowsBF16ChunkedAt — the fold's K>4 entry)
 // while the PLAIN route keeps the gather there (throughput winner at small
-// dims, tolerance tier). Off-envelope dims: gather, tolerance only.
+// dims, tolerance tier); off-envelope rows 5..8 ride the gather on the plain
+// route likewise, tolerance only.
 func TestLthnQMVRowsParity(t *testing.T) {
 	requireNativeRuntime(t)
 	rng := rand.New(rand.NewSource(29))
@@ -204,8 +207,12 @@ func TestLthnQMVRowsParity(t *testing.T) {
 			if nan > 0 {
 				t.Fatalf("out=%d rows=%d produced %d NaN", outDim, rows, nan)
 			}
-			if fast && rows <= lthnQMVRowsMaxM {
-				// Fast-twin dims, single tiled dispatch: byte-identical to per-row.
+			if rows <= lthnQMVRowsMaxM {
+				// Single tiled dispatch — the envelope's own M-variant twin
+				// (fast or general): byte-identical to per-row on BOTH.
+				if plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits); !ok || !plan.tiled || plan.tiledKey.general == fast {
+					t.Fatalf("out=%d in=%d rows=%d: plan not the envelope's tiled twin (ok=%v tiled=%v general=%v fast=%v)", outDim, inDim, rows, ok, plan.tiled, plan.tiledKey.general, fast)
+				}
 				if !bytes.Equal(got, want) {
 					t.Errorf("out=%d in=%d rows=%d: tiled route not byte-identical to per-row qmv", outDim, inDim, rows)
 				}

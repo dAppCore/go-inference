@@ -216,6 +216,123 @@ func TestMTPRowsMoEBatchedMatchesPerRow_FusedGateUp_Good(t *testing.T) {
 	t.Logf("mtpRowsMoEBatched (fused ExpGateUp) == %d x MoEBlockQuantInto, byte for byte; max expert group size %d", K, maxGroup)
 }
 
+// mtpRows26B* pins the REAL gemma4 26B-A4B block geometry (config_test.go's
+// TestConfigArchRealGemma4_26B_A4B_MoEGeometry: hidden 2816, expert FF 704, dense FF 2112, quant
+// gs 64/b 4) — the projections whose NON-512-aligned inDims declined the whole #53 driver
+// up-front on the real checkpoint (see qmvByteExactServable's real-26B lesson). Expert COUNT is
+// not qmv geometry (the per-expert projection dims are what the byte-exact routes see), so the
+// fixture keeps numExperts=topK=2 — every row routes to BOTH experts and the grouped lane
+// engages deterministically, exactly as the aligned fixtures arrange.
+const (
+	mtpRows26BDModel    = 2816
+	mtpRows26BDFF       = 2112
+	mtpRows26BExpertDFF = 704
+)
+
+// mtpRowsMoE26BWeightsFused builds the fused-ExpGateUp fixture at the real 26B projection dims —
+// the live shape (Arch.FuseExpertGateUp synthesises ExpGateUp at every gemma4 load).
+func mtpRowsMoE26BWeightsFused(t testing.TB) MoEQuantLayerWeights {
+	t.Helper()
+	const dModel, dFF, expertDFF, numExperts = mtpRows26BDModel, mtpRows26BDFF, mtpRows26BExpertDFF, mtpRowsMoETestNumExperts
+	const gs, bits = mtpRowsMoETestGroupSize, mtpRowsMoETestBits
+	mkNorm := func(salt int) []byte { return toBF16Bytes(syntheticFloat32(dModel, salt)) }
+	mkQuant := func(outDim, inDim, salt int) QuantWeight {
+		p, s, b := quantizeProj(t, outDim, inDim, gs, bits, salt)
+		return QuantWeight{Packed: p, Scales: s, Biases: b, GroupSize: gs, Bits: bits}
+	}
+	w := MoEQuantLayerWeights{
+		NumExperts: numExperts, TopK: mtpRowsMoETestTopK, ExpertDFF: expertDFF,
+		ExpertGroupSize: gs, ExpertBits: bits,
+		LocalGroupSize: gs, LocalBits: bits,
+		RouterGroupSize: gs, RouterBits: bits,
+		PreFFNormW: mkNorm(21), PreFFNorm2W: mkNorm(22),
+		PostFFNorm1W: mkNorm(23), PostFFNorm2W: mkNorm(24), PostFFNormW: mkNorm(25),
+		LocalGate: mkQuant(dFF, dModel, 26), LocalUp: mkQuant(dFF, dModel, 27), LocalDown: mkQuant(dModel, dFF, 28),
+		RouterNormWScaled: mkNorm(29), Router: mkQuant(numExperts, dModel, 30),
+		ExpGate: mkQuant(numExperts*expertDFF, dModel, 31), ExpUp: mkQuant(numExperts*expertDFF, dModel, 32),
+		ExpDown: mkQuant(numExperts*dModel, expertDFF, 33),
+	}
+	w.ExpGateUp = fuseExpertGateUpQuant(w.ExpGate, w.ExpUp, numExperts, expertDFF, dModel, gs, bits)
+	w.ExpGate, w.ExpUp = QuantWeight{}, QuantWeight{}
+	return w
+}
+
+// TestMTPRowsMoEEligible_Real26BGeometry_Good pins the geometry unlock this tier exists for: the
+// REAL 26B block dims — every projection inDim NON-512-aligned — now pass mtpRowsMoEEligible at
+// a full verify band (maxRows 8 probes the general tiled rows 2..4 AND the chunked composition
+// 5..8 through qmvByteExactServable, per projection). Before the general tier this geometry
+// declined up-front and the layer-major driver never engaged on the real checkpoint.
+func TestMTPRowsMoEEligible_Real26BGeometry_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	w := mtpRowsMoE26BWeightsFused(t)
+	if !mtpRowsMoEEligible(w, mtpRows26BDModel, mtpRows26BDFF, 8) {
+		t.Fatal("REAL 26B geometry (2816/704/2112) declined mtpRowsMoEEligible — the unaligned tier must serve every block projection at rows 1..8")
+	}
+	for r := 1; r <= 8; r++ {
+		for _, p := range [][2]int{
+			{mtpRows26BExpertDFF, mtpRows26BDModel}, // expert gate/up
+			{mtpRows26BDModel, mtpRows26BExpertDFF}, // expert down
+			{mtpRows26BDFF, mtpRows26BDModel},       // local gate/up
+			{mtpRows26BDModel, mtpRows26BDFF},       // local down
+		} {
+			if !qmvByteExactServable(r, p[0], p[1], mtpRowsMoETestGroupSize, mtpRowsMoETestBits) {
+				t.Fatalf("qmvByteExactServable(rows=%d, out=%d, in=%d) = false on the real 26B projection set", r, p[0], p[1])
+			}
+		}
+	}
+}
+
+// TestMTPRowsMoEBatchedMatchesPerRow_Real26BGeometry_Good is the end-to-end byte receipt at the
+// REAL 26B dims: the grouped-by-expert batched block equals K sequential per-row block calls —
+// whose expert/local projections route through qmv_impl at these unaligned dims — bit for bit,
+// with the same engagement guard as the aligned fixtures (maxGroup > 1: the multi-row GENERAL
+// tile actually carried grouped pairs, not a vacuous all-singles compare).
+func TestMTPRowsMoEBatchedMatchesPerRow_Real26BGeometry_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, dFF, K = mtpRows26BDModel, mtpRows26BDFF, 4
+	w := mtpRowsMoE26BWeightsFused(t)
+
+	rowBytes := dModel * bf16Size
+	hSlab := toBF16Bytes(syntheticFloat32(K*dModel, 44))
+
+	got, ok, err := mtpRowsMoEBatched(hSlab, w, dModel, dFF, K, mtpRowsMoETestEps)
+	if err != nil {
+		t.Fatalf("mtpRowsMoEBatched: %v", err)
+	}
+	if !ok {
+		t.Fatal("mtpRowsMoEBatched declined the real 26B geometry — the unaligned tier must serve it")
+	}
+	if len(got) != K*rowBytes {
+		t.Fatalf("mtpRowsMoEBatched out bytes = %d, want %d", len(got), K*rowBytes)
+	}
+
+	want := make([]byte, 0, K*rowBytes)
+	for r := range K {
+		row := hSlab[r*rowBytes : (r+1)*rowBytes]
+		out, rerr := MoEBlockQuantInto(nil, row, w, dModel, dFF, mtpRowsMoETestEps)
+		if rerr != nil {
+			t.Fatalf("MoEBlockQuantInto row %d: %v", r, rerr)
+		}
+		want = append(want, out...)
+	}
+
+	maxGroup := mtpRowsMoEMaxGroupSize.Load()
+	if !bytes.Equal(got, want) {
+		firstDiff := -1
+		for i := range got {
+			if got[i] != want[i] {
+				firstDiff = i
+				break
+			}
+		}
+		t.Fatalf("mtpRowsMoEBatched (real 26B dims) diverged from the per-row reference at byte %d (K=%d, maxGroup=%d)", firstDiff, K, maxGroup)
+	}
+	if maxGroup < 2 {
+		t.Fatalf("26B fixture never grouped >1 pair onto one expert (maxGroup=%d) — the compare never engaged the multi-row general tile", maxGroup)
+	}
+	t.Logf("mtpRowsMoEBatched == %d x MoEBlockQuantInto at 2816/704/2112, byte for byte; max expert group size %d", K, maxGroup)
+}
+
 // TestMTPRowsMoEEligible_Ugly pins the decline discriminators: gpt_oss (ClampedSwiGLU), qwen (a
 // bound SharedGate), and a malformed (wrong-shaped) fused ExpGateUp tensor all decline —
 // mtpRowsMoEBatched must never be reached on a geometry it does not implement or cannot validate.
