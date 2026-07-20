@@ -9,21 +9,49 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/kv"
 	sharedmodel "dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 )
 
-type hipComposedModelShape interface {
-	HiddenSize() int
-	NumLayers() int
-}
-
-// loadHIPComposedTextModel lets a registered config-composed architecture enter
-// the shared session model before the standard transformer tensor loader.
-func loadHIPComposedTextModel(path string, cfg inference.LoadConfig) (inference.TextModel, bool, error) {
+// loadHIPComposedTextModel used to detour any config-composed architecture (an ArchSpec registered
+// with a Composed hook — the Qwen 3.6 gated-delta hybrid family, plus the arch-zoo's other hybrid/MoE
+// registrations) through model/composed's LoadComposedDir, ahead of HIP's own GGUF/safetensors native
+// loader. #50 retires model/composed; HIP was one of its last two consumers in go-inference (the
+// other: cmd/mtp-probe) — this function no longer imports, or calls into, model/composed.
+//
+// It still probes config.json — through the shared, composed-free model.ProbeDirArch/ProbeModelTypes/
+// LookupArch (the root "dappco.re/go/inference/model" package, not model/composed) — to recognise a
+// checkpoint that WOULD have matched a Composed hook, so a retired checkpoint gets a clean, NAMED
+// decline instead of silently falling into HIP's regular native pipeline. That matters: HIP's own
+// architecture-profile metadata (engine/hip/profile) lists several composed-only archs as "supported"
+// for INSPECTION/labelling purposes (qwen3_6, qwen3_6_moe, qwen3_next, deepseek, deepseek_r1, mixtral,
+// composed, hybrid, …), but that table is proven insufficient as a stand-in for "HIP has a working
+// forward kernel" — qwen3_6 sits in that very table and STILL needed the composed detour, because HIP's
+// native runtime has no gated-delta linear-attention kernel (see dense_config.go's staged, unwired
+// IsQwen36Hybrid/Qwen36NativeGuardMessage — written for a native guard that was never wired in because
+// the composed fallback made it unnecessary). Letting a composed-registered checkpoint fall through
+// unchecked risks the native pipeline silently misreading a hybrid/MoE/MLA tensor layout as a plain
+// dense transformer — a coherent-but-wrong decode, not a clean failure. So every architecture that
+// carries a Composed hook declines HERE, named, rather than falling through unexamined. The full set
+// affected today (queried live off the registry, not hardcoded): qwen3_5/qwen3_5_moe(+text aliases)/
+// qwen3_6/qwen3_6_moe/qwen3_next (dual-route, model/arch/Qwen/qwen35), mixtral/dbrx/olmoe/granitemoe/
+// qwen2_moe/qwen3_moe (dual-route, each with its own factory port elsewhere — HIP has none), jetmoe/
+// deepseek_v2/deepseek_v3/deepseek_vl_v2/glm_ocr(+text)/dots_ocr(+1_5)/llama4(+text) (composed-only,
+// several already refuse unconditionally inside their own Composed hook), the generic "composed"/
+// "hybrid" ids, and the qwen3_5_mtp/qwen3_6_mtp/qwen3_5_mtp_text drafter ids.
+//
+// Route (a) — routing through HIP's native runtime via the shared factory route (model.Load) — is not
+// available for any of these architectures: HIP's nativeRuntime interface only ever consumes
+// nativeLoadConfig (HIP's own GGUF/safetensors-tensor-shaped struct); nothing converts a
+// *model.LoadedModel (model.Load's reactive Assemble output) into one. The only caller of model.Load in
+// this package loads Gemma4's vision/audio TOWER as a sub-component (gemma4_vision_encoder.go,
+// gemma4_unified_vision.go, gemma4_audio_tower.go) — there is no glue for a full text decode. Building
+// that glue — plus a HIP-side hybrid/MoE/MLA forward to actually execute what Assemble describes —
+// mirrors engine/metal's arch_qwen_fused.go, itself a substantial GPU-kernel investment; it is a new
+// engine seam, not a same-file sever. Route (b) — a clean typed decline — applies uniformly to every
+// architecture this loader used to reach.
+func loadHIPComposedTextModel(path string, _ inference.LoadConfig) (inference.TextModel, bool, error) {
 	stat := core.Stat(path)
 	if !stat.OK {
 		return nil, false, nil
@@ -32,57 +60,38 @@ func loadHIPComposedTextModel(path string, cfg inference.LoadConfig) (inference.
 	if !ok || !info.IsDir() {
 		return nil, false, nil
 	}
-
-	tokenModel, matched, err := sharedmodel.LoadComposedDir(path)
-	if err != nil || !matched {
-		return nil, matched, err
-	}
-	if cfg.AdapterPath != "" {
-		return nil, true, core.NewError("rocm.LoadModel: adapters are not supported by composed models")
-	}
-	sessionModel, ok := tokenModel.(sharedmodel.SessionModel)
-	if !ok {
-		return nil, true, core.NewError("rocm.LoadModel: composed loader returned a model without incremental sessions")
-	}
-	shape, ok := tokenModel.(hipComposedModelShape)
-	if !ok || shape.HiddenSize() <= 0 || shape.NumLayers() <= 0 {
-		return nil, true, core.NewError("rocm.LoadModel: composed loader returned incomplete model geometry")
-	}
-	modelType, _, err := sharedmodel.ProbeDirArch(path)
+	modelType, configJSON, err := sharedmodel.ProbeDirArch(path)
 	if err != nil {
-		return nil, true, err
+		// A directory whose config.json can't be read is not this function's concern to report —
+		// mirrors loadHIPMamba2TextModel's identical sibling check (mamba2_runtime.go), which defers
+		// the same failure to whichever loader in native.go's pipeline runs next.
+		return nil, false, nil
 	}
-	tok, err := tokenizer.LoadTokenizer(core.PathJoin(path, "tokenizer.json"))
-	if err != nil {
-		return nil, true, core.E("rocm.LoadModel", "load composed tokenizer", err)
-	}
-	maxLen := cfg.ContextLen
-	if maxLen <= 0 {
-		maxLen = sharedmodel.ProbeDirContextWindow(path)
-		if maxLen <= 0 {
-			maxLen = defaultContextLengthCap
+	spec, matched := sharedmodel.LookupArch(modelType)
+	declared := modelType
+	if !matched {
+		// Multimodal wrapper fallback, mirroring LoadComposedDir's own resolution: the top-level
+		// model_type is unregistered, but a nested text_config.model_type carries the Composed hook.
+		if _, textModelType := sharedmodel.ProbeModelTypes(configJSON); textModelType != "" {
+			if textSpec, textMatched := sharedmodel.LookupArch(textModelType); textMatched {
+				spec, matched, declared = textSpec, true, textModelType
+			}
 		}
 	}
-	source := &hipComposedTextModel{
-		model:            sessionModel,
-		tokenizer:        tok,
-		modelType:        modelType,
-		numLayers:        shape.NumLayers(),
-		declaredStops:    loadGenerationConfigStops(path),
-		declaredSampling: loadGenerationConfigSamplingDefaults(path),
+	if !matched || spec.Composed == nil {
+		return nil, false, nil
 	}
-	modelInfo := inference.ModelInfo{
-		Architecture: modelType,
-		VocabSize:    tokenModel.Vocab(),
-		NumLayers:    shape.NumLayers(),
-		HiddenSize:   shape.HiddenSize(),
-	}
-	return engine.NewTextModel(source, tok, modelType, modelInfo, maxLen), true, nil
+	return nil, true, core.NewError("rocm.LoadModel: " + declared + " is a config-composed/hybrid architecture with no native ROCm execution path — the model/composed fallback that used to serve it is retired (#50)")
 }
 
-// hipComposedTextModel bridges the backend-neutral composed SessionModel into
-// HIP's shared engine serving surface. The model owns host f32 weights; its
-// projection hooks remain available for portable HIP++ acceleration.
+// hipComposedTextModel bridges a backend-neutral, token-prefix sharedmodel.SessionModel into HIP's
+// shared engine serving surface (OpenEngineSession → hipComposedEngineSession). Despite the name, it is
+// no longer composed-specific: loadHIPComposedTextModel (above) retired its use of model/composed
+// (#50), so the only remaining constructor is mamba2_runtime.go's loadHIPMamba2TextModel, wrapping a
+// model/arch/mamba2 recurrent SessionModel. The type keeps its historical name because
+// mamba2_runtime.go (outside this sever's scope) already references it by that name — a rename is a
+// follow-up, not part of this change. The model owns host f32 weights; its projection hooks remain
+// available for portable HIP++ acceleration.
 type hipComposedTextModel struct {
 	model            sharedmodel.SessionModel
 	tokenizer        engine.TextTokenizer
@@ -113,12 +122,17 @@ func (model *hipComposedTextModel) OpenEngineSession() (engine.Session, error) {
 
 func (*hipComposedTextModel) Close() error { return nil }
 
+// DeclaredChatTemplate reports the ChatML template for a qwen-family architecture and the Gemma
+// template otherwise, resolved through HIP's own architecture-profile registry
+// (hipArchitectureChatTemplate/ROCmChatTemplateID, inference_model.go + profile/architecture.go) rather
+// than model/composed's ChatMLDialect helper — the last direct reference this file held to model/
+// composed, removed as part of #50's sever.
 func (model *hipComposedTextModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	if model == nil {
 		return engine.ChatTemplate{}, false
 	}
-	if composed.ChatMLDialect(model.modelType) {
-		return hipQwenChatTemplate(), true
+	if template, ok := hipArchitectureChatTemplate(model.modelType); ok {
+		return template, true
 	}
 	return engine.GemmaChatTemplate(engine.DetectTurnTokens(model.tokenizer), false), true
 }
@@ -143,10 +157,10 @@ func (*hipComposedTextModel) ActiveMemoryBytes() uint64 { return 0 }
 
 func (*hipComposedTextModel) PeakMemoryBytes() uint64 { return 0 }
 
-// hipComposedEngineSession retains a composed architecture as its complete
-// token prefix. Each decode deterministically rebuilds recurrent/KV state from
-// that prefix; generated tokens are committed so later turns and snapshots are
-// complete.
+// hipComposedEngineSession retains a token-prefix-shaped model (today: Mamba2, via
+// mamba2_runtime.go's loadHIPMamba2TextModel — see hipComposedTextModel's doc comment) as its complete
+// token prefix. Each decode deterministically rebuilds recurrent/KV state from that prefix; generated
+// tokens are committed so later turns and snapshots are complete.
 type hipComposedEngineSession struct {
 	model        sharedmodel.SessionModel
 	prompt       []int32
