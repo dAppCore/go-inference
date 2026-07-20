@@ -2682,6 +2682,18 @@ func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32, exact boo
 	}
 
 	rowBytes := s.arch.Hidden * bf16Size
+	// #53: LTHN_MTP_ROWS_MOE=1 arms the layer-major driver (mtp_rows_driver.go) for the byte-exact
+	// greedy lane ONLY — it groups each layer's MoE expert weight sweep across the K draft rows
+	// instead of paying it once per row. Declines cleanly (ok=false, no side effect) on any geometry
+	// it does not implement, falling straight through to the unchanged per-row lane below. The
+	// sampled fold lane (verifyBatchedHiddens above) is untouched by this lever.
+	if exact && mtpRowsMoEForced {
+		if rows, ok, rerr := s.verifyRowsMoEBatchedHiddens(draftTokens, rowBytes); rerr != nil {
+			return nil, rerr
+		} else if ok {
+			return rows, nil
+		}
+	}
 	if rows, ok := s.mtpVerifyHiddenRowsScratch(len(draftTokens), rowBytes); ok {
 		for i, draft := range draftTokens {
 			hidden, err := s.stepID(draft)
