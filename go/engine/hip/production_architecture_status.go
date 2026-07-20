@@ -4,6 +4,10 @@
 
 package hip
 
+import (
+	rocmprofile "dappco.re/go/inference/engine/hip/profile"
+)
+
 type ProductionArchitectureStatusReport struct {
 	TotalArchitectures        int
 	NativeArchitectures       int
@@ -62,7 +66,25 @@ func productionArchitectureGap(id string) ProductionArchitectureGap {
 		MoE:           isROCmMoEArchitecture(id),
 		MissingNative: productionArchitectureMissingNative(id),
 		NextWork:      productionArchitectureNextWork(id),
+		Notes:         productionArchitectureGapNotes(id),
 	}
+}
+
+// productionArchitectureGapNotes reports the truthful, per-id explanation for
+// why id has no native ROCm runtime yet. It defers to
+// profile.ArchitectureProfileNotes — the single source of truth c73a9377
+// corrected post-#50 — rather than duplicating its judgement here, so this
+// report cannot drift back out of sync with the profile registry the way it
+// did between the composed-engine retirement and this fix (this file was
+// last touched at the original hip-engine landing and was never revisited by
+// either the composed-strip or the truth-pass merges). For every id currently
+// reachable here (deepseek, deepseek_r1, mixtral, qwen3_6, qwen3_6_moe,
+// qwen3_moe, qwen3_next — the full set produced by
+// DefaultProductionArchitectureStatus today), that source names the retired
+// composed detour by number and states plainly that no native execution path
+// replaced it.
+func productionArchitectureGapNotes(id string) []string {
+	return rocmprofile.ArchitectureProfileNotes(id)
 }
 
 func productionArchitectureFamily(id string) string {

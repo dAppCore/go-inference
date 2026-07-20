@@ -26,9 +26,19 @@ func isROCmGemma4BackboneArchitecture(architecture string) bool {
 	return isROCmGemma4Architecture(architecture) || normalizeROCmArchitecture(architecture) == "diffusion_gemma"
 }
 
+// isROCmDenseQuickWinArchitecture reports whether architecture is a plain dense
+// transformer (single attention type, no MoE routing, no hybrid/recurrent
+// layers) eligible for HIP's experimental loader-neutral small-decode route
+// (hip_small_decode.go) — a synthetic-buffer kernel smoke path, not a full
+// model loader. "qwen3_6" does NOT belong here: dense_config.go's
+// IsQwen36Hybrid names it a gated-delta hybrid (interleaved linear/full
+// attention), and its only attempt at real end-to-end ROCm serving was the
+// composed-engine detour that #50 retired outright (loadHIPComposedTextModel
+// declines it, profile.SupportedNativeArchitecture excludes it) — there is no
+// working route left for it to be a "quick win" candidate for.
 func isROCmDenseQuickWinArchitecture(architecture string) bool {
 	switch normalizeROCmArchitecture(architecture) {
-	case "gemma3", "gemma3_text", "qwen3", "qwen3_6", "mistral", "phi", "glm", "glm4", "hermes", "granite":
+	case "gemma3", "gemma3_text", "qwen3", "mistral", "phi", "glm", "glm4", "hermes", "granite":
 		return true
 	default:
 		return false
