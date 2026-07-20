@@ -674,6 +674,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	if s.trace {
 		return decline("trace")
 	}
+	// State-lane TurboQuant (tq_kv_state.go): the batched pass is not TQ-aware
+	// for this carrier — its landings would write bf16 rows where the decode
+	// reads packed codes. Decline wholesale; the per-token stepToken path is
+	// TQ-correct by construction (correct-but-sequential prefill, v1).
+	if s.tqStateArmed() {
+		return decline("state turboquant caches: batched pass not TQ-aware for the state carrier — per-token prefill")
+	}
 	// recorded-ICB sessions (the quant decode lane): the replay owns the LIVE per-layer caches —
 	// s.lb is ring-sized and UNUSED there, so the batch must read and write the replay's own
 	// buffers or its rows would be invisible to every later replayed step. The per-row interleave's

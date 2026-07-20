@@ -599,8 +599,10 @@ func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionS
 	// TurboQuant sessions decline every KV-view consumer (v1): snapshot capture
 	// / restore, -state sleep-wake, and the drafter export all read bf16-shaped
 	// cache bytes the packed code caches do not hold (unlike q8, which keeps
-	// bf16 mirrors). This is THE choke point every such path funnels through.
-	if s.state.icb.hasKVTQ() {
+	// bf16 mirrors). This is THE choke point every such path funnels through —
+	// and it gates BOTH carriers (recorded-ICB and state-lane, tq_kv_state.go):
+	// a second carrier must never slip past a decline written for the first.
+	if s.hasKVTQAny() {
 		return nil, core.NewError("native.ArchSession: -kv-cache turboquant declines KV snapshot / conversation-state sleep (v1) — serve stateless or drop -kv-cache")
 	}
 	ownerCount := s.ownedStateCacheLayers()

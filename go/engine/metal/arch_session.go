@@ -691,6 +691,29 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 		state.ropeScale = archRopeScale(arch)               // RoPE position scale, distinct from the attention scale
 		state.ropeFreqs = uploadRopePeriods(arch.RopeFreqs) // YaRN long-context spectrum (nil ⇒ base rope)
 		state.bindGatedDeltaBF16(g.Layers)                  // MixerGatedDelta recurrence weights (#18); no-op for an all-attention model
+		// State-lane TurboQuant arming (tq_kv_state.go): a stack the arch ICB
+		// cannot record (MoE / gated-delta — stepToken decode) arms the STATE
+		// carrier, before pool init (an armed carrier declines the paged pool).
+		// Trace sessions fall through to the ICB block's refusal below.
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && archSpecsRequireStepToken(arch.Layer) && !state.trace {
+			if serr := tqKVArchServable(arch, nil, tqMode); serr != nil {
+				buildErr = serr
+				return
+			}
+			tqState, terr := allocArchStateKVTQ(arch.Layer, lb, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.AttnOutputGate, tqMode)
+			if terr != nil {
+				buildErr = terr
+				return
+			}
+			if !tqState.any() {
+				buildErr = core.NewError("native.NewArchSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
+			state.kvTQState = tqState
+		}
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return
@@ -837,9 +860,11 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
 			buildErr = tqErr
 			return
-		} else if tqMode != nil && !sess.icbEligible() {
-			// A session the ICB cannot record (trace, MoE, hybrid) has no
-			// TurboQuant lane — refuse rather than run silently native (#41 S3).
+		} else if tqMode != nil && !sess.icbEligible() && !sess.state.tqStateArmed() {
+			// A session neither carrier serves (trace: per-layer host reads of
+			// bf16 cache bytes) has no TurboQuant lane — refuse rather than run
+			// silently native (#41 S3). MoE/hybrid stacks armed the STATE
+			// carrier above (tq_kv_state.go) and never reach this refusal.
 			buildErr = core.NewError("native.NewArchSession: -kv-cache turboquant requires the recorded decode lane (this session cannot record the arch ICB)")
 			return
 		} else if sess.icbEligible() {
@@ -957,6 +982,29 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		state.attnOutputGate = arch.AttnOutputGate
 		state.bindGatedAttnQuant(g.Layers) // gated full-attention layers (Qwen3.5 attn_output_gate); no-op unless the Arch declares it
 		state.bindQwenFusedDense(g.Layers) // fused device lane for the Qwen holders (whole-layer, dense FFN); no-op elsewhere
+		// State-lane TurboQuant arming (tq_kv_state.go): a stack the arch ICB
+		// cannot record (MoE / gated-delta — stepToken decode) arms the STATE
+		// carrier, before pool init (an armed carrier declines the paged pool).
+		// Trace sessions fall through to the ICB block's refusal below.
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && archSpecsRequireStepToken(arch.Layer) && !state.trace {
+			if serr := tqKVArchServable(arch, nil, tqMode); serr != nil {
+				buildErr = serr
+				return
+			}
+			tqState, terr := allocArchStateKVTQ(arch.Layer, lb, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.AttnOutputGate, tqMode)
+			if terr != nil {
+				buildErr = terr
+				return
+			}
+			if !tqState.any() {
+				buildErr = core.NewError("native.NewArchQuantSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
+			state.kvTQState = tqState
+		}
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return
@@ -1162,9 +1210,11 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
 			buildErr = tqErr
 			return
-		} else if tqMode != nil && !sess.icbEligible() {
-			// A session the ICB cannot record (trace, MoE, hybrid) has no
-			// TurboQuant lane — refuse rather than run silently native (#41 S3).
+		} else if tqMode != nil && !sess.icbEligible() && !sess.state.tqStateArmed() {
+			// A session neither carrier serves (trace: per-layer host reads of
+			// bf16 cache bytes) has no TurboQuant lane — refuse rather than run
+			// silently native (#41 S3). MoE/hybrid stacks armed the STATE
+			// carrier above (tq_kv_state.go) and never reach this refusal.
 			buildErr = core.NewError("native.NewArchQuantSession: -kv-cache turboquant requires the recorded decode lane (this session cannot record the arch ICB)")
 			return
 		} else if sess.icbEligible() {
