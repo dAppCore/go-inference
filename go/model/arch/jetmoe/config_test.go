@@ -9,6 +9,9 @@ import (
 	coreio "dappco.re/go/io"
 )
 
+// TestConfig_Arch_Good pins the documented "happy path" for an always-refuses arch: a
+// realistic, dimensionally-valid published jetmoe-8b config still refuses, but with the
+// MoA-specific message (not a dimension-guard error) — #59 item 6's restored named refusal.
 func TestConfig_Arch_Good(t *testing.T) {
 	data, err := coreio.Local.Read(core.PathJoin("testdata", "jetmoe-jetmoe-8b-config.json"))
 	if err != nil {
@@ -18,22 +21,25 @@ func TestConfig_Arch_Good(t *testing.T) {
 	if r := core.JSONUnmarshal([]byte(data), &cfg); !r.OK {
 		t.Fatal(r.Error())
 	}
-	arch, err := cfg.Arch()
-	if err != nil {
-		t.Fatal(err)
+	_, err = cfg.Arch()
+	if err == nil {
+		t.Fatal("Arch: expected a clean MoA refusal, got a resolved architecture")
 	}
-	if arch.Hidden != 2048 || arch.Heads != 32 || arch.KVHeads != 16 || arch.HeadDim != 128 || arch.RotaryDim != 128 {
-		t.Fatalf("attention geometry = hidden %d heads %d/%d head/rotary %d/%d", arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.RotaryDim)
-	}
-	if arch.Experts != 8 || arch.TopK != 2 || arch.ExpertFF != 5632 || !arch.NormaliseMoETopK || arch.SharedExperts != 0 {
-		t.Fatalf("MoE geometry = experts %d top-k %d expert FF %d normalise %v shared %d", arch.Experts, arch.TopK, arch.ExpertFF, arch.NormaliseMoETopK, arch.SharedExperts)
+	if !core.Contains(err.Error(), "Mixture-of-Attention (MoA) requires routed query/output attention projections with shared KV") {
+		t.Fatalf("Arch refusal %q must name the MoA gap", err.Error())
 	}
 }
 
+// TestConfig_Arch_Bad proves an incomplete config fails the dimension guard — the error
+// propagated is the dimension-guard message, NOT the MoA refusal _Good and _Ugly both reach
+// once dimensions validate.
 func TestConfig_Arch_Bad(t *testing.T) {
 	_, err := (Config{HiddenSize: 8}).Arch()
 	if err == nil {
 		t.Fatal("incomplete architecture accepted")
+	}
+	if core.Contains(err.Error(), "Mixture-of-Attention") {
+		t.Fatal("Arch: an incomplete config must fail the dimension guard, not reach the MoA refusal")
 	}
 }
 
@@ -42,6 +48,9 @@ func TestConfig_Arch_Ugly(t *testing.T) {
 	_, err := cfg.Arch()
 	if err == nil {
 		t.Fatal("top-k greater than expert count accepted")
+	}
+	if core.Contains(err.Error(), "Mixture-of-Attention") {
+		t.Fatal("Arch: an invalid top-k must fail its own guard, not reach the MoA refusal")
 	}
 }
 

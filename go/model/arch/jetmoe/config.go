@@ -9,8 +9,6 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
-const defaultRopeTheta float32 = 10_000
-
 // Config is the architecture-relevant subset of a JetMoE config.json.
 type Config struct {
 	ModelType         string  `json:"model_type"`
@@ -33,7 +31,12 @@ type Config struct {
 // InferFromWeights satisfies model.ArchConfig. Published JetMoE configs declare their geometry.
 func (c *Config) InferFromWeights(weights map[string]safetensors.Tensor) { weights = nil }
 
-// Arch resolves JetMoE's grouped-query attention and routed FFN declaration.
+// Arch deliberately refuses: every published JetMoE checkpoint routes attention through
+// per-expert query/output projections sharing one KV projection (Mixture-of-Attention, MoA —
+// see MOA_GAP.md), a primitive the engine does not implement. Misreading MoA as standard dense
+// attention would silently drop the routed half, so Arch refuses rather than resolve a wrong
+// geometry — the same early-refusal shape as deepseek's MLA gap
+// (model/arch/deepseek-ai/deepseek/config.go Config.Arch).
 func (c Config) Arch() (model.Arch, error) {
 	if c.HiddenSize <= 0 || c.FFNHiddenSize <= 0 || c.NumHiddenLayers <= 0 || c.NumAttentionHeads <= 0 || c.MoENumExperts <= 0 || c.MoETopK <= 0 || c.VocabSize <= 0 {
 		return model.Arch{}, core.NewError("jetmoe.Config.Arch: all architecture dimensions must be > 0")
@@ -41,53 +44,5 @@ func (c Config) Arch() (model.Arch, error) {
 	if c.MoETopK > c.MoENumExperts {
 		return model.Arch{}, core.NewError("jetmoe.Config.Arch: moe_top_k exceeds moe_num_experts")
 	}
-	headDim := c.KVChannels
-	if headDim == 0 {
-		if c.HiddenSize%c.NumAttentionHeads != 0 {
-			return model.Arch{}, core.NewError("jetmoe.Config.Arch: hidden_size must divide by num_attention_heads when kv_channels is absent")
-		}
-		headDim = c.HiddenSize / c.NumAttentionHeads
-	}
-	kvHeads := c.NumKeyValueHeads
-	if kvHeads == 0 {
-		kvHeads = c.NumAttentionHeads
-	}
-	if c.NumAttentionHeads%kvHeads != 0 {
-		return model.Arch{}, core.NewError("jetmoe.Config.Arch: num_attention_heads must be a multiple of num_key_value_heads")
-	}
-	eps := c.RMSNormEps
-	if eps == 0 {
-		eps = c.LayerNormEpsilon
-	}
-	if eps == 0 {
-		eps = 1e-5
-	}
-	rope := c.RopeTheta
-	if rope == 0 {
-		rope = defaultRopeTheta
-	}
-	rotaryPercent := c.RotaryPercent
-	if rotaryPercent == 0 {
-		rotaryPercent = 1
-	}
-	rotaryDim := int(float32(headDim) * rotaryPercent)
-	layerTypes := make([]string, c.NumHiddenLayers)
-	for i := range layerTypes {
-		layerTypes[i] = "full_attention"
-	}
-	layers := model.DeriveLayers(layerTypes, 0)
-	for i := range layers {
-		layers[i].HeadDim, layers[i].KVHeads, layers[i].MoE = headDim, kvHeads, true
-	}
-	return model.Arch{
-		Hidden: c.HiddenSize, Heads: c.NumAttentionHeads, KVHeads: kvHeads,
-		HeadDim: headDim, GlobalHeadDim: headDim, GlobalKVHeads: kvHeads,
-		FF: c.FFNHiddenSize, Vocab: c.VocabSize, Experts: c.MoENumExperts,
-		TopK: c.MoETopK, ExpertFF: c.FFNHiddenSize,
-		MoEGating: model.MoEGatingSoftmax, NormaliseMoETopK: true, SharedExperts: 0,
-		Eps: eps, AttnScale: float32(1 / core.Pow(float64(headDim), 0.5)), EmbedScale: 1,
-		RopeBase: rope, RopeLocalBase: rope, RopeScale: 1,
-		RotaryDim: rotaryDim, RotaryDimLocal: rotaryDim,
-		TieWordEmbeddings: c.TieWordEmbeddings, Layer: layers,
-	}, nil
+	return model.Arch{}, core.NewError("jetmoe.Config.Arch: Mixture-of-Attention (MoA) requires routed query/output attention projections with shared KV; the engine implements no such attention primitive")
 }
