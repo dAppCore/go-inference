@@ -154,6 +154,76 @@ func TestPackExperts_Good(t *testing.T) {
 	}
 }
 
+// TestPackExperts_QuantisedScalesAndBiases_Good proves packExperts also packs a quantised role's
+// .scales/.biases sibling tensors, in the SAME row-major expert-index order as .weight — the
+// packed-scales/biases convention model.Assemble's quant loader (LoadLinear/affineGeometry) reads
+// off a natively-packed checkpoint (gemma4's switch_glu.*.weight/.scales/.biases), synthesised here
+// from Qwen-MoE's per-expert quant triples so a quantised Qwen-MoE checkpoint can serve too (#59).
+func TestPackExperts_QuantisedScalesAndBiases_Good(t *testing.T) {
+	const numLayers, numExperts, ff, hidden, groups = 1, 3, 8, 4, 2
+	in := expertCheckpoint(numLayers, numExperts, ff, hidden)
+	for e := 0; e < numExperts; e++ {
+		base := uint16(e * 10)
+		prefix := core.Sprintf("model.layers.0.mlp.experts.%d.", e)
+		in[prefix+"gate_proj.scales"], in[prefix+"gate_proj.biases"] = bf16Tensor2D(ff, groups, base+201), bf16Tensor2D(ff, groups, base+202)
+		in[prefix+"up_proj.scales"], in[prefix+"up_proj.biases"] = bf16Tensor2D(ff, groups, base+203), bf16Tensor2D(ff, groups, base+204)
+		in[prefix+"down_proj.scales"], in[prefix+"down_proj.biases"] = bf16Tensor2D(hidden, groups, base+205), bf16Tensor2D(hidden, groups, base+206)
+	}
+
+	out, err := packExperts(in, numLayers, numExperts)
+	if err != nil {
+		t.Fatalf("packExperts: %v", err)
+	}
+	for _, role := range expertRoles {
+		var wantScales, wantBiases []byte
+		var outDim int
+		for e := 0; e < numExperts; e++ {
+			sSrc := in[core.Sprintf("model.layers.0.mlp.experts.%d.%s.scales", e, role.hfSuffix)]
+			bSrc := in[core.Sprintf("model.layers.0.mlp.experts.%d.%s.biases", e, role.hfSuffix)]
+			wantScales = append(wantScales, sSrc.Data...)
+			wantBiases = append(wantBiases, bSrc.Data...)
+			outDim = sSrc.Shape[0]
+		}
+		packedName := core.Sprintf("model.layers.0%s.%s", packedExpertsPrefix, role.packedSuffix)
+		scales, ok := out[packedName+".scales"]
+		if !ok || !bytes.Equal(scales.Data, wantScales) {
+			t.Fatalf("role %s: packed scales missing or != concatenation of experts 0..%d in order", role.packedSuffix, numExperts-1)
+		}
+		if len(scales.Shape) != 2 || scales.Shape[0] != outDim*numExperts || scales.Shape[1] != groups {
+			t.Fatalf("role %s: packed scales shape = %v, want [%d,%d]", role.packedSuffix, scales.Shape, outDim*numExperts, groups)
+		}
+		biases, ok := out[packedName+".biases"]
+		if !ok || !bytes.Equal(biases.Data, wantBiases) {
+			t.Fatalf("role %s: packed biases missing or != concatenation of experts 0..%d in order", role.packedSuffix, numExperts-1)
+		}
+	}
+}
+
+// TestPackExperts_QuantisedScalesAndBiases_Bad proves a partially-quantised expert (scales present,
+// biases absent) fails loudly rather than silently packing a scales-only triple, and that a
+// mismatched scales shape across experts is caught the same way the weight shape check already is.
+func TestPackExperts_QuantisedScalesAndBiases_Bad(t *testing.T) {
+	t.Run("biases_absent", func(t *testing.T) {
+		in := expertCheckpoint(1, 2, 8, 4)
+		in["model.layers.0.mlp.experts.0.gate_proj.scales"] = bf16Tensor2D(8, 2, 1)
+		if _, err := packExperts(in, 1, 2); err == nil {
+			t.Fatal("packExperts accepted a role with scales but no biases")
+		}
+	})
+	t.Run("scales_shape_mismatch", func(t *testing.T) {
+		in := expertCheckpoint(1, 2, 8, 4)
+		for _, e := range []int{0, 1} {
+			prefix := core.Sprintf("model.layers.0.mlp.experts.%d.", e)
+			in[prefix+"gate_proj.scales"] = bf16Tensor2D(8, 2, uint16(e))
+			in[prefix+"gate_proj.biases"] = bf16Tensor2D(8, 2, uint16(e))
+		}
+		in["model.layers.0.mlp.experts.1.gate_proj.scales"] = bf16Tensor2D(8, 3, 9) // wrong group count
+		if _, err := packExperts(in, 1, 2); err == nil {
+			t.Fatal("packExperts accepted experts whose scales shapes disagree")
+		}
+	})
+}
+
 // TestPackExperts_Bad proves a genuinely malformed/partial checkpoint fails LOUDLY, naming the exact
 // tensor that broke the pattern, rather than silently packing a short or misaligned tensor.
 func TestPackExperts_Bad(t *testing.T) {

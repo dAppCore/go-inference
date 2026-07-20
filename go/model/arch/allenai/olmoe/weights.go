@@ -62,29 +62,65 @@ func packExperts(in map[string]safetensors.Tensor, numLayers, numExperts int) (m
 	if numLayers <= 0 || numExperts <= 0 {
 		return nil, core.NewError("olmoe.packExperts: num_hidden_layers and num_experts must be > 0")
 	}
-	out := make(map[string]safetensors.Tensor, len(in)+numLayers*len(expertRoles))
+	out := make(map[string]safetensors.Tensor, len(in)+numLayers*len(expertRoles)*3)
 	for name, tensor := range in {
 		out[name] = tensor
 	}
 	for layer := 0; layer < numLayers; layer++ {
 		prefix := core.Sprintf("model.layers.%d.mlp.experts.", layer)
 		for _, role := range expertRoles {
-			packed, err := packExpertRole(in, prefix, role, numExperts)
+			weight, scales, biases, err := packExpertRole(in, prefix, role, numExperts)
 			if err != nil {
 				return nil, err
 			}
-			out[core.Sprintf("model.layers.%d%s.%s.weight", layer, packedExpertsPrefix, role)] = *packed
+			packedName := core.Sprintf("model.layers.%d%s.%s", layer, packedExpertsPrefix, role)
+			out[packedName+".weight"] = *weight
+			if scales != nil {
+				out[packedName+".scales"] = *scales
+				out[packedName+".biases"] = *biases
+			}
 		}
 	}
 	return out, nil
 }
 
 // packExpertRole concatenates one role's numExperts per-expert 2-D tensors (prefix+"{e}."+role+".weight")
-// into one [numExperts·outDim, inDim] tensor, row-major. Every expert must share the first expert's shape
-// and dtype — a real checkpoint always does; a mismatch means a malformed or partial checkpoint, reported
-// by the exact tensor name that broke the pattern.
-func packExpertRole(in map[string]safetensors.Tensor, prefix, role string, numExperts int) (*safetensors.Tensor, error) {
-	firstName := prefix + "0." + role + ".weight"
+// into one [numExperts·outDim, inDim] tensor, row-major — and, when the checkpoint ships this role
+// QUANTISED (a sibling "<expert>.<role>.scales" tensor present), the matching packed .scales/.biases
+// pair alongside it, stacked the identical way. Concatenating scales/biases along the same output-row
+// axis as the weight reproduces exactly the shape model.Assemble's quant loader (LoadLinear/
+// affineGeometry) already reads off a NATIVELY packed checkpoint — gemma4's switch_glu.*.weight/
+// .scales/.biases ship as one [experts·outDim, inDim] weight beside a matching [experts·outDim,
+// nGroups] scales/biases pair per role; this synthesises the identical convention from OLMoE's
+// per-expert triples, so LoadLinear derives the SAME groupSize/bits from the packed shapes with zero
+// engine-side change. A role with no ".scales" sibling packs .weight only (the existing bf16
+// behaviour, byte-identical). Every expert must share the first expert's shape and dtype for
+// whichever components are present — a real checkpoint always does; a mismatch means a malformed or
+// partial checkpoint, reported by the exact tensor name that broke the pattern.
+func packExpertRole(in map[string]safetensors.Tensor, prefix, role string, numExperts int) (weight, scales, biases *safetensors.Tensor, err error) {
+	weight, err = packExpertComponent(in, prefix, role, "weight", numExperts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if _, quantised := in[prefix+"0."+role+".scales"]; !quantised {
+		return weight, nil, nil, nil
+	}
+	if scales, err = packExpertComponent(in, prefix, role, "scales", numExperts); err != nil {
+		return nil, nil, nil, err
+	}
+	if biases, err = packExpertComponent(in, prefix, role, "biases", numExperts); err != nil {
+		return nil, nil, nil, err
+	}
+	return weight, scales, biases, nil
+}
+
+// packExpertComponent concatenates one role's numExperts per-expert 2-D tensors
+// (prefix+"{e}."+role+"."+component) into one [numExperts·outDim, lastDim] tensor, row-major — the
+// shape-check-and-stack shared by the weight, scales and biases components. Every expert must share
+// the first expert's shape and dtype; a mismatch means a malformed or partial checkpoint, reported by
+// the exact tensor name that broke the pattern.
+func packExpertComponent(in map[string]safetensors.Tensor, prefix, role, component string, numExperts int) (*safetensors.Tensor, error) {
+	firstName := prefix + "0." + role + "." + component
 	first, ok := in[firstName]
 	if !ok {
 		return nil, core.NewError("olmoe.packExperts: " + firstName + " absent")
@@ -92,16 +128,16 @@ func packExpertRole(in map[string]safetensors.Tensor, prefix, role string, numEx
 	if len(first.Shape) != 2 {
 		return nil, core.NewError("olmoe.packExperts: " + firstName + " is not 2-D")
 	}
-	outDim, inDim := first.Shape[0], first.Shape[1]
+	outDim, lastDim := first.Shape[0], first.Shape[1]
 	rowBytes := len(first.Data)
 	data := make([]byte, 0, rowBytes*numExperts)
 	for e := 0; e < numExperts; e++ {
-		name := core.Sprintf("%s%d.%s.weight", prefix, e, role)
+		name := core.Sprintf("%s%d.%s.%s", prefix, e, role, component)
 		t, ok := in[name]
 		if !ok {
 			return nil, core.NewError("olmoe.packExperts: " + name + " absent")
 		}
-		if len(t.Shape) != 2 || t.Shape[0] != outDim || t.Shape[1] != inDim {
+		if len(t.Shape) != 2 || t.Shape[0] != outDim || t.Shape[1] != lastDim {
 			return nil, core.NewError("olmoe.packExperts: " + name + " shape mismatch")
 		}
 		if t.Dtype != first.Dtype {
@@ -112,5 +148,5 @@ func packExpertRole(in map[string]safetensors.Tensor, prefix, role string, numEx
 		}
 		data = append(data, t.Data...)
 	}
-	return &safetensors.Tensor{Dtype: first.Dtype, Shape: []int{outDim * numExperts, inDim}, Data: data}, nil
+	return &safetensors.Tensor{Dtype: first.Dtype, Shape: []int{outDim * numExperts, lastDim}, Data: data}, nil
 }
