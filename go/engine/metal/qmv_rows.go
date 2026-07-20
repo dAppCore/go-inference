@@ -98,6 +98,49 @@ func qmvRowsTiledCap() int {
 
 type lthnQMVRowsKey struct {
 	groupSize, bits, m int
+	// general selects the qmv_impl M-variant (lthn_qmv_rows_general) — the
+	// byte-parity twin of the NON-fast per-row route, for dims outside the
+	// qmv_fast envelope (outDim%8==0 && inDim%512==0). false = the fast twin.
+	general bool
+}
+
+// lthnQMVRowsKernelName derives the metallib host name a key resolves — ONE
+// place, consulted by both the plain and ICB pipeline resolvers, so the
+// fast/general twin split can never skew between live encode and ICB record.
+func lthnQMVRowsKernelName(key lthnQMVRowsKey) string {
+	variant := ""
+	if key.general {
+		variant = "_general"
+	}
+	return core.Sprintf("lthn_qmv_rows%s_bfloat16_t_gs_%d_b_%d", variant, key.groupSize, key.bits)
+}
+
+// qmvRowsTiledKeyFor is THE tiled-band rule: the register-tiled kernel key for
+// one M-sized dispatch at this geometry, or ok=false when no tiled kernel
+// serves it. On the qmv_fast envelope (outDim%8==0 && inDim%512==0 — the same
+// rule qmvBF16KernelName routes the per-row decode by) M rides the fast twin up
+// to qmvRowsTiledCap() (wide cases included when the lane is armed). Every
+// other dim routes per-row to qmv_impl, so M rides the general twin
+// (lthn_qmv_rows_general — qmv_impl's M-variant, byte-identical to THAT
+// oracle), capped at the flat tile's 4: there is no general wide variant
+// (docs/design-qmv-rows-unaligned.md — the fast wide twin was live-refuted and
+// the unaligned rows>4 band is chunk-composed byte-tier only). The plan gate,
+// the chunked fold, the byte-exact encoder and the servability probe ALL
+// consult this, so live, record and probe stay one rule.
+func qmvRowsTiledKeyFor(m, outDim, inDim, gs, bits int) (lthnQMVRowsKey, bool) {
+	if m < 2 {
+		return lthnQMVRowsKey{}, false
+	}
+	if outDim%8 == 0 && inDim%512 == 0 {
+		if m > qmvRowsTiledCap() {
+			return lthnQMVRowsKey{}, false
+		}
+		return lthnQMVRowsKey{groupSize: gs, bits: bits, m: m}, true
+	}
+	if m > lthnQMVRowsMaxM {
+		return lthnQMVRowsKey{}, false
+	}
+	return lthnQMVRowsKey{groupSize: gs, bits: bits, m: m, general: true}, true
 }
 
 var (
@@ -119,11 +162,10 @@ func lthnQMVRowsPipeline(key lthnQMVRowsKey) (metal.MTLComputePipelineState, boo
 		lthnQMVRowsPSOCache[key] = nil
 		return nil, false
 	}
-	name := core.Sprintf("lthn_qmv_rows_bfloat16_t_gs_%d_b_%d", key.groupSize, key.bits)
 	fc := metal.NewMTLFunctionConstantValues()
 	m := int32(key.m)
 	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&m), metal.MTLDataTypeInt, 0)
-	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(name, fc)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(lthnQMVRowsKernelName(key), fc)
 	if err != nil || fn == nil || fn.GetID() == 0 {
 		lthnQMVRowsPSOCache[key] = nil
 		return nil, false
@@ -189,19 +231,25 @@ func qmvRowsChunks(rows int) []int {
 
 // encQMVRowsBF16ChunkedAt is the BYTE-TIER multi-row qmv for rows >
 // lthnQMVRowsMaxM: qmvRowsChunks tiled dispatches of 2..4 rows each, every
-// chunk byte-identical to the per-row qmv on the fast-twin envelope
-// (outDim%8==0 && inDim%512==0). handled=false when the envelope, a chunk
-// PSO, or the kill switch declines — the caller keeps its throughput route.
-// Only the laneSet GEMM fold (projectRowsByteTier) takes this: the plain
+// chunk byte-identical to the per-row qmv — the fast twin on the qmv_fast
+// envelope, the general (qmv_impl M-variant) twin on every other dim
+// (qmvRowsTiledKeyFor picks per chunk; 2..4 chunks always fit the general flat
+// cap). handled=false when a chunk key/PSO or the kill switch declines — the
+// caller keeps its throughput route. Only the laneSet GEMM fold
+// (projectRowsByteTier) and the byte-exact MoE lane take this: the plain
 // encQMVRowsBF16At keeps the gather, which wins on throughput at small dims.
 func encQMVRowsBF16ChunkedAt(enc metal.MTLComputeCommandEncoder, wq, scales, biases, in, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, inOff, outOff uint, rows, outDim, inDim, gs, bits int) (bool, error) {
-	if rows <= lthnQMVRowsMaxM || rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
+	if rows <= lthnQMVRowsMaxM || rows > qmvRowsMax || !qmvChunksEnabled() {
 		return false, nil
 	}
 	chunks := qmvRowsChunks(rows)
 	psos := make([]metal.MTLComputePipelineState, len(chunks))
 	for i, m := range chunks {
-		pso, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: m})
+		key, ok := qmvRowsTiledKeyFor(m, outDim, inDim, gs, bits)
+		if !ok {
+			return false, nil
+		}
+		pso, ok := lthnQMVRowsPipeline(key)
 		if !ok {
 			return false, nil
 		}
@@ -224,14 +272,14 @@ func qmvRowsPlanFor(rows, outDim, inDim, gs, bits int) (qmvRowsPlan, bool) {
 	if rows < 2 || rows > qmvRowsMax || inDim <= 0 || gs <= 0 || inDim%gs != 0 || (inDim*bits)%32 != 0 {
 		return qmvRowsPlan{}, false
 	}
-	// The register-tiled kernel is qmv_fast_impl's M-variant, so it may fire
-	// ONLY where the per-row oracle itself routes fast — outDim%8==0 &&
-	// inDim%512==0, the qmvBF16KernelName rule (which also keeps the plain
-	// k-loop tail-free at packs=2). Other dims route per-row to the qmv_impl
-	// twin this kernel does not reproduce; they keep the gather fallback.
-	// Rows 5..8 resolve the WIDE halved-tile cases behind the same host name.
-	if rows <= qmvRowsTiledCap() && outDim%8 == 0 && inDim%512 == 0 {
-		key := lthnQMVRowsKey{groupSize: gs, bits: bits, m: rows}
+	// Each envelope gets its per-row oracle's OWN M-variant (qmvRowsTiledKeyFor —
+	// the one tiled-band rule): fast dims (outDim%8==0 && inDim%512==0, the
+	// qmvBF16KernelName rule) ride qmv_fast_impl's M-variant, rows 5..8
+	// resolving the WIDE halved-tile cases behind the same host name when the
+	// lane is armed; every other dim rides qmv_impl's M-variant
+	// (lthn_qmv_rows_general, flat 2..4 only). A geometry with no tiled key —
+	// or a missing PSO — keeps the gather fallback.
+	if key, ok := qmvRowsTiledKeyFor(rows, outDim, inDim, gs, bits); ok {
 		if _, ok := lthnQMVRowsPipeline(key); ok {
 			return qmvRowsPlan{tiled: true, tiledKey: key}, true
 		}
@@ -285,11 +333,10 @@ func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, 
 		lthnQMVRowsICBPSOCache[key] = nil
 		return nil, false
 	}
-	name := core.Sprintf("lthn_qmv_rows_bfloat16_t_gs_%d_b_%d", key.groupSize, key.bits)
 	fc := metal.NewMTLFunctionConstantValues()
 	m := int32(key.m)
 	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&m), metal.MTLDataTypeInt, 0)
-	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(name, fc)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(lthnQMVRowsKernelName(key), fc)
 	if err != nil || fn == nil || fn.GetID() == 0 {
 		lthnQMVRowsICBPSOCache[key] = nil
 		return nil, false
@@ -315,14 +362,17 @@ func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, 
 // (grid-Z, qmv_fast bytes, weight re-streamed per row — the THROUGHPUT winner
 // at small dims; the byte-tier chunked variant is encQMVRowsBF16ChunkedAt,
 // fold-only).
-// Byte identity: the tiled kernel is qmv_fast_impl's M-variant and the plan
-// gate admits it only on fast-twin dims (outDim%8==0 && inDim%512==0 — the
-// same rule qmvBF16KernelName routes the per-row decode by), so a tiled encode
-// is byte-identical to the per-row qmv row for row. Its packs=1 predecessor
-// claimed qmv_impl parity and was refuted 2026-07-13 (~1 ulp value-dependent
-// accumulation drift); the fast-twin match replaced it. The gather fallback
-// remains a THROUGHPUT route (MTP verify draft blocks), not a byte-identity
-// claim — qmvProjector.rowsByteTier accepts tiled plans only.
+// Byte identity: the tiled kernel is the per-row oracle's OWN M-variant —
+// qmv_fast_impl's on fast-twin dims (outDim%8==0 && inDim%512==0, the rule
+// qmvBF16KernelName routes the per-row decode by), qmv_impl's
+// (lthn_qmv_rows_general, rows 2..4) everywhere else — qmvRowsTiledKeyFor
+// matches twin to envelope, so a tiled encode is byte-identical to the per-row
+// qmv row for row on EVERY dim it serves. The refuted 2026-07-13 predecessor
+// (one packs=1 kernel claiming parity with BOTH per-row twins; ~1 ulp
+// value-dependent accumulation drift on fast dims) is exactly why the twins
+// stay separate and envelope-matched. The gather fallback remains a THROUGHPUT
+// route (MTP verify draft blocks), not a byte-identity claim —
+// qmvProjector.rowsByteTier accepts tiled plans only.
 func encQMVRowsBF16At(enc metal.MTLComputeCommandEncoder, wq, scales, biases, in, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, inOff, outOff uint, rows, outDim, inDim, gs, bits int) (bool, error) {
 	plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
 	if !ok {
