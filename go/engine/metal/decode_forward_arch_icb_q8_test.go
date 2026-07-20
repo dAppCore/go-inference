@@ -50,6 +50,49 @@ func newKVQ8ICBFixtureLen(t testing.TB, maxLen int) *ArchSession {
 	return sess
 }
 
+// newKVQ8ICBSharedFixture is newKVQ8ICBFixture with numShared TRAILING
+// shared-KV layers (gemma3n E2B/E4B's own tail-sharing shape, #53/#54's
+// sharer branch — encAttnHalfSharedKVQ8At): the plain fixture has no sharers
+// at all (NumKVSharedLayers defaults to 0), so it never exercises a layer
+// reading a q8 OWNER's cache through KVShareFrom.
+// maxLen=512 keeps archQ8ICBBlocks at 0 (single-pass q8 SDPA) — below
+// sdpa2PassMinKV(1024), so this fixture and TestKVQ8ICBVerifyInterleaveDeepByteExact's
+// (maxLen=4096, forced 2-pass from position 0) exercise the two DISTINCT
+// branches encSDPADecodeQ8ForcedBlocksAt can take, not the same one twice.
+func newKVQ8ICBSharedFixture(t testing.TB, numShared int) *ArchSession {
+	return newKVQ8ICBSharedFixtureLen(t, numShared, 512)
+}
+
+func newKVQ8ICBSharedFixtureLen(t testing.TB, numShared, maxLen int) *ArchSession {
+	t.Helper()
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 256, 256, 64
+	const numLayers, gs, bits = 3, 64, 4
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		NumKVSharedLayers: numShared,
+		Quantization:      &model.QuantConfig{GroupSize: gs, Bits: bits},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	lm, err := model.Assemble(quantGemma4Tensors(t, arch, gs, bits), arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	sess, err := NewArchQuantSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchQuantSession: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	return sess
+}
+
 // TestKVQ8ICBDecodeTracksBF16 pins the #367 slice-B contract: with
 // LTHN_KV_Q8_ICB armed, the recorded ICB stores GLOBAL K/V as int8 + group
 // scales and reads them through the q8 SDPA — the per-step hiddens must stay
@@ -873,4 +916,164 @@ func TestKVQ8ICBBidirSpanChunkSplitRoutesCausalRuns(t *testing.T) {
 		t.Fatalf("split bidir prefill diverges structurally from the single-chunk run: worst |Δ|=%g (scale %g)", worst, scale)
 	}
 	t.Logf("split bidir tracked single-chunk: worst |Δ| = %.5g (scale %.5g)", worst, scale)
+}
+
+// TestKVQ8ICBVerifyInterleaveByteExact pins #53/#54: the byte-exact MTP verify
+// (exact=true — verifyAssistantDraftHiddens never arms verifyFoldSmallK unless
+// LTHN_MTP_VERIFY_FOLD=1 forces it, TestMtpVerifyFoldArmed_Good) used to
+// decline WHOLESALE under q8 ICB caches at K<=batchedDenseICBMaxRows ("q8 icb
+// caches: batch below the fold gate"), paying K sequential stepID rounds
+// instead of the one-command-buffer interleave every other cache format gets
+// (mtp-diag: "verifyBatchedHiddens: state declined the batched dense lane").
+// The interleave now lands q8 rows itself (encAttnHalfKVQ8InputAt / the
+// sharer twin encAttnHalfSharedKVQ8At) with encKVQ8StoreRows at rows=1 (the
+// fold's own K-row store, at N=1) and encSDPADecodeQ8ForcedBlocksAt keyed on
+// archQ8ICBBlocks (the SAME session-maxLen-derived 2-pass choice the recorded
+// ICB replay bakes at construction, not the live n — #53/#54's real bug: an
+// n-keyed 2-pass choice agrees with the replay only once n itself crosses
+// sdpa2PassMinKV, diverging by ~1 ULP below that even though both sides read
+// the identical landed q8 bytes) — the SAME per-row kernels sequential stepID
+// uses for every other op, so unlike the fold's qmm_t token-identity tier
+// (quantisation distance only, #55 — see
+// TestKVQ8ICBBatchedPrefillMatchesSequential's verify block, which arms
+// verifyFoldSmallK and compares by tolerance), this lane must be
+// BYTE-IDENTICAL to sequential stepID. The fixture carries a trailing SHARED
+// layer (gemma3n E2B/E4B's own shape) so both new branches — the q8 OWNER row
+// and the sharer-of-a-q8-owner row — run in one receipt.
+func TestKVQ8ICBVerifyInterleaveByteExact(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	batched := newKVQ8ICBSharedFixture(t, 1)
+	seq := newKVQ8ICBSharedFixture(t, 1)
+	if !batched.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+	sharerLayer, ownerQ8Layer := -1, -1
+	for li := range batched.state.specs {
+		if !batched.state.specs[li].OwnsCache() {
+			sharerLayer = li
+		} else if batched.state.icb.kvQ8.on(li) {
+			ownerQ8Layer = li
+		}
+	}
+	if sharerLayer < 0 {
+		t.Fatal("fixture must carry a shared-KV layer (gemma3n E2B/E4B shape) — NumKVSharedLayers did not take")
+	}
+	if ownerQ8Layer < 0 {
+		t.Fatal("fixture must carry a q8-armed owner layer")
+	}
+	if !batched.state.icb.kvQ8.on(batched.state.specs[sharerLayer].KVShareFrom) {
+		t.Fatal("fixture's shared layer must point at a q8-armed owner — the sharer branch (encAttnHalfSharedKVQ8At) would go untested otherwise")
+	}
+
+	// warm both sessions identically, well clear of position 0 (a realistic
+	// mid-conversation MTP verify, not a boundary case at pos 0).
+	warm := []int32{1, 5, 3, 9, 7, 2, 4, 8, 6, 1}
+	for _, id := range warm {
+		if _, err := batched.stepID(id); err != nil {
+			t.Fatalf("batched warm stepID: %v", err)
+		}
+		if _, err := seq.stepID(id); err != nil {
+			t.Fatalf("seq warm stepID: %v", err)
+		}
+	}
+
+	// the byte-exact verify lane: verifyFoldSmallK is NEVER armed here — pin
+	// that first, so an engagement below can only be the interleave, never the
+	// (non-byte-identical) fold silently substituting for it.
+	if batched.state.verifyFoldSmallK {
+		t.Fatal("verifyFoldSmallK must be false — this test pins the byte-exact (non-fold) lane the real MTP verify takes")
+	}
+	draft := []int32{2, 4, 6, 8, 1} // K=5, well below batchedDenseICBMaxRows(16)
+	vh, vBatched, verr := batched.verifyBatchedHiddens(draft)
+	if verr != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", verr)
+	}
+	if !vBatched {
+		t.Fatal("q8 verify must ENGAGE the interleave at K=5 without verifyFoldSmallK (#53/#54) — the vacuous-compare trap: an unengaged (declined) batch would trivially equal the sequential twin because both sides would just be running the same stepID loop")
+	}
+	if len(vh) != len(draft) {
+		t.Fatalf("verify rows = %d, want %d", len(vh), len(draft))
+	}
+	for i, id := range draft {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("seq verify stepID(%d): %v", i, serr)
+		}
+		if !bytes.Equal(vh[i], hs) {
+			worst, scale, firstAt := 0.0, 0.0, -1
+			for j := 0; j+1 < len(hs); j += 2 {
+				a := float64(bf16ToF32(vh[i][j], vh[i][j+1]))
+				b := float64(bf16ToF32(hs[j], hs[j+1]))
+				if d := math.Abs(a - b); d > worst {
+					worst = d
+				}
+				if m := math.Abs(b); m > scale {
+					scale = m
+				}
+				if a != b && firstAt < 0 {
+					firstAt = j / 2
+				}
+			}
+			t.Fatalf("row %d: q8 interleave verify diverged from sequential stepID — NOT byte-identical (worst |Δ|=%g scale=%g firstDiffElem=%d of %d)", i, worst, scale, firstAt, len(hs)/2)
+		}
+	}
+	t.Logf("q8 interleave verify byte-identical to sequential over %d rows (owner layer %d, sharer layer %d)", len(draft), ownerQ8Layer, sharerLayer)
+}
+
+// TestKVQ8ICBVerifyInterleaveDeepByteExact is TestKVQ8ICBVerifyInterleaveByteExact
+// on a session whose maxLen(4096) crosses sdpa2PassMinKV(1024) — archQ8ICBBlocks
+// forces the 2-pass q8 SDPA pair from position 0 (mirroring the recorded ICB
+// replay's OWN unconditional choice, #53/#54), so this receipt covers the
+// OTHER branch encSDPADecodeQ8ForcedBlocksAt can take — the shallow fixture
+// (maxLen=512) stays on single-pass throughout.
+func TestKVQ8ICBVerifyInterleaveDeepByteExact(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	batched := newKVQ8ICBSharedFixtureLen(t, 1, 4096)
+	seq := newKVQ8ICBSharedFixtureLen(t, 1, 4096)
+	if !batched.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+
+	warm := make([]int32, sdpa2PassMinKV+6)
+	for i := range warm {
+		warm[i] = int32((i*11 + 2) % 60)
+	}
+	for _, id := range warm {
+		if _, err := batched.stepID(id); err != nil {
+			t.Fatalf("batched warm stepID: %v", err)
+		}
+		if _, err := seq.stepID(id); err != nil {
+			t.Fatalf("seq warm stepID: %v", err)
+		}
+	}
+
+	if batched.state.verifyFoldSmallK {
+		t.Fatal("verifyFoldSmallK must be false — this test pins the byte-exact (non-fold) lane")
+	}
+	draft := []int32{3, 7, 1, 9, 5} // K=5, past the 2-pass knee via basePos
+	vh, vBatched, verr := batched.verifyBatchedHiddens(draft)
+	if verr != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", verr)
+	}
+	if !vBatched {
+		t.Fatal("deep q8 verify must ENGAGE the interleave at K=5 without verifyFoldSmallK (#53/#54)")
+	}
+	for i, id := range draft {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("seq verify stepID(%d): %v", i, serr)
+		}
+		if !bytes.Equal(vh[i], hs) {
+			t.Fatalf("deep row %d: q8 interleave verify diverged from sequential stepID — NOT byte-identical", i)
+		}
+	}
+	t.Logf("deep q8 interleave verify byte-identical to sequential over %d rows at basePos=%d", len(draft), len(warm))
 }

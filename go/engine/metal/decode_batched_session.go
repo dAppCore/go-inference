@@ -656,6 +656,265 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 	return nil
 }
 
+// archQ8ICBBlocks mirrors decode_forward_arch_icb.go's sdpa2PassICBBlocks
+// EXACTLY: the recorded ICB replay bakes ONE 2-pass-or-not decision (and block
+// count) for EVERY q8 GLOBAL layer from the session's maxLen at construction —
+// unconditionally, from position 0, NEVER re-derived from the live n — fanned
+// to the worst-served global layer (fewest KV heads, #365). #53/#54's own bug:
+// encSDPADecodeQ8At (and this whole file's other q8 SDPA call sites) instead
+// pick 2-pass from the LIVE n, which only agrees with the replay once n itself
+// crosses sdpa2PassMinKV — below that knee the replay is ALREADY on the 2-pass
+// ladder (safe at any smaller live n, per the replay's own comment: a block
+// whose strided walk starts past n writes finite_min/0 partials the pass-2
+// merge zeroes) while an n-keyed re-encode is still single-pass — two
+// different kernels computing the "same" softmax, not bit-identical. A fresh
+// per-row re-encode standing in for the replay (this file's interleave) must
+// therefore key off maxLen, not n, or its bytes drift from the replay by the
+// same token-identity-tier margin the #55 qmm_t fold already carries — just
+// from the ATTENTION side instead of the projections.
+func (s *archDecodeState) archQ8ICBBlocks() int {
+	if s.maxLen < sdpa2PassMinKV {
+		return 0
+	}
+	minKV := 0
+	for li := range s.specs {
+		if s.specs[li].Attention != model.GlobalAttention {
+			continue
+		}
+		if kv := kvHeadsOf(s.specs[li], s.nKVHeads); minKV == 0 || kv < minKV {
+			minKV = kv
+		}
+	}
+	if minKV == 0 {
+		return 0
+	}
+	return int(sdpa2PassBlocks(s.maxLen, minKV))
+}
+
+// interleaveKVQ8Usable reports whether the per-row interleave (foldAttn=false,
+// the small-K lane the byte-exact MTP verify takes — #53/#54) can serve this
+// K-row batch under q8 ICB caches. The interleave never lands a whole chunk
+// before any row reads (the fold's land-before-read contract, #15), so a
+// bidirectional row cap is never servable here — that keeps declining to the
+// existing fold-or-sequential routing unchanged. Otherwise the interleave's q8
+// needs are exactly the per-row q8 kernels: encKVQ8StoreRows at rows=1 (the
+// fold's own K-row landing, at N=1 — see encAttnHalfKVQ8InputAt below) and
+// encSDPADecodeQ8ForcedBlocksAt keyed on archQ8ICBBlocks (matching the
+// replay's OWN maxLen-keyed choice, not the live n — see archQ8ICBBlocks) for
+// every layer that touches a q8 cache, owner or sharer. None of the fold's
+// rows-batched projection/rope/multiQ/gelu kernels are needed here.
+func (s *archDecodeState) interleaveKVQ8Usable(basePos, K int) bool {
+	if s.icb == nil || !s.icb.hasKVQ8() || s.rowAttnCaps != nil || !gpuHasKVQ8StoreRows() {
+		return false
+	}
+	blocks := s.archQ8ICBBlocks()
+	for li := range s.specs {
+		ownIdx := li
+		if !s.specs[li].OwnsCache() {
+			ownIdx = s.specs[li].KVShareFrom
+		}
+		if ownIdx < 0 || ownIdx >= len(s.specs) || !s.icb.kvQ8.on(ownIdx) {
+			continue // this layer never touches a q8 cache
+		}
+		lhd := headDimOf(s.specs[li], s.headDim)
+		if blocks > 0 {
+			if _, perr := sdpaVector2Pass1Q8Pipeline(lhd, int32(blocks)); perr != nil {
+				return false
+			}
+			if _, perr := sdpaVector2Pass2PipelineForHeadDim(lhd); perr != nil {
+				return false
+			}
+		} else if _, perr := sdpaVectorQ8Pipeline(lhd); perr != nil {
+			return false
+		}
+		if s.specs[li].OwnsCache() && s.lb[li].kNorm.buf == nil {
+			return false // per-row landing needs the owner's kNorm, exactly as the fold requires
+		}
+	}
+	return s.asc.kProj != nil && s.asc.vProj != nil
+}
+
+// encSDPADecodeQ8ForcedBlocksAt is encSDPADecodeQ8At but takes the 2-pass
+// block count as an EXTERNAL decision (archQ8ICBBlocks) instead of deriving it
+// from the live n — see archQ8ICBBlocks for why: the recorded ICB replay's
+// choice is keyed on the session's maxLen, fixed at construction, not on n.
+// blocks<=0 selects the single-pass kernel; blocks>0 selects the 2-pass pair
+// at exactly that block count — the pass-2 merge zeroes any block whose
+// strided walk starts past n, so a live n smaller than the blocks ladder
+// expects is always safe (the replay's own safety argument).
+func encSDPADecodeQ8ForcedBlocksAt(enc metal.MTLComputeCommandEncoder, sc attnScratch, q metal.MTLBuffer, qOff uint, k, v metal.MTLBuffer, kScales, vScales metal.MTLBuffer, out metal.MTLBuffer, outOff uint, nHeads, nKVHeads, headDim, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) error {
+	if blocks > 0 && sc.p2Partials != nil {
+		pso1, err := sdpaVector2Pass1Q8Pipeline(headDim, int32(blocks))
+		if err != nil {
+			return err
+		}
+		pso2, err := sdpaVector2Pass2PipelineForHeadDim(headDim)
+		if err != nil {
+			return err
+		}
+		sink := encSink{enc}
+		emitSDPAVector2Pass1Q8At(sink, pso1, q, qOff, k, v, sc.p2Partials, sc.p2Sums, sc.p2Maxs, kScales, vScales, 0, 0, nil, nHeads, nKVHeads, n, blocks, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+		emitSDPA2Pass2At(sink, pso2, sc.p2Partials, sc.p2Sums, sc.p2Maxs, out, outOff, 1, nHeads, blocks)
+		return nil
+	}
+	pso, err := sdpaVectorQ8Pipeline(headDim)
+	if err != nil {
+		return err
+	}
+	emitSDPAVectorQ8At(encSink{enc}, pso, q, qOff, k, v, out, outOff, kScales, vScales, 0, 0, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	return nil
+}
+
+// encAttnHalfKVQ8InputAt is encAttnHalfKVInputAt (decode_step.go) for a q8 ICB
+// OWNER row: K/V project into the session's shared single-row scratch
+// (sc.kProj/sc.vProj — always allocated, see newAttnScratch) instead of
+// straight into the cache, norm+rope/value-norm run there exactly as the bf16
+// path runs them on the cache row in place, then ONE encKVQ8StoreRows
+// (rows=1) quantises the staged row into the int8 cache + f32 group scale at
+// this row's own offset — the SAME store math (lthn_kv_q8_store_rows_bf16)
+// the K-row fold's landing already calls, just at N=1. The SDPA read is
+// encSDPADecodeQ8At — the SAME q8 kernel pair the fold's own per-row corner
+// already calls (line ~1434) — so a q8-owner interleave row is byte-identical
+// to sequential stepID: every OTHER op (Q projection/rope, O projection,
+// residual) is the UNCHANGED proj.project/encQKNormRopeAt/encResidualMaybeNormAt
+// single-row call encAttnHalfKVInputAt itself makes. q8 only arms on GLOBAL
+// owner layers (TestKVQ8ICBDecodeTracksBF16 pins this), so there is no ring
+// slot / sliding-window arithmetic to carry here.
+func encAttnHalfKVQ8InputAt(
+	enc metal.MTLComputeCommandEncoder,
+	x metal.MTLBuffer, xOff uint, kCacheBuf, vCacheBuf, kScales, vScales metal.MTLBuffer, offBuf, h metal.MTLBuffer, hOff, offOff uint,
+	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
+	sc attnScratch, proj projector,
+	dModel, nHeads, nKVHeads, headDim, pos, rotaryDim, q8Blocks int, base, scale, ropeScale, eps float32,
+	ropeFreqs metal.MTLBuffer,
+) error {
+	if sc.kProj == nil || sc.vProj == nil {
+		return core.NewError("native.encAttnHalfKVQ8InputAt: q8 landing needs kProj/vProj scratch")
+	}
+	kvDim := nKVHeads * headDim
+	if err := encRMSNormBF16At(enc, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
+		return err
+	}
+	// query: unchanged from encAttnHalfKVInputAt — the head projection never touches the KV cache.
+	if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {
+		return err
+	}
+	if gpuHasGeluKernel() && qNorm.buf != nil {
+		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
+			return err
+		}
+	} else {
+		if qNorm.buf != nil {
+			if err := encRMSNormRowsBF16(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, nHeads, headDim, eps); err != nil {
+				return err
+			}
+		}
+		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale); err != nil {
+			return err
+		}
+	}
+	// key: project into the STAGING row (not the int8 cache), norm+rope there —
+	// identical maths to the bf16 path norming/roping the cache row in place.
+	if err := proj.project(enc, sc.normed, sc.kProj, 0, projK); err != nil {
+		return err
+	}
+	if gpuHasGeluKernel() && kNorm.buf != nil {
+		if err := encQKNormRopeAt(enc, sc.kProj, kNorm.buf, sc.kProj, 0, kNorm.off, 0, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
+			return err
+		}
+	} else {
+		if kNorm.buf != nil {
+			if err := encRMSNormRowsBF16(enc, sc.kProj, kNorm.buf, sc.kProj, 0, kNorm.off, 0, nKVHeads, headDim, eps); err != nil {
+				return err
+			}
+		}
+		if err := encRopeDecodeAt(enc, sc.kProj, sc.kProj, 0, 0, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, ropeScale); err != nil {
+			return err
+		}
+	}
+	// value: project STRAIGHT into the staging row (no rotation) — gemma4 K==V
+	// layers carry no v_proj, so project via wK exactly as encAttnHalfKVInputAt does.
+	vIdx := projV
+	if !proj.hasV() {
+		vIdx = projK
+	}
+	if err := proj.project(enc, sc.normed, sc.vProj, 0, vIdx); err != nil {
+		return err
+	}
+	if valueNorm != nil {
+		if err := encRMSNormRowsBF16(enc, sc.vProj, valueNorm, sc.vProj, 0, 0, 0, nKVHeads, headDim, eps); err != nil {
+			return err
+		}
+	}
+	// the quantise-store hop: rows=1, the fold's own K-row store at N=1 — same
+	// kernel, same per-group scale formula, only the row count differs.
+	rowOff := uint(pos * kvDim)
+	scaleOff := uint(pos * (kvDim / kvQ8GroupSize) * 4)
+	if err := encKVQ8StoreRows(enc, sc.kProj, kCacheBuf, rowOff, kScales, scaleOff, 1, kvDim); err != nil {
+		return err
+	}
+	if err := encKVQ8StoreRows(enc, sc.vProj, vCacheBuf, rowOff, vScales, scaleOff, 1, kvDim); err != nil {
+		return err
+	}
+	if err := encSDPADecodeQ8ForcedBlocksAt(enc, sc, sc.q, 0, kCacheBuf, vCacheBuf, kScales, vScales, sc.attn, 0,
+		nHeads, nKVHeads, headDim, pos+1, q8Blocks,
+		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale); err != nil {
+		return err
+	}
+	if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
+		return err
+	}
+	return encResidualMaybeNormAt(enc, x, xOff, sc.attnOut, 0, sc.normed, h, hOff, postAttnNorm, dModel, eps)
+}
+
+// encAttnHalfSharedKVQ8At is encAttnHalfSharedInputAt (decode_forward_arch.go)
+// attending a q8-armed OWNER's cache: the sharer never lands its own K/V (it
+// has none), so the only change from the bf16 twin is the SDPA read —
+// encSDPADecodeQ8At against the owner's int8 K/V + group scales, the SAME
+// kernel pair a q8 owner's own row reads (encAttnHalfKVQ8InputAt above) and
+// the fold's per-row corner already calls. gemma3n E2B/E4B's trailing
+// shared-KV layers are exactly why this twin exists — without it a sharer of
+// a q8 owner would read int8 bytes through the plain bf16 SDPA kernel.
+func encAttnHalfSharedKVQ8At(
+	enc metal.MTLComputeCommandEncoder,
+	x metal.MTLBuffer, xOff uint, attendK, attendV, kScales, vScales, offBuf, h metal.MTLBuffer, hOff, offOff uint,
+	attnNormW, postAttnNorm, qNorm bufView,
+	sc attnScratch, proj projector,
+	dModel, nHeads, nKVHeads, headDim, pos, rotaryDim, q8Blocks int, base, scale, ropeScale, eps float32,
+	ropeFreqs metal.MTLBuffer,
+) error {
+	kvDim := nKVHeads * headDim
+	if err := encRMSNormBF16At(enc, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
+		return err
+	}
+	if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {
+		return err
+	}
+	if gpuHasGeluKernel() && qNorm.buf != nil {
+		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
+			return err
+		}
+	} else {
+		if qNorm.buf != nil {
+			if err := encRMSNormRowsBF16(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, nHeads, headDim, eps); err != nil {
+				return err
+			}
+		}
+		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale); err != nil {
+			return err
+		}
+	}
+	if err := encSDPADecodeQ8ForcedBlocksAt(enc, sc, sc.q, 0, attendK, attendV, kScales, vScales, sc.attn, 0,
+		nHeads, nKVHeads, headDim, pos+1, q8Blocks,
+		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale); err != nil {
+		return err
+	}
+	if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
+		return err
+	}
+	return encResidualMaybeNormAt(enc, x, xOff, sc.attnOut, 0, sc.normed, h, hOff, postAttnNorm, dModel, eps)
+}
+
 func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][]byte, pleSlab []byte, basePos int, readResult, readLastOnly bool, lastDst []byte, dstRows [][]byte, directInputs bool) (out [][]byte, ok bool, err error) {
 	K := len(embs)
 	if K == 0 {
@@ -736,10 +995,29 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				return decline("q8 icb caches: fold prerequisites")
 			}
 			if !(K > batchedDenseICBMaxRows || s.verifyFoldSmallK) || K <= 1 || !gpuHasGeluKernel() {
-				// small non-verify batches never engage the fold — their per-row
-				// interleave would write bf16 rows into the int8 caches. The
-				// per-token replay handles them (q8-aware by recording).
-				return decline("q8 icb caches: batch below the fold gate")
+				// #53/#54: small batches used to decline WHOLESALE here — the per-row
+				// interleave (below, foldAttn=false) wrote bf16 rows straight into the
+				// int8 caches, so the byte-exact MTP verify (which never arms
+				// verifyFoldSmallK — mtpVerifyFoldArmed(exact=true) is always false
+				// unless LTHN_MTP_VERIFY_FOLD=1 forces it, #55) paid K sequential
+				// stepID rounds instead of one command buffer. The interleave now
+				// lands q8 rows itself (encAttnHalfKVQ8InputAt / the sharer twin
+				// encAttnHalfSharedKVQ8At, below) with encKVQ8StoreRows at rows=1 —
+				// the SAME store math the fold's own K-row landing calls — and reads
+				// them back through encSDPADecodeQ8At, the SAME per-row q8 SDPA the
+				// fold's own per-row corner already uses (line ~1434). Every OTHER
+				// projection stays on proj.project (the per-row qmv kernel), so this
+				// path is byte-identical to sequential decode, unlike the fold's qmm_t
+				// token-identity tier (#55) — that is exactly why it may serve the
+				// byte-exact lane where the fold must not (TestMtpVerifyFoldArmed_Good).
+				// interleaveKVQ8Usable is the narrower prerequisite check for THIS path
+				// (per-row q8 kernels only — none of the fold's rows-batched/multiQ/gelu
+				// requirements above); anything it can't serve keeps declining exactly
+				// as before, unchanged for the cached-prefix prefill paths this gate
+				// protects.
+				if !s.interleaveKVQ8Usable(basePos, K) {
+					return decline("q8 icb caches: batch below the fold gate")
+				}
 			}
 			for li := range s.specs {
 				ownIdx := li
@@ -1081,6 +1359,15 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	layerEnd := len(s.specs)
 	if s.prefillSkipToLayer > 0 && s.prefillSkipToLayer < layerEnd {
 		layerEnd = s.prefillSkipToLayer
+	}
+	// q8Blocks: the interleave's q8 SDPA reads (encAttnHalfKVQ8InputAt /
+	// encAttnHalfSharedKVQ8At, #53/#54) must key their 2-pass-or-not choice off
+	// the SAME session-wide value the recorded ICB replay bakes at construction
+	// (archQ8ICBBlocks), never off the live basePos+i — see archQ8ICBBlocks.
+	// Computed once per call (session-invariant), not per row.
+	var q8Blocks int
+	if icbK != nil && s.icb.hasKVQ8() {
+		q8Blocks = s.archQ8ICBBlocks()
 	}
 	for li := 0; li < layerEnd; li++ {
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
@@ -1583,13 +1870,32 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			endEncodingFast(enc)
 			return nil, false, core.NewError("native.stepTokensBatchedDense: bidirectional row caps need the batched-rope attention fold")
 		}
+		// #53/#54: the interleave's q8 twins (see encAttnHalfKVQ8InputAt /
+		// encAttnHalfSharedKVQ8At above) — interleaveKVQ8Usable already proved every
+		// q8-touching layer has what these need before the function ever reached
+		// this loop, so a plain kvQ8.on lookup here is enough.
+		kvQ8Layer := !foldAttn && ownsCache && s.icb != nil && s.icb.kvQ8.on(li)
+		var ownerQ8 bool
+		var q8Own int
+		if !foldAttn && !ownsCache && s.icb != nil {
+			q8Own = s.specs[li].KVShareFrom
+			ownerQ8 = s.icb.kvQ8.on(q8Own)
+		}
 		for i := 0; !foldAttn && i < K; i++ { // skipped whole when the attention fold ran above
 			hTarget, hOff := s.hBuf, uint(0)
 			if foldMLP {
 				hTarget, hOff = hSlab, uint(i*rowBytes)
 			}
 			if ownsCache {
-				if err = encAttnHalfKVInputAt(enc, readRows[i], readOff[i], layerK, layerV, offBuf[i], hTarget, hOff, offOff[i],
+				if kvQ8Layer {
+					if err = encAttnHalfKVQ8InputAt(enc, readRows[i], readOff[i], layerK, layerV,
+						s.icb.kvQ8.kScales[li], s.icb.kvQ8.vScales[li], offBuf[i], hTarget, hOff, offOff[i],
+						s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
+						s.dModel, s.nHeads, lkv, lhd, basePos+i, rotDim, q8Blocks, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				} else if err = encAttnHalfKVInputAt(enc, readRows[i], readOff[i], layerK, layerV, offBuf[i], hTarget, hOff, offOff[i],
 					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
 					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 					endEncodingFast(enc)
@@ -1603,7 +1909,15 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				} else {
 					kC, vC = s.lb[own].kCache, s.lb[own].vCache
 				}
-				if err = encAttnHalfSharedInputAt(enc, readRows[i], readOff[i], kC, vC, offBuf[i], hTarget, hOff, offOff[i],
+				if ownerQ8 {
+					if err = encAttnHalfSharedKVQ8At(enc, readRows[i], readOff[i], kC, vC,
+						s.icb.kvQ8.kScales[q8Own], s.icb.kvQ8.vScales[q8Own], offBuf[i], hTarget, hOff, offOff[i],
+						s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj,
+						s.dModel, s.nHeads, lkv, lhd, basePos+i, rotDim, q8Blocks, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				} else if err = encAttnHalfSharedInputAt(enc, readRows[i], readOff[i], kC, vC, offBuf[i], hTarget, hOff, offOff[i],
 					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj,
 					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 					endEncodingFast(enc)
