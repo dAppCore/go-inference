@@ -16,12 +16,13 @@ import (
 // Assemble (its linear_attention layers have no q/k/v to assemble), so it registers a Composed hook rather
 // than a Parse + Weights layout; model.Load routes a Composed arch to LoadComposedDir instead of Assemble.
 //
-// Registered ids: the wrapper model_types (qwen3_5, qwen3_5_moe) and their nested text_config aliases
-// (qwen3_5_text, qwen3_5_moe_text), qwen3_6 / qwen3_6_moe (the same hybrid under its other released name),
-// qwen3_next (Qwen 3.6's predecessor, the same gated-delta/full-attention hybrid), and the generic
-// "composed"/"hybrid" ids a checkpoint without a qwen-family model_type may carry. This is every id
-// engine/metal's hardcoded model_type switch used to name directly — registering them here is what let
-// that switch be deleted rather than merely bypassed.
+// Registered ids: the generic "composed"/"hybrid" ids a checkpoint without a qwen-family model_type may
+// carry. Every real Qwen 3.6 hybrid id (qwen3_5/qwen3_5_moe + text_config aliases, qwen3_6/qwen3_6_moe,
+// qwen3_next) now registers in model/arch/Qwen/qwen35 instead — #50 archzoo finished what #18 started: ALL
+// five released names carry BOTH the factory route and a Composed hook that delegates back here, so this
+// spec is down to the ids no released qwen checkpoint actually carries. This is every id engine/metal's
+// hardcoded model_type switch used to name directly — registering them here is what let that switch be
+// deleted rather than merely bypassed.
 //
 // The registration lives here, not in model/qwen3: composed imports qwen3 for the gated-delta block, so
 // qwen3 cannot import composed — the hook that reaches LoadComposed must sit on the composed side of that
@@ -29,10 +30,9 @@ import (
 func init() {
 	model.RegisterArch(model.ArchSpec{
 		ModelTypes: []string{
-			// qwen3_5 / qwen3_5_moe (+ text_config aliases) now register in model/arch/Qwen/qwen35 with BOTH
-			// the factory route and a Composed hook that delegates back here — the #18 unification. This spec
-			// keeps the ids qwen35 does not (yet) own.
-			"qwen3_6", "qwen3_6_moe", "qwen3_next",
+			// Every named Qwen 3.6 hybrid release (qwen3_5*, qwen3_6*, qwen3_next) now registers in
+			// model/arch/Qwen/qwen35 with BOTH the factory route and a Composed hook that delegates back
+			// here — the #18/#50 unification. This spec keeps only the nameless generic ids.
 			"composed", "hybrid",
 		},
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {

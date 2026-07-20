@@ -1,7 +1,9 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-// Package qwen35 declares the Qwen 3.6 hybrid architecture (model_type qwen3_5 / qwen3_5_moe, nested
-// text_config qwen3_5_text / qwen3_5_moe_text) to the engine's reactive loader. It is a 3:1
+// Package qwen35 declares the Qwen 3.6 hybrid architecture — one architecture released under three
+// model_type families: qwen3_5 / qwen3_5_moe (nested text_config qwen3_5_text / qwen3_5_moe_text),
+// qwen3_6 / qwen3_6_moe (the same hybrid under its other released name), and qwen3_next (Qwen 3.6's
+// predecessor) — to the engine's reactive loader. It is a 3:1
 // GatedDeltaNet/full-attention hybrid: linear_attention layers carry the gated-delta recurrence
 // (MixerGatedDelta — a recurrent state, no KV cache) and every full_attention_interval-th layer is standard
 // GQA with GATED output (attn_output_gate: q_proj emits [q ; gate] and the attention output is sigmoid-gated

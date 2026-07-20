@@ -46,6 +46,19 @@ func init() {
 			}
 			return &cfg, nil
 		},
+		// Weights + NormalizeConfig give Mixtral the factory route (model.Assemble + arch_session — the
+		// #18 unification target), dual-registered alongside the Composed hook below exactly as qwen35
+		// carries both for the Qwen 3.6 hybrid: Composed stays the A/B reference + the route a caller that
+		// deliberately bypasses model.Load still reaches, while model.Load now succeeds instead of
+		// rejecting Mixtral as composed-only.
+		Weights: FactoryWeightNames(),
+		NormalizeConfig: func(tensors map[string]safetensors.Tensor, ac model.ArchConfig) map[string]safetensors.Tensor {
+			cfg := ac.(*Config)
+			if packed, err := packExperts(tensors, cfg.NumHiddenLayers, cfg.NumLocalExperts); err == nil {
+				return packed
+			}
+			return tensors // malformed/absent experts — Assemble's nil-safe load surfaces the gap downstream
+		},
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
 			cm, err := composed.LoadComposed(NormalizeWeights(tensors), configJSON)
 			if err != nil {

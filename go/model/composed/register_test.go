@@ -11,17 +11,14 @@ import (
 	coreio "dappco.re/go/io"
 )
 
-// TestComposedArchRegistered confirms init() registered every Qwen 3.6 hybrid model_type (the wrapper ids,
-// their nested text_config aliases, qwen3_6/qwen3_6_moe, qwen3_next, and the generic composed/hybrid ids)
-// with a Composed hook — the reactive loader can resolve each to the composed loader, and engine/metal's
-// former hardcoded fallback switch (which named this exact id set) needs no equivalent any more.
+// TestComposedArchRegistered confirms init() registered the generic composed/hybrid ids with a Composed
+// hook — the reactive loader can resolve each to the composed loader, and engine/metal's former hardcoded
+// fallback switch (which named this exact id set) needs no equivalent any more. Every NAMED Qwen 3.6
+// hybrid release (qwen3_5/qwen3_5_moe + text aliases, qwen3_6/qwen3_6_moe, qwen3_next) registers in
+// model/arch/Qwen/qwen35 instead (the #18/#50 dual route) — asserted there, not here — so composed's own
+// init() carries only the nameless generic ids.
 func TestComposedArchRegistered(t *testing.T) {
-	// qwen3_5/qwen3_5_moe (+ text aliases) register in model/arch/Qwen/qwen35 now (the #18 dual
-	// route) — composed's own init() carries the ids qwen35 does not own.
-	for _, mt := range []string{
-		"qwen3_6", "qwen3_6_moe", "qwen3_next",
-		"composed", "hybrid",
-	} {
+	for _, mt := range []string{"composed", "hybrid"} {
 		spec, ok := model.LookupArch(mt)
 		if !ok {
 			t.Fatalf("model_type %q not registered — composed init() did not run", mt)
@@ -79,11 +76,16 @@ func TestComposedMTPRefusal(t *testing.T) {
 
 // TestComposedArchRoundTrip is the registration round-trip: model_type → LookupArch → ArchSpec → the
 // Composed hook builds a serve-ready TokenModel from a synthetic hybrid checkpoint, and the two bookends +
-// the decode seam drive it (Embed → DecodeForward → Head → vocab logits). No engine/metal switch.
+// the decode seam drive it (Embed → DecodeForward → Head → vocab logits). No engine/metal switch. Uses the
+// generic "hybrid" id, not a named qwen3_5/qwen3_6/qwen3_next release: those now register in
+// model/arch/Qwen/qwen35 (#18/#50), a package composed does not import, so package composed's own test
+// binary cannot see them through the registry — LoadComposed itself does not care which model_type string
+// reaches it (see mkHybridCheckpoint's qwen3_5-labelled cfg, passed to spec.Composed directly below), so
+// "hybrid" exercises the identical Composed-hook code path.
 func TestComposedArchRoundTrip(t *testing.T) {
-	spec, ok := model.LookupArch("qwen3_6")
+	spec, ok := model.LookupArch("hybrid")
 	if !ok || spec.Composed == nil {
-		t.Fatal("qwen3_6 composed arch not registered")
+		t.Fatal("hybrid composed arch not registered")
 	}
 	ts, cfg := mkHybridCheckpoint()
 	tm, err := spec.Composed(ts, cfg)
@@ -108,17 +110,20 @@ func TestComposedArchRoundTrip(t *testing.T) {
 	if len(logits) != 32*2 {
 		t.Fatalf("Head logits = %d bytes, want %d (vocab bf16)", len(logits), 32*2)
 	}
-	t.Log("qwen3_5 → LookupArch → Composed hook → ComposedTokenModel: registration reaches the composed loader")
+	t.Log("hybrid → LookupArch → Composed hook → ComposedTokenModel: registration reaches the composed loader")
 }
 
-// TestLoadComposedDirRoundTrip is the end-to-end neutral path: a checkpoint dir (config.json carrying
-// model_type qwen3_5 + a model.safetensors) is loaded by model.LoadComposedDir straight to a TokenModel via
-// the registry — the registry-driven routing that replaces the backend's hardcoded switch. It also pins
-// that model.Load REJECTS the same dir (a composed arch must not fall into the transformer Assemble path).
+// TestLoadComposedDirRoundTrip is the end-to-end neutral path: a checkpoint dir (config.json carrying the
+// generic model_type "hybrid" + a model.safetensors) is loaded by model.LoadComposedDir straight to a
+// TokenModel via the registry — the registry-driven routing that replaces the backend's hardcoded switch.
+// It also pins that model.Load REJECTS the same dir (a composed-ONLY arch must not fall into the
+// transformer Assemble path). "hybrid" (not qwen3_6, which the #50 archzoo move gave a factory route
+// too — see qwen35's register_test.go) is deliberately still composed-only: this test's whole point is the
+// rejection branch, so it needs an id with no Parse/Weights.
 func TestLoadComposedDirRoundTrip(t *testing.T) {
 	ts, _ := mkHybridCheckpoint()
 	dir := t.TempDir()
-	cfg := `{"model_type":"qwen3_6","hidden_size":8,"num_hidden_layers":4,"intermediate_size":16,` +
+	cfg := `{"model_type":"hybrid","hidden_size":8,"num_hidden_layers":4,"intermediate_size":16,` +
 		`"num_attention_heads":4,"num_key_value_heads":2,"head_dim":8,"vocab_size":32,"rms_norm_eps":1e-5,` +
 		`"rope_theta":1000000,"partial_rotary_factor":0.5,"full_attention_interval":2}`
 	if err := coreio.Local.Write(core.PathJoin(dir, "config.json"), cfg); err != nil {
@@ -137,15 +142,15 @@ func TestLoadComposedDirRoundTrip(t *testing.T) {
 		t.Fatalf("LoadComposedDir: %v", err)
 	}
 	if !ok {
-		t.Fatal("LoadComposedDir ok=false — the qwen3_5 Composed hook was not reached")
+		t.Fatal("LoadComposedDir ok=false — the generic hybrid Composed hook was not reached")
 	}
 	if tm.Vocab() != 32 {
 		t.Fatalf("Vocab() = %d, want 32", tm.Vocab())
 	}
 	if _, _, lerr := model.Load(dir); lerr == nil {
-		t.Fatal("model.Load must reject a composed arch (route it to LoadComposedDir), not Assemble it")
+		t.Fatal("model.Load must reject a composed-only arch (route it to LoadComposedDir), not Assemble it")
 	}
-	t.Log("dir → LoadComposedDir → registry → Composed hook → TokenModel; model.Load rejects the composed arch")
+	t.Log("dir → LoadComposedDir → registry → Composed hook → TokenModel; model.Load rejects the composed-only arch")
 }
 
 // TestLoadComposedDir_RoutingContract pins the two branches engine/metal/load.go now delegates to the
@@ -155,12 +160,10 @@ func TestLoadComposedDirRoundTrip(t *testing.T) {
 // future qwenX that registers a Composed hook therefore loads with zero engine edits.
 func TestLoadComposedDir_RoutingContract(t *testing.T) {
 	// Every registered composed arch is reachable through the registry — this is the coverage the engine
-	// switch used to hardcode. qwen3_5 additionally has the full dir round-trip above.
-	// (qwen3_5* are qwen35-owned — asserted there; composed keeps the rest.)
-	for _, mt := range []string{
-		"qwen3_6", "qwen3_6_moe", "qwen3_next",
-		"composed", "hybrid",
-	} {
+	// switch used to hardcode. The generic hybrid checkpoint additionally has the full dir round-trip
+	// above. (Every named qwen3_5*/qwen3_6*/qwen3_next id is qwen35-owned — asserted there; composed keeps
+	// only the nameless generic ids.)
+	for _, mt := range []string{"composed", "hybrid"} {
 		if spec, ok := model.LookupArch(mt); !ok || spec.Composed == nil {
 			t.Fatalf("composed model_type %q not reachable through the registry (LoadComposedDir would miss it)", mt)
 		}
