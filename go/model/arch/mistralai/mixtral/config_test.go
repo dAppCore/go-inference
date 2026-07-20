@@ -30,6 +30,11 @@ func TestConfig_Arch_Good(t *testing.T) {
 	if arch.Experts != 8 || arch.TopK != 2 || arch.ExpertFF != 14336 || !arch.NormaliseMoETopK || arch.SharedExperts != 0 || !arch.HasMoE() {
 		t.Fatalf("MoE geometry = experts %d top-k %d expert FF %d normalise %v shared %d", arch.Experts, arch.TopK, arch.ExpertFF, arch.NormaliseMoETopK, arch.SharedExperts)
 	}
+	// #63: hidden_act must reach Arch.Activation so the MoE expert combine can select SiLU
+	// (engine/metal/projector.go's ffnUsesSiLU) instead of gemma4's GELU default.
+	if arch.Activation != "silu" {
+		t.Fatalf("Activation = %q, want silu (real Mixtral checkpoints declare hidden_act: silu)", arch.Activation)
+	}
 	if len(arch.Layer) != 32 || arch.RopeBase != 1_000_000 || arch.Eps != 1e-5 {
 		t.Fatalf("architecture receipt = layers %d rope %g eps %g", len(arch.Layer), arch.RopeBase, arch.Eps)
 	}

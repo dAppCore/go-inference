@@ -25,6 +25,10 @@ type Config struct {
 	RopeTheta         float32 `json:"rope_theta"`
 	NormTopKProb      bool    `json:"norm_topk_prob"`
 	TieWordEmbeddings *bool   `json:"tie_word_embeddings"`
+	// HiddenActivation is the routed-expert SwiGLU gate ("silu" on every real OLMoE checkpoint).
+	// Forwarded verbatim into Arch.Activation (mirroring granitemoe's HiddenActivation) so the MoE
+	// expert combine (engine/metal) can select SiLU instead of gemma4's GELU (#63).
+	HiddenActivation string `json:"hidden_act"`
 }
 
 // InferFromWeights satisfies model.ArchConfig. OLMoE declares its geometry.
@@ -72,6 +76,6 @@ func (c Config) Arch() (model.Arch, error) {
 		MoEGating: model.MoEGatingSoftmax, NormaliseMoETopK: c.NormTopKProb, SharedExperts: 0,
 		Eps: eps, AttnScale: float32(1 / core.Pow(float64(headDim), 0.5)), EmbedScale: 1,
 		RopeBase: rope, RopeLocalBase: rope, RopeScale: 1, RotaryDim: headDim, RotaryDimLocal: headDim,
-		TieWordEmbeddings: c.TieWordEmbeddings, Layer: layers,
+		TieWordEmbeddings: c.TieWordEmbeddings, Activation: c.HiddenActivation, Layer: layers,
 	}, nil
 }

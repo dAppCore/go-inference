@@ -34,6 +34,11 @@ func TestConfig_Arch_Good(t *testing.T) {
 	if arch.MoEGating != model.MoEGatingSoftmax || len(arch.Layer) != 16 || !arch.HasMoE() {
 		t.Fatalf("architecture receipt = gating %q layers %d MoE %v", arch.MoEGating, len(arch.Layer), arch.HasMoE())
 	}
+	// #63: hidden_act must reach Arch.Activation so the MoE expert combine can select SiLU
+	// (engine/metal/projector.go's ffnUsesSiLU) instead of gemma4's GELU default.
+	if arch.Activation != "silu" {
+		t.Fatalf("Activation = %q, want silu (real OLMoE checkpoints declare hidden_act: silu)", arch.Activation)
+	}
 }
 
 func TestConfig_Arch_Bad(t *testing.T) {

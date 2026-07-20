@@ -71,9 +71,13 @@ func writeCheckpointDir(t *testing.T, configJSON string, tensors map[string]safe
 // already proves loads through model.Load: 1 layer, 2 experts, top-1.
 // hidden_size 64 / num_attention_heads 2 gives headDim 32 — the paged SDPA kernel's floor
 // (encSDPAPagedDecodeStrided requires headDim a multiple of 32, at most 512).
+// hidden_act (#63) matches every real Mixtral checkpoint's declared "silu" — this fixture now
+// genuinely exercises moeBlockBF16AfterRouterWithBufferPooled's SiLU gate instead of silently
+// running gemma4's GELU by omission; the generated ids below change accordingly (the test asserts
+// vocab range + determinism only, never hardcoded ids, so no expectation needed updating).
 const zooMixtralBF16Config = `{"model_type":"mixtral","hidden_size":64,"intermediate_size":12,"num_hidden_layers":1,` +
 	`"num_attention_heads":2,"num_key_value_heads":1,"num_local_experts":2,"num_experts_per_tok":1,` +
-	`"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":10000,"tie_word_embeddings":false}`
+	`"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":10000,"tie_word_embeddings":false,"hidden_act":"silu"}`
 
 // writeZooMixtralBF16Dir writes a small bf16 Mixtral checkpoint: real per-expert w1/w2/w3 tensors
 // (packExperts synthesises the packed triple at NormalizeConfig time), no shared expert, one
@@ -112,8 +116,11 @@ func writeZooMixtralBF16Dir(t *testing.T) string {
 // already proves loads through model.Load: 1 layer, 4 experts, top-2, the RAW fused-tensor layout
 // (NormalizeWeights + packExperts run inside model.Load's NormalizeConfig hook).
 // d_model 64 / n_heads 2 gives headDim 32 — the paged SDPA kernel's floor (see zooMixtralBF16Config).
+// ffn_config.ffn_act_fn.name (#63) matches every real DBRX checkpoint's declared "silu" — see
+// zooMixtralBF16Config's identical note; this fixture's generated ids change accordingly (no
+// hardcoded expectation to update — the test asserts vocab range + determinism only).
 const zooDBRXBF16Config = `{"model_type":"dbrx","d_model":64,"n_heads":2,"n_layers":1,"vocab_size":32,` +
-	`"attn_config":{"kv_n_heads":1,"rope_theta":10000},"ffn_config":{"ffn_hidden_size":12,"moe_num_experts":4,"moe_top_k":2}}`
+	`"attn_config":{"kv_n_heads":1,"rope_theta":10000},"ffn_config":{"ffn_hidden_size":12,"moe_num_experts":4,"moe_top_k":2,"ffn_act_fn":{"name":"silu"}}}`
 
 // writeZooDBRXBF16Dir writes a small bf16 DBRX checkpoint in the real fused-tensor layout
 // (transformer.blocks.0.ffn.experts.mlp.w1/v1/w2, one 3-D tensor per role covering every expert) —
@@ -151,9 +158,14 @@ func writeZooDBRXBF16Dir(t *testing.T) string {
 // kernels are group-size-specific, and 32 is the group size the existing quant test suite already
 // uses, e.g. arch_quant_session_test.go) AND headDim 32 (hidden_size 64 / num_attention_heads 2) —
 // the paged SDPA kernel's floor (see zooMixtralBF16Config).
+// hidden_act (#63) matches every real Mixtral checkpoint's declared "silu" — this fixture now
+// genuinely exercises moeBlockQuantAfterRouterWithDeviceIndexBufferPooled's SiLU gate (the SAME
+// break-out quant funnel the real OLMoE checkpoint decodes through) instead of silently running
+// gemma4's GELU by omission; the generated ids change accordingly (no hardcoded expectation to
+// update — the test asserts vocab range + determinism only).
 const zooMixtralQuantConfig = `{"model_type":"mixtral","hidden_size":64,"intermediate_size":32,"num_hidden_layers":1,` +
 	`"num_attention_heads":2,"num_key_value_heads":1,"num_local_experts":2,"num_experts_per_tok":1,` +
-	`"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":10000,"tie_word_embeddings":false}`
+	`"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":10000,"tie_word_embeddings":false,"hidden_act":"silu"}`
 
 // writeZooMixtralQuantDir writes a fully 4-bit-quantised Mixtral checkpoint — embed/attention/
 // router/lm_head AND every per-expert w1/w2/w3 triple affine-packed via packAffineQuant (pure Go,
@@ -498,6 +510,11 @@ func TestFactoryLoadQwenMoEBF16_SharedExpertContributionIsLive_Good(t *testing.T
 // paged SDPA kernel's floor (see zooMixtralBF16Config). Every scalar granitemoe.Config.Arch requires
 // strictly positive (logits_scaling/residual_multiplier/embedding_multiplier/attention_multiplier) is
 // set, unlike qwenmoe/mixtral's more lenient defaulting.
+// hidden_act:"silu" below predates #63 — granitemoe.Config.Arch already forwarded it to
+// Activation, but moe_block.go's expert combine ignored the field, so it made no numeric
+// difference. #63 wires it through (moeLoadedToBF16's UsesSiLU), so this fixture's Generate now
+// genuinely runs the SiLU gate; the generated ids change accordingly (no hardcoded expectation to
+// update — the test asserts vocab range + determinism only).
 const zooGraniteMoEBF16Config = `{"model_type":"granitemoe","hidden_size":64,"intermediate_size":12,"num_hidden_layers":1,` +
 	`"num_attention_heads":2,"num_key_value_heads":1,"num_local_experts":2,"num_experts_per_tok":1,` +
 	`"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":10000,"tie_word_embeddings":false,"hidden_act":"silu",` +
@@ -570,4 +587,31 @@ func TestFactoryLoadGraniteMoEBF16_Generate_Good(t *testing.T) {
 		}
 	}
 	t.Logf("granitemoe-shaped bf16 MoE checkpoint (fused ExpGateUp) served through the factory route: ids %v twice", out1)
+}
+
+// TestMoEActivationWiring_UsesSiLU pins #63's activation wiring at its construction site: both
+// moeLoadedToBF16 (bf16, moe_block.go) and moeToQuant (quant, load_shared.go) resolve
+// UsesSiLU from arch.Activation via the SAME selector the dense-FFN/ICB paths already use
+// (projector.go's ffnUsesSiLU). gemma4 never sets Activation (model/arch/google/gemma3's config has
+// no hidden_act field at all) — the unset/zero-value case MUST stay GELU, exactly the guarantee
+// encMoEBlockQuantDevice, moeBlockQuantAfterRouterWithDeviceIndexBufferPooled and
+// moeBlockBF16AfterRouterWithBufferPooled's emitGelu/emitGate closures rely on for gemma4's
+// byte-for-byte output. mixtral/dbrx/olmoe declare "silu" and must flip to SiLU.
+func TestMoEActivationWiring_UsesSiLU(t *testing.T) {
+	bf16GELU := moeLoadedToBF16(&model.LoadedMoE{}, model.Arch{})
+	if bf16GELU == nil || bf16GELU.UsesSiLU {
+		t.Fatalf("moeLoadedToBF16(unset Activation).UsesSiLU = %+v, want false (gemma4's default must stay GELU)", bf16GELU)
+	}
+	bf16SiLU := moeLoadedToBF16(&model.LoadedMoE{}, model.Arch{Activation: "silu"})
+	if bf16SiLU == nil || !bf16SiLU.UsesSiLU {
+		t.Fatalf("moeLoadedToBF16(Activation silu).UsesSiLU = %+v, want true (mixtral/dbrx/olmoe)", bf16SiLU)
+	}
+	quantGELU := moeToQuant(&model.LoadedMoE{}, model.Arch{})
+	if quantGELU == nil || quantGELU.UsesSiLU {
+		t.Fatalf("moeToQuant(unset Activation).UsesSiLU = %+v, want false (gemma4's default must stay GELU)", quantGELU)
+	}
+	quantSiLU := moeToQuant(&model.LoadedMoE{}, model.Arch{Activation: "silu"})
+	if quantSiLU == nil || !quantSiLU.UsesSiLU {
+		t.Fatalf("moeToQuant(Activation silu).UsesSiLU = %+v, want true (mixtral/dbrx/olmoe)", quantSiLU)
+	}
 }

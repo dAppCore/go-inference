@@ -1,5 +1,6 @@
 {
   "architectures": ["MixtralForCausalLM"],
+  "hidden_act": "silu",
   "hidden_size": 4096,
   "intermediate_size": 14336,
   "model_type": "mixtral",
