@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	core "dappco.re/go"
+	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/internal/enginegate"
+	"dappco.re/go/inference/model"
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"
 )
 
@@ -62,27 +65,35 @@ func TestRealCheckpointGPU_ArgmaxParis_Good(t *testing.T) {
 	t.Logf("GPU generated ids: %v", gen)
 }
 
-// TestRealCheckpointGPU_Bonsai1BitRepack_Bad locks the 1-bit capability boundary left by the
-// composed strip (#50): the retired composed engine bound owned weights itself and served this
-// checkpoint (prism-ml/Bonsai-27B-mlx-1bit, qwen3_5 hybrid) through the b1→b2 exact repack; the
-// factory engine's zero-copy binding (shardBuffers.bufForAligned) serves only views into the
-// mapped shards, so an owned repacked weight cannot bind (probed 2026-07-20 — the repack itself
-// reaches the qmv kernels fine when hooked at model.LoadLinear). Until the owned-weight device-
-// binding fallback lands, LoadTokenModelDir must refuse UP FRONT with the gap named — never a
-// deep bind error mid-generate. When that fallback lands, this flips back to the _Good serving
-// test (git history holds the body: repack → Generate → "Paris"). Skips when the checkpoint is
-// not in the local HF cache.
-func TestRealCheckpointGPU_Bonsai1BitRepack_Bad(t *testing.T) {
+// TestRealCheckpointGPU_Bonsai1BitRepack_Good locks #24's other half end-to-end: the 1-bit
+// affine checkpoint (prism-ml/Bonsai-27B-mlx-1bit, qwen3_5 hybrid) loads through the b1→b2
+// exact repack (mlxaffine.RepackB1ToB2: no b_1 kernel ships, and mlx-lm itself REJECTS bits=1
+// outright) hooked at model.LoadLinear, the repacked OWNED weights bind resident through the
+// registered-owned-range fallback (#60 — the wall that had this test in its _Bad decline form),
+// and the model answers the capital question sanely on the GPU. The repack's exactness has its
+// own unit gate (TestRepackB1ToB2_ExactDequant); the synthetic in-CI twin of this lane is
+// TestLoadDirB1RepackServe_Good. Skips when the checkpoint is not in the local HF cache.
+func TestRealCheckpointGPU_Bonsai1BitRepack_Good(t *testing.T) {
 	dir := enginegate.HFModelPath(t, "prism-ml/Bonsai-27B-mlx-1bit")
+	tok, err := tokenizer.LoadTokenizer(core.PathJoin(dir, "tokenizer.json"))
+	if err != nil {
+		t.Fatalf("LoadTokenizer: %v", err)
+	}
+	ids := tok.Encode("The capital of France is")
 	tm, err := LoadTokenModelDir(dir, 64)
-	if err == nil {
-		if c, ok := tm.(interface{ Close() error }); ok {
-			defer func() { _ = c.Close() }()
-		}
-		t.Fatal("LoadTokenModelDir served a sub-2-bit pack — the owned-weight binding fallback must have landed; flip this test back to the _Good serving form (see doc comment)")
+	if err != nil {
+		t.Fatalf("LoadTokenModelDir: %v", err)
 	}
-	if !strings.Contains(err.Error(), "sub-2-bit quant pack") || !strings.Contains(err.Error(), "owned-weight device binding pending") {
-		t.Fatalf("sub-2-bit decline error = %q — want the typed refusal naming the pack and the pending owned-weight binding", err)
+	if c, ok := tm.(interface{ Close() error }); ok {
+		defer func() { _ = c.Close() }()
 	}
-	t.Logf("typed decline (as designed): %v", err)
+	gen, err := model.Generate(tm, ids, 4, -1)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	text := tok.Decode(gen)
+	if !strings.Contains(text, "Paris") {
+		t.Fatalf("1-bit Bonsai continuation %q (ids %v) does not name Paris — the b1→b2 repack lane regressed", text, gen)
+	}
+	t.Logf("Bonsai continuation: %q", text)
 }

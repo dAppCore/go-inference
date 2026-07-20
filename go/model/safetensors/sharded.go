@@ -80,6 +80,10 @@ type DirMapping struct {
 	// BF16 — they are no longer shard mmap views, so the zero-copy binder consults IsWidened to bind
 	// them resident rather than failing its wrong-mapping guard. nil until a widening pass runs.
 	widened []widenedRange
+	// owned records the heap Data ranges of load-time SYNTHESISED tensors AdoptOwnedTensors swept
+	// up (packExperts packs, the b1→b2 repack — see owned.go): registered legitimate off-shard
+	// buffers the binder binds resident, evicted with the owning session. nil until adoption runs.
+	owned []widenedRange
 }
 
 // widenedRange is the [start,end) heap-address span of one F16→BF16-widened tensor's Data.
@@ -162,5 +166,8 @@ func (d *DirMapping) Close() error {
 	}
 	d.Shards = nil
 	d.Tensors = nil
+	// Drop the owned-tensor registrations: the ranges' backing slices die with the model, and a
+	// stale range must never match a later allocation at a recycled address (see owned.go).
+	d.owned = nil
 	return firstErr
 }
