@@ -14,7 +14,7 @@
 // This is the factory-native declaration the composed loader is being retired in favour of (#18): the
 // per-layer schedule (DeriveLayers maps linear_attention → MixerGatedDelta) plus the neutral Arch
 // declarations here feed model.Assemble (weights) and arch_session (decode) — the same reactive path
-// gemma4 rides — rather than model/composed's parallel loader. It carries the schedule + declarations only;
+// gemma4 rides — rather than the retired composed engine's parallel loader (#50). It carries the schedule + declarations only;
 // the gated-delta geometry (key/value heads, conv kernel) is DERIVED from the weight shapes at assemble
 // time (assembleGatedDelta), not trusted from config field names a checkpoint might spell differently.
 package qwen35
@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	// defaultRopeTheta matches model/composed's ropeTheta() fallback (1e6): the real Qwen 3.6 checkpoints
+	// defaultRopeTheta matches the retired composed engine's ropeTheta() fallback (1e6): the real Qwen 3.6 checkpoints
 	// carry rope_theta 1e7 under rope_parameters, so this fires only for a config that omits it entirely.
 	defaultRopeTheta  float32 = 1_000_000
 	defaultRMSNormEps float32 = 1e-6

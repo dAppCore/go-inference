@@ -3,9 +3,7 @@
 package glmocr
 
 import (
-	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/safetensors"
 )
 
 // init registers glm_ocr and its nested text_config alias glm_ocr_text
@@ -26,16 +24,6 @@ func init() {
 		ModelTypes: []string{"glm_ocr", "glm_ocr_text"},
 		Parse: func(data []byte) (model.ArchConfig, error) {
 			return ParseConfig(data)
-		},
-		Composed: func(_ map[string]safetensors.Tensor, cfgJSON []byte) (model.TokenModel, error) {
-			mt, textMT := model.ProbeModelTypes(cfgJSON)
-			if mt == "" {
-				mt = textMT
-			}
-			if mt == "" {
-				mt = "glm_ocr"
-			}
-			return nil, core.NewError(mt + " (GLM-OCR) is a recognised OCR vision-language arch; its vision encoder + OCR decoder forward is not yet implemented in this engine")
 		},
 	})
 }

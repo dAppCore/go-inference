@@ -5,7 +5,6 @@ package deepseek
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/safetensors"
 )
 
 // Names documents the DeepSeek MLA and routed-expert tensor layout.
@@ -35,9 +34,6 @@ func init() {
 				return nil, core.NewError("deepseek.Parse: config.json parse failed")
 			}
 			return &cfg, nil
-		},
-		Composed: func(map[string]safetensors.Tensor, []byte) (model.TokenModel, error) {
-			return nil, core.NewError("deepseek.Load: MLA attention core is not implemented; refusing standard-attention fallback")
 		},
 	})
 }

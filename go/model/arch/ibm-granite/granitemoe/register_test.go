@@ -83,7 +83,7 @@ func TestWeightMapFixture_Good(t *testing.T) {
 
 func TestRegister_Good(t *testing.T) {
 	spec, ok := model.LookupArch("granitemoe")
-	if !ok || spec.Parse == nil || spec.Composed == nil {
-		t.Fatalf("granitemoe registration = ok %v parse %v composed %v", ok, spec.Parse != nil, spec.Composed != nil)
+	if !ok || spec.Parse == nil {
+		t.Fatalf("granitemoe registration = ok %v parse %v", ok, spec.Parse != nil)
 	}
 }

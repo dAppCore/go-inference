@@ -85,9 +85,6 @@ func ResolveGemma4ArchitectureDeclaration(data []byte) (Gemma4ArchitectureDeclar
 	if !ok || spec.Parse == nil {
 		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: no shared ArchSpec for " + resolution.Architecture)
 	}
-	if spec.Composed != nil {
-		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: composed execution is not supported")
-	}
 	cfg, err := spec.Parse(data)
 	if err != nil {
 		return Gemma4ArchitectureDeclaration{}, core.E("rocm Gemma4 architecture declaration", "parse shared config", err)

@@ -5,8 +5,6 @@ package stablelm
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
-	"math"
 	"testing"
 )
 
@@ -65,26 +63,6 @@ func TestConfig_InferFromWeights_Ugly(t *testing.T) {
 	cfg.InferFromWeights(nil)
 	if _, err := cfg.Arch(); err == nil {
 		t.Fatal("fractional rotary dimension became valid after InferFromWeights")
-	}
-}
-
-// TestTinyStableLMForward_Good uses varied seeded weights and partial rotary.
-func TestTinyStableLMForward_Good(t *testing.T) {
-	syn := func(n, seed int) []float32 {
-		o := make([]float32, n)
-		for i := range o {
-			o[i] = float32((i*seed)%19-9) / 31
-		}
-		return o
-	}
-	m := composed.NewAttnMixer(&composed.AttnWeights{QProj: syn(128, 3), KProj: syn(64, 5), VProj: syn(64, 7), OProj: syn(128, 11)}, composed.AttnConfig{Heads: 4, KVHeads: 2, HeadDim: 4, RotaryDim: 2, RopeTheta: 10000})
-	x := syn(32, 13)
-	got, _, err := m.Forward(x, 4, 8, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if math.Float32bits(got[24]) != math.Float32bits(-0.013525661) {
-		t.Fatalf("golden=%g", got[24])
 	}
 }
 

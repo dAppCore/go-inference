@@ -1,5 +1,9 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
+// #50 NOTE: this example rides the RETIRED composed engine's API (model/composed), which the
+// examples module still resolves from the released dappco.re/go/inference v0.12.0 pin. Port it to
+// the factory route before bumping that pin past #50.
+
 // The packed-expert MoE path: a quantised Mixture-of-Experts checkpoint (Qwen 3.6 — model_type
 // qwen3_5_moe) keeps its routed + shared experts PACKED (mlx-affine codes + scales/biases) all
 // the way to the matvec — buildMoE used to widen every expert to f32 at load regardless, an ~8x

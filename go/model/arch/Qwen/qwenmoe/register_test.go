@@ -13,7 +13,7 @@ import (
 func TestRegister_Good(t *testing.T) {
 	for _, modelType := range []string{"qwen2_moe", "qwen3_moe"} {
 		spec, ok := model.LookupArch(modelType)
-		if !ok || spec.Parse == nil || spec.Composed == nil {
+		if !ok || spec.Parse == nil {
 			t.Fatalf("%s registration = found %v spec %+v", modelType, ok, spec)
 		}
 	}

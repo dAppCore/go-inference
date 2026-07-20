@@ -10,7 +10,7 @@ import (
 )
 
 // assemble_gated_delta.go builds a MixerGatedDelta layer through the reactive factory — the loader half
-// of teaching Assemble the named mixer kind (#18), replacing model/composed's buildGatedDelta. The five
+// of teaching Assemble the named mixer kind (#18), replacing the retired composed engine's buildGatedDelta (#50). The five
 // projections (in_proj_qkv/a/b/z + out_proj) load through the factory's own LoadLinear (quant-or-bf16
 // universal, the same path gemma's MoE experts use); the small recurrence tensors (conv/A_log/norm/
 // dt_bias) stay host f32, unquantised, so the recurrent state math is exact. Geometry is resolved from

@@ -7,7 +7,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/safetensors"
 )
 
 // testConfigJSON mirrors the field names/values confirmed live from
@@ -24,8 +23,8 @@ const testConfigJSON = `{"model_type":"deepseek_vl_v2","hidden_size":1280,"inter
 // TestDeepseekvl2Registered_Good pins the deepseek_vl_v2 "recognised, and OCR works through its
 // own verb" contract: model.LookupArch succeeds (a user pointing lem at a DeepSeek-OCR checkpoint
 // gets direction, not "unknown model architecture"), Parse succeeds far enough to report what the
-// arch is, and both the Arch and Composed refusal seams name the arch and redirect to `lem ocr`
-// — mirroring composed.TestComposedMTPRefusal's discipline for a non-hybrid vision-language arch.
+// arch is, and the Arch refusal seam names the arch and redirects to `lem ocr` — the recognised-
+// with-its-own-verb discipline for a non-hybrid vision-language arch.
 func TestDeepseekvl2Registered_Good(t *testing.T) {
 	spec, ok := model.LookupArch("deepseek_vl_v2")
 	if !ok {
@@ -34,10 +33,6 @@ func TestDeepseekvl2Registered_Good(t *testing.T) {
 	if spec.Parse == nil {
 		t.Fatal("deepseek_vl_v2 registered without a Parse hook")
 	}
-	if spec.Composed == nil {
-		t.Fatal("deepseek_vl_v2 registered without a Composed hook")
-	}
-
 	ac, err := spec.Parse([]byte(testConfigJSON))
 	if err != nil {
 		t.Fatalf("Parse must succeed enough to report what the arch is: %v", err)
@@ -57,16 +52,5 @@ func TestDeepseekvl2Registered_Good(t *testing.T) {
 		t.Fatal("Arch: expected a clean forward refusal, got a resolved architecture")
 	} else if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not a decoder-only causal-LM") {
 		t.Fatalf("Arch refusal %q must name deepseek_vl_v2 and say it is not a decoder-only causal-LM", err.Error())
-	}
-
-	tm, err := spec.Composed(map[string]safetensors.Tensor{}, []byte(testConfigJSON))
-	if err == nil {
-		t.Fatal("Composed: expected a clean forward refusal, got a model")
-	}
-	if tm != nil {
-		t.Fatal("Composed: refusal must return a nil model")
-	}
-	if !core.Contains(err.Error(), "deepseek_vl_v2") || !core.Contains(err.Error(), "not a decoder-only causal-LM") {
-		t.Fatalf("Composed refusal %q must name deepseek_vl_v2 and say it is not a decoder-only causal-LM", err.Error())
 	}
 }

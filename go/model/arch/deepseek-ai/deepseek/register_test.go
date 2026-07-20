@@ -7,7 +7,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/safetensors"
 )
 
 func TestRegister_WeightNames_Good(t *testing.T) {
@@ -46,11 +45,15 @@ func TestRegister_WeightNames_Ugly(t *testing.T) {
 func TestDeepSeekRegistered_Good(t *testing.T) {
 	for _, modelType := range []string{"deepseek_v2", "deepseek_v3"} {
 		spec, ok := model.LookupArch(modelType)
-		if !ok || spec.Composed == nil || spec.Parse == nil {
+		if !ok || spec.Parse == nil {
 			t.Fatalf("%s registration = found %v spec %+v", modelType, ok, spec)
 		}
-		if _, err := spec.Composed(map[string]safetensors.Tensor{}, []byte(`{"model_type":"deepseek_v2"}`)); err == nil {
-			t.Fatalf("%s composed hook accepted MLA without an MLA mixer", modelType)
+		ac, err := spec.Parse([]byte(`{"model_type":"` + modelType + `","hidden_size":8,"num_hidden_layers":1,"num_attention_heads":2,"vocab_size":32,"kv_lora_rank":4,"qk_rope_head_dim":2,"qk_nope_head_dim":2,"v_head_dim":2}`))
+		if err != nil {
+			t.Fatalf("%s Parse: %v", modelType, err)
+		}
+		if _, aerr := ac.Arch(); aerr == nil {
+			t.Fatalf("%s Arch() accepted MLA without an MLA attention implementation", modelType)
 		}
 	}
 }

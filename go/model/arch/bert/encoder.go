@@ -20,7 +20,7 @@ import (
 // float32/float64-accumulate, single-threaded, zero SIMD/BLAS, zero device
 // hook — every number above is pure Go scalar loops. 45 tok/s means a
 // realistic 100-doc reranking batch (~1.5K tokens) costs on the order of 30s;
-// the composed AX-8 device-hook pattern (model/composed/composed.go's
+// the retired composed engine's AX-8 device-hook pattern (its composed.go
 // ProjMatMulInto/MLPDevice/ResidualNormMLPDevice — a nil package-level func
 // var the lib calls conditionally, bound by engine/metal at runtime, never
 // imported the other way per AX-8) is the house precedent for closing that

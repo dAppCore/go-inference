@@ -1,5 +1,9 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
+// #50 NOTE: this example rides the RETIRED composed engine's API (model/composed), which the
+// examples module still resolves from the released dappco.re/go/inference v0.12.0 pin. Port it to
+// the factory route before bumping that pin past #50.
+
 // Serve a QUANTISED hybrid (Qwen 3.6 — model_type qwen3_5) with its weights kept PACKED on device. The
 // composed hybrid stack alternates gated-delta linear-attention layers with full-attention layers; at 27B
 // a dense f32 widening is ~110 GB (dead on arrival), so the loader carries every 2-D projection PACKED

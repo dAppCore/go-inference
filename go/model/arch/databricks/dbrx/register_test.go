@@ -52,7 +52,7 @@ func TestRegister_NormalizeWeights_Ugly(t *testing.T) {
 
 func TestDBRXRegistered_Good(t *testing.T) {
 	spec, ok := model.LookupArch("dbrx")
-	if !ok || spec.Parse == nil || spec.Composed == nil {
+	if !ok || spec.Parse == nil {
 		t.Fatalf("DBRX registration = found %v spec %+v", ok, spec)
 	}
 }
@@ -66,7 +66,7 @@ func TestDBRXRegistered_Bad(t *testing.T) {
 
 func TestDBRXRegistered_Ugly(t *testing.T) {
 	spec, _ := model.LookupArch("dbrx")
-	if _, err := spec.Composed(nil, []byte(`{}`)); err == nil {
-		t.Fatal("empty config and checkpoint accepted")
+	if _, err := spec.Parse([]byte("{")); err == nil {
+		t.Fatal("malformed config accepted")
 	}
 }

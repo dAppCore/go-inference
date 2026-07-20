@@ -5,30 +5,19 @@ package qwen35
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
-	"dappco.re/go/inference/model/safetensors"
 )
 
-// register.go declares the Qwen 3.6 hybrid family to the reactive loader with BOTH routes on one ArchSpec:
-// Parse + Weights for the factory (model.Assemble + arch_session — the #18 unification target) AND a
-// Composed hook that delegates to model/composed (the current default + the A/B reference while the
-// factory decode lands). model.LoadComposedDir sees the Composed hook and keeps serving through composed by
-// default; the engine opts INTO the factory route with the factory route by DEFAULT (engine/metal/load.go;
-// LTHN_QWEN_COMPOSED=1 reverts), landed once the factory decode was validated against composed.
+// register.go declares the Qwen 3.6 hybrid family to the reactive loader: Parse + Weights for the
+// factory route (model.Assemble + arch_session — the #18 unification target, and since #50 the ONLY
+// route; the parallel composed engine that used to carry the A/B reference is retired).
 //
-// The family is ONE architecture released under three model_type strings: qwen3_5 / qwen3_5_moe (+ their
-// nested text_config aliases), qwen3_6 / qwen3_6_moe (the same hybrid under its other released name — see
-// model/composed/register.go's prior comment, and loader.go's case that has always built qwen3_5 and
-// qwen3_6 identically), and qwen3_next (Qwen 3.6's predecessor, the same gated-delta/full-attention
-// hybrid). All five ids share this one Parse/Weights/Composed declaration — there is no per-id behaviour
-// difference; the geometry (gated-delta key/value heads, conv kernel) is DERIVED from weight shapes at
-// assemble time (assembleGatedDelta below), not trusted from config field names that drift release to
-// release, which is exactly what makes one declaration safe for all three released names (#50 archzoo).
-//
-// This registration REPLACES composed's own for all five ids (composed/register.go no longer lists any of
-// them). RegisterArch is last-wins, but carrying both hooks on one spec here makes the ownership explicit
-// rather than init-order-dependent. qwen35 may import composed (composed does not import qwen35), so the
-// delegating hook sits cleanly on this side of that edge.
+// The family is ONE architecture released under three model_type strings: qwen3_5 / qwen3_5_moe (+
+// their nested text_config aliases), qwen3_6 / qwen3_6_moe (the same hybrid under its other released
+// name), and qwen3_next (Qwen 3.6's predecessor, the same gated-delta/full-attention hybrid). All
+// seven ids share this one Parse/Weights declaration — there is no per-id behaviour difference; the
+// geometry (gated-delta key/value heads, conv kernel) is DERIVED from weight shapes at assemble time
+// (assembleGatedDelta), not trusted from config field names that drift release to release, which is
+// exactly what makes one declaration safe for all released names (#50 archzoo).
 func init() {
 	model.RegisterArch(model.ArchSpec{
 		ModelTypes: []string{
@@ -43,14 +32,21 @@ func init() {
 			return &cfg, nil
 		},
 		Weights: WeightNames(),
-		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
-			// Delegate to the composed loader (the current default + A/B reference). Zero-copy mmap build,
-			// matching the behaviour composed's own qwen3_5 hook had before this package took the registration.
-			cm, err := composed.LoadComposedMmap(tensors, configJSON)
-			if err != nil {
-				return nil, core.E("qwen35.Load", "assemble composed model", err)
-			}
-			return composed.NewTokenModel(cm), nil
+	})
+
+	// The multi-token-prediction drafter (qwen3_5_mtp) is a REGISTERED model_type that PAIRS with
+	// its base (assistant-side declarations; the MTP head + verify loop) but REFUSES a STANDALONE
+	// load: it is the small speculative head trained alongside a Qwen 3.6 base, it shares the
+	// base's embedding + LM head and projects from the base's last hidden state — there is no base
+	// hidden to project from on its own. A user who points lem at the MTP submodule ALONE gets
+	// direction toward pairing rather than a mystery. Registered separately from the base hybrid
+	// so the refusal message is distinct from a real load failure. (The refusal moved here from
+	// the retired composed engine's register — #50; note the pairing itself currently declines
+	// too: the composed pair loader retired with it, the factory pair route is pending.)
+	model.RegisterArch(model.ArchSpec{
+		ModelTypes: []string{"qwen3_5_mtp", "qwen3_5_mtp_text", "qwen3_6_mtp"},
+		Parse: func([]byte) (model.ArchConfig, error) {
+			return nil, core.NewError("qwen35: qwen3_5_mtp is an MTP drafter with no standalone forward — serve it paired with its base model (lem pair <base> <mtp>)")
 		},
 	})
 }

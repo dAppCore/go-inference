@@ -52,7 +52,7 @@ type RWKV7Model struct {
 
 // RWKV7Session is a persistent recurrent decode session over an RWKV7Model: per-layer WKV7 [H,K,V] state
 // plus the two independent token-shift registers, threaded across forward calls. Single-goroutine (the
-// per-layer state is mutable) — the same ownership rule block.go/model/composed document: never share a
+// per-layer state is mutable) — the same ownership rule block.go documents: never share a
 // session across concurrently-stepped conversations.
 type RWKV7Session struct {
 	m      *RWKV7Model

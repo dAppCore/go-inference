@@ -5,8 +5,6 @@ package smollm3
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
-	"math"
 	"testing"
 )
 
@@ -65,32 +63,6 @@ func TestConfig_InferFromWeights_Ugly(t *testing.T) {
 	cfg.InferFromWeights(nil)
 	if _, err := cfg.Arch(); err == nil {
 		t.Fatal("short NoPE schedule became valid after InferFromWeights")
-	}
-}
-
-// TestTinySmolLM3Forward_Good proves the declared RoPE and NoPE paths differ under varied fills.
-func TestTinySmolLM3Forward_Good(t *testing.T) {
-	syn := func(n, seed int) []float32 {
-		o := make([]float32, n)
-		for i := range o {
-			o[i] = float32((i*seed)%23-11) / 37
-		}
-		return o
-	}
-	w := &composed.AttnWeights{QProj: syn(64, 3), KProj: syn(32, 5), VProj: syn(32, 7), OProj: syn(64, 11)}
-	x := syn(24, 13)
-	rope := composed.NewAttnMixer(w, composed.AttnConfig{Heads: 2, KVHeads: 1, HeadDim: 4, RotaryDim: 4, RopeTheta: 5_000_000})
-	nope := composed.NewAttnMixer(w, composed.AttnConfig{Heads: 2, KVHeads: 1, HeadDim: 4})
-	a, _, e := rope.Forward(x, 3, 8, nil)
-	if e != nil {
-		t.Fatal(e)
-	}
-	b, _, e := nope.Forward(x, 3, 8, nil)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if math.Float32bits(a[16]) == math.Float32bits(b[16]) {
-		t.Fatal("RoPE and NoPE paths unexpectedly equal")
 	}
 }
 

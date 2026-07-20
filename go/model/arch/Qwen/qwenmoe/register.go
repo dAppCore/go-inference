@@ -5,7 +5,6 @@ package qwenmoe
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -31,24 +30,6 @@ func init() {
 				return packed
 			}
 			return tensors // malformed/absent experts — Assemble's nil-safe load surfaces the gap downstream
-		},
-		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
-			var cfg Config
-			if r := core.JSONUnmarshal(configJSON, &cfg); !r.OK {
-				return nil, core.NewError("qwenmoe.Load: config.json parse failed")
-			}
-			arch, err := cfg.Arch()
-			if err != nil {
-				return nil, core.E("qwenmoe.Load", "resolve architecture", err)
-			}
-			// Zero-copy: the packed quant projection weights (attention q/k/v/o, embed, lm_head) VIEW the
-			// mapped checkpoint rather than being copied to the heap. model.LoadComposedDir hands the model
-			// the mapping via RetainMmap, so it stays alive for the aliasing weights' lifetime.
-			assembled, err := composed.LoadComposedWithArchMmap(tensors, configJSON, arch)
-			if err != nil {
-				return nil, core.E("qwenmoe.Load", "assemble composed model", err)
-			}
-			return composed.NewTokenModel(assembled), nil
 		},
 	})
 }

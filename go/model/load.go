@@ -3,21 +3,10 @@
 package model
 
 import (
-	"io"
-
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
-
-// mmapRetainer is a TokenModel whose weights may ALIAS the checkpoint mmap (a zero-copy load).
-// LoadComposedDir offers the mapping to RetainMmap: the model takes ownership (returns true) and
-// unmaps it on its own Close/finalize when its weights view it, or declines (returns false) so the
-// loader unmaps it immediately when every weight was copied/widened out. This keeps the mapping's
-// lifetime with whoever actually references it, without LoadComposedDir needing to know which.
-type mmapRetainer interface {
-	RetainMmap(io.Closer) bool
-}
 
 // load.go is the engine's single REACTIVE loader: read a checkpoint dir, probe model_type, and react to
 // the registered ArchSpec — parse, resolve dims from the weight shapes, derive the Arch, assemble. It
@@ -40,13 +29,6 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 	}
 	if !ok {
 		return nil, nil, core.NewError("model.Load: no architecture registered for model_type " + mt)
-	}
-	if spec.Composed != nil && spec.Parse == nil {
-		// A composed-ONLY arch is not the reactive transformer Assemble path (its linear_attention layers
-		// have no q/k/v to assemble) — route it through LoadComposedDir, not here. A DUAL-route arch
-		// (Composed AND Parse+Weights, e.g. qwen35) carries both, so it reaches Assemble here when a caller
-		// deliberately bypasses LoadComposedDir (engine/metal's default factory route for qwen3_5*) — #18.
-		return nil, nil, core.NewError("model.Load: " + mt + " is a composed/hybrid arch — load via LoadComposedDir")
 	}
 	ac, err := spec.Parse(cfg)
 	if err != nil {
@@ -112,48 +94,6 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 		}
 	}
 	return m, dm, nil
-}
-
-// LoadComposedDir reads dir and builds the hybrid (non-Assemble) TokenModel through the model_type's
-// registered Composed hook — the neutral, backend-agnostic routing for a config-composed stack (Qwen 3.6
-// gated-delta + full attention) whose weights the reactive transformer Assemble does not describe. It is
-// the registry-driven replacement for a backend's hardcoded model_type switch: probe model_type (with the
-// text_config fallback for the multimodal wrapper), look up the ArchSpec, and when it carries a Composed
-// hook, map the safetensors and call it. ok=false means the model_type is a standard transformer (or is
-// unregistered) — load it via Load instead.
-//
-// Mmap lifetime: the composed hook builds ZERO-COPY, so a quant checkpoint's packed weights VIEW the mmap
-// rather than being copied to the heap (the RSS win). The model takes ownership of the mapping through
-// RetainMmap and unmaps it on its own Close/finalize; when the model aliases nothing (a dense pack widened
-// to f32, or an all-1-bit pack repacked to owned heap) RetainMmap declines and the mapping is unmapped here.
-func LoadComposedDir(dir string) (TokenModel, bool, error) {
-	cfgStr, err := coreio.Local.Read(core.PathJoin(dir, "config.json"))
-	if err != nil {
-		return nil, false, core.E("model.LoadComposedDir", "read config.json", err)
-	}
-	cfg := []byte(cfgStr)
-	mt, textMT := probeModelTypes(cfg)
-	spec, ok := LookupArch(mt)
-	if !ok && textMT != "" {
-		spec, ok = LookupArch(textMT)
-	}
-	if !ok || spec.Composed == nil {
-		return nil, false, nil
-	}
-	dm, err := safetensors.LoadDirMmap(dir)
-	if err != nil {
-		return nil, false, err
-	}
-	tm, err := spec.Composed(dm.Tensors, cfg)
-	if err != nil {
-		_ = dm.Close()
-		return nil, false, err
-	}
-	// Hand the mapping to the model if its weights alias it; otherwise unmap now (nothing views it).
-	if r, ok := tm.(mmapRetainer); !ok || !r.RetainMmap(dm) {
-		_ = dm.Close()
-	}
-	return tm, true, nil
 }
 
 // ProbeDirArch reads dir/config.json and returns its top-level model_type plus the raw config bytes —
