@@ -128,6 +128,19 @@ type Config struct {
 	VisionStartTokenID TokenID           `json:"vision_start_token_id"`
 	VisionEndTokenID   TokenID           `json:"vision_end_token_id"`
 	VisionConfig       *VisionArchConfig `json:"vision_config"`
+
+	// MTP drafter fields (qwen3_5_mtp / qwen3_6_mtp — see mtp_drafter.go). Carried directly on THIS
+	// type, not a separate one, because a real drafter checkpoint nests mtp_num_hidden_layers INSIDE
+	// its own text_config (the base's text_config, reused verbatim) — only a field declared on Config
+	// itself survives effective()'s recursive resolution down to TextConfig. MTPNumHiddenLayers is the
+	// head's OWN transformer depth (distinct from NumHiddenLayers, which a drafter config still
+	// carries as an artefact of reusing the base's text_config shape, but never as the head's actual
+	// depth). BlockSize is the checkpoint's declared draft length (top-level only on the real
+	// checkpoint, so read via c.BlockSize directly, never c.effective().BlockSize); a future pair
+	// loader's default draft block when the caller pins none, falling back to its own constant when
+	// absent (0). The base's own Arch()/InferFromWeights never read either field.
+	MTPNumHiddenLayers int `json:"mtp_num_hidden_layers"`
+	BlockSize          int `json:"block_size"`
 }
 
 // effective returns the text config (self, or the nested text_config for the multimodal wrapper).
