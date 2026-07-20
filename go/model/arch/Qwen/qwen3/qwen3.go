@@ -124,6 +124,10 @@ func (c *Config) Arch() (model.Arch, error) {
 		RotaryDim:      headDim,
 		RotaryDimLocal: headDim,
 		RopeScale:      1,
-		Layer:          layers,
+		// Qwen3 does NOT scale token embeddings; without this the engine's gemma-default
+		// sqrt(hidden) fallback multiplied every embed ~50.6x on Qwen3-4B, corrupting the
+		// whole forward (#66 — this file was the sole EmbedScale omission tree-wide).
+		EmbedScale: 1,
+		Layer:      layers,
 	}, nil
 }
