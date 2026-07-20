@@ -172,13 +172,39 @@ func (m *speculativeModel) Generate(ctx context.Context, prompt string, opts ...
 }
 
 // Chat streams the speculative completion of a multi-turn conversation, framed
-// through the SHARED engine render (engine.RenderChatTurns over the gemma
-// ChatTemplate for the target's detected marker dialect) — byte-identical to
-// the plain engine path's plain-turns framing, with no private template copy to
-// drift.
+// byte-identically to the plain engine path's Chat: the SAME detected template
+// (engine.DetectChatTemplate over the target's marker dialect), the SAME
+// large-variant thought-suppressor declaration (the geometry proxy
+// NeedsThoughtChannelSuppressor keys on — gemma4 12B/26B/31B pre-close the
+// empty thought channel on the thinking-off cue, E2B/E4B do not), and the SAME
+// full-template render honouring the request's thinking flag.
+//
+// The pair previously rendered plain turns (engine.RenderChatTurns) with the
+// suppressor unconditionally off, while the plain lane rendered the full
+// declared template — on a 26B pair the two lanes conditioned on DIFFERENT
+// prompt tokens (34 vs 38: the pair dropped the pre-closed thought channel),
+// so pair-vs-plain greedy equality was broken at the prompt, before the verify
+// machinery ever ran (#55).
 func (m *speculativeModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
-	prompt := engine.RenderChatTurns(engine.GemmaChatTemplate(m.turns, false), messages)
-	return m.speculate(ctx, m.tok.Encode(prompt), inference.ApplyGenerateOpts(opts))
+	cfg := inference.ApplyGenerateOpts(opts)
+	targetHeads := 0
+	if m.pair != nil {
+		targetHeads = m.pair.TargetArch.Heads
+	}
+	prompt := speculativeChatPrompt(m.tok, m.turns, targetHeads, messages, cfg.EnableThinking)
+	return m.speculate(ctx, m.tok.Encode(prompt), cfg)
+}
+
+// speculativeChatPrompt frames a speculative Chat request byte-identically to
+// the plain engine path: the SAME detected template (DetectChatTemplate over
+// the target's marker dialect), the SAME large-variant thought-suppressor
+// geometry proxy (NeedsThoughtChannelSuppressor — heads >=
+// largeVariantAttentionHeads), and the SAME full-template render honouring the
+// request's thinking flag. Extracted so the #55 template-parity regression
+// test pins the framing without loading a pair.
+func speculativeChatPrompt(tok engine.TextTokenizer, turns engine.TurnTokens, targetHeads int, messages []inference.Message, enableThinking *bool) string {
+	tmpl := engine.DetectChatTemplate(tok, turns, targetHeads >= largeVariantAttentionHeads)
+	return engine.RenderChatPrompt(tmpl, messages, enableThinking)
 }
 
 // speculate runs the AssistantPair MTP loop over the target session, decoding

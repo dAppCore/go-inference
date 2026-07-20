@@ -366,6 +366,16 @@ func RenderChatTurns(t ChatTemplate, messages []inference.Message) string {
 	return renderChatTurns(t, messages)
 }
 
+// RenderChatPrompt is the exported full-template render (see
+// [renderChatTemplate]): the same leading-system fold, thinking-switch system
+// turn, and suppressor handling the plain engine Chat path applies. The seam
+// exists so engine/metal's speculative pair frames its chat prompt
+// byte-identically to the plain lane — pair-vs-plain greedy equality (#55)
+// starts with both lanes conditioning on the same prompt tokens.
+func RenderChatPrompt(t ChatTemplate, messages []inference.Message, enableThinking *bool) string {
+	return renderChatTemplate(t, messages, enableThinking)
+}
+
 // chatTemplateDefaultSystemRE matches a ChatML system turn whose content is a
 // pure string LITERAL — the "<|im_start|>system\n<default><|im_end|>" a
 // Qwen2.5-style jinja emits as its no-system fallback. The content class

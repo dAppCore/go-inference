@@ -1609,14 +1609,19 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 		return result, nil
 	}
 
-	// Adopt the boundary from the verify pass — the sampled lane's exact shape
-	// (verifyDraftBlockSampledFromSession): the accepted prefix's KV rows are
-	// already correct (batched/sequential verify parity), hiddens[accepted-1] IS
-	// the hidden at the last accepted token, and rows[accepted-1] already set the
-	// replacement above. Re-forwarding the accepted tokens (the old reforge) paid
-	// `accepted` extra target forwards per accepting round — more target work per
-	// committed token than plain decode, which kept MTP slower than plain even at
-	// 67% acceptance.
+	// Adopt the boundary from the verify pass. This adoption is sound ONLY
+	// because the greedy verify forward runs the per-row lane
+	// (verifyAssistantDraftHiddens exact=true): each row's hidden and KV bytes
+	// are identical to the sequential plain-decode step, so
+	// hiddens[accepted-1] IS the canonical hidden at the last accepted token
+	// and the accepted prefix's KV rows are the bytes plain decode would have
+	// written. Under the batched FOLD the same adoption was NOT sound — fold
+	// numerics drift from sequential decode and flipped near-tied argmaxes
+	// downstream (#55). Re-forwarding the accepted tokens (the old reforge)
+	// paid `accepted` extra target forwards per accepting round — more target
+	// work per committed token than plain decode, which kept MTP slower than
+	// plain even at 67% acceptance; the per-row verify makes the reforge
+	// unnecessary rather than paying it back.
 	target.pos = posBefore + accepted
 	if err := target.truncateSpeculativeKV(target.pos); err != nil {
 		return AssistantVerifyResult{}, err
@@ -1677,7 +1682,7 @@ func (pair *AssistantPair) verifyDraftBlockSampledFromSession(target *ArchSessio
 	} else {
 		result.DraftedTokens = draftTokens
 	}
-	hiddens, err := target.verifyAssistantDraftHiddens(draftTokens)
+	hiddens, err := target.verifyAssistantDraftHiddens(draftTokens, false)
 	if err != nil {
 		return AssistantVerifyResult{}, err
 	}
@@ -2508,7 +2513,12 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 		mtpDiagVerifyRowsCalls++
 		diagT0 = time.Now()
 	}
-	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens)
+	// The greedy verify is the byte-exact lane (#55): the block forward runs
+	// per-row (exact=true — the fold's batched numerics can flip a near-tied
+	// argmax) and the rows head defaults to the per-row canonical qmv tier the
+	// plain decode pick uses. LTHN_MTP_ROWS_HEAD=1 re-arms the K-row fused
+	// qmm_t head for the A/B.
+	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2520,14 +2530,19 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	if len(hiddens) != len(draftTokens) {
 		return nil, nil, core.NewError("native.assistant verify target rows are incomplete")
 	}
-	if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
-		return nil, nil, gerr
-	} else if ok {
-		if diagVerify {
-			nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms rows-head=%.1fms\n",
-				len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
+	if mtpRowsHeadForced {
+		if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
+			return nil, nil, gerr
+		} else if ok {
+			if diagVerify {
+				nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms rows-head=%.1fms\n",
+					len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
+			}
+			if mtpDiagForTest {
+				s.mtpDiagCrossCheckRows(hiddens, suppress, rows)
+			}
+			return rows, hiddens, nil
 		}
-		return rows, hiddens, nil
 	}
 	for i, hidden := range hiddens {
 		token, err := s.greedyFromHiddenInPool(hidden, suppress)
@@ -2572,14 +2587,86 @@ func (s *ArchSession) greedyRowsFromHiddensInPool(hiddens [][]byte, suppress []i
 	return s.headEnc.greedyRowsBufferInPool(s.mtpVerifyGreedyRowsBuf, uint(rowBytes), len(hiddens), suppress, out)
 }
 
-func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32) ([][]byte, error) {
-	if !mtpVerifyFoldDisabled {
-		// verify blocks are 4-7 rows: below batchedDenseICBMaxRows the ICB
-		// per-row interleave reads every quant weight K times (K× a plain
-		// step — the whole speculative win gone on dense targets). Let this
-		// verify take the batched fold: weights swept once, token-identity
-		// tier (the same boundary the prompt-scale qmm trades at), routing
-		// deterministic. LTHN_MTP_VERIFY_FOLD=0 restores the per-row lane.
+// mtpDiagRowsXchkRound counts verify rounds for the #55 rows-tier cross-check
+// (single decode goroutine, diag only).
+var mtpDiagRowsXchkRound int
+
+// mtpDiagRowsXchkLogged caps the #55 mismatch log so a pathological run cannot
+// flood the trace.
+var mtpDiagRowsXchkLogged int
+
+// mtpDiagCrossCheckRows re-derives every verify row's greedy token through the
+// per-row canonical tier (headLogitsScratch qmv + host argmax — the tier plain
+// decode and the boundary `first` use) and logs any row where the K-row fused
+// rows head (qmm_t token-identity tier) picked a different token, with the
+// canonical top-2 ids/logits/gap. Diag-only (#55): this is the instrument that
+// witnesses a near-tie argmax flip between the two head tiers live.
+func (s *ArchSession) mtpDiagCrossCheckRows(hiddens [][]byte, suppress []int32, rows []int32) {
+	mtpDiagRowsXchkRound++
+	if mtpDiagRowsXchkLogged >= 40 || !s.canUseHeadLogitsScratch() {
+		return
+	}
+	for i, hidden := range hiddens {
+		logits, err := s.headLogitsScratch(hidden, false)
+		if err != nil {
+			return
+		}
+		t1, v1, t2, v2 := mtpDiagTop2BF16Suppressed(logits, s.arch.Vocab, suppress)
+		if t1 < 0 || i >= len(rows) {
+			return
+		}
+		if rows[i] != t1 && mtpDiagRowsXchkLogged < 40 {
+			mtpDiagRowsXchkLogged++
+			nativeTraceLog(core.Sprintf(
+				"mtp-diag rows-xchk MISMATCH round=%d row=%d qmm_t-pick=%d canonical-top1=%d(%.6f) top2=%d(%.6f) gap=%.6f\n",
+				mtpDiagRowsXchkRound, i, rows[i], t1, v1, t2, v2, v1-v2))
+		}
+	}
+}
+
+// mtpDiagTop2BF16Suppressed host-scans a bf16 logits row for the top-2
+// unsuppressed ids (ties break to the lower id, matching greedyBF16Suppressed).
+func mtpDiagTop2BF16Suppressed(logits []byte, vocab int, suppress []int32) (int32, float32, int32, float32) {
+	if len(logits) < vocab*bf16Size {
+		return -1, 0, -1, 0
+	}
+	best, second := -1, -1
+	var bestV, secondV float32
+	for i := range vocab {
+		if tokenSuppressed(i, suppress) {
+			continue
+		}
+		v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1])
+		switch {
+		case best < 0 || v > bestV:
+			second, secondV = best, bestV
+			best, bestV = i, v
+		case second < 0 || v > secondV:
+			second, secondV = i, v
+		}
+	}
+	return int32(best), bestV, int32(second), secondV
+}
+
+// verifyAssistantDraftHiddens forwards the draft block through the target and
+// returns the per-row hiddens. exact selects the numeric tier (#55):
+//
+//   - exact=true — the byte-exact greedy lane. The block runs the PER-ROW
+//     lane (qmv dot-body per row — byte-identical to the sequential plain
+//     decode step, weights re-read per row), so committed hiddens and KV rows
+//     are the same bytes plain decode would produce and the greedy
+//     pair-vs-plain equality holds by construction.
+//   - exact=false — the sampled lane. The verify takes the small-K batched
+//     FOLD: weights swept once per block through the qmm token-identity tier
+//     (the same boundary the prompt-scale qmm trades at). The fold's batched
+//     numerics are NOT byte-identical to sequential decode — at a near-tied
+//     argmax that flips a committed token, which is why the exact lane never
+//     folds — but the sampled contract is distributional, not byte.
+//
+// LTHN_MTP_VERIFY_FOLD=0 forces the per-row lane everywhere;
+// LTHN_MTP_VERIFY_FOLD=1 forces the fold everywhere (the #55 A/B lever).
+func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32, exact bool) ([][]byte, error) {
+	if mtpVerifyFoldArmed(exact) {
 		s.state.verifyFoldSmallK = true
 		defer func() { s.state.verifyFoldSmallK = false }()
 	}
