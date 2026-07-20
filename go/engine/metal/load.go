@@ -219,6 +219,17 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		tm.headEnc = he
 		tm.vision = lm.Vision
 		tm.unifiedVision = lm.UnifiedVision
+		if lm.Vision == nil && lm.UnifiedVision == nil {
+			// The qwen35 factory vision tower (#59 item 1): assembled by the arch package from the
+			// mapped tensors when this is a vision-towered qwen hybrid; nil (no error) for every
+			// other checkpoint. A PRESENT but malformed tower fails the load loudly.
+			qv, qerr := loadQwenVisionTower(dir, dm)
+			if qerr != nil {
+				_ = sb.Close()
+				return nil, qerr
+			}
+			tm.qwenVision = qv
+		}
 		if lm.Vision != nil || lm.UnifiedVision != nil {
 			// Best-effort: absent/malformed processor config leaves the cfg nil and
 			// ProjectImage falls back to HF defaults, so it never fails the load.
@@ -254,6 +265,16 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	tm.headEnc = he
 	tm.vision = lm.Vision
 	tm.unifiedVision = lm.UnifiedVision
+	if lm.Vision == nil && lm.UnifiedVision == nil {
+		// The qwen35 factory vision tower (#59 item 1) — the bf16 arm's mirror of the quant arm's
+		// attach above.
+		qv, qerr := loadQwenVisionTower(dir, dm)
+		if qerr != nil {
+			_ = sb.Close()
+			return nil, qerr
+		}
+		tm.qwenVision = qv
+	}
 	if lm.Vision != nil || lm.UnifiedVision != nil {
 		// Best-effort: absent/malformed processor config leaves the cfg nil and
 		// ProjectImage falls back to HF defaults, so it never fails the load.
