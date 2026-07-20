@@ -181,21 +181,38 @@ does not block the forward.
 **Round policy reconfirmed 2026-07-20 (§7a) — no contradiction with the landed
 v1 forward's single-call-per-block shape. Arming proceeds.**
 
-1. Live `DFlashAuxSource` for the real convention: per-layer aux hiddens at
+1. ~~Live `DFlashAuxSource` for the real convention: per-layer aux hiddens at
    `target_layer_ids` via the existing non-corrupting live tap, PLUS the
    borrowed target embedding for block seeding (per-position mask-token
-   embeddings — not the old single-anchor broadcast).
-2. Re-point `DFlashDrafter`/`ProposeBlock` (assistant_dflash*.go) at this
+   embeddings — not the old single-anchor broadcast).~~ **Done, with one
+   caveat — see §7b: the live tap (`ExtractAuxHiddensLive`) is single-boundary-
+   position-shaped and cannot supply the reference's multi-row per-round need
+   without a session-stepping redesign paired to the verify oracle's own
+   posture; the landed `ExtractAuxHiddensAllRaw` instead widens the EXISTING
+   throwaway `ForwardCaptureHiddens` primitive `ExtractAuxHiddens` already
+   used (same full-prefix-replay tier `generateDFlash`'s own verify oracle
+   already has) to return every row. Per-position mask-token seeding IS
+   real (`zLabDFlashProposer.ProposeBlock`, `assistant_dflash_zlab.go`).**
+2. ~~Re-point `DFlashDrafter`/`ProposeBlock` (assistant_dflash*.go) at this
    forward + the borrowed target lm_head for block readout (no reduced head,
    no d2t for z-lab); keep the speculators-convention reduced-head posture as
-   a separate arm if that family is ever wanted.
+   a separate arm if that family is ever wanted.~~ **Done — a new,
+   z-lab-specific `zLabDFlashDrafter`/`zLabDFlashProposer`
+   (`assistant_dflash_zlab.go`), NOT a repoint of the speculators-convention
+   `DFlashDrafter` (kept exactly as landed, the separate arm this item
+   asked for). Reads each proposed position off the TARGET's own
+   `headLogitsScratch`, never a reduced head.**
 3. ~~Reconfirm the `spec_generate` round policy against the reference (§5's
    named gap) before arming.~~ **Done — see §7a.**
-4. Flip `DFlashEngineProbe` ONLY once a live draft→verify round trip against
-   a real paired target lands an accept-rate receipt (survey §6 item 6-7's
-   posture, unchanged).
+4. **NOT flipped — see §7b.** The receipt landed (real paired generate,
+   determinism + losslessness both proven against z-lab/Qwen3-4B-DFlash-b16 +
+   Qwen/Qwen3-4B) but the accept-rate is 0.00: root-caused to a pre-existing
+   bug in `ForwardCaptureHiddens`'s intermediate-layer capture, outside this
+   lane's fence. `DFlashEngineProbe` stays `false` until that's fixed and
+   re-measured.
 5. Perf follow-ups: resident bf16 weights + fused device chain; skip re-fusing
-   unchanged context rows across rounds.
+   unchanged context rows across rounds. (Now a shared item with §7b's fix —
+   both point at the same incremental-capture direction.)
 
 ## 7a. Round-policy reconfirmation (banked evidence, 2026-07-20)
 
@@ -291,3 +308,80 @@ token after a full match.
 **Verdict: no contradiction anywhere in the chain (reference round policy ↔
 landed engine-forward call shape ↔ landed Go verify driver). Arming (§7
 items 1, 2, 4) proceeds.**
+
+## 7b. Live glue landed; DFlashEngineProbe withheld (evidence, 2026-07-20)
+
+**What landed** (`assistant_dflash_zlab.go`, new; `assistant_dflash_proposer.go`
++ `ExtractAuxHiddensAllRaw`; `speculative_model.go`'s `zlab` field +
+`generateDFlashZLab`): `LoadSpeculativePair` recognises the z-lab convention
+from `draftPath/config.json` alone (`zlabdflash.ParseConfig`, before
+`LoadAssistantPairDirs` would even be attempted — that loader demands
+`model.embed_tokens.weight`, which this convention architecturally lacks) and
+routes to a wholly separate load path. `zLabDFlashProposer.ProposeBlock` seeds
+each block from the TARGET's own embedding table (the real anchor at position
+0, `MaskTokenID`'s embedding at every other position) and reads each proposed
+position off the TARGET's own borrowed `headLogitsScratch` + argmax — never a
+reduced draft vocab. The speculators-convention `DFlashDrafter`
+(`assistant_dflash.go`) is untouched, the separate arm §7 item 2 asked for.
+
+**The receipt** (`TestSpeculativeModel_DFlashZLab_RealPairedGenerate`,
+`assistant_dflash_zlab_test.go`, env-gated, real
+`z-lab/Qwen3-4B-DFlash-b16` + real `Qwen/Qwen3-4B`):
+
+- **Determinism**: PASS — the same prompt twice yields byte-identical token
+  sequences.
+- **Losslessness**: PASS — the paired sequence is byte-identical to the SAME
+  target's plain greedy decode (`ArchSession.Generate`), confirmed a second,
+  independent way too: loading the target PLAINLY through
+  `inference.LoadModel` (no drafter at all) and running the identical Chat
+  request reproduces the exact same tokens.
+- **Accept-rate**: **0.00** (180 proposed, 0 accepted, over 12 rounds on a
+  12-token greedy completion of "The capital of France is"). Lossless, but
+  not yet accelerating.
+
+**Root cause of the 0% accept-rate — NOT this lane's wiring.**
+`ExtractAuxHiddensAllRaw` widens `ForwardCaptureHiddens`'s existing per-layer
+capture to every context row (`assistant_dflash_proposer.go`'s doc); the bug
+is one layer down, in `ForwardCaptureHiddens` itself
+(`train_session.go`/`decode_forward_arch.go` — outside this lane's fence:
+`dflash*`/`assistant_dflash*`/z-lab only). Two independent checks, both
+against the real Qwen/Qwen3-4B target:
+
+1. **External cross-validation**: an independent `transformers`/`torch`
+   extraction (venv at `/Users/snider/PyCharmMiscProject/.venv`, torch 2.13.0
+   + transformers 5.5.4, MPS) of the SAME 5-token prompt's `hidden_states` at
+   the SAME `target_layer_ids` (`[1, 9, 17, 25, 33]`, `extract_context_
+   feature`'s own `+1` HF-embedding-slot convention) diverges from
+   `ExtractAuxHiddensAllRaw`'s output by ~2× total magnitude (sumAbs got
+   ≈221,719 vs want ≈117,451; max abs diff ≈4,837 on values with hidden std
+   ~120+ at that depth) — reproduced identically with the ICB replay path
+   AND with it disabled (`LTHN_DECODE_ICB=0`), so it is not ICB-specific. The
+   divergence is worst at the FIRST token and at the DEEPEST sampled layers —
+   consistent with a per-layer capture-bookkeeping fault, not a wrong
+   `target_layer_ids` list (the literal `[1,9,17,25,33]` values were shared
+   byte-for-byte between the Python reference and the Go call in this check,
+   bypassing config-parsing entirely).
+2. **Within-engine cross-check**: `ForwardCaptureHiddens`' OWN final-layer
+   row, read through the SAME session's head, agrees EXACTLY with the
+   ordinary `PrefillTokens`+`BoundaryLogits` decode path's greedy prediction
+   for the identical prefix (both pick token 43614). So the FINAL output is
+   right; only the INTERMEDIATE per-layer captures — exactly what a DFlash
+   aux tap needs — are wrong. `decode_forward_arch.go` already carries a
+   comment naming this exact bug CLASS from a prior incident (#391, "the
+   captured hiddens disagreed with the serving forward" from a recorded-
+   op-boundary misalignment) — this looks like the same family recurring for
+   a real, large (36-layer, GQA) architecture, not a new defect this lane
+   introduced.
+
+**Consequence**: `DFlashEngineProbe` (`serving/serve_draft.go`) stays
+`false` — §7 item 4's own gate ("ONLY once a live draft→verify round trip
+against a real paired target lands an accept-rate receipt") is not met. The
+architecture, the load path, and the proposer are all correct and proven
+lossless; the drafter is fed the wrong numbers by a primitive this lane does
+not own. **Follow-up** (a different lane, `train_session.go`/
+`decode_forward_arch.go`'s owner): re-validate `ForwardCaptureHiddens`'
+intermediate-layer capture against a real large model (repro: the exact
+prompt tokens `[785, 6722, 315, 9625, 374]` — "The capital of France is" —
+target_layer_ids `[1, 9, 17, 25, 33]`, expected sums logged above), fix, then
+re-run `TestSpeculativeModel_DFlashZLab_RealPairedGenerate` and flip the
+probe once accept-rate is meaningfully above 0.

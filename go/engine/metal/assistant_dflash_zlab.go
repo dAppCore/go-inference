@@ -96,7 +96,7 @@ type zLabDFlashSource func(context []int) (targetHiddenRaw []float32, ctxLen int
 type zLabDFlashProposer struct {
 	drafter   *zLabDFlashDrafter
 	source    zLabDFlashSource
-	maskEmbed []byte                              // TARGET bf16 embedding of MaskTokenID — constant per generate call
+	maskEmbed []byte                             // TARGET bf16 embedding of MaskTokenID — constant per generate call
 	head      func(hidden []byte) (int32, error) // TARGET's own borrowed lm_head + argmax, bf16 hidden -> target-vocab id
 }
 

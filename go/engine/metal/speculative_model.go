@@ -53,8 +53,8 @@ type speculativeModel struct {
 	// read pair.TargetArch falls back to target.arch (identical data, the
 	// same target checkpoint, just not re-derived through the AssistantPair
 	// path).
-	zlab *zLabDFlashDrafter
-	tok  *tokenizer.Tokenizer
+	zlab       *zLabDFlashDrafter
+	tok        *tokenizer.Tokenizer
 	info       inference.ModelInfo
 	modelType  string
 	draftBlock int
