@@ -13,10 +13,14 @@ import (
 )
 
 // subTwoBitQuantDecline returns a typed refusal when the checkpoint's declared quantisation is a
-// width no factory device path serves: the affine qmv kernels have no sub-2-bit instantiation
-// (#24's open half), so a 1-bit pack (Bonsai) cannot decode. The retired composed engine used to
-// serve these host-side (#50); refusing with the gap named beats a missing-kernel error deep in the
-// head build. An absent/unparseable quantization block (bf16) is servable — nil.
+// width this loader cannot yet serve end-to-end. The kernels are NOT the gap: an exact b1→b2 code
+// widening exists (mlxaffine.RepackB1ToB2, zero quality change) and hooking it at model.LoadLinear
+// does reach the qmv kernels — but the repack allocates OWNED buffers, and this engine's zero-copy
+// binding (shardBuffers.bufForAligned) serves only views into the mapped checkpoint shards, so the
+// load then fails at bind ("weight is not a view into any mapped shard" — probed 2026-07-20). The
+// retired composed engine bound owned weights itself (#50). Lifting this decline = the owned-weight
+// device-binding fallback (boarded; same class blocks serving any synthesised pack, e.g. the
+// packExperts MoE tensors). An absent/unparseable quantization block (bf16) is servable — nil.
 func subTwoBitQuantDecline(cfg []byte) error {
 	var q struct {
 		Quantization struct {
@@ -27,7 +31,7 @@ func subTwoBitQuantDecline(cfg []byte) error {
 		return nil
 	}
 	if q.Quantization.Bits > 0 && q.Quantization.Bits < 2 {
-		return core.NewError("native.LoadTokenModelDir: this checkpoint declares a sub-2-bit quant pack — the factory qmv kernels have no sub-2-bit width (#24) and the composed host lane that served it is retired (#50)")
+		return core.NewError("native.LoadTokenModelDir: this checkpoint declares a sub-2-bit quant pack — the exact b1->b2 repack produces owned buffers the zero-copy shard binding cannot yet serve (owned-weight device binding pending), and the composed host lane that served it is retired (#50)")
 	}
 	return nil
 }
