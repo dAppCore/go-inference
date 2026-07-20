@@ -43,6 +43,13 @@ func init() {
 	// so the refusal message is distinct from a real load failure. (The refusal moved here from
 	// the retired composed engine's register — #50; note the pairing itself currently declines
 	// too: the composed pair loader retired with it, the factory pair route is pending.)
+	//
+	// This refusal is DELIBERATELY left unchanged (#59 item 2 — see docs/design-qwen-mtp-pair.md):
+	// mtp_drafter.go gives the checkpoint a real, tested Parse/Arch/weight-name route
+	// (ParseDrafterConfig/Config.DrafterArch/DrafterWeightNames), but as plain, uncalled package
+	// API — not wired here — because trading this named "serve it paired" message for
+	// model.Assemble's generic "absent" error would be a UX regression for zero functional gain
+	// (nothing can serve the checkpoint standalone either way; see TestMTPDrafterRefusal_Bad).
 	model.RegisterArch(model.ArchSpec{
 		ModelTypes: []string{"qwen3_5_mtp", "qwen3_5_mtp_text", "qwen3_6_mtp"},
 		Parse: func([]byte) (model.ArchConfig, error) {
