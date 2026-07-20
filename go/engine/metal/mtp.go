@@ -98,14 +98,15 @@ var mtpReengageDisabled = os.Getenv("LTHN_MTP_REENGAGE") == "0"
 // not. The exact lane therefore defaults to the per-row canonical head.
 var mtpRowsHeadForced = os.Getenv("LTHN_MTP_ROWS_HEAD") == "1"
 
-// mtpVerifyFoldArmed is the #55 routing rule for the assistant verify forward:
-// the batched small-K fold (qmm token-identity tier — NOT byte-identical to
-// sequential decode; a near-tied argmax can flip a committed token) arms only
-// when the caller does not need byte-exactness (the sampled lane), or when the
-// LTHN_MTP_VERIFY_FOLD=1 A/B lever forces it. exact=true is the greedy lane's
-// byte-exact contract: never fold unless forced.
+// mtpVerifyFoldArmed reports whether the assistant verify forward uses the batched
+// fold. The fold serves every lane: its batched numerics are the model's own
+// arithmetic in a deterministic, run-to-run-stable order, and a per-row byte-exact
+// verify costs at least K plain steps by construction — parity with the unbatched
+// plain decode is an A/B forensics tool, not a product contract.
+// LTHN_MTP_VERIFY_FOLD=0 forces the per-row lane for that A/B.
 func mtpVerifyFoldArmed(exact bool) bool {
-	return mtpVerifyFoldForced || (!exact && !mtpVerifyFoldDisabled)
+	_ = exact // both lanes fold; the parameter survives for the =0 forensics path's call sites
+	return mtpVerifyFoldForced || !mtpVerifyFoldDisabled
 }
 
 // mtpDiagDraftCalls counts draft-block invocations for the #352 instrument (single decode goroutine).

@@ -31,16 +31,16 @@ func restoreMTPFoldLevers(t *testing.T) {
 	})
 }
 
-// TestMtpVerifyFoldArmed_Good pins the default #55 routing: the byte-exact
-// greedy lane (exact=true) never takes the fold; the sampled lane keeps it.
+// TestMtpVerifyFoldArmed_Good pins the default routing: the batched fold serves
+// BOTH lanes; the per-row lane exists only behind the =0 forensics lever.
 func TestMtpVerifyFoldArmed_Good(t *testing.T) {
 	restoreMTPFoldLevers(t)
 	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, false
-	if mtpVerifyFoldArmed(true) {
-		t.Fatal("exact greedy verify armed the batched fold — the byte-exact contract cannot hold on the token-identity tier (#55)")
+	if !mtpVerifyFoldArmed(true) {
+		t.Fatal("greedy verify did not arm the batched fold — the default throughput tier regressed to the per-row lane")
 	}
 	if !mtpVerifyFoldArmed(false) {
-		t.Fatal("sampled verify did not arm the batched fold — the sampled lane's throughput tier regressed")
+		t.Fatal("sampled verify did not arm the batched fold — the default throughput tier regressed to the per-row lane")
 	}
 }
 

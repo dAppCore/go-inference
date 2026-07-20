@@ -123,9 +123,9 @@ func TestMTPRowsDriverVerifyMatchesRowMajor_Good(t *testing.T) {
 
 	run := func(forced bool) (hiddens [][]byte, kv [][2][]byte, greedy []int32) {
 		t.Helper()
-		saved := mtpRowsMoEArmed
-		mtpRowsMoEArmed = forced
-		defer func() { mtpRowsMoEArmed = saved }()
+		saved, savedFoldOff := mtpRowsMoEArmed, mtpVerifyFoldDisabled
+		mtpRowsMoEArmed, mtpVerifyFoldDisabled = forced, true // the rows driver lives on the per-row lane, behind the =0 forensics lever
+		defer func() { mtpRowsMoEArmed, mtpVerifyFoldDisabled = saved, savedFoldOff }()
 
 		sess := mtpRowsDriverNewSession(t, arch, quant, ts, prompt)
 		hs, err := sess.verifyAssistantDraftHiddens(draft, true)
