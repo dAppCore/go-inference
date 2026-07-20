@@ -134,6 +134,10 @@ func moeToQuant(e *model.LoadedMoE, arch model.Arch) *MoEQuantLayerWeights {
 		SharedUp:          qw(e.SharedUp),
 		SharedDown:        qw(e.SharedDown),
 		SharedSigmoid:     qw(e.SharedSigmoid),
+		// #63: the expert combine's gate nonlinearity, resolved the same way moeLoadedToBF16 resolves
+		// its bf16 sibling's UsesSiLU (engine/metal/moe_block.go) — ffnUsesSiLU(arch.Activation).
+		// gemma4 never sets Activation, so this stays false (GELU) for every existing gemma4 load.
+		UsesSiLU: ffnUsesSiLU(arch.Activation),
 	}
 	if e.ExpGate != nil {
 		q.ExpertGroupSize, q.ExpertBits = e.ExpGate.GroupSize, e.ExpGate.Bits

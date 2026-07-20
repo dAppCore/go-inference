@@ -10,7 +10,9 @@ import (
 
 // Databricks DBRX Instruct config fixture:
 // https://huggingface.co/databricks/dbrx-instruct/blob/main/config.json
-const instructConfig = `{"model_type":"dbrx","d_model":6144,"n_heads":48,"n_layers":40,"vocab_size":100352,"tie_word_embeddings":false,"attn_config":{"clip_qkv":8,"kv_n_heads":8,"rope_theta":500000},"ffn_config":{"ffn_hidden_size":10752,"moe_num_experts":16,"moe_top_k":4}}`
+// ffn_act_fn.name (#63) is DBRX's real nested activation declaration — verified against the
+// mlx-community/dbrx-instruct-4bit mirror's config.json, which carries the same ffn_config block.
+const instructConfig = `{"model_type":"dbrx","d_model":6144,"n_heads":48,"n_layers":40,"vocab_size":100352,"tie_word_embeddings":false,"attn_config":{"clip_qkv":8,"kv_n_heads":8,"rope_theta":500000},"ffn_config":{"ffn_hidden_size":10752,"moe_num_experts":16,"moe_top_k":4,"ffn_act_fn":{"name":"silu"}}}`
 
 func TestConfig_Arch_Good(t *testing.T) {
 	var cfg Config
@@ -29,6 +31,11 @@ func TestConfig_Arch_Good(t *testing.T) {
 	}
 	if !arch.LayerNorm || arch.QKVClip != 8 {
 		t.Fatalf("attention quirks = layer norm %v qkv clip %g", arch.LayerNorm, arch.QKVClip)
+	}
+	// #63: ffn_config.ffn_act_fn.name must reach Arch.Activation so the MoE expert combine can
+	// select SiLU (engine/metal/projector.go's ffnUsesSiLU) instead of gemma4's GELU default.
+	if arch.Activation != "silu" {
+		t.Fatalf("Activation = %q, want silu (real DBRX checkpoints declare ffn_config.ffn_act_fn.name: silu)", arch.Activation)
 	}
 }
 

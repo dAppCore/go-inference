@@ -79,6 +79,14 @@ type MoELayerWeights struct {
 	// mismatch). Zero falls back to ExpertDFF at the moeBlockBF16AfterRouterWithBufferPooled call site,
 	// mirroring MoEQuantLayerWeights.SharedDFF (#61).
 	SharedDFF int
+
+	// UsesSiLU selects the expert-combine gate nonlinearity: false (the zero value) is gemma4's GELU
+	// (encGeluGateMul/the fused gelu kernel — byte-identical to every load before #63); true is
+	// SiLU/SwiGLU (encSiLUGateMulBF16 — mixtral/dbrx/olmoe's llama-family shape, and qwen-shaped bf16
+	// layers' shared expert). Set from arch.Activation via ffnUsesSiLU at load (moeLoadedToBF16) — see
+	// moeBlockBF16AfterRouterWithBufferPooled's emitGelu closure and its shared-expert branch, the two
+	// places this flag is consulted. gemma4 never sets Arch.Activation, so this is always false for it.
+	UsesSiLU bool
 }
 
 // routerNormWeight is the norm weight MoERouter applies internally before the router's score
@@ -139,6 +147,10 @@ func moeLoadedToBF16(e *model.LoadedMoE, arch model.Arch) *MoELayerWeights {
 		RouterNormWScaled: e.RouterScale, RouterW: bw(e.Router), PerExpertScale: e.PerExpertScale,
 		ExpGateW: bw(e.ExpGate), ExpUpW: bw(e.ExpUp), ExpGateUpW: bw(e.ExpGateUp), ExpDownW: bw(e.ExpDown),
 		SharedGateW: bw(e.SharedGate), SharedUpW: bw(e.SharedUp), SharedDownW: bw(e.SharedDown), SharedSigmoidW: bw(e.SharedSigmoid),
+		// #63: the expert combine's gate nonlinearity, resolved the same way the dense-FFN/ICB paths
+		// already resolve theirs (projector.go's ffnUsesSiLU). gemma4 never sets Activation, so this
+		// stays false (GELU) for every existing gemma4 load — zero behaviour change.
+		UsesSiLU: ffnUsesSiLU(arch.Activation),
 	}
 }
 
@@ -153,6 +165,14 @@ func mlpTransformBF16(x, wGate, wUp, wDown []byte, dModel, dFF int) ([]byte, err
 }
 
 func mlpTransformBF16Into(out []byte, x, wGate, wUp, wDown []byte, dModel, dFF int) ([]byte, error) {
+	return mlpTransformActivationBF16Into(out, x, wGate, wUp, wDown, dModel, dFF, false)
+}
+
+// mlpTransformActivationBF16Into is mlpTransformBF16Into with an explicit gate-activation choice:
+// GELU (useSiLU false — gemma4's local dense MLP; mlpTransformBF16Into's existing callers all resolve
+// here, byte-identical) or SiLU/SwiGLU (useSiLU true —
+// moeBlockBF16AfterRouterWithBufferPooled's qwen-shaped shared-expert branch, #63).
+func mlpTransformActivationBF16Into(out []byte, x, wGate, wUp, wDown []byte, dModel, dFF int, useSiLU bool) ([]byte, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
@@ -211,7 +231,12 @@ func mlpTransformBF16Into(out []byte, x, wGate, wUp, wDown []byte, dModel, dFF i
 			endEncodingFast(enc)
 			return
 		}
-		if encErr = encGeluGateMul(enc, msc.gate, msc.up, msc.gated, msc, dFF); encErr != nil {
+		if useSiLU {
+			encErr = encSiLUGateMulBF16(enc, msc.gate, msc.up, msc.gated, dFF)
+		} else {
+			encErr = encGeluGateMul(enc, msc.gate, msc.up, msc.gated, msc, dFF)
+		}
+		if encErr != nil {
 			endEncodingFast(enc)
 			return
 		}
@@ -1070,22 +1095,25 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 		return nil, err
 	}
 	// Shared expert (qwen-shaped, see SharedGateW's doc): a THIRD independent branch, sized at sharedFF
-	// (may differ from both dFF and expertDFF), computed here via the self-contained mlpTransformBF16
-	// (its own pooled scratch keyed on (dModel, sharedFF) — never the fixed-width msc scratch run()
-	// uses below, which is sized max(dFF, expertDFF) and would silently truncate a wider shared branch)
-	// rather than folded into the live encoder. normedHost is rms(h, pre2W) — the SAME value the routed
-	// experts normalise on (scratch.expertIn inside run()) — matching the quant reference
-	// (encQwenMoEHalf), which feeds ONE normed value to both the routed and the shared expert.
-	// sharedContribution (host bf16, dModel) is added into scratch.expertAcc inside run(), after the
-	// routed-expert loop and before any post-combine norm — exactly where encQwenMoEHalf sums the shared
-	// expert into the SAME accumulator as the routed experts, pre-residual.
+	// (may differ from both dFF and expertDFF), computed here via the self-contained
+	// mlpTransformActivationBF16Into (its own pooled scratch keyed on (dModel, sharedFF) — never the
+	// fixed-width msc scratch run() uses below, which is sized max(dFF, expertDFF) and would silently
+	// truncate a wider shared branch) rather than folded into the live encoder. normedHost is
+	// rms(h, pre2W) — the SAME value the routed experts normalise on (scratch.expertIn inside run()) —
+	// matching the quant reference (encQwenMoEHalf), which feeds ONE normed value to both the routed
+	// and the shared expert. sharedContribution (host bf16, dModel) is added into scratch.expertAcc
+	// inside run(), after the routed-expert loop and before any post-combine norm — exactly where
+	// encQwenMoEHalf sums the shared expert into the SAME accumulator as the routed experts,
+	// pre-residual. The shared branch's gate uses w.UsesSiLU — the SAME per-layer activation as the
+	// routed experts (#63): every real arch that ships a shared expert (qwen's family) declares SiLU
+	// for both branches uniformly, never a mix.
 	var sharedContribution []byte
 	if hasShared {
 		normedHost, nerr := RMSNormBF16Into(nil, h, pre2W, 1, dModel, eps)
 		if nerr != nil {
 			return nil, nerr
 		}
-		mlpOut, merr := mlpTransformBF16(normedHost, w.SharedGateW, w.SharedUpW, w.SharedDownW, dModel, sharedFF)
+		mlpOut, merr := mlpTransformActivationBF16Into(nil, normedHost, w.SharedGateW, w.SharedUpW, w.SharedDownW, dModel, sharedFF, w.UsesSiLU)
 		if merr != nil {
 			return nil, merr
 		}
@@ -1120,6 +1148,12 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 			return nil, err
 		}
 	}
+	// #63: the layer's declared expert-combine activation — gemma4 (Activation unset) stays GELU,
+	// byte-identical; a llama-family zoo layer (mixtral/dbrx/olmoe) or a qwen-shaped layer's routed
+	// experts (Activation "silu") switch to SiLU. Applies uniformly to BOTH branches emitGelu serves
+	// below (gemma4's local dense MLP, every arch's routed experts) — the two never coexist with a
+	// mismatched activation on any registered arch.
+	useSiLU := w.UsesSiLU
 	scalePSO, scaleErr := bf16MulScalarPipeline()
 
 	var encErr error
@@ -1189,7 +1223,13 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 		emitExpertDownGemv := func(mat, vec, out metal.MTLBuffer, matOff uint) {
 			emitGemv(sink, expertDownPSO, mat, matOff, vec, out, 0, expertDFF, dModel, expertDownBM, expertDownBN, expertDownSM, expertDownTM)
 		}
+		// emitGelu, despite its name (kept for callers below), is the layer's whole gate-activation
+		// choice (#63): useSiLU routes to the SwiGLU gate first — gemma4 (useSiLU false) falls through
+		// to the original GELU dispatch unchanged.
 		emitGelu := func(gate, up, out metal.MTLBuffer, n int) error {
+			if useSiLU {
+				return encSiLUGateMulBF16(enc, gate, up, out, n)
+			}
 			if useFusedGelu {
 				emitBinary(sink, geluPSO, gate, 0, up, 0, out, 0, n)
 				return nil
@@ -1478,6 +1518,17 @@ type MoEQuantLayerWeights struct {
 	SwigluLimit                         float32
 	RouterBias                          []byte
 	ExpGateBias, ExpUpBias, ExpDownBias []byte
+
+	// UsesSiLU selects the expert-combine gate nonlinearity: false (the zero value) is gemma4's GELU
+	// (byte-identical to every load before #63); true is SiLU/SwiGLU (encSiLUGateMulBF16 —
+	// mixtral/dbrx/olmoe's llama-family shape). Set from arch.Activation via ffnUsesSiLU at load
+	// (moeToQuant, load_shared.go) — see encMoEBlockQuantDevice and
+	// moeBlockQuantAfterRouterWithDeviceIndexBufferPooled's emitGelu/emitGate closures, where this flag
+	// is consulted. gemma4 never sets Arch.Activation, so this is always false for it. A qwen-shaped
+	// layer (SharedGate bound) never reaches either function — it decodes on the host (encQwenMoEHalf,
+	// already SiLU-correct) before either combine sees it — so this field is moot but still correctly
+	// resolved for one.
+	UsesSiLU bool
 }
 
 // routerNorm is MoELayerWeights.routerNormWeight() for the quant struct: the norm weight (bytes
@@ -2071,14 +2122,21 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	if err != nil {
 		return enc, encConc, false, nil
 	}
+	// #63: the layer's declared expert-combine activation — see moeBlockBF16AfterRouterWithBufferPooled's
+	// identical useSiLU doc. gemma4 (the only arch shaped to reach this fully-encoded lane today, since
+	// eligibility above requires the local dense MLP + all five sandwich norms) never sets
+	// Arch.Activation, so this stays false for it — byte-identical.
+	useSiLU := w.UsesSiLU
 	// gelu fold (#341 phase 1): both down projections read gate/up directly and
 	// compute gelu(gate)·up at load — the two gelu dispatches (and the expert
 	// gelu's barrier) never encode. Decided ONCE for the whole block so the
 	// gated scratch stays coherent; either PSO missing (stale metallib, exotic
-	// width) or the lever falls back to the chain unchanged.
+	// width) or the lever falls back to the chain unchanged. The fused kernel is
+	// GELU-specific (lthn_gelu_qmv/lthn_gather_qmv's gelu:true variant) — a SiLU layer
+	// always falls back to the plain (already SiLU-aware) chain below, never the fold.
 	geluFold := false
 	var localDownGeluPSO, gatherDownGeluPSO metal.MTLComputePipelineState
-	if geluFoldEnabled {
+	if geluFoldEnabled && !useSiLU {
 		if p1, ok1 := lthnGeluQMVPipeline(localDownGroupSize, localDownBits); ok1 {
 			if p2, ok2 := lthnGatherQMVPipeline(lthnGatherQMVKey{groupSize: expDownGroupSize, bits: expDownBits, expertRows: dModel, batchedX: true, gelu: true}); ok2 {
 				localDownGeluPSO, gatherDownGeluPSO, geluFold = p1, p2, true
@@ -2169,6 +2227,20 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	}
 	emitAdd := func(a, b, out metal.MTLBuffer) {
 		emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
+	}
+	// emitGate is the layer's whole gate-activation dispatch (#63): useSiLU routes to the composed
+	// SwiGLU chain (no fused SiLU kernel exists, mirroring the bf16/quant break-out funnels' identical
+	// choice); gemma4 (useSiLU false) keeps the original one-dispatch fused gelu kernel this lane
+	// requires (gpuHasGeluKernel is asserted above). encSiLUGateMulBF16's own pipelines
+	// (vv_Multiplybfloat16, v_SigmoidBFloat16BFloat16) are base MLX kernels already relied on
+	// unchecked elsewhere in this lane (addPSO); its error is not expected to fire in practice — same
+	// tolerance as every other post-setup emit closure here — so the caller need not thread it through.
+	emitGate := func(gate, up, out metal.MTLBuffer, n int) {
+		if useSiLU {
+			_ = encSiLUGateMulBF16(enc, gate, up, out, n)
+			return
+		}
+		emitBinary(sink, geluPSO, gate, 0, up, 0, out, 0, n)
 	}
 	// ---- stage decisions, hoisted above the emits so the concurrent fork can gate ----
 	localGateViewQ := quantMLPProjView{packed: localGatePacked, scales: localGateScales, biases: localGateBiases, groupSize: localGateGroupSize, bits: localGateBits}
@@ -2320,7 +2392,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 			routerPlan.emitTopK(sink)
 		}
 		if !geluFold {
-			emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+			emitGate(msc.gate, msc.up, msc.gated, dFF)
 		}
 		barrier()
 		// stage 4: expert gate/up gathers (need the top-k indices) ∥ local down
@@ -2332,7 +2404,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		// (the stage and its barrier disappear; the stage-4 barrier already
 		// orders the gate/up slabs ahead of the down gather)
 		if !geluFold {
-			emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+			emitGate(scratch.expertGateAll, scratch.expertUpAll, scratch.expertGatedAll, topK*expertDFF)
 			barrier()
 		}
 		// stage 6: expert down gather
@@ -2391,7 +2463,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
 		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
 		if !geluFold {
-			emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+			emitGate(msc.gate, msc.up, msc.gated, dFF)
 		}
 		emitLocalDown()
 	}
@@ -2400,7 +2472,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	if allRoutes {
 		emitGatherInAll()
 		if !geluFold {
-			emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+			emitGate(scratch.expertGateAll, scratch.expertUpAll, scratch.expertGatedAll, topK*expertDFF)
 		}
 		emitGatherDownAll()
 		seam("moe.tail")
@@ -2427,7 +2499,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 				emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGatePacked, expGateScales, expGateBiases, scratch.expertIn, msc.gate, i, dModel, expertDFF, expGateGroupSize, expGateBits, 0)
 				emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expUpPacked, expUpScales, expUpBiases, scratch.expertIn, msc.up, i, dModel, expertDFF, expUpGroupSize, expUpBits, 0)
 			}
-			emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, expertDFF)
+			emitGate(msc.gate, msc.up, msc.gated, expertDFF)
 			emitGatherQ(gatherExpertDownPSO, gatherExpertDownMeta, expDownPacked, expDownScales, expDownBiases, msc.gated, msc.down, i, expertDFF, dModel, expDownGroupSize, expDownBits, 0)
 			if i == 0 {
 				emitScaleAt(msc.down, uint(i*bf16Size), scratch.expertAcc, dModel)
@@ -2728,6 +2800,9 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 			return nil, err
 		}
 	}
+	// #63: the layer's declared expert-combine activation — see moeBlockBF16AfterRouterWithBufferPooled's
+	// identical useSiLU doc (its bf16 sibling; the two funnels are kept in step).
+	useSiLU := w.UsesSiLU
 	scalePSO, scaleErr := bf16MulScalarPipeline()
 	if scaleErr != nil && len(weights) != topK*bf16Size {
 		return nil, core.NewError("native.moeBlockQuantAfterRouter: host weights required when device scalar scaling is unavailable")
@@ -2844,7 +2919,13 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 		emitGatherQ := func(pso metal.MTLComputePipelineState, meta *gatherQMVBF16Meta, wq, scales, biases, x, out metal.MTLBuffer, wqOff, scalesOff, biasesOff uint, route int, inDim, outDim, groupSize, bits, rowBase int) {
 			emitGatherQMVBF16Steel(sink, pso, meta, x, wq, wqOff, scales, scalesOff, biases, biasesOff, routeIdxBuf, uint(route*4), out, 0, outDim, inDim, groupSize, bits, rowBase)
 		}
+		// emitGelu, despite its name (kept for callers below), is the layer's whole gate-activation
+		// choice (#63): useSiLU routes to the SwiGLU gate first — gemma4 (useSiLU false) falls through
+		// to the original GELU dispatch unchanged.
 		emitGelu := func(gate, up, out metal.MTLBuffer, n int) error {
+			if useSiLU {
+				return encSiLUGateMulBF16(enc, gate, up, out, n)
+			}
 			if useFusedGelu {
 				emitBinary(sink, geluPSO, gate, 0, up, 0, out, 0, n)
 				return nil

@@ -27,6 +27,10 @@ type Config struct {
 	RMSNormEps        float32 `json:"rms_norm_eps"`
 	RopeTheta         float32 `json:"rope_theta"`
 	TieWordEmbeddings *bool   `json:"tie_word_embeddings"`
+	// HiddenActivation is the routed-expert SwiGLU gate ("silu" on every real Mixtral checkpoint).
+	// Forwarded verbatim into Arch.Activation (mirroring granitemoe's HiddenActivation) so the MoE
+	// expert combine (engine/metal) can select SiLU instead of gemma4's GELU (#63).
+	HiddenActivation string `json:"hidden_act"`
 }
 
 // InferFromWeights satisfies model.ArchConfig. Mixtral declares its geometry.
@@ -73,6 +77,6 @@ func (c Config) Arch() (model.Arch, error) {
 		Experts: c.NumLocalExperts, TopK: c.NumExpertsPerTok, ExpertFF: c.IntermediateSize,
 		MoEGating: model.MoEGatingSoftmax, NormaliseMoETopK: true, Eps: eps, AttnScale: float32(1 / core.Pow(float64(headDim), 0.5)), EmbedScale: 1,
 		RopeBase: rope, RopeLocalBase: rope, RopeScale: 1, RotaryDim: headDim, RotaryDimLocal: headDim,
-		TieWordEmbeddings: c.TieWordEmbeddings, Layer: layers,
+		TieWordEmbeddings: c.TieWordEmbeddings, Activation: c.HiddenActivation, Layer: layers,
 	}, nil
 }

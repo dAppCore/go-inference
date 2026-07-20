@@ -23,6 +23,15 @@ type FFNConfig struct {
 	HiddenSize int `json:"ffn_hidden_size"`
 	Experts    int `json:"moe_num_experts"`
 	TopK       int `json:"moe_top_k"`
+	// ActFn is DBRX's routed-expert activation, nested as ffn_config.ffn_act_fn.name ("silu" on every
+	// real DBRX checkpoint) rather than a flat hidden_act — unlike olmoe/mixtral's top-level field, DBRX
+	// buries it inside its own already-nested ffn_config block.
+	ActFn FFNActivation `json:"ffn_act_fn"`
+}
+
+// FFNActivation carries DBRX's ffn_config.ffn_act_fn.name activation declaration.
+type FFNActivation struct {
+	Name string `json:"name"`
 }
 
 // Config is the architecture-relevant subset of a DBRX config.json.
@@ -75,6 +84,6 @@ func (c Config) Arch() (model.Arch, error) {
 		MoEGating: model.MoEGatingSoftmax, NormaliseMoETopK: false, SharedExperts: 0,
 		Eps: eps, AttnScale: float32(1 / core.Pow(float64(headDim), 0.5)), EmbedScale: 1,
 		RopeBase: rope, RopeLocalBase: rope, RopeScale: 1, RotaryDim: headDim, RotaryDimLocal: headDim,
-		TieWordEmbeddings: c.TieWordEmbeddings, LayerNormBefore: true, LayerNorm: true, QKVClip: c.Attention.ClipQKV, NormPlacement: model.NormPlacementPre, Layer: layers,
+		TieWordEmbeddings: c.TieWordEmbeddings, LayerNormBefore: true, LayerNorm: true, QKVClip: c.Attention.ClipQKV, NormPlacement: model.NormPlacementPre, Activation: c.FFN.ActFn.Name, Layer: layers,
 	}, nil
 }
