@@ -910,6 +910,7 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 				sess.icbPeer = peer
 			}
 		}
+		logCachePlan(arch, &sess.state, cfg.kvCacheMode)
 	})
 	if buildErr != nil {
 		return nil, buildErr
@@ -1256,6 +1257,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 				sess.icbPeer = peer
 			}
 		}
+		logCachePlan(arch, &sess.state, cfg.kvCacheMode)
 	})
 	if buildErr != nil {
 		return nil, buildErr
