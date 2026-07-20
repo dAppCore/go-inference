@@ -73,9 +73,10 @@ Gated-delta linear attention interleaved with full attention (`full_attention_in
 fused whole-token chain decode, `engine/metal/arch_qwen_fused.go`; the parallel composed engine
 retired in #50) with the device gated-delta block (`docs/design-hybrid-recurrence.md`). Both
 artefact forms serve: the mlx-community 4-bit conversions (the serving form) and the official
-`Qwen/` bf16 exports (the source/eval form). Post-#50 declines, by name: sub-2-bit packs (no
-factory qmv width, #24), the 35B's vision tower on image turns (factory serves the text stack;
-vision port pending), and the MTP `-draft` pairing (factory pair route pending).
+`Qwen/` bf16 exports (the source/eval form). Sub-2-bit packs (Bonsai 1-bit) serve through the
+LoadLinear b1→b2 exact repack + owned-weight resident binding (#60; the post-#50 up-front decline
+is gone). Remaining declines, by name: the 35B's vision tower on image turns (factory serves the
+text stack; vision port pending), and the MTP `-draft` pairing (factory pair route pending).
 
 Numbers: M3 Ultra, `lem bench` tg-512 greedy, 2026-07-16.
 

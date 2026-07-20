@@ -12,30 +12,6 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
-// subTwoBitQuantDecline returns a typed refusal when the checkpoint's declared quantisation is a
-// width this loader cannot yet serve end-to-end. The kernels are NOT the gap: an exact b1→b2 code
-// widening exists (mlxaffine.RepackB1ToB2, zero quality change) and hooking it at model.LoadLinear
-// does reach the qmv kernels — but the repack allocates OWNED buffers, and this engine's zero-copy
-// binding (shardBuffers.bufForAligned) serves only views into the mapped checkpoint shards, so the
-// load then fails at bind ("weight is not a view into any mapped shard" — probed 2026-07-20). The
-// retired composed engine bound owned weights itself (#50). Lifting this decline = the owned-weight
-// device-binding fallback (boarded; same class blocks serving any synthesised pack, e.g. the
-// packExperts MoE tensors). An absent/unparseable quantization block (bf16) is servable — nil.
-func subTwoBitQuantDecline(cfg []byte) error {
-	var q struct {
-		Quantization struct {
-			Bits int `json:"bits"`
-		} `json:"quantization"`
-	}
-	if r := core.JSONUnmarshal(cfg, &q); !r.OK {
-		return nil
-	}
-	if q.Quantization.Bits > 0 && q.Quantization.Bits < 2 {
-		return core.NewError("native.LoadTokenModelDir: this checkpoint declares a sub-2-bit quant pack — the exact b1->b2 repack produces owned buffers the zero-copy shard binding cannot yet serve (owned-weight device binding pending), and the composed host lane that served it is retired (#50)")
-	}
-	return nil
-}
-
 // load.go is the native backend's directory loader: it delegates to the engine's reactive loader
 // (model.Load) — read config.json, probe model_type, react to the registered ArchSpec (parse → infer →
 // derive → assemble) — then turns the neutral model.LoadedModel into the native decode structs. The
@@ -192,12 +168,11 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		// (model.LoadComposedDir) is gone (#50): qwen3_5/3.6 hybrids ride the factory's fused
 		// whole-token chain (#18 — faster than the composed lane was on both released hybrids),
 		// and a checkpoint the factory cannot serve fails HERE with a named error instead of
-		// falling back silently. Known capability gaps are declined by name: sub-2-bit packs
-		// (below) and the qwen vision tower (the factory serves the TEXT stack; an image turn
-		// on a vision-towered qwen checkpoint gets the engine's clean not-a-vision-model refusal).
-		if derr := subTwoBitQuantDecline(cfg); derr != nil {
-			return nil, derr
-		}
+		// falling back silently. Sub-2-bit packs (Bonsai 1-bit) serve through the LoadLinear
+		// b1→b2 exact repack + the owned-weight resident binding (#60) — the up-front decline
+		// they used to hit is gone. The remaining named gap is the qwen vision tower (the
+		// factory serves the TEXT stack; an image turn on a vision-towered qwen checkpoint gets
+		// the engine's clean not-a-vision-model refusal).
 	}
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
