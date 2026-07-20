@@ -314,3 +314,214 @@ precise answer. Soft-token count for this fixture rose from 4 to 64
 ((16/2)·(16/2) after the forced 256×256 upscale) — still trivial prefill
 cost for a 27B model; the test stayed "minutes-cheap" (~10s wall,
 including model load).
+
+## 6. The device-resident bf16 tower (#59's vision follow-up)
+
+§2 named this as the natural next step and bounded it in advance: "Device-resident
+bf16 tower weights are a measured follow-up, not v1." This section is that
+follow-up — upload the tower's weights once, encode on-GPU, and let the v1 host
+f32 copy go.
+
+### 6.1 The precedent, and why qwen didn't start there
+
+gemma4's SigLIP tower (`engine/metal/vision.go`) is already device-resident, and
+it got there almost for free: its weights are bf16 **views straight into the
+mapped checkpoint** (`gemma4.AssembleVision`'s `visionWeight` returns
+`t.Data` — a `[]byte` alias of the mmap, never widened), so `residentBytes`
+(the #60 owned-weight pin-cache, `attention.go`) no-copy-binds them to a Metal
+buffer on first use and the "upload" costs nothing beyond that first bind — there
+is no separate f32 copy to free because one was never made. Every projection
+rides `MatRowsBF16`/`MatMulBF16NT` (the fused bf16 steel GEMM), attention rides
+`VisionSDPA` (decomposed score/softmax/weighted-sum, the two matmuls on-device,
+GQA-aware via a `nHeads/nKVHeads` ratio and a caller-supplied scale — both already
+parameters, not gemma constants), and the only host-side work is the tiny
+per-head QK-norm + rope and the elementwise glue (bias-add, GELU-gate-mul) —
+too small for a command-buffer round trip to pay for itself.
+
+qwen's v1 tower could not start there: `qwen35.LoadVisionTower` **widens or
+dequantises every weight into an OWNED f32 heap copy** at load (dense tensors via
+`safetensors.DecodeFloatData`, packed ones via `mlxaffine.DequantizeTensor`) —
+deliberately, to match the retired composed engine's own host f32/f64 numeric
+tier byte-for-byte (§1's "Numeric tier" note). That copy is real, additional
+memory (not an mmap alias), it is what made the v1 tower's ~1.7 GB cost
+concrete rather than nominal, and it is exactly what this follow-up now
+downcasts to bf16 and releases.
+
+### 6.2 What moves device, what stays host
+
+Everything GEMM/LayerNorm/attention/GELU-shaped moves onto the engine's
+existing bf16 kernels — the same reuse gemma's tower already proved out, just
+applied to qwen's LayerNorm-with-bias / fused-QKV / merger shape instead of
+SigLIP's RMSNorm / pooling shape:
+
+| stage | kernel reused | new code |
+|---|---|---|
+| patch embed | `MatRowsBF16` | bf16 patch upcast (`f32ToBf16Slice`, already used for output features) |
+| per-block LayerNorm (×2) | `LayerNormBF16` | a bias-optional wrapper (§6.4) |
+| Q/K/V/O projections | `MatRowsBF16` | host bias-add (no equal-shape broadcast-add kernel exists; gemma's own tower computes its linear biases the same way) |
+| attention core | `VisionSDPA` (gemma's kernel, unmodified — GQA ratio + scale are call parameters) | token-major↔head-major bf16 reshape (below) |
+| GELU MLP (the REAL layout — what the live 27B ships) | `MatRowsBF16` + `GeluBF16` | none |
+| merger LayerNorm + both linears + GELU | `LayerNormBF16`, `MatRowsBF16`, `GeluBF16` | none |
+
+Stays host, deliberately, matching where gemma's OWN tower already keeps this
+same slice of work:
+
+- **Per-head QK-norm + 2-D rope.** HeadDim-sized (tens to low hundreds of
+  values), applied once per token per head — the existing scalar helpers
+  (`qwenVisionRMSNormHead`, `qwenVisionRope2D`, `qwenVisionRotaryTable`) are
+  reused byte-for-byte, wrapped only in new bf16↔f32 data-movement glue
+  (`qwenVisionSplitHeadsRoped`) — no new host maths, exactly the edge gemma's
+  own `qkNormRoPEHeadMajor` sits at.
+- **The merger's spatial-block gather.** A pure row permutation (M×M blocks →
+  concatenated rows), zero arithmetic. There is no device gather primitive of
+  this shape anywhere in this engine, and gemma4's tower has no merger to have
+  set a precedent for one — `qwenVisionMergeSpatialBF16` is
+  `qwenVisionMergeSpatial`'s existing f32 gather re-expressed as byte-wide
+  copies, not a new algorithm.
+- **The GUESSED layout's SwiGLU gate** (`silu(gate)·up`). No device kernel
+  computes this activation — `GeluGateMul`/`GeluGateMulBF16` are GELU-gated
+  (gemma's nonlinearity, wrong shape), and the decode path's `MoEExpertsQuantSiLU`
+  is a MoE-block primitive with no vision-tower-shaped sibling. A new metallib
+  kernel was **not** written for it: it is O(L·FF) elementwise (the same tier as
+  the bias-add/gather glue above, not a compute-bound GEMM) and it serves a
+  compatibility lane no live receipt exercises — the real 27B checkpoint ships
+  the REAL layout's plain GELU MLP, which is fully device end-to-end.
+  `qwenVisionSiluGateMulBF16` stays a host bf16↔f64↔bf16 loop, reusing
+  `qwenVisionSilu`'s existing formula unchanged.
+
+This is a truthful, not a forced, partial: every stage that has a genuine
+device twin uses it; the three that don't are all either too small to be worth
+a kernel, structurally gather-only, or unexercised by any live checkpoint.
+
+### 6.3 The seam and the lifetime
+
+`qwen35.VisionTower` gained one field: `DeviceSeam any` — an opaque hook
+`qwen35` never reads (AX-8: this package never imports engine).
+`engine/metal/qwen_vision_device.go` stores its bf16 mirror
+(`*qwenVisionDeviceTower`) there once built. This — not a package-level cache
+keyed by tower pointer — is the load-bearing design choice: the mirror's
+lifetime becomes **exactly** the tower's, so a model unload frees both
+together with no separate eviction hook to wire up or forget. (An earlier
+draft of this follow-up used a `sync.Map` cache; it was dropped specifically
+because it would have kept every unloaded model's ~0.9 GB bf16 tower alive
+for the rest of the process — the `DeviceSeam` field has no such failure
+mode.)
+
+The individual `residentBytes` binds each bf16 buffer picks up on first kernel
+dispatch are a SEPARATE, narrower lifetime question this follow-up does not
+change the shape of: qwen's vision tower has never been registered in
+`safetensors.DirMapping.OwnedRanges()` (unlike the b1→b2 repack / packExperts
+class `docs/design-owned-weight-binding.md` describes), so those individual
+buffer binds are process-lifetime-cached, same tier as this engine's widened
+F16→BF16 tensors. This was already true of the v1 tower's f32 weights for any
+projection shape that crossed the old 2^20 device-GEMM floor; it is not a new
+category, only a wider one now that every stage (including attention) routes
+through a device kernel. Wiring these into `OwnedRanges()` for true
+session-scoped eviction is the natural next follow-up, not silently accepted
+here — it needs a `model.Load`-sequencing change (the tower loads after
+`AdoptOwnedTensors()`'s sweep already ran), out of this lane's file fence.
+
+### 6.4 Two rough edges the port hit
+
+- **`LayerNormBF16` requires a real bias buffer**, even for a "no bias" norm —
+  its own convention (gemma4's audio subsampler passes an explicit zero
+  vector) differs from `qwen35.VisionBlock`/`VisionMerger`'s convention (a nil
+  `NormB` means no bias, tolerated by the host `qwenVisionLayerNorm`). The
+  GUESSED layout's synthetic test tower has exactly this shape (no merger/block
+  bias) and caught it immediately. `qwenVisionLayerNormBF16` restores qwen35's
+  convention by substituting a fresh zero bf16 buffer — exact, not an
+  approximation, since bf16 zero is the same all-zero byte pattern as f32 zero.
+- **`VisionSDPA` wants head-major** `[heads, L, headDim]`; every projection
+  naturally produces token-major `[L, heads·headDim]`. `qwenVisionSplitHeadsBF16`
+  / `qwenVisionSplitHeadsRoped` / `qwenVisionMergeHeadsBF16` do the reshape
+  (the norm+rope variant folds the per-head host maths into the same pass, so
+  there is no separate transpose step) — proven as exact inverses in isolation
+  (`TestQwenVisionSplitMergeHeadsBF16_RoundTrip_Good`) rather than trusted to
+  the end-to-end parity number alone.
+
+### 6.5 The precision change, measured
+
+This is a precision change, not a free lunch: the host tier keeps f32 weights
+with f64-accumulated projections; the device tier is bf16 (≈3 decimal digits,
+round-to-nearest-even, MLX's own convention — `f32ToBF16`) **throughout**,
+weights and activations alike. `TestQwenVisionTowerForwardDevice_HostParity_Good`
+runs the same synthetic weights and patches through both tiers and pins a
+max-abs-diff band, the same method `TestQwenVisionTowerForward_OracleParity_Good`
+already uses against the independent f64 oracle (that test pins `1e-5` —
+f32-vs-f32 rounding noise; this one needs a much looser band, bf16's real cost).
+
+A depth sweep on the REAL-layout synthetic tower (2/4/8/16/27 blocks; logged
+during development, not a committed test) showed the divergence does **not**
+grow unboundedly with depth — each block's LayerNorm re-centres the
+activations it hands to the next one:
+
+| blocks | max abs diff | max reference magnitude |
+|---|---|---|
+| 2 | 0.00099 | 0.44 |
+| 4 | 0.00139 | 0.35 |
+| 8 | 0.00173 | 0.30 |
+| 16 | 0.00116 | 0.27 |
+| 27 (the live checkpoint's actual depth) | 0.00265 | 0.30 |
+
+The committed test therefore runs the REAL layout at 27 blocks — the live
+checkpoint's own depth, not a token-sized stand-in — and pins **0.01**, ~4×
+the deepest measured case, tight enough to still catch a structural porting
+slip (a transposed weight or a wrong fused band diverges by order-1, not by
+bf16 noise) by orders of magnitude. The GUESSED layout (1 block, its existing
+synthetic shape) measured 0.00023, comfortably inside the same band.
+
+### 6.6 The memory story, measured on the real 27B tower
+
+`LTHN_VISION_DIAG=1` on `TestQwenVisionImageTurn_RealCheckpoint`
+(`mlx-community/Qwen3.6-27B-4bit`) logs the built mirror's exact byte count:
+
+```
+qwen-vision: device tower resident, bf16 bytes=921460192 (~879 MiB); host f32 copy freed (~1758 MiB)
+```
+
+879 MiB resident, ≈1758 MiB (≈1.72 GB) freed — matching §2's original "~1.7 GB"
+estimate almost exactly, and confirming the bf16 mirror really is half: same
+element counts, 2 bytes/element instead of 4. `TestFreeQwenVisionHostWeights_Good`
+pins the release itself (every large f32 slice is nil after
+`freeQwenVisionHostWeights`, on both tensor layouts) as a Go-native receipt
+that doesn't need the real checkpoint to re-run; the number above is the
+measured confirmation on the actual 27B tower.
+
+### 6.7 The wall-time story, measured on the real 27B tower
+
+Same test, same fixture (64×64 → smart-resize 256×256 → grid 16×16, 64 soft
+tokens), timed with `LTHN_VISION_DIAG=1` around `projectQwenImage`'s tower-forward
+call only (excludes model load and text decode):
+
+| path | encode wall | reply |
+|---|---|---|
+| host (`LTHN_QWEN_VISION_DEVICE=0`) | 4.69 s | `"square"` |
+| device (default) | 0.72–0.73 s (two runs) | `"Square"` |
+
+≈6.4× faster. The dominant cost this removes is the host attention core
+(`qwenVisionAttentionForward`'s triple-nested f64 loop, O(L²·HeadDim·H) with
+**zero** device dispatch of its own — only the projections either side of it
+crossed the old 2^20 GEMM floor) against `VisionSDPA`'s device-matmul
+decomposition; the effect grows with L² (patch count squared), so it will be
+more pronounced still on larger images than this 64-soft-token fixture.
+
+Both replies are correct ("square" / "Square" — a capitalisation difference
+from the downstream text decode, not a content error); they are not expected
+to be byte-identical given §6.5 — the image EMBEDDINGS differ by the pinned
+band, so the greedy token stream downstream of them is free to diverge in
+inconsequential ways while remaining semantically right. This is the
+correctness receipt for the device path specifically: pre-#59-normalisation
+this same fixture answered "rectangle" (§5); every measurement in this section
+answers "square"/"Square" — the device tower did not regress the normalisation
+follow-up's fix.
+
+### 6.8 The kill-switch
+
+`LTHN_QWEN_VISION_DEVICE=0` restores the v1 host-only tower exactly (f32
+weights populated and never freed, `DeviceSeam` left nil, `projectQwenImage`
+falls through to `QwenVisionTowerForward`) — the same "one lever per commit"
+env kill-switch shape this engine's other wall-clock-adaptive features use
+(`LTHN_MTP_REENGAGE`, `LTHN_MTP_DRAFTLEN`). It is a real safety valve, not
+just a test convenience: both `TestLoadQwenVisionTower_DeviceResident_Good`
+and `TestLoadQwenVisionTower_DeviceDisabled_Good` exercise it end-to-end
+through the real load seam.
