@@ -269,6 +269,12 @@ func loadedToBF16(m *model.LoadedModel) *BF16Model {
 		l.PerLayerGate, l.PerLayerProjection = bw(L.PerLayerGate), bw(L.PerLayerProjection)
 		l.PostPerLayerInputNormW = L.PostPerLayerInputNorm
 		l.GatedDelta, l.GatedDeltaCfg = L.GatedDelta, L.GatedDeltaCfg // MixerGatedDelta recurrence (#18); nil for attention layers
+		if L.MoE != nil {
+			// The bf16 sibling of moeToQuant (line ~71): without this every bf16 factory
+			// MoE layer silently dropped its expert weights before decode — unhit in
+			// production only because MoE serving is quant (#59 zooserve find).
+			l.MoE = moeLoadedToBF16(L.MoE, m.Arch)
+		}
 	}
 	return g
 }
