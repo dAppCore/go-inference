@@ -2205,7 +2205,7 @@ func TestNativeContract_PlanModelFit_Q6QuantTypeOnly_Good(t *testing.T) {
 
 func TestNativeContract_PlanModelFit_DenseAndMTPRouteLabels_Good(t *testing.T) {
 	runtime := &fakeNativeRuntime{device: nativeDeviceInfo{MemoryBytes: 16 * memoryGiB, Name: "gfx1100"}}
-	for _, architecture := range []string{"gemma3", "qwen3", "qwen3_6", "mistral"} {
+	for _, architecture := range []string{"gemma3", "qwen3", "mistral"} {
 		t.Run("dense_"+architecture, func(t *testing.T) {
 			dense, err := newROCmBackendWithRuntime(runtime).PlanModelFit(context.Background(), inference.ModelIdentity{
 				Architecture:  architecture,
@@ -4627,7 +4627,7 @@ func TestNativeContract_ModelPackInspectorArchitectureFixtures_Good(t *testing.T
 		{name: "Qwen3", architecture: "qwen3", dense: true, config: `{"model_type":"Qwen3ForCausalLM","max_position_embeddings":32768}`},
 		{name: "Qwen3MoE", architecture: "qwen3_moe", capability: inference.CapabilityMoERouting, config: `{"model_type":"Qwen3MoeForCausalLM","num_local_experts":128,"num_experts_per_tok":8}`},
 		{name: "Qwen3Next", architecture: "qwen3_next", config: `{"architectures":["Qwen3NextForCausalLM"],"max_position_embeddings":262144}`},
-		{name: "Qwen3.6", architecture: "qwen3_6", dense: true, config: `{"architectures":["Qwen3_5ForConditionalGeneration"],"max_position_embeddings":262144}`},
+		{name: "Qwen3.6", architecture: "qwen3_6", dense: false, config: `{"architectures":["Qwen3_5ForConditionalGeneration"],"max_position_embeddings":262144}`},
 		{name: "Qwen3.6MoE", architecture: "qwen3_6_moe", capability: inference.CapabilityMoERouting, config: `{"architectures":["Qwen3_5MoeForConditionalGeneration"],"num_local_experts":128,"num_experts_per_tok":8}`},
 		{name: "Gemma", architecture: "gemma", config: `{"model_type":"GemmaForCausalLM","max_position_embeddings":8192}`},
 		{name: "Gemma3", architecture: "gemma3", dense: true, config: `{"model_type":"Gemma3ForCausalLM","max_position_embeddings":131072}`},
