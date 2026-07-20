@@ -458,7 +458,7 @@ func KnownArchitectureProfileID(id string) bool {
 // SupportedNativeArchitecture below stays the strict natively-runnable predicate for load/fit/gap
 // decisions.
 func RecognisedArchitecture(architecture string) bool {
-	if _, ok := registeredArchitectureProfileForArchitecture(architecture); ok {
+	if _, ok := LookupArchitectureProfile(architecture); ok {
 		return true
 	}
 	architecture = NormalizeArchitecture(architecture)
