@@ -72,16 +72,41 @@ var mtpDiagForTest = os.Getenv("LTHN_MTP_DIAG") != ""
 // mtpNoFusedForTest forces the legacy per-op drafter path (#352 A/B; env LTHN_MTP_NOFUSED).
 var mtpNoFusedForTest = os.Getenv("LTHN_MTP_NOFUSED") != ""
 
-// mtpVerifyFoldDisabled restores the per-row verify lane (LTHN_MTP_VERIFY_FOLD=0):
-// the MTP verify otherwise takes the batched fold at small K — weights swept once
-// per block instead of once per drafted row.
+// mtpVerifyFoldDisabled forces the per-row verify lane everywhere
+// (LTHN_MTP_VERIFY_FOLD=0), including the sampled verify that defaults to the
+// batched fold — weights swept once per block instead of once per drafted row.
 var mtpVerifyFoldDisabled = os.Getenv("LTHN_MTP_VERIFY_FOLD") == "0"
+
+// mtpVerifyFoldForced arms the batched fold everywhere (LTHN_MTP_VERIFY_FOLD=1),
+// including the byte-exact greedy verify that defaults to the per-row lane —
+// the #55 A/B lever. The fold is a token-identity tier: its batched numerics
+// are not byte-identical to sequential decode, and at a near-tied argmax that
+// flips a committed token, so the greedy lane never takes it by default.
+var mtpVerifyFoldForced = os.Getenv("LTHN_MTP_VERIFY_FOLD") == "1"
 
 // mtpReengageDisabled restores the permanent low-accept bail (LTHN_MTP_REENGAGE=0):
 // the speculative loop otherwise runs plain for a bounded cooldown after a bail and
 // re-probes drafting, staying engaged only when the probe's measured emitted-token
 // rate is at least the plain stretch's (#299).
 var mtpReengageDisabled = os.Getenv("LTHN_MTP_REENGAGE") == "0"
+
+// mtpRowsHeadForced re-arms the K-row fused rows head in the byte-exact greedy
+// verify (LTHN_MTP_ROWS_HEAD=1) — the #55 A/B lever. That head scores verify
+// rows through the qmm_t token-identity tier, whose logits bytes differ from
+// the per-row qmv tier plain decode picks with; at a near-tied argmax the two
+// tiers can disagree, which would emit a committed token plain decode would
+// not. The exact lane therefore defaults to the per-row canonical head.
+var mtpRowsHeadForced = os.Getenv("LTHN_MTP_ROWS_HEAD") == "1"
+
+// mtpVerifyFoldArmed is the #55 routing rule for the assistant verify forward:
+// the batched small-K fold (qmm token-identity tier — NOT byte-identical to
+// sequential decode; a near-tied argmax can flip a committed token) arms only
+// when the caller does not need byte-exactness (the sampled lane), or when the
+// LTHN_MTP_VERIFY_FOLD=1 A/B lever forces it. exact=true is the greedy lane's
+// byte-exact contract: never fold unless forced.
+func mtpVerifyFoldArmed(exact bool) bool {
+	return mtpVerifyFoldForced || (!exact && !mtpVerifyFoldDisabled)
+}
 
 // mtpDiagDraftCalls counts draft-block invocations for the #352 instrument (single decode goroutine).
 var mtpDiagDraftCalls int

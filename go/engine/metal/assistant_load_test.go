@@ -1469,7 +1469,7 @@ func TestArchSessionAssistantSequentialVerifyHiddensUsePinnedScratch(t *testing.
 	}
 
 	ids := []int32{4, 5, 6}
-	hiddens, err := session.verifyAssistantDraftHiddens(ids)
+	hiddens, err := session.verifyAssistantDraftHiddens(ids, true)
 	if err != nil {
 		t.Fatalf("verifyAssistantDraftHiddens: %v", err)
 	}
@@ -1490,7 +1490,7 @@ func TestArchSessionAssistantSequentialVerifyHiddensUsePinnedScratch(t *testing.
 	}
 	firstPtr := byteDataPointer(hiddens[0])
 
-	hiddens, err = session.verifyAssistantDraftHiddens(ids)
+	hiddens, err = session.verifyAssistantDraftHiddens(ids, true)
 	if err != nil {
 		t.Fatalf("second verifyAssistantDraftHiddens: %v", err)
 	}
