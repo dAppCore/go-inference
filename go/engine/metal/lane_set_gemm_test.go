@@ -595,7 +595,7 @@ func TestLaneSetGEMMQuantOffEnvelopeFoldByteIdentity(t *testing.T) {
 }
 
 // TestLaneSetGEMMQuantByteIdentityHiddens is the positive quant receipt for the
-// weight-read-once fold (the receipt 9b6b9d2 claimed and the 2026-07-13 root
+// weight-read-once fold (the receipt 9b6b9d2 claimed and the root
 // cause revoked, restored on the fast-twin kernel): on a DENSE 4-bit quant
 // model whose every projection sits on the fast-twin envelope (inDim%512==0,
 // outDim%8==0 — production routing), the armed fold must FIRE and produce
@@ -761,7 +761,7 @@ func TestLaneSetGEMMQuantK6ByteIdentityHiddens(t *testing.T) {
 // ICB replay even though the fold is byte-eligible on its fast-twin dims —
 // the 4-bit weight stream is too thin for weight-read-once to beat the
 // replay's recorded-op economics (live E2B K=4: fold ~114 vs replay ~118
-// tok/s, 2026-07-13). Forced mode (gemmMode 1) still folds — that is every
+// tok/s). Forced mode (gemmMode 1) still folds — that is every
 // byte-identity receipt in this file.
 func TestLaneSetGEMMQuantAutoPrefersReplay(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
@@ -1029,7 +1029,7 @@ func TestLaneSetGEMMKVShareByteIdentity(t *testing.T) {
 }
 
 // TestLaneSetGEMME2BByteIdentityHiddens is the real-checkpoint promotion
-// receipt (2026-07-13): E2B — a 4-bit MatFormer carrying every arm at once
+// receipt: E2B — a 4-bit MatFormer carrying every arm at once
 // (PLE tower, sliding windows, KV-share layers, mixed head dims, double-wide
 // deep FFN, split rope, layer scalars) — folds by DEFAULT, no test hooks, and
 // must stay byte-identical to the per-lane ICB replay to completion. This test
@@ -1179,7 +1179,7 @@ func laneSetPartialAdvanceByteIdentity(t *testing.T, m *NativeTokenModel) {
 // the fold's bf16 batched gemv is byte-identical to the per-lane replay
 // (bf16Projector.rowsByteTier) at ANY dims, so this fixture isolates the q8-KV
 // staging rung from the quant projection entirely — it was the instrument that
-// proved the q8 ops correct while the 2026-07-13 tiled-kernel divergence was
+// proved the q8 ops correct while the tiled-kernel divergence was
 // open. The quant-weight sibling receipt is
 // TestLaneSetGEMMQ8KVQuantByteIdentityHiddens (fast-twin dims).
 func laneSetBF16Q8FixtureMax(t *testing.T, maxLen int) *NativeTokenModel {

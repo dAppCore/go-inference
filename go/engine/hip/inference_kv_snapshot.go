@@ -19,7 +19,7 @@
 // KeyBytes/KeyShape/KeyDType (and optional per-head float32 slices). engine/
 // metal's ArchSession produces exactly that from its multi-head native cache.
 //
-// # The mapping (layout assumed — Snider's parity test proves it end-to-end)
+// # The mapping (layout assumed — proven end-to-end by the parity test)
 //
 // kv.Snapshot stores [head][token][dim], while HIP's host state is
 // [token][head][dim]. Capture de-interleaves each layer into head-major bytes

@@ -92,7 +92,7 @@ func TestClampedSwiGLUGateClamp_Good(t *testing.T) {
 // TestClampedSwiGLUBF16_Good pins the full formula (gate' = min(gate,limit); up' = max(min(up,limit),-limit);
 // glu = gate'·sigmoid(1.702·gate'); out = glu·(up'+1)) against hand-computed float64 values, source-cited
 // in moe_clamped_swiglu.go: HF transformers GptOssExperts._apply_gate + mlx_lm's gpt_oss.py, fetched
-// 2026-07-19 and byte-identical between the two.
+// from source and byte-identical between the two.
 func TestClampedSwiGLUBF16_Good(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")

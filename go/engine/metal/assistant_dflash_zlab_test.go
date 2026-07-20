@@ -118,7 +118,7 @@ func TestZLabDFlashProposer_ProposeBlock_Bad(t *testing.T) {
 //	  LTHN_DFLASH_ZLAB_TARGET=<target dir> \
 //	  go test -tags metal_runtime -count=1 -run RealPairedGenerate ./engine/metal/ -v
 //
-// KNOWN receipt (2026-07-20): determinism and losslessness both PASS against
+// KNOWN receipt: determinism and losslessness both PASS against
 // real weights — the wiring is correct. The logged accept-rate is currently
 // 0.00: ExtractAuxHiddensAllRaw is plumbed correctly (it passes
 // ForwardCaptureHiddens' own per-layer rows straight through — see its own

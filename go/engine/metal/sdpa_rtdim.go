@@ -70,7 +70,7 @@ func sdpaVectorRTDimPipeline() (metal.MTLComputePipelineState, error) {
 	}
 	// Cache SUCCESS only. A nil/torn-down customLibrary is a transient state some
 	// test suites pass through — latching the error here poisoned every later
-	// caller in the process (the 199-failure suite cascade, 2026-07-19).
+	// caller in the process (a 199-failure suite cascade).
 	if customLibrary == nil || customLibrary.GetID() == 0 {
 		return nil, core.NewError("native.sdpaVectorRTDimPipeline: custom library unavailable")
 	}

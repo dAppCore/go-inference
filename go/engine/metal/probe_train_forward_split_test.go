@@ -30,7 +30,7 @@ import (
 // The A/B ratio is the batched-capture upside; the (C−A)/C share is the host-half tax
 // that no forward-route change touches (its fix is GPU head/loss ops, a separate rung).
 //
-// VERDICT (2026-07-14, E2B-it-bf16, T=128): A 3.08s vs A2 67ms — 46× — and the SFT step
+// VERDICT (E2B-it-bf16, T=128): A 3.08s vs A2 67ms — 46× — and the SFT step
 // fell 3.64s → 0.77s (4.8×). The identity check found the SERIAL capture divergent on the
 // real model: serial-vs-batched differed on 128/128 rows (worst |Δ| 48.6), and against the
 // SERVING prefill's boundary hidden the batched capture matched EXACTLY (|Δ| 0) while the

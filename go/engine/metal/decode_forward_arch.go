@@ -338,7 +338,7 @@ type archDecodeState struct {
 	base, localBase, scale, eps                                   float32 // localBase = sliding-layer RoPE theta
 	// ropeScale is the RoPE POSITION scale (arch.RopeScale — 1.0 for standard rope, <1 for linear
 	// context extension). It is DISTINCT from scale (the SDPA 1/√headDim attention scale): the rope
-	// kernel computes angle = ropeScale·pos·inv_freq. Conflating the two (the pre-2026-07 bug) is
+	// kernel computes angle = ropeScale·pos·inv_freq. Conflating the two is
 	// invisible on gemma (attnScale==1.0==RopeScale) but corrupts every rope on qwen/llama/mistral
 	// (attnScale 1/√headDim ≠ 1.0). Defaulted to 1.0 by newArchDecodeState; the session sets it.
 	ropeScale float32

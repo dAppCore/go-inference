@@ -17,7 +17,7 @@ import (
 // scale folded there would be confidently wrong, which is why the fold lives on AttnScale instead).
 //
 // Formula verified against the canonical implementation, fetched directly (not from training-data
-// recall) on 2026-07-19:
+// recall):
 //
 //	https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/modeling_rope_utils.py
 //	  function _compute_yarn_parameters (lines 327-459 at fetch time)

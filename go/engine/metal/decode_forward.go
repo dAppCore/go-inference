@@ -23,7 +23,7 @@ import (
 // the encode + the growing-window GPU work, nothing else.
 //
 // inputs are the T token hidden vectors (each dModel bf16) — the embedding/lm_head
-// /sampler are separate concerns (a real model load, Snider's call); this exercises
+// /sampler are separate concerns (they need a real model load); this exercises
 // the transformer stack + KV growth. Returns the T per-token output vectors. With
 // the same weights/inputs it equals stepping DecodeStepKV token-by-token,
 // layer-by-layer (gated byte-for-byte in the tests). All raw bf16.

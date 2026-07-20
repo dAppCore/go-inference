@@ -5,7 +5,7 @@
 // inference_kv_snapshot_test.go is the HARDWARE-FREE receipt for the structural
 // reconcile (hip host decode state <-> kv.Snapshot). It exercises the pure
 // float32 converter with synthetic per-layer K/V — no HIP device, no GPU — so
-// it runs on any linux/amd64 host (Snider's box or a linux CI), not just on the
+// it runs on any linux/amd64 host (a dev box or a linux CI), not just on the
 // AMD hardware the full engine.Session parity test needs. It proves the one
 // property the converter must have: capture -> snapshot -> restore reproduces
 // hip's per-layer float32 K/V exactly.

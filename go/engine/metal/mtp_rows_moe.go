@@ -120,7 +120,7 @@ func mtpRowsMoEGroupHistBump(m int) {
 // qmvByteExactServable is encQMVByteExactAt's route decision WITHOUT the encode — the pure
 // probe eligibility uses so the driver can never start a verify it cannot finish. It MUST
 // mirror encQMVByteExactAt exactly (same helpers, same order); the driver's in-flight tripwire
-// error fires if they ever drift. Real-26B lesson (2026-07-20): expert dFF not %512 had NO
+// error fires if they ever drift. Real-26B lesson: expert dFF not %512 had NO
 // multi-row byte-exact route at any rows>=2 (tiled and chunked both required outDim%8 &&
 // inDim%512), and the coarse eligibility missed it — the pair hard-errored mid-verify on the
 // real checkpoint while every synthetic fixture chose aligned dims. The general tiled tier

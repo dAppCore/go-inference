@@ -63,7 +63,7 @@ type ChatTemplate struct {
 	// MergeAdjacentAssistant folds DIRECTLY consecutive assistant messages
 	// into ONE assistant turn — the first opens it, contents concatenate in
 	// order, the last closes it — the gemma4 canonical chat_template.jinja
-	// (2026-07-09) turn-tag-balance rule, which suppresses the duplicate
+	// turn-tag-balance rule, which suppresses the duplicate
 	// "<|turn>model" open and the early close between adjacent assistant
 	// history entries. ChatML and the gemma3-era dialect render every message
 	// as its own turn (their templates carry no such fold).

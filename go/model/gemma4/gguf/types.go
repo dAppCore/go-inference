@@ -37,7 +37,7 @@ func gemma4UseMoreBits(layerIndex, layerCount int) bool {
 //
 // Reference: https://github.com/ggml-org/llama.cpp/blob/master/src/llama-quant.cpp,
 // llama_ftype_get_default_type and llama_tensor_get_type_impl
-// (ggml-org/llama.cpp@master, fetched 2026-07-12).
+// (ggml-org/llama.cpp@master).
 func gemma4BulkType(format basegguf.QuantizeFormat) uint32 {
 	switch format {
 	case basegguf.QuantizeQ8_0:

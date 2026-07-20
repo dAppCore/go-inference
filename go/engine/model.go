@@ -405,8 +405,7 @@ func (m *TextModel) Tokenize(text string) ([]int32, error) {
 // (with Decode and ApplyChatTemplate) is what lets the serve scheduler's
 // continuous-batching coordinator bind to a real engine model: the CB gate
 // probes inference.TokenizerModel, and until these were exported the engine
-// never satisfied it — CB silently served the plain path on every live boot
-// (found 2026-07-13).
+// never satisfied it — CB silently served the plain path on every live boot.
 func (m *TextModel) Encode(text string) []int32 {
 	if m == nil || m.tok == nil {
 		return nil

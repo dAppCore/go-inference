@@ -406,7 +406,7 @@ const laneOverlapPrefillChunkRows = 512
 // original one-token-at-a-time stepBody loop: byte-compatible (the sampled
 // and E2B oracle receipts compare lanes against classic sessions prefilled by
 // exactly this route) but ~40× cheaper on admission — the serial loop paid
-// one commit+wait per prompt token (measured live 2026-07-13: 4 concurrent
+// one commit+wait per prompt token (measured live: 4 concurrent
 // 1161-token chat admissions took 29.8s serial vs 0.6s on this route).
 func (ls *laneSet) prefillLane(lane *decodeLane, promptIDs []int32) error {
 	hidden, err := lane.sess.prefillRetainedTokens(promptIDs, "native.laneSet.Prepare")

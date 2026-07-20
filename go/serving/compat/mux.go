@@ -704,7 +704,7 @@ func (h *anthropicMessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	visible, thought := parseOpenAIModelOutput(model, tokens, openAITokensText(tokens))
 	// The reasoning channel becomes a typed thinking block AHEAD of the
 	// text/tool blocks — the real Anthropic extended-thinking shape (it used
-	// to leak into the text block; handover 2026-07-18b follow-up).
+	// to leak into the text block).
 	var leading []anthropiccompat.ContentBlock
 	if thought = core.Trim(thought); thought != "" {
 		leading = append(leading, anthropiccompat.ThinkingBlock(thought))

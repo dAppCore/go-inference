@@ -264,7 +264,7 @@ func TestChatTemplate_ResolveThinking_Ugly(t *testing.T) {
 }
 
 // TestChatTemplate_MergeAdjacentAssistant_Good pins the gemma4 turn-tag-balance
-// rule (canonical chat_template.jinja, 2026-07-09): DIRECTLY consecutive
+// rule (canonical chat_template.jinja): DIRECTLY consecutive
 // assistant messages fold into ONE model turn — opened once, contents
 // concatenated in order, closed once — instead of the unbalanced close/reopen
 // pair the pre-fix template emitted.

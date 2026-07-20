@@ -1164,7 +1164,7 @@ func spTok() *tokenizer.Tokenizer {
 
 // TestTextModelDecodeKeepsWordBoundarySpace pins the STREAMING decode contract:
 // concatenating per-token decode output must reassemble the words WITH their
-// boundary spaces. The 2026-07-05 regression served "helloworld" for every
+// boundary spaces. A regression served "helloworld" for every
 // reply because the stream decoded through DecodeOne, whose Decode-of-one
 // semantics strip the ▁ boundary.
 func TestTextModelDecodeKeepsWordBoundarySpace(t *testing.T) {

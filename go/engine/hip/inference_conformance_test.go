@@ -3,7 +3,7 @@
 //go:build linux && amd64 && !rocm_legacy_server
 
 // inference_conformance_test.go is the HIP-HARDWARE receipt for the reconcile —
-// the tests Snider runs on his linux+AMD box to prove engine/hip's retained
+// the tests run on a linux+AMD box to prove engine/hip's retained
 // decode satisfies the shared engine contracts AND that the device<->kv.Snapshot
 // round-trip is lossless. Unlike the hardware-free converter test
 // (inference_kv_snapshot_test.go), these need a real ROCm/HIP device and a

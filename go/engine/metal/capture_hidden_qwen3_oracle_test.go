@@ -20,7 +20,7 @@ import (
 // [1,9,17,25,33]) and reports a ~2x sumAbs divergence, attributed there to
 // "ForwardCaptureHiddens' per-layer capture bookkeeping".
 //
-// FINDING (2026-07-20, this lane): that attribution is wrong. The tap is not
+// FINDING: that attribution is wrong. The tap is not
 // the bug. Two proofs, both below:
 //
 //  1. Structural (read, not re-derived here): the plain per-token capture
@@ -84,7 +84,7 @@ import (
 // is the DOMINANT term, not the whole story — a smaller residual gap survives
 // that fix alone, left for that fix's own lane to close and re-measure.
 //
-// #67 UPDATE (2026-07-20, this lane): the EmbedScale fix above landed (d946853a) and this
+// #67 UPDATE: the EmbedScale fix above landed (d946853a) and this
 // file's own 5-sample band (target_layer_ids [1,9,17,25,33], spaced 8 apart) already passes on
 // it (grand -11.2%, inside the ±15% band, tightened below to ±13% now that this is precisely
 // characterised and confirmed deterministic run-to-run). But #67's brief named a real, separate
@@ -118,7 +118,7 @@ import (
 // layer 35 alone until that seam's owner closes it, at which point the whole depth should
 // collapse toward the ±20%-or-better band every OTHER layer already sits in.
 //
-// #67 UPDATE 2 (2026-07-20, lane/layer35): dispatched to fix the layer-35 divergence inside
+// #67 UPDATE 2: dispatched to fix the layer-35 divergence inside
 // decode_forward_arch.go / decode_forward_arch_icb.go specifically (the "shared per-layer
 // attention/MLP encode path" the paragraph above names). Traced BOTH routes' last-layer handling
 // line-by-line looking for an `li == lastLayer` (explicit or implicit) branch that substitutes
@@ -212,7 +212,7 @@ const (
 	oracleGrandTotalSumAbs = 117450.5478515625
 	// oracleParityBandFrac is how far the engine's own grand-total sumAbs may sit from
 	// oracleGrandTotalSumAbs (relative) and still count as "matches". Tightened by #67
-	// (2026-07-20) from a pre-EmbedScale-fix 0.15 to bracket the now-precisely-measured,
+	// from a pre-EmbedScale-fix 0.15 to bracket the now-precisely-measured,
 	// repeat-run-deterministic -11.2% residual these 5 samples land on post-fix, with headroom
 	// for legitimate cross-implementation bf16 noise but not much more: #67's own all-layer
 	// instrument (TestForwardCaptureHiddensQwen3AllLayersVsRealOracle below) found a SEPARATE,
@@ -402,7 +402,7 @@ func TestForwardCaptureHiddensQwen3FaithfulToOrdinaryDecode(t *testing.T) {
 // qwen3resid_alllayers.py's cross-check in this lane's own working notes, reproduced inline by
 // TestOracleAllLayerTotalSumAbsAgreesWithFiveLayerOracle below.
 //
-// Generated 2026-07-20 (#67, this lane): transformers 5.5.4 + torch 2.13.0, bfloat16, MPS,
+// Generated (#67): transformers 5.5.4 + torch 2.13.0, bfloat16, MPS,
 // Qwen/Qwen3-4B (local snapshot, the same LTHN_DFLASH_ZLAB_TARGET checkpoint),
 // output_hidden_states=True over the same 5 raw prompt tokens ("The capital of France is", no
 // chat template, no BOS). Not required at test time; this is the readout of that one-time

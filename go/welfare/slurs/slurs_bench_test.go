@@ -27,7 +27,7 @@ var (
 	sinkTerm string
 )
 
-// benchDefault is the production matcher — the Snider-curated catalogue, which
+// benchDefault is the production matcher — the curated catalogue, which
 // seeds empty (catalogue.go). Detect calls Match on this every served turn, so
 // the empty-catalogue path is the live per-turn shape.
 var benchDefault = Default()

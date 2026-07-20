@@ -164,7 +164,7 @@ func TestArchQuantSessionTurboQuantBatchedPrefillMatchesSequential_Good(t *testi
 		}
 	}
 	aB, aS := argmax(lB), argmax(lS)
-	// Measured band (this synthetic, k4v4, 2026-07-19): per-row worst |Δ| 0.625
+	// Measured band (this synthetic, k4v4): per-row worst |Δ| 0.625
 	// at hidden scale 14.25 (~4.4%, the same tier the q8 batched-vs-sequential
 	// gate trades at) and next-token argmax AGREES with max |logit Δ| 0.125 —
 	// NOT byte-tight: the batched multiQ online-softmax over the bf16 scratch and

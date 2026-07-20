@@ -48,7 +48,7 @@ import (
 // keeps the proven live tail encodes and the mechanism stays for the
 // whole-layer follow-up.
 //
-// RECEIPT (2026-07-11, e2b 4-bit + bf16 assistant, K=6 blocks, same prompt):
+// RECEIPT (e2b 4-bit + bf16 assistant, K=6 blocks, same prompt):
 // live verify fwd 10.3-10.9ms; tail-replay 10.8-11.2ms after the declare-once
 // residency fix (12.1-12.2 before it), recording pass +2ms. The per-layer
 // executeCommands (~33/pass) + the recorded all-prior barrier drains

@@ -22,7 +22,7 @@ import (
 // nothing (the receipts bench prices any fix); it exists so the ranking is one
 // `-run TestKernelPSOStats -v` away.
 //
-// VERDICT (2026-07-14, M3 Ultra, metallib @ mlx v0.32.0 + lthn): 95 kernels surveyed,
+// VERDICT (M3 Ultra, metallib @ mlx v0.32.0 + lthn): 95 kernels surveyed,
 // ZERO register-limited — every plainly-instantiable kernel in both libraries compiles
 // at the full 1024-thread cap. Threadgroup memory tops out at 18.5KB
 // (lthn_logits_sample_bf16) and 16.4KB (the paged-SDPA p1 tiles) — reduction kernels

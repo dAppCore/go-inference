@@ -13,7 +13,7 @@ import (
 
 // TestSdpaSinks_SoftmaxWithSinkF32_Good byte-gates the fused host formula against the LITERAL
 // reference computation (transformers modeling_gpt_oss.py eager_attention_forward, fetched
-// 2026-07-19): softmax over the CONCATENATED [logits ; sink] vector, then drop the sink's column.
+// from source): softmax over the CONCATENATED [logits ; sink] vector, then drop the sink's column.
 // The two forms must agree to float64 round-off on every element.
 func TestSdpaSinks_SoftmaxWithSinkF32_Good(t *testing.T) {
 	logits := []float32{0.5, -1.25, 3.0, 0.0, 2.25}
