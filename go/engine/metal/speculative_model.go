@@ -102,12 +102,22 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 	if draftBlock <= 0 {
 		draftBlock = 5
 	}
-	// A gated-delta hybrid TARGET (Qwen 3.5/3.6) cannot be an ArchSession — its recurrent layers
-	// thread state, not KV streams an AssistantPair could share. The retired composed engine used
-	// to serve this pairing (composed.LoadSpeculativePairDirs); a factory pair route does not exist
-	// yet, so the load declines with the gap named rather than mis-pairing (#50).
+	// A gated-delta hybrid TARGET (Qwen 3.5/3.6) declines the MTP pairing. The drafter checkpoint
+	// (qwen3_5_mtp) now parses as a real, weight-validated architecture — qwen35.ParseDrafterConfig /
+	// Config.DrafterArch, #59 item 2 — but the pair LOAD itself is not wired, for two concrete
+	// reasons named in full in docs/design-qwen-mtp-pair.md:
+	//   - the drafter keeps its OWN attention state (never shares the target's K/V) — a different
+	//     shape than this file's AssistantPair contract assumes, and mtp.MTPMethod has no honest
+	//     value for it yet (MTPDraftModel is documented as sharing the target's K/V streams);
+	//   - a genuinely accelerating pair needs the hybrid target's recurrent gated-delta state
+	//     snapshotted/restored across a batched verify block; the primitive exists
+	//     (session_state_blocks.go, #62) but has had no live caller since #50 retired
+	//     model/composed's CloneState.
+	// The retired composed engine used to serve this pairing (composed.LoadSpeculativePairDirs); it
+	// is gone, and a factory pair route does not exist yet, so the load declines with the gap named
+	// rather than mis-pairing.
 	if mt := probeModelType(targetPath); qwen35.HybridModelType(mt) {
-		return nil, core.NewError("native.LoadSpeculativePair: " + mt + " is a gated-delta hybrid — its MTP pairing rode the retired composed engine (#50) and the factory pair route is pending; serve the base model without -draft")
+		return nil, core.NewError("native.LoadSpeculativePair: " + mt + " is a gated-delta hybrid — the qwen3_5_mtp drafter checkpoint now parses as a real architecture, but the factory pair load is not wired (the drafter's own-KV attention state has no engine forward, and target-side gated-delta rollback is unwired since #50 — see docs/design-qwen-mtp-pair.md); serve the base model without -draft")
 	}
 	target, err := LoadDir(targetPath, maxLen)
 	if err != nil {
