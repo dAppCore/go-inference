@@ -36,6 +36,7 @@ library; the comments in each file are the documentation.
 | `pkg/rerank` | query-vs-documents scoring (RAG's second half) |
 | `pkg/tokenizer` | encode/decode and token counting (no GPU) |
 | `pkg/quantise` | programmatic quantisation to GGUF recipes |
+| `pkg/packed-moe` | the packed-expert MoE convention — per-expert tensors, `packExperts`, factory `Generate` |
 | `pkg/benchmark` | `Metrics()` — prefill/decode tok/s, token counts, peak GPU memory |
 | `pkg/eval` | `Classify()` — batched one-token labels as a minimal eval harness |
 | `pkg/backends` | the backend registry; pinning with `WithBackend` |
