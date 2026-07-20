@@ -112,6 +112,28 @@ func init() {
 	model.RegisterArch(model.ArchSpec{
 		ModelTypes: []string{"llama4", "llama4_text"},
 		Parse:      func(data []byte) (model.ArchConfig, error) { return parseConfig(data) },
+		// Weights + NormalizeConfig give Llama 4 the factory route (model.Assemble — the #18/#50
+		// unification target), dual-registered alongside the Composed hook below exactly as
+		// dbrx/qwenmoe/mixtral/granitemoe carry both: Composed stays the A/B reference + the route a
+		// caller that deliberately bypasses model.Load still reaches, while model.Load now succeeds
+		// instead of rejecting Llama 4 as composed-only. Llama 4 was the LAST arch-zoo entry still
+		// Composed-only (#50).
+		Weights: FactoryWeightNames(),
+		NormalizeConfig: func(tensors map[string]safetensors.Tensor, ac model.ArchConfig) map[string]safetensors.Tensor {
+			cfg := ac.(*Config)
+			normalised, err := NormalizeWeights(tensors)
+			if err != nil {
+				return tensors // malformed checkpoint — Assemble's nil-safe load surfaces the gap downstream
+			}
+			arch, err := cfg.Arch()
+			if err != nil {
+				return normalised // Parse succeeding doesn't guarantee Arch(); load.go's own Arch() call reports this cleanly
+			}
+			if packed, err := packExperts(normalised, arch); err == nil {
+				return packed
+			}
+			return normalised // malformed/absent experts on a declared MoE layer — nil ExpGate/ExpUp/ExpDown surfaces downstream
+		},
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
 			cfg, err := parseConfig(configJSON)
 			if err != nil {
