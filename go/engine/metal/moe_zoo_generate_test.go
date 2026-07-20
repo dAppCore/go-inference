@@ -10,35 +10,38 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	_ "dappco.re/go/inference/model/arch/databricks/dbrx"   // register "dbrx" (this file's dbrx fixture's arch)
-	_ "dappco.re/go/inference/model/arch/mistralai/mixtral" // register "mixtral" (this file's mixtral fixtures' arch)
+	_ "dappco.re/go/inference/model/arch/Qwen/qwenmoe"           // register "qwen2_moe" (this file's qwenmoe fixture's arch)
+	_ "dappco.re/go/inference/model/arch/databricks/dbrx"        // register "dbrx" (this file's dbrx fixture's arch)
+	_ "dappco.re/go/inference/model/arch/ibm-granite/granitemoe" // register "granitemoe" (this file's granitemoe fixture's arch)
+	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"      // register "mixtral" (this file's mixtral fixtures' arch)
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
 
-// moe_zoo_generate_test.go — the end-to-end serve receipts for #59 item 3 (make the zoo MoE arches
-// actually SERVE): a small mixtral-shaped and dbrx-shaped bf16 checkpoint, and a quantised
-// mixtral-shaped checkpoint, load through the factory route and Generate real tokens — proving both
-// named gaps from #60's "What this does NOT do" are closed: (a) the bf16/quant MoE step decode no
-// longer assumes gemma4's five-sandwich-norm, always-on-local-MLP shape (moe_block.go, decode_forward_
-// arch_quant.go), and (b) packExperts now packs the quantised scales/biases triple alongside the
-// weight (model/arch/mistralai/mixtral/weights.go and its dbrx/olmoe/qwenmoe siblings).
+// moe_zoo_generate_test.go — the end-to-end serve receipts for #59's zoo MoE arches actually SERVING:
+// a small mixtral-shaped and dbrx-shaped bf16 checkpoint, a quantised mixtral-shaped checkpoint, a
+// qwenmoe-shaped bf16 checkpoint with an always-on shared expert, and a granitemoe-shaped bf16
+// checkpoint with a checkpoint-native fused expert tensor, all load through the factory route and
+// Generate real tokens — proving every named gap closed: (a) the bf16/quant MoE step decode no longer
+// assumes gemma4's five-sandwich-norm, always-on-local-MLP shape (moe_block.go, decode_forward_
+// arch_quant.go); (b) packExperts now packs the quantised scales/biases triple alongside the weight
+// (model/arch/mistralai/mixtral/weights.go and its dbrx/olmoe/qwenmoe siblings); (c) MoELayerWeights
+// (bf16) carries the shared-expert quad (SharedGateW/UpW/DownW/SigmoidW + SharedDFF) and
+// moeBlockBF16AfterRouterWithBufferPooled adds its contribution — a bf16 qwenmoe layer no longer
+// silently drops it; (d) that same executor reads a checkpoint-native fused ExpGateUpW (granitemoe),
+// offset-split by ExpertDFF rows, not just the split ExpGateW/ExpUpW layout.
 //
 // The quantised fixture calls LoadDir directly — the unmodified, literal factory route — because
 // load_shared.go's loadedToQuant already wires a LoadedModel's MoE block onto the native quant
 // struct (moeToQuant), so the quant route needed no upstream fix here.
 //
-// The bf16 fixtures do NOT call LoadDir/LoadTokenModelDir directly: load_shared.go's loadedToBF16
-// maps every OTHER per-layer field from model.LoadedModel onto DecodeLayerWeights but never sets
-// .MoE (grep confirms — the only production site that converts a LoadedMoE into a native MoE struct
-// is moeToQuant, quant-only), so today's bf16 factory route drops every MoE layer's weights before
-// decode is ever reached, for ANY architecture — a gap upstream of (and distinct from) the decode-
-// shape fix, in load_shared.go, which #59's file fence names OUT OF BOUNDS here (a concurrent lane
-// owns it). buildZooBF16Session below runs the REAL model.Load + the REAL loadedToBF16 + the REAL
-// buildShardBuffers + the REAL newArchSessionShards — every production step LoadDir itself calls —
-// and supplies ONLY the missing one-line wiring via moeLoadedToBF16 (a new, production, non-test
-// function in moe_block.go: the bf16 sibling of moeToQuant, ready for load_shared.go's one-line
-// call once that lane's fence lifts).
+// The bf16 fixtures do NOT call LoadDir/LoadTokenModelDir directly: buildZooBF16Session below runs
+// the REAL model.Load + the REAL loadedToBF16 + the REAL buildShardBuffers + the REAL
+// newArchSessionShards — every production step LoadDir itself calls — then re-applies moeLoadedToBF16
+// per MoE layer. That per-layer re-apply is belt-and-braces, not a missing-wire workaround: commit
+// 6721442d ("#59 wire moeLoadedToBF16 into loadedToBF16") already made load_shared.go's loadedToBF16
+// call `l.MoE = moeLoadedToBF16(L.MoE, m.Arch)` itself, so the loop below is idempotent — kept so this
+// file's fixtures stay independent of that wiring's exact call site.
 
 // bf16TensorVals bf16-encodes values as a safetensors.Tensor of the given logical shape.
 func bf16TensorVals(values []float32, shape ...int) safetensors.Tensor {
@@ -345,4 +348,226 @@ func TestFactoryLoadMixtralQuant_Generate_Good(t *testing.T) {
 		}
 	}
 	t.Logf("mixtral-shaped 4-bit quantised MoE checkpoint served through LoadDir (the unmodified factory route): ids %v twice", out1)
+}
+
+// zooQwenMoEBF16Config is a bf16 Qwen2-MoE-shaped checkpoint: 1 layer, 2 experts, top-1, WITH an
+// always-on shared expert whose intermediate size (20) deliberately differs from the routed experts'
+// (12) — mirroring the real Qwen1.5-MoE-A2.7B ratio (moe_intermediate_size=1408 vs
+// shared_expert_intermediate_size=5632, qwenmoe/weights.go's #57 doc) — the shared-expert gap this
+// change closes on the bf16 side. hidden_size 64 / num_attention_heads 2 gives headDim 32 — the paged
+// SDPA kernel's floor (see zooMixtralBF16Config).
+const zooQwenMoEBF16Config = `{"model_type":"qwen2_moe","hidden_size":64,"intermediate_size":12,"moe_intermediate_size":12,` +
+	`"shared_expert_intermediate_size":20,"num_hidden_layers":1,"num_attention_heads":2,"num_key_value_heads":1,` +
+	`"head_dim":32,"num_experts":2,"num_experts_per_tok":1,"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":10000,` +
+	`"norm_topk_prob":false,"tie_word_embeddings":false}`
+
+// writeZooQwenMoEBF16Dir writes a small bf16 Qwen2-MoE checkpoint through the REAL HF tensor layout
+// (model.layers.0.mlp.{gate,experts.N.*,shared_expert.*,shared_expert_gate}) — qwenmoe's
+// FactoryWeightNames/packExperts (weights.go) do the real name mapping/packing, exactly the zoo
+// mixtral/dbrx fixtures' pattern for a third arch package.
+//
+// zeroShared writes an all-zero shared-expert SwiGLU (gate/up/down; the σ gate stays bound and real,
+// and every OTHER tensor — attention, router, routed experts, embeddings — is byte-identical to the
+// zeroShared=false build, same salt sequence). Since GELU(0)=0, an all-zero gate weight forces the
+// WHOLE shared branch's numeric contribution to zero regardless of up/down: comparing Generate()
+// across the two builds isolates the shared branch's effect on decode output
+// (TestFactoryLoadQwenMoEBF16_SharedExpertContributionIsLive_Good).
+func writeZooQwenMoEBF16Dir(t *testing.T, zeroShared bool) string {
+	t.Helper()
+	const hidden, expertFF, sharedFF, vocab, heads, kvHeads, headDim, experts = 64, 12, 20, 32, 2, 1, 32, 2
+	salt := 1
+	next := func(n int) []float32 {
+		v := syntheticFloat32(n, salt)
+		salt++
+		return v
+	}
+	tensors := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight":                      bf16TensorVals(next(vocab*hidden), vocab, hidden),
+		"model.norm.weight":                              bf16Ones(hidden),
+		"lm_head.weight":                                 bf16TensorVals(next(vocab*hidden), vocab, hidden),
+		"model.layers.0.input_layernorm.weight":          bf16Ones(hidden),
+		"model.layers.0.post_attention_layernorm.weight": bf16Ones(hidden),
+		"model.layers.0.self_attn.q_proj.weight":         bf16TensorVals(next(heads*headDim*hidden), heads*headDim, hidden),
+		"model.layers.0.self_attn.k_proj.weight":         bf16TensorVals(next(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.v_proj.weight":         bf16TensorVals(next(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.o_proj.weight":         bf16TensorVals(next(hidden*heads*headDim), hidden, heads*headDim),
+		"model.layers.0.mlp.gate.weight":                 bf16TensorVals(next(experts*hidden), experts, hidden),
+		"model.layers.0.mlp.shared_expert_gate.weight":   bf16TensorVals(next(hidden), 1, hidden),
+	}
+	for e := range experts {
+		prefix := core.Sprintf("model.layers.0.mlp.experts.%d", e)
+		tensors[prefix+".gate_proj.weight"] = bf16TensorVals(next(expertFF*hidden), expertFF, hidden)
+		tensors[prefix+".up_proj.weight"] = bf16TensorVals(next(expertFF*hidden), expertFF, hidden)
+		tensors[prefix+".down_proj.weight"] = bf16TensorVals(next(hidden*expertFF), hidden, expertFF)
+	}
+	// Always consume the SAME salt sequence regardless of zeroShared, so every other tensor above stays
+	// byte-identical between the two builds — the shared-expert SwiGLU is the ONLY delta.
+	sharedGate, sharedUp, sharedDown := next(sharedFF*hidden), next(sharedFF*hidden), next(hidden*sharedFF)
+	if zeroShared {
+		sharedGate = make([]float32, sharedFF*hidden)
+		sharedUp = make([]float32, sharedFF*hidden)
+		sharedDown = make([]float32, hidden*sharedFF)
+	}
+	tensors["model.layers.0.mlp.shared_expert.gate_proj.weight"] = bf16TensorVals(sharedGate, sharedFF, hidden)
+	tensors["model.layers.0.mlp.shared_expert.up_proj.weight"] = bf16TensorVals(sharedUp, sharedFF, hidden)
+	tensors["model.layers.0.mlp.shared_expert.down_proj.weight"] = bf16TensorVals(sharedDown, hidden, sharedFF)
+	return writeCheckpointDir(t, zooQwenMoEBF16Config, tensors)
+}
+
+// TestFactoryLoadQwenMoEBF16_Generate_Good is the bf16 end-to-end serve receipt for a qwen-shaped MoE
+// arch WITH an always-on shared expert at a DISTINCT width from the routed experts (SharedDFF=20 vs
+// ExpertDFF=12) — the gap MoELayerWeights' SharedGateW/UpW/DownW/SigmoidW/SharedDFF fields and
+// moeBlockBF16AfterRouterWithBufferPooled's shared branch close: factory-parsed, decoded on metal,
+// deterministic, in-vocab, twice.
+func TestFactoryLoadQwenMoEBF16_Generate_Good(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	dir := writeZooQwenMoEBF16Dir(t, false)
+	const vocab, n = 32, 4
+	cycle := func() []int32 {
+		sess := buildZooBF16Session(t, dir, 16)
+		out, err := sess.Generate([]int32{1, 5, 3}, n, -1)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if len(out) != n {
+			t.Fatalf("Generate returned %d ids, want %d", len(out), n)
+		}
+		for i, id := range out {
+			if id < 0 || id >= vocab {
+				t.Fatalf("generated id[%d] = %d outside vocab [0,%d)", i, id, vocab)
+			}
+		}
+		if err := sess.Close(); err != nil {
+			t.Fatalf("session Close: %v", err)
+		}
+		return out
+	}
+	out1, out2 := cycle(), cycle()
+	for i := range out1 {
+		if out1[i] != out2[i] {
+			t.Fatalf("cycle outputs diverged (%v vs %v) — bf16 qwenmoe shared-expert Generate is not deterministic", out1, out2)
+		}
+	}
+	t.Logf("qwenmoe-shaped bf16 MoE checkpoint (distinct-width shared expert) served through the factory route: ids %v twice", out1)
+}
+
+// TestFactoryLoadQwenMoEBF16_SharedExpertContributionIsLive_Good is the liveness receipt: the SAME
+// qwenmoe-shaped bf16 checkpoint with its shared-expert SwiGLU weights zeroed out
+// (writeZooQwenMoEBF16Dir's zeroShared) must Generate a DIFFERENT token sequence than the real-weights
+// checkpoint — proving the shared branch's contribution actually reaches the decoded output, rather
+// than being silently dropped (the bug this change closes) or computed-and-discarded (decorative).
+func TestFactoryLoadQwenMoEBF16_SharedExpertContributionIsLive_Good(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const n = 6
+	generate := func(dir string) []int32 {
+		sess := buildZooBF16Session(t, dir, 16)
+		out, err := sess.Generate([]int32{1, 5, 3}, n, -1)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if err := sess.Close(); err != nil {
+			t.Fatalf("session Close: %v", err)
+		}
+		return out
+	}
+	withShared := generate(writeZooQwenMoEBF16Dir(t, false))
+	zeroed := generate(writeZooQwenMoEBF16Dir(t, true))
+	same := len(withShared) == len(zeroed)
+	if same {
+		for i := range withShared {
+			if withShared[i] != zeroed[i] {
+				same = false
+				break
+			}
+		}
+	}
+	if same {
+		t.Fatalf("Generate output identical with real (%v) vs zeroed (%v) shared-expert weights — the shared branch is not reaching the decoded output", withShared, zeroed)
+	}
+	t.Logf("shared-expert contribution is live: real weights %v vs zeroed weights %v diverge", withShared, zeroed)
+}
+
+// zooGraniteMoEBF16Config is a bf16 GraniteMoE-shaped checkpoint: 1 layer, 2 experts, top-1, with the
+// checkpoint-NATIVE fused [gate‖up] expert tensor (block_sparse_moe.input_linear) — the fused-ExpGateUp
+// gap this change closes on the bf16 side (moeBlockBF16AfterRouterWithBufferPooled previously only read
+// the split ExpGateW/ExpUpW layout). hidden_size 64 / num_attention_heads 2 gives headDim 32 — the
+// paged SDPA kernel's floor (see zooMixtralBF16Config). Every scalar granitemoe.Config.Arch requires
+// strictly positive (logits_scaling/residual_multiplier/embedding_multiplier/attention_multiplier) is
+// set, unlike qwenmoe/mixtral's more lenient defaulting.
+const zooGraniteMoEBF16Config = `{"model_type":"granitemoe","hidden_size":64,"intermediate_size":12,"num_hidden_layers":1,` +
+	`"num_attention_heads":2,"num_key_value_heads":1,"num_local_experts":2,"num_experts_per_tok":1,` +
+	`"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":10000,"tie_word_embeddings":false,"hidden_act":"silu",` +
+	`"logits_scaling":1,"residual_multiplier":1,"embedding_multiplier":1,"attention_multiplier":0.176}`
+
+// writeZooGraniteMoEBF16Dir writes a small bf16 GraniteMoE checkpoint in the real checkpoint-native
+// fused layout (block_sparse_moe.{router.layer,input_linear,output_linear} — ONE 3-D tensor per role
+// covering every expert, no per-expert synthesis needed; granitemoe.FactoryWeightNames points
+// ExpGateUp/ExpDown straight at them) — mirrors granitemoe/load_test.go's own tinyWeights() shapes,
+// scaled up to headDim 32 for the paged SDPA kernel.
+func writeZooGraniteMoEBF16Dir(t *testing.T) string {
+	t.Helper()
+	const hidden, ff, vocab, heads, kvHeads, headDim, experts = 64, 12, 32, 2, 1, 32, 2
+	salt := 1
+	next := func(n int) []float32 {
+		v := syntheticFloat32(n, salt)
+		salt++
+		return v
+	}
+	tensors := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight":                            bf16TensorVals(next(vocab*hidden), vocab, hidden),
+		"model.norm.weight":                                    bf16Ones(hidden),
+		"lm_head.weight":                                       bf16TensorVals(next(vocab*hidden), vocab, hidden),
+		"model.layers.0.input_layernorm.weight":                bf16Ones(hidden),
+		"model.layers.0.post_attention_layernorm.weight":       bf16Ones(hidden),
+		"model.layers.0.self_attn.q_proj.weight":               bf16TensorVals(next(heads*headDim*hidden), heads*headDim, hidden),
+		"model.layers.0.self_attn.k_proj.weight":               bf16TensorVals(next(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.v_proj.weight":               bf16TensorVals(next(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.o_proj.weight":               bf16TensorVals(next(hidden*heads*headDim), hidden, heads*headDim),
+		"model.layers.0.block_sparse_moe.router.layer.weight":  bf16TensorVals(next(experts*hidden), experts, hidden),
+		"model.layers.0.block_sparse_moe.input_linear.weight":  bf16TensorVals(next(experts*2*ff*hidden), experts, 2*ff, hidden),
+		"model.layers.0.block_sparse_moe.output_linear.weight": bf16TensorVals(next(experts*hidden*ff), experts, hidden, ff),
+	}
+	return writeCheckpointDir(t, zooGraniteMoEBF16Config, tensors)
+}
+
+// TestFactoryLoadGraniteMoEBF16_Generate_Good is the bf16 end-to-end serve receipt for a
+// checkpoint-native FUSED [gate‖up] expert tensor — the gap MoELayerWeights.ExpGateUpW and
+// moeBlockBF16AfterRouterWithBufferPooled's offset-split read close: factory-parsed, decoded on metal,
+// deterministic, in-vocab, twice.
+func TestFactoryLoadGraniteMoEBF16_Generate_Good(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	dir := writeZooGraniteMoEBF16Dir(t)
+	const vocab, n = 32, 4
+	cycle := func() []int32 {
+		sess := buildZooBF16Session(t, dir, 16)
+		out, err := sess.Generate([]int32{1, 5, 3}, n, -1)
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if len(out) != n {
+			t.Fatalf("Generate returned %d ids, want %d", len(out), n)
+		}
+		for i, id := range out {
+			if id < 0 || id >= vocab {
+				t.Fatalf("generated id[%d] = %d outside vocab [0,%d)", i, id, vocab)
+			}
+		}
+		if err := sess.Close(); err != nil {
+			t.Fatalf("session Close: %v", err)
+		}
+		return out
+	}
+	out1, out2 := cycle(), cycle()
+	for i := range out1 {
+		if out1[i] != out2[i] {
+			t.Fatalf("cycle outputs diverged (%v vs %v) — bf16 granitemoe fused-ExpGateUp Generate is not deterministic", out1, out2)
+		}
+	}
+	t.Logf("granitemoe-shaped bf16 MoE checkpoint (fused ExpGateUp) served through the factory route: ids %v twice", out1)
 }

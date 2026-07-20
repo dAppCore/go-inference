@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -54,7 +55,30 @@ type MoELayerWeights struct {
 	RouterW           []byte // [NumExperts × dModel] expert-score projection
 	PerExpertScale    []byte // [NumExperts] optional (nil to skip)
 
-	ExpGateW, ExpUpW, ExpDownW []byte // experts ([NumExperts × …] at ExpertDFF) — always required
+	ExpGateW, ExpUpW, ExpDownW []byte // experts ([NumExperts × …] at ExpertDFF) — split gate/up layout
+	// ExpGateUpW is the checkpoint-native FUSED [gate‖up] expert tensor (granitemoe's
+	// block_sparse_moe.input_linear: [NumExperts·2·ExpertDFF, dModel] — expert e's gate rows at
+	// [e·2·ExpertDFF, e·2·ExpertDFF+ExpertDFF), up immediately after). Mirrors
+	// MoEQuantLayerWeights.ExpGateUp's layout exactly (mtp_rows_moe.go's moeExpertQuantOffsets doc:
+	// "gate's packed/scales/biases ahead of up's"). Bound XOR with ExpGateW/ExpUpW: len(ExpGateUpW) != 0
+	// selects the offset-split read in moeBlockBF16AfterRouterWithBufferPooled instead of two separate
+	// weight tensors (#59).
+	ExpGateUpW []byte
+
+	// Shared expert (qwen2_moe/qwen3_5_moe): a single always-on dense SwiGLU (SharedGateW/SharedUpW/
+	// SharedDownW) + an optional σ gate (SharedSigmoidW, [1×dModel]; unbound ⇒ σ≡1) added to the routed
+	// output — out += σ(SharedSigmoidW·normed) · SwiGLU(normed) — mirroring MoEQuantLayerWeights' Shared*
+	// quad (arch_qwen_moe.go's encQwenMoEHalf is the quant reference for both the maths and the combine
+	// point: the shared contribution sums into the SAME accumulator as the routed experts, before any
+	// post-combine norm). A bound SharedGateW marks this bf16 layer qwen-shaped (#59) — every OTHER
+	// executor here treats it as absent (nil/empty ⇒ no shared branch), matching the zoo/gemma4
+	// tolerance the rest of this struct already documents.
+	SharedGateW, SharedUpW, SharedDownW, SharedSigmoidW []byte
+	// SharedDFF is the shared expert's OWN intermediate size — may differ from ExpertDFF (real
+	// Qwen1.5-MoE-A2.7B ships moe_intermediate_size=1408 vs shared_expert_intermediate_size=5632, a 4x
+	// mismatch). Zero falls back to ExpertDFF at the moeBlockBF16AfterRouterWithBufferPooled call site,
+	// mirroring MoEQuantLayerWeights.SharedDFF (#61).
+	SharedDFF int
 }
 
 // routerNormWeight is the norm weight MoERouter applies internally before the router's score
@@ -74,25 +98,25 @@ func (w MoELayerWeights) routerNormWeight() []byte {
 
 // moeLoadedToBF16 maps the shared loader's MoE block (model.LoadedMoE, model.Assemble's neutral
 // output) onto the native bf16 MoELayerWeights — the bf16 sibling of load_shared.go's moeToQuant,
-// for any MoE arch model.Assemble can build: gemma4's dual-branch shape (every field populated) or
-// a llama-family zoo layer's single-norm shape (mixtral/dbrx/olmoe — #59; only PreFFNorm/Router/
-// ExpGate/ExpUp/ExpDown set, everything else nil). Every field maps straight across; an absent
-// LoadedMoE field (nil *Linear or nil/empty []byte) yields the matching nil MoELayerWeights field
-// — the identity/skip convention moeBlockBF16AfterRouterWithBufferPooled now honours (see
-// MoELayerWeights' doc). NumExperts/TopK/ExpertDFF come from arch (model-wide), mirroring
-// moeToQuant exactly.
+// for any MoE arch model.Assemble can build: gemma4's dual-branch shape (every field populated), a
+// llama-family zoo layer's single-norm shape (mixtral/dbrx/olmoe — #59; only PreFFNorm/Router/
+// ExpGate/ExpUp/ExpDown set, everything else nil), a qwen-shaped layer's always-on shared expert
+// (qwen2_moe/qwen3_moe — #59; SharedGate/Up/Down/Sigmoid additionally set), or a checkpoint-native
+// fused ExpGateUp (granitemoe — #59; ExpGate/ExpUp nil, ExpGateUp set instead). Every field maps
+// straight across; an absent LoadedMoE field (nil *Linear or nil/empty []byte) yields the matching
+// nil MoELayerWeights field — the identity/skip convention moeBlockBF16AfterRouterWithBufferPooled
+// honours (see MoELayerWeights' doc). NumExperts/TopK/ExpertDFF come from arch (model-wide);
+// SharedDFF falls back to ExpertDFF when the arch declares no distinct shared width, mirroring
+// moeToQuant's own sharedFF resolution (#61).
 //
-// NOT YET WIRED into load_shared.go's loadedToBF16 (that file is a concurrent lane's — #59's file
-// fence names it explicitly out of bounds here): loadedToBF16 maps every OTHER per-layer field from
-// model.LoadedModel onto DecodeLayerWeights but never sets .MoE, so today's bf16 factory route
-// (model.Load → loadedToBF16 → LoadDir/LoadTokenModelDir) drops every MoE layer's weights on the
-// floor before decode is ever reached — a gap upstream of (and distinct from) the decode-shape
-// fix this file otherwise makes. This function is the missing conversion, ready for the one-line
-// wire-up (`l.MoE = moeLoadedToBF16(L.MoE, m.Arch)` beside loadedToBF16's other per-layer fields) —
-// named honestly here rather than silently patched into the forbidden file. Until that lands, a
-// bf16 MoE checkpoint's factory Generate is exercised by calling this conversion directly (see
-// TestFactoryLoadZoo…Generate_Good), the same LoadedMoE→native mapping the quant route already
-// gets automatically through moeToQuant.
+// WIRED into load_shared.go's loadedToBF16 (`l.MoE = moeLoadedToBF16(L.MoE, m.Arch)`, commit
+// 6721442d) — the factory bf16 MoE route no longer drops expert weights on the floor. What that
+// wiring did NOT yet close (closed here, #59): MoELayerWeights itself carried no shared-expert
+// fields at all (a bf16 qwenmoe Generate silently dropped the shared-expert contribution), and
+// moeBlockBF16AfterRouterWithBufferPooled only read the split ExpGateW/ExpUpW layout (a
+// checkpoint-native fused ExpGateUp, granitemoe's block_sparse_moe.input_linear, declined with a
+// shape error). See moe_zoo_generate_test.go's TestFactoryLoadQwenMoEBF16_Generate_Good and
+// TestFactoryLoadGraniteMoEBF16_Generate_Good.
 func moeLoadedToBF16(e *model.LoadedMoE, arch model.Arch) *MoELayerWeights {
 	if e == nil {
 		return nil
@@ -103,13 +127,18 @@ func moeLoadedToBF16(e *model.LoadedMoE, arch model.Arch) *MoELayerWeights {
 		}
 		return lin.Weight
 	}
+	sharedFF := arch.SharedExpertFF
+	if sharedFF == 0 {
+		sharedFF = arch.ExpertFF
+	}
 	return &MoELayerWeights{
-		NumExperts: arch.Experts, TopK: arch.TopK, ExpertDFF: arch.ExpertFF,
+		NumExperts: arch.Experts, TopK: arch.TopK, ExpertDFF: arch.ExpertFF, SharedDFF: sharedFF,
 		PreFFNormW: e.PreFFNorm, PreFFNorm2W: e.PreFFNorm2,
 		PostFFNorm1W: e.PostFFNorm1, PostFFNorm2W: e.PostFFNorm2, PostFFNormW: e.PostFFNorm,
 		WGate: bw(e.LocalGate), WUp: bw(e.LocalUp), WDown: bw(e.LocalDown),
 		RouterNormWScaled: e.RouterScale, RouterW: bw(e.Router), PerExpertScale: e.PerExpertScale,
-		ExpGateW: bw(e.ExpGate), ExpUpW: bw(e.ExpUp), ExpDownW: bw(e.ExpDown),
+		ExpGateW: bw(e.ExpGate), ExpUpW: bw(e.ExpUp), ExpGateUpW: bw(e.ExpGateUp), ExpDownW: bw(e.ExpDown),
+		SharedGateW: bw(e.SharedGate), SharedUpW: bw(e.SharedUp), SharedDownW: bw(e.SharedDown), SharedSigmoidW: bw(e.SharedSigmoid),
 	}
 }
 
@@ -868,6 +897,13 @@ func moeBlockBF16AfterRouterWithBufferOutputInPool(h []byte, hBuf, outputBuf met
 	return err
 }
 
+// sigmoidF32 is the plain host logistic 1/(1+e^-x) — the shared-expert σ gate's nonlinearity,
+// mirroring arch_qwen_moe.go's sharedGateSigmoid exactly (same maths; float32 in/out here since the
+// bf16 shared branch never needs sharedGateSigmoid's float64 accumulation for a single scalar gate).
+func sigmoidF32(x float32) float32 {
+	return float32(1 / (1 + math.Exp(-float64(x))))
+}
+
 func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out []byte, outputBuf metal.MTLBuffer, idx []int32, weights []byte, weightBuf metal.MTLBuffer, w MoELayerWeights, dModel, dFF int, eps float32, useAutoreleasePool bool, useCallerOut bool) ([]byte, error) {
 	expertDFF, numExperts, topK := w.ExpertDFF, w.NumExperts, w.TopK
 	size := dModel * bf16Size
@@ -910,8 +946,41 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 		}
 	}
 	gateSz, downSz := expertDFF*dModel*bf16Size, dModel*expertDFF*bf16Size
-	if len(w.ExpGateW) != numExperts*gateSz || len(w.ExpUpW) != numExperts*gateSz || len(w.ExpDownW) != numExperts*downSz {
+	// fusedExperts marks a checkpoint-native FUSED [gate‖up] expert tensor (granitemoe's
+	// block_sparse_moe.input_linear — see ExpGateUpW's doc); the split ExpGateW/ExpUpW pair is the
+	// default (gemma4, mixtral/dbrx/olmoe, qwenmoe). Exactly one layout is validated — never both.
+	fusedExperts := len(w.ExpGateUpW) != 0
+	if fusedExperts {
+		if len(w.ExpGateUpW) != numExperts*2*gateSz {
+			return nil, core.NewError("native.moeBlockBF16AfterRouter: fused expert gate_up weight size mismatch")
+		}
+	} else if len(w.ExpGateW) != numExperts*gateSz || len(w.ExpUpW) != numExperts*gateSz {
 		return nil, core.NewError("native.moeBlockBF16AfterRouter: expert weight size mismatch")
+	}
+	if len(w.ExpDownW) != numExperts*downSz {
+		return nil, core.NewError("native.moeBlockBF16AfterRouter: expert weight size mismatch")
+	}
+	// hasShared marks a qwen-shaped layer's always-on shared expert (see SharedGateW's doc) — gated on
+	// SharedGateW alone, mirroring the quant reference's OWN marker convention (arch_qwen_moe.go: "A
+	// bound SharedGate MARKS a qwen MoE layer"). sharedFF falls back to ExpertDFF when the arch declares
+	// no distinct shared width, mirroring MoEQuantLayerWeights.SharedDFF's own fallback (#61) and
+	// moeLoadedToBF16's resolution.
+	hasShared := len(w.SharedGateW) != 0
+	sharedFF := w.SharedDFF
+	if sharedFF == 0 {
+		sharedFF = expertDFF
+	}
+	if hasShared {
+		sharedGateSz := sharedFF * dModel * bf16Size
+		if len(w.SharedGateW) != sharedGateSz || len(w.SharedUpW) != sharedGateSz {
+			return nil, core.NewError("native.moeBlockBF16AfterRouter: shared expert gate/up weights must be SharedDFF*dModel bf16 bytes")
+		}
+		if len(w.SharedDownW) != dModel*sharedFF*bf16Size {
+			return nil, core.NewError("native.moeBlockBF16AfterRouter: shared expert down weight must be dModel*SharedDFF bf16 bytes")
+		}
+		if len(w.SharedSigmoidW) != 0 && len(w.SharedSigmoidW) != size {
+			return nil, core.NewError("native.moeBlockBF16AfterRouter: shared expert sigmoid gate must be dModel bf16 bytes or absent")
+		}
 	}
 	for i := range idx {
 		if idx[i] < 0 || int(idx[i]) >= numExperts {
@@ -967,7 +1036,13 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 	if hasLocal {
 		localGate, localUp, localDown = residentBytes(w.WGate), residentBytes(w.WUp), residentBytes(w.WDown)
 	}
-	expertGate, expertUp, expertDown := residentBytes(w.ExpGateW), residentBytes(w.ExpUpW), residentBytes(w.ExpDownW)
+	var expertGate, expertUp, expertGateUp metal.MTLBuffer
+	if fusedExperts {
+		expertGateUp = residentBytes(w.ExpGateUpW)
+	} else {
+		expertGate, expertUp = residentBytes(w.ExpGateW), residentBytes(w.ExpUpW)
+	}
+	expertDown := residentBytes(w.ExpDownW)
 	var localInBM, localInBN, localInSM, localInSN, localInTM, localInTN int
 	var localDownBM, localDownBN, localDownSM, localDownSN, localDownTM, localDownTN int
 	var localInPSO, localDownPSO metal.MTLComputePipelineState
@@ -993,6 +1068,40 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 	expertDownPSO, err := pipelineFor(gemvKernelName("bfloat16", expertDownBM, expertDownBN, expertDownSM, expertDownSN, expertDownTM, expertDownTN))
 	if err != nil {
 		return nil, err
+	}
+	// Shared expert (qwen-shaped, see SharedGateW's doc): a THIRD independent branch, sized at sharedFF
+	// (may differ from both dFF and expertDFF), computed here via the self-contained mlpTransformBF16
+	// (its own pooled scratch keyed on (dModel, sharedFF) — never the fixed-width msc scratch run()
+	// uses below, which is sized max(dFF, expertDFF) and would silently truncate a wider shared branch)
+	// rather than folded into the live encoder. normedHost is rms(h, pre2W) — the SAME value the routed
+	// experts normalise on (scratch.expertIn inside run()) — matching the quant reference
+	// (encQwenMoEHalf), which feeds ONE normed value to both the routed and the shared expert.
+	// sharedContribution (host bf16, dModel) is added into scratch.expertAcc inside run(), after the
+	// routed-expert loop and before any post-combine norm — exactly where encQwenMoEHalf sums the shared
+	// expert into the SAME accumulator as the routed experts, pre-residual.
+	var sharedContribution []byte
+	if hasShared {
+		normedHost, nerr := RMSNormBF16Into(nil, h, pre2W, 1, dModel, eps)
+		if nerr != nil {
+			return nil, nerr
+		}
+		mlpOut, merr := mlpTransformBF16(normedHost, w.SharedGateW, w.SharedUpW, w.SharedDownW, dModel, sharedFF)
+		if merr != nil {
+			return nil, merr
+		}
+		sigmoidGate := float32(1)
+		if len(w.SharedSigmoidW) != 0 {
+			gl, gerr := MatVecBF16(w.SharedSigmoidW, normedHost, 1, dModel)
+			if gerr != nil {
+				return nil, gerr
+			}
+			sigmoidGate = sigmoidF32(bf16ToF32Slice(gl)[0])
+		}
+		mlpOutF32 := bf16ToF32Slice(mlpOut)
+		for i := range mlpOutF32 {
+			mlpOutF32[i] *= sigmoidGate
+		}
+		sharedContribution = f32ToBf16Slice(mlpOutF32)
 	}
 	rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
 	if err != nil {
@@ -1119,9 +1228,20 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 		emitRMS(inputBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 		for i := range topK {
 			e := int(idx[i])
-			gateOff, downOff := uint(e*gateSz), uint(e*downSz)
-			emitExpertInGemv(expertGate, scratch.expertIn, msc.gate, gateOff)
-			emitExpertInGemv(expertUp, scratch.expertIn, msc.up, gateOff)
+			downOff := uint(e * downSz)
+			if fusedExperts {
+				// expert e's fused block is rows [e·2·expertDFF, (e+1)·2·expertDFF) of ExpGateUpW: gate is
+				// the block's own start, up is the very next expertDFF-sized slice — two separate GEMV
+				// dispatches against the SAME resident tensor, never a single gemv-then-split kernel
+				// (mirrors encMoEBlockQuantDevice/mtp_rows_moe.go's own fused handling).
+				base := uint(e * 2 * gateSz)
+				emitExpertInGemv(expertGateUp, scratch.expertIn, msc.gate, base)
+				emitExpertInGemv(expertGateUp, scratch.expertIn, msc.up, base+uint(gateSz))
+			} else {
+				gateOff := uint(e * gateSz)
+				emitExpertInGemv(expertGate, scratch.expertIn, msc.gate, gateOff)
+				emitExpertInGemv(expertUp, scratch.expertIn, msc.up, gateOff)
+			}
 			if encErr = emitGelu(msc.gate, msc.up, msc.gated, expertDFF); encErr != nil {
 				endEncodingFast(enc)
 				return
@@ -1139,6 +1259,14 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 				}
 				emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
 			}
+		}
+		// Shared expert (qwen-shaped, #59): sum the pre-computed sharedContribution into the SAME
+		// accumulator as the routed experts, before any post-combine norm — exactly where the quant host
+		// path (encQwenMoEHalf) adds it. No-op (sharedContribution nil, hasShared false) for every
+		// non-qwen-shaped layer — gemma4/zoo output is byte-for-byte untouched.
+		if hasShared {
+			sharedBuf := sharedBytes(sharedContribution)
+			emitAdd(scratch.expertAcc, sharedBuf, scratch.expertAcc)
 		}
 		// Combine: gemma4 sums BOTH branches (each independently post-normed) then post-norms the sum.
 		// A zoo layer with no local branch (hasLocal false) skips straight to the expert accumulator —
