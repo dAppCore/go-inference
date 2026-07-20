@@ -198,11 +198,119 @@ tower weights are a measured follow-up, not v1.
   interface (`VisionBudgetTokenModel` — qwen's grid is image-native, not
   budgeted; a request's `VisionBudget` is ignored by the fallback path
   exactly as the interface contract allows).
-- **No HF-processor parity work** (mean/std normalisation, min/max_pixels
+- ~~**No HF-processor parity work** (mean/std normalisation, min/max_pixels
   resize policy) — the reference's crop policy is ported verbatim; aligning
   preprocessing with `Qwen2VLImageProcessorFast` is a separate measured
-  follow-up.
+  follow-up.~~ **Done — see §5.** The named follow-up landed (#59's
+  normalisation follow-up): normalisation AND the resize policy, not just
+  normalisation, because the real checkpoint's declared bounds turned out to
+  diverge from the crop policy on ordinary inputs, not just an edge case.
 - **No `model/` edits outside qwen35** — the neutral `vision.Loaded`
   extension (folding the qwen tower into the declarative `ArchSpec.Vision`
   hook properly) is named as the natural follow-up once the payload shape is
   settled by a second consumer.
+
+## 5. The normalisation + resize follow-up (#59, addendum)
+
+§4 named this as future work and expected it to be normalisation only. It
+turned out to be both, and the "measured" part of "separate, measured
+follow-up" mattered: the real checkpoint's `preprocessor_config.json`
+(`mlx-community/Qwen3.6-27B-4bit`) declares
+
+```json
+{"size": {"shortest_edge": 65536, "longest_edge": 16777216},
+ "patch_size": 16, "temporal_patch_size": 2, "merge_size": 2,
+ "image_mean": [0.5, 0.5, 0.5], "image_std": [0.5, 0.5, 0.5]}
+```
+
+— `Qwen2VLImageProcessorFast`'s `smart_resize`: both axes rounded to the
+nearest `patch_size·merge_size` (=32) multiple, the resulting pixel COUNT
+clamped into `[shortest_edge, longest_edge]` via a scale-and-round-again
+step, resampled (not cropped) with an antialiased bicubic filter. Checked
+against this port's own 64×64 live-receipt fixture, that bound
+(`shortest_edge`=65536=256²) forces a **4×upscale to 256×256** — not a
+rare/large-image-only edge case, the common case for anything smaller than
+a 256px-per-side photo. Top-left crop and smart_resize therefore disagree on
+ordinary inputs, not just extremes, so item 3 of the follow-up brief ("if
+resize semantics diverge, implement what the config declares") applied.
+
+**What shipped** (`model/arch/Qwen/qwen35/vision_preprocess.go`,
+`vision.go`'s `ImageToPatchGrid`, `engine/metal/qwen_vision.go`):
+
+- `VisionPreprocessConfig` (ImageMean/ImageStd/MinPixels/MaxPixels) +
+  `LoadVisionPreprocessConfig(dir)`, reading `preprocessor_config.json` —
+  the filename `model/arch/rednote-hilab/dotsocr` and
+  `model/arch/zai-org/glmocr` already use for the same Qwen2VL-derived
+  processor family (gemma4's OWN convention is the sibling
+  `processor_config.json`, a different file — qwen35 follows its closer
+  architectural cousins here, not gemma4's filename). HF-standard defaults
+  (`transformers.image_utils.OPENAI_CLIP_MEAN/STD`, `size` 56²/28²·1280 —
+  `Qwen2VLImageProcessor`'s own class defaults, confirmed against a local
+  transformers 5.6.0.dev install) apply when the file is absent — never an
+  error, mirroring `LoadGemma4ImageFeatureConfigs`'s missing-file contract.
+  A present-but-malformed file fails loud, matching `LoadVisionTower`'s own
+  present-but-broken contract for the tower weights. The load seam
+  (`loadQwenVisionTower`) traces the fallback via `nativeTraceLog` when no
+  file is found — the one gemma-neighbourhood load path that already logs a
+  processor-config fallback is `buildAudioExtractor`, not the vision path
+  (which is silent); this port took the logged idiom since the brief asked
+  for it explicitly.
+- `qwenSmartResizeTarget` — a verbatim port of `smart_resize`'s dimension
+  arithmetic, using `math.RoundToEven` (NOT `math.Round`) for the
+  round-to-nearest-multiple step: Python's builtin `round()` is
+  round-half-to-even, and disagrees with Go's round-half-away-from-zero
+  `math.Round` at exact `.5` boundaries (confirmed against the reference:
+  `smart_resize(2,2,factor=4,...)` rounds `2/4=0.5` DOWN to the even 0, not
+  up to 1).
+- `resizeBicubicRGB`/`resampleAxis`/`cubicKernel` — a separable two-pass
+  antialiased bicubic resample (a=-0.5 kernel, support widened by the
+  downsample factor when shrinking), independently written for this
+  package. It was NOT ported from `engine/metal`'s gemma4 vision resize
+  (`vision_features.go`'s `visionResizeBicubicAA`, out of this lane's file
+  fence, read-only precedent) but lands on the same well-known
+  Pillow-compatible algorithm that file already uses — unsurprising, since
+  both are implementing the same publicly documented antialiasing
+  convention torchvision added specifically to match Pillow's C resize.
+- Normalisation applies exactly where the reference applies it: after the
+  resize (which itself runs in the 0–255 domain and rounds back to an
+  integer pixel value, matching the reference's `uint8` resize output —
+  confirmed via the oracle), THEN `/255`, THEN `(v-mean[c])/std[c]` per
+  channel.
+- `ImageToPatchGrid` gained a `VisionPreprocessConfig` parameter. A
+  zero-value config (a caller with no policy to declare — e.g. the seam
+  dispatch test's tiny synthetic tower) degrades safely to the pre-#59
+  behaviour: `MinPixels`/`MaxPixels` <=0 disable the resize bounds (only
+  the parameter-free round-to-nearest-multiple step still applies), and a
+  zero `ImageStd[c]` is treated as 1 by `normalized()`, making
+  "normalisation" a no-op plain `/255` rescale. Production callers always
+  route through `LoadVisionPreprocessConfig`, which never returns a
+  zero-value config.
+
+**Verification.** No Python dependency ships in this repo, so the oracle
+comparisons below are reproducible, not re-checked by `go test`: a local
+`transformers`+`torch`+`torchvision` install (`AutoImageProcessor` resolves
+the checkpoint's own `Qwen2VLImageProcessor`) fed the exact 64×64
+live-receipt fixture (and a synthetic 4001×5003 non-aligned image for the
+downscale branch) through the real pipeline.
+`qwenSmartResizeTarget`/`smart_resize` dimension arithmetic matched exactly
+on every case tried (upscale, downscale, no-op, the round-half-to-even
+boundary, the >200:1 aspect-ratio refusal and its exact-200 boundary).
+`resizeBicubicRGB` matched the real resize to max abs diff 1/255 (uint8
+domain) — 0.02%–0.09% of pixels differing by that single LSB, the rest
+exact — on both the upscale and downscale cases: quantisation-noise-level
+agreement, not a byte-identical port. The committed Go tests
+(`vision_preprocess_test.go`, `vision_test.go`) pin the dimension
+arithmetic and a handful of oracle-cross-checked pixel values (both
+uniform-region "no blending" points and genuinely-blended edge-transition
+points) as Go-native receipts that don't need the Python environment to
+re-run.
+
+**Live effect.** `TestQwenVisionImageTurn_RealCheckpoint`
+(`mlx-community/Qwen3.6-27B-4bit`, the 64×64 navy-background/yellow-square
+fixture, "what shape is on the image?"): pre-#59 (top-left crop, no
+normalisation) answered **"rectangle"**; post-#59 (smart_resize to 256×256
++ 0.5/0.5/0.5 normalisation) answers **"square"** — the geometrically
+precise answer. Soft-token count for this fixture rose from 4 to 64
+((16/2)·(16/2) after the forced 256×256 upscale) — still trivial prefill
+cost for a 27B model; the test stayed "minutes-cheap" (~10s wall,
+including model load).

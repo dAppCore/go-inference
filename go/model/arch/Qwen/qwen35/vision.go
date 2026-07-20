@@ -121,6 +121,12 @@ type VisionTower struct {
 	Blocks   []VisionBlock
 	Merger   VisionMerger
 	Cfg      VisionTowerConfig
+	// Preprocess is the checkpoint's declared preprocessor_config.json policy (normalisation +
+	// smart_resize bounds) — set by the engine load seam via LoadVisionPreprocessConfig, NOT by
+	// LoadVisionTower (which only reads config.json + tensors; preprocessor_config.json is a
+	// separate file with separate provenance, see vision_preprocess.go). The zero value degrades
+	// safely to the pre-#59 behaviour (VisionPreprocessConfig.normalized()'s doc comment).
+	Preprocess VisionPreprocessConfig
 }
 
 // isqrt returns the integer square root of n (⌊√n⌋), or -1 for n<0 — used to recover the merger's
@@ -140,18 +146,26 @@ func isqrt(n int) int {
 	return r
 }
 
-// ImageToPatchGrid decodes raw PNG/JPEG image bytes and slices it into a non-overlapping grid of
-// PatchSize×PatchSize patches, returning the flattened per-patch pixel rows [gridH*gridW,PatchDim]
-// (row-major raster order; each patch row is [PatchSize·PatchSize·InChannels] channel-last HWC,
-// repeated TemporalPatchSize times — the Qwen-VL convention of feeding a still image as
-// TemporalPatchSize identical frames into what a checkpoint's Conv3D patch embed reduces to for a
-// non-overlapping kernel). The image is TOP-LEFT CROPPED — not resampled — down to the nearest
-// multiple of PatchSize·MergeSize on each axis, so every patch is exact source pixels and the grid
-// always merges cleanly; a production resize/pad POLICY (aspect-preserving budget, bicubic resample,
-// HF's image_mean/std normalisation) is a preprocessing follow-up layered on top, not this function's
-// job — this is the retired composed tower's own patchifier, ported verbatim (pixels land as v/255 in
-// [0,1], exactly what that lane's live 27B image turns fed the tower).
-func ImageToPatchGrid(data []byte, cfg VisionTowerConfig) (patches []float32, gridH, gridW int, err error) {
+// ImageToPatchGrid decodes raw PNG/JPEG image bytes, resizes it to the HF Qwen2VLImageProcessor's
+// smart_resize target (both axes rounded to the nearest PatchSize·MergeSize multiple, the resized
+// pixel COUNT clamped into pp's [MinPixels,MaxPixels] budget — qwenSmartResizeTarget is the dimension
+// arithmetic, resizeBicubicRGB the pixel resample; vision_preprocess.go), rescales to [0,1], and
+// normalises per channel ((v-mean[c])/std[c], pp's ImageMean/ImageStd) before slicing the result into
+// a non-overlapping grid of PatchSize×PatchSize patches. Returns the flattened per-patch rows
+// [gridH*gridW,PatchDim] (row-major raster order; each patch row is
+// [PatchSize·PatchSize·InChannels] channel-last HWC, repeated TemporalPatchSize times — the Qwen-VL
+// convention of feeding a still image as TemporalPatchSize identical frames into what a checkpoint's
+// Conv3D patch embed reduces to for a non-overlapping kernel).
+//
+// v1 of this port (pre-#59-normalisation-follow-up) top-left CROPPED to the nearest patch·merge
+// multiple with no resample and no normalisation, matching the retired composed engine's own
+// patchifier verbatim (the values that lane's live 27B image turns fed the tower). The real HF
+// processor resizes (not crops) and normalises; this function now does too — the measured follow-up
+// docs/design-qwen-vision-factory.md §4 named. Because smart_resize's pixel-count floor always
+// produces a target at or above MinPixels, a genuinely tiny image is upscaled rather than rejected —
+// the old "image smaller than one patch·merge block" refusal only remains reachable when pp disables
+// both bounds (MinPixels<=0) AND the image rounds all the way down to zero.
+func ImageToPatchGrid(data []byte, cfg VisionTowerConfig, pp VisionPreprocessConfig) (patches []float32, gridH, gridW int, err error) {
 	if cfg.PatchSize <= 0 {
 		return nil, 0, 0, core.NewError("qwen35.ImageToPatchGrid: PatchSize must be positive")
 	}
@@ -161,12 +175,29 @@ func ImageToPatchGrid(data []byte, cfg VisionTowerConfig) (patches []float32, gr
 	}
 	bounds := img.Bounds()
 	h, w := bounds.Dy(), bounds.Dx()
+	if h <= 0 || w <= 0 {
+		return nil, 0, 0, core.NewError("qwen35.ImageToPatchGrid: image has empty bounds")
+	}
 	unit := cfg.PatchSize * max(cfg.MergeSize, 1)
-	th, tw := (h/unit)*unit, (w/unit)*unit
+	pp = pp.normalized()
+	th, tw, rerr := qwenSmartResizeTarget(h, w, unit, pp.MinPixels, pp.MaxPixels)
+	if rerr != nil {
+		return nil, 0, 0, core.E("qwen35.ImageToPatchGrid", "smart-resize target", rerr)
+	}
 	if th <= 0 || tw <= 0 {
-		return nil, 0, 0, core.NewError(core.Sprintf("qwen35.ImageToPatchGrid: %dx%d image smaller than one %d-pixel patch·merge block", w, h, unit))
+		return nil, 0, 0, core.NewError(core.Sprintf(
+			"qwen35.ImageToPatchGrid: %dx%d image resolves to a %dx%d target — smaller than one %d-pixel patch·merge block",
+			w, h, tw, th, unit))
 	}
 	gridH, gridW = th/cfg.PatchSize, tw/cfg.PatchSize
+
+	rgb := decodeImageRGB255(img, bounds)
+	if th != h || tw != w {
+		rgb = resizeBicubicRGB(rgb, h, w, th, tw)
+	}
+	for i, v := range rgb {
+		rgb[i] = roundClampByte(v)
+	}
 
 	channels := cfg.InChannels
 	if channels <= 0 {
@@ -184,16 +215,16 @@ func ImageToPatchGrid(data []byte, cfg VisionTowerConfig) (patches []float32, gr
 			base := idx * patchPixels * frames
 			col := 0
 			for py := range cfg.PatchSize {
-				y := bounds.Min.Y + gy*cfg.PatchSize + py
+				y := gy*cfg.PatchSize + py
 				for px := range cfg.PatchSize {
-					x := bounds.Min.X + gx*cfg.PatchSize + px
-					r, g, b, _ := img.At(x, y).RGBA() // 16-bit, premultiplied per image.Color's contract
-					patches[base+col] = float32(r>>8) / 255
+					x := gx*cfg.PatchSize + px
+					src := (y*tw + x) * 3
+					patches[base+col] = normalisePixel(rgb[src], pp.ImageMean[0], pp.ImageStd[0])
 					if channels > 1 {
-						patches[base+col+1] = float32(g>>8) / 255
+						patches[base+col+1] = normalisePixel(rgb[src+1], pp.ImageMean[1], pp.ImageStd[1])
 					}
 					if channels > 2 {
-						patches[base+col+2] = float32(b>>8) / 255
+						patches[base+col+2] = normalisePixel(rgb[src+2], pp.ImageMean[2], pp.ImageStd[2])
 					}
 					col += channels
 				}
@@ -205,6 +236,12 @@ func ImageToPatchGrid(data []byte, cfg VisionTowerConfig) (patches []float32, gr
 		}
 	}
 	return patches, gridH, gridW, nil
+}
+
+// normalisePixel rescales a 0..255 pixel value to [0,1] and applies the reference's per-channel
+// normalisation: (v/255 - mean) / std.
+func normalisePixel(v255 float64, mean, std float32) float32 {
+	return (float32(v255)/255 - mean) / std
 }
 
 // InterpolatePosEmbed resamples a learned square [side²,hidden] position table onto a (dstH × dstW)
