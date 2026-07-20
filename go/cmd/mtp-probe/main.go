@@ -1,158 +1,51 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-// mtp-probe measures the real Qwen MTP head's speculative acceptance against its real base — the
-// slice-B receipt and the block-verify go/no-go instrument. Temporary probe; the serve seam is the
-// shipping surface.
+// mtp-probe measured the composed-loaded Qwen MTP head's speculative acceptance against its composed
+// base: a per-token vs block-verify lane comparison, plus a -parity mode diffing composed's batched
+// forward against sequential single-token stepping bit-for-bit. #50 retires model/composed, and this
+// probe was one of its last two consumers in go-inference (the other: engine/hip/composed_runtime.go —
+// see that file's doc comment for the parallel sever). model/composed's LoadSpeculativePairDirs and
+// ComposedTokenModel are gone from this binary's dependency graph.
+//
+// It is NOT converted to the engine/metal factory route. That route (native.LoadSpeculativePair,
+// engine/metal/speculative_model.go) hands back a shared inference.TextModel driven by string prompts
+// through Generate/Chat streaming iterators — not this probe's raw token-ID
+// pair.GenerateSpeculative(ids, maxNew, eosID, temp) call. Converting main()'s acceptance-rate
+// comparison would mean rebuilding it around that different calling convention (context.Context,
+// option functions, streamed tokens, metrics read back post-hoc via SpeculativeMetricsProvider) — a
+// real rewrite, not a same-file sever. Its -parity mode has no public equivalent on the new engine at
+// all: ArchSession's batched/sequential forward paths are private to engine/metal, and the exact
+// question -parity asked (does a batched forward match a token-by-token reference, bit-for-bit) is now
+// a standing, TESTED invariant of the MTP exact-verify lane rather than something a standalone probe
+// needs to check by hand — see engine/metal's mtp_exact_lane_test.go (the #55 regression pins) and its
+// mtp_session_test.go / mtp_reengage_test.go neighbours.
+//
+// Live replacements:
+//   - measure a real base+draft pair (acceptance, tok/s, MTP metrics):
+//     `lem generate -draft <assistant-path> -temp 0 -max-tokens <n> <base-model>` (cli/generate.go's
+//     -draft flag — the shipped speculative serve lane; NOT "lem pair", which is stale wording left
+//     over in model/composed/register.go's own retired refusal message).
+//   - verify exact-lane correctness: `go test ./engine/metal/ -run MTP` (mtp_exact_lane_test.go,
+//     mtp_session_test.go, mtp_reengage_test.go).
+//
+// This file is flagged for DELETION — kept as a pointer stub, not a working tool, so a caller who still
+// reaches for `mtp-probe` lands on the real commands instead of a silently-stale binary.
 package main
 
 import (
 	"fmt"
 	"os"
-	"time"
-
-	"dappco.re/go/inference/decode/tokenizer"
-	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
-
-	// Bind the metal device hooks (steel GEMM projections, fused tails, the quant backend) into the
-	// composed stack — without this import the probe measures the raw single-core host fallback, not
-	// the served lane.
-	_ "dappco.re/go/inference/engine/metal"
 )
 
 func main() {
-	if len(os.Args) < 3 {
-		fmt.Println("usage: mtp-probe <base-dir> <draft-dir> [maxNew] [prompt]")
-		os.Exit(2)
-	}
-	base, draft := os.Args[1], os.Args[2]
-	maxNew := 48
-	if len(os.Args) > 3 {
-		fmt.Sscanf(os.Args[3], "%d", &maxNew)
-	}
-	prompt := "The three primary colours are red, blue and"
-	if len(os.Args) > 4 {
-		prompt = os.Args[4]
-	}
-	if len(os.Args) > 3 && os.Args[3] == "-parity" {
-		parity(base)
-		return
-	}
-	t0 := time.Now()
-	pair, err := composed.LoadSpeculativePairDirs(base, draft)
-	if err != nil {
-		fmt.Println("load pair:", err)
-		os.Exit(1)
-	}
-	defer pair.Close()
-	fmt.Printf("pair loaded in %s (checkpoint draft block %d)\n", time.Since(t0).Round(time.Millisecond), pair.DefaultDraftBlock)
-	tok, err := tokenizer.LoadTokenizer(base + "/tokenizer.json")
-	if err != nil {
-		fmt.Println("tokenizer:", err)
-		os.Exit(1)
-	}
-	ids := tok.Encode(prompt)
-	fmt.Printf("prompt %q → %d ids\n", prompt, len(ids))
-	t1 := time.Now()
-	out, m, err := pair.GenerateSpeculative(ids, maxNew, -1, 0)
-	if err != nil {
-		fmt.Println("generate:", err)
-		os.Exit(1)
-	}
-	dt := time.Since(t1)
-	fmt.Printf("[per-token] output: %q\n", tok.Decode(out))
-	fmt.Printf("[per-token] tokens=%d wall=%s (%.2f tok/s) proposed=%d accepted=%d acceptance=%.1f%% draftCalls=%d baseForwards=%d\n",
-		len(out), dt.Round(time.Millisecond), float64(len(out))/dt.Seconds(),
-		m.ProposedTokens, m.AcceptedTokens, m.AcceptanceRate*100, m.DraftCalls, m.TargetVerifyCalls)
-
-	pair.BlockVerify = true
-	t2 := time.Now()
-	outB, mb, err := pair.GenerateSpeculative(ids, maxNew, -1, 0)
-	if err != nil {
-		fmt.Println("generate (block):", err)
-		os.Exit(1)
-	}
-	dtB := time.Since(t2)
-	fmt.Printf("[block]     output: %q\n", tok.Decode(outB))
-	fmt.Printf("[block]     tokens=%d wall=%s (%.2f tok/s) proposed=%d accepted=%d acceptance=%.1f%% draftCalls=%d baseForwards=%d\n",
-		len(outB), dtB.Round(time.Millisecond), float64(len(outB))/dtB.Seconds(),
-		mb.ProposedTokens, mb.AcceptedTokens, mb.AcceptanceRate*100, mb.DraftCalls, mb.TargetVerifyCalls)
-	same := len(out) == len(outB)
-	if same {
-		for i := range out {
-			if out[i] != outB[i] {
-				same = false
-				break
-			}
-		}
-	}
-	fmt.Printf("lanes agree byte-for-byte: %v  |  block speedup ×%.2f over per-token, tokens/forward %.2f vs 1.00\n",
-		same, dt.Seconds()/dtB.Seconds(), float64(len(outB))/float64(mb.TargetVerifyCalls))
-}
-
-// parity measures whether the composed BATCHED forward is byte-identical to sequential single-token
-// stepping on the real model with the device hooks bound — the evidence that decides whether the
-// block-verify lane needs a boundary reforge (gemma4's fold lesson) or is byte-clean as built.
-func parity(baseDir string) {
-	tm, ok, err := model.LoadComposedDir(baseDir)
-	if err != nil || !ok {
-		fmt.Println("load:", ok, err)
-		os.Exit(1)
-	}
-	cm := tm.(*composed.ComposedTokenModel).Model()
-	tok, err := tokenizer.LoadTokenizer(baseDir + "/tokenizer.json")
-	if err != nil {
-		fmt.Println("tokenizer:", err)
-		os.Exit(1)
-	}
-	ids := tok.Encode("The quick brown fox jumps over the lazy dog while the seven wise owls watch from the oak")
-	fmt.Printf("parity probe over %d ids\n", len(ids))
-	batchSess := composed.NewSession(cm)
-	t0 := time.Now()
-	batched, err := batchSess.Forward(ids)
-	if err != nil {
-		fmt.Println("batched forward:", err)
-		os.Exit(1)
-	}
-	dtBatch := time.Since(t0)
-	seqSess := composed.NewSession(cm)
-	t1 := time.Now()
-	var seq []float32
-	for _, id := range ids {
-		h, serr := seqSess.Forward([]int32{id})
-		if serr != nil {
-			fmt.Println("sequential forward:", serr)
-			os.Exit(1)
-		}
-		seq = append(seq, h...)
-	}
-	dtSeq := time.Since(t1)
-	if len(seq) != len(batched) {
-		fmt.Printf("SHAPE MISMATCH: seq %d vs batched %d\n", len(seq), len(batched))
-		os.Exit(1)
-	}
-	exact, worst, worstAt := 0, 0.0, -1
-	for i := range batched {
-		if batched[i] == seq[i] {
-			exact++
-		} else if d := abs64(float64(batched[i]) - float64(seq[i])); d > worst {
-			worst, worstAt = d, i
-		}
-	}
-	fmt.Printf("floats=%d exact=%d (%.2f%%) worst |Δ|=%g at %d\n",
-		len(batched), exact, 100*float64(exact)/float64(len(batched)), worst, worstAt)
-	fmt.Printf("batched %s vs sequential %s → batch advantage ×%.2f (%d rows)\n",
-		dtBatch.Round(time.Millisecond), dtSeq.Round(time.Millisecond), dtSeq.Seconds()/dtBatch.Seconds(), len(ids))
-	if exact == len(batched) {
-		fmt.Println("VERDICT: byte-identical — block-verify needs no reforge")
-	} else {
-		fmt.Println("VERDICT: token-identity tier — block-verify commits need the canonical-boundary discipline")
-	}
-}
-
-func abs64(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
+	fmt.Fprintln(os.Stderr, "mtp-probe is retired (#50: model/composed removal) — it no longer measures anything.")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "For real acceptance/tok/s/MTP metrics on a base+draft pair:")
+	fmt.Fprintln(os.Stderr, "  lem generate -draft <assistant-path> -temp 0 -max-tokens <n> <base-model>")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "For exact-lane correctness (what -parity used to check by hand):")
+	fmt.Fprintln(os.Stderr, "  go test ./engine/metal/ -run MTP   (mtp_exact_lane_test.go, mtp_session_test.go, mtp_reengage_test.go)")
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "This binary (go/cmd/mtp-probe) is flagged for deletion.")
+	os.Exit(1)
 }
