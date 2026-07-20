@@ -27,10 +27,19 @@ import (
 // repack lane. Soft-gated (t.Errorf, not t.Fatalf) on the coherence check only: #67's own
 // diagnosis (capture_hidden_qwen3_oracle_test.go's header and
 // TestForwardCaptureHiddensQwen3AllLayersVsRealOracle) found a real, deterministic engine fault
-// at the FINAL decoder layer (35 of 36) — outside this lane's fence (model/arch/Qwen/qwen3/
-// only) — that corrupts the exact hidden state this test's argmax reads. This test is the
-// receipt for THAT fix landing, not a claim this lane makes one; a KNOWN-gap soft-fail here
-// documents the gap precisely rather than landmining anyone else who runs this suite.
+// at the FINAL decoder layer (35 of 36) that corrupts the exact hidden state this test's argmax
+// reads. lane/layer35 (2026-07-20) traced decode_forward_arch.go's and decode_forward_arch_icb.go's
+// last-layer handling line-by-line — the shared per-layer encode path #67 pointed at — and found
+// it structurally byte-identical to every other layer (see capture_hidden_qwen3_oracle_test.go's
+// "#67 UPDATE 2" for the full trace + the independent oracle re-run that pins the actual
+// mechanism: layer 35's trained near-exact cancellation of several massive-activation channels
+// amplifying the already-accepted layers-6..34 upstream drift, not a control-flow substitution).
+// Still unfixed, now for a DIFFERENT reason than either prior note claimed: closing this needs
+// either tightening the layers-6..34 drift (model/arch/Qwen/qwen3/, forbidden to both lanes so
+// far) or higher-precision accumulation through the affected span (kernels/, forbidden here too)
+// — not a change reachable from this file's or decode_forward_arch{,_icb}.go's fence. This test
+// is the receipt for THAT fix landing, not a claim this lane makes one; a KNOWN-gap soft-fail
+// here documents the gap precisely rather than landmining anyone else who runs this suite.
 func TestQwen3DecodeSanity_ParisContinuation(t *testing.T) {
 	requireNativeRuntime(t)
 	targetDir := core.Getenv("LTHN_DFLASH_ZLAB_TARGET")

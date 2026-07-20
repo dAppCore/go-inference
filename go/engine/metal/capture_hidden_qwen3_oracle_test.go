@@ -118,6 +118,80 @@ import (
 // layer 35 alone until that seam's owner closes it, at which point the whole depth should
 // collapse toward the ±20%-or-better band every OTHER layer already sits in.
 //
+// #67 UPDATE 2 (2026-07-20, lane/layer35): dispatched to fix the layer-35 divergence inside
+// decode_forward_arch.go / decode_forward_arch_icb.go specifically (the "shared per-layer
+// attention/MLP encode path" the paragraph above names). Traced BOTH routes' last-layer handling
+// line-by-line looking for an `li == lastLayer` (explicit or implicit) branch that substitutes
+// something other than the plain post-block residual into the buffer this file's capture reads —
+// found NONE, and the specific candidate mechanism this lane was pointed at is refuted:
+//
+//  1. Control flow is IDENTICAL for the last layer and every other layer in both fence files.
+//     decode_forward_arch.go's stepTokenEncode per-layer loop (li := startLayer..len(s.specs), the
+//     loop opening at ~1796) has no `li == len(s.specs)-1` (or equivalent) conditional anywhere —
+//     confirmed by exhaustive grep, not just reading — and the captureLayerHiddens append at 2134
+//     copies `out`, the SAME buffer encMLPHalfBF16 (or the MoE/gated branches) just wrote via the
+//     SAME residual-add call, for every li. decode_forward_arch_icb.go's recordArchICB has exactly
+//     four `li == nLayers-1` conditionals (2285, 2294, 2327, 2334) — all four only set
+//     finalOutIdx/finalOutBind, bookkeeping that lets a LATER caller redirect where the last
+//     layer's residual-add op ADDITIONALLY writes (bindStepOutput / stepBodyIntoBuffer, for a
+//     caller wanting the result in its own buffer). They never change what gets computed — the
+//     recorded op (setRMSResidual when a post-FF norm exists, else plain setBin(addPSO, hBuf, down,
+//     outBuf, dModel), both gated on lay.hasPF which is false for qwen3 — no sandwich norms) is
+//     issued identically for every layer. stepBodyCapture (724-760) explicitly UNDOES any such
+//     redirect before capturing (737: `r.bindStepOutput(r.ping[r.nLayers%2])`, restoring the
+//     recorded ping target) and reads `r.ping[(li+1)%2]` (753) for every li including 35 — the
+//     plain ping-pong slot, no substitution.
+//  2. The specific mechanism this lane was pointed at — ArchSession.boundaryNormedHiddenInto
+//     (arch_session.go:1602) folding the final-norm gain out of s.retainedHidden ("a unit-RMS
+//     head-input WITHOUT the final-norm gain… the head consumes it gain-folded") — does not reach
+//     this capture at all. ForwardCaptureHiddens (train_session.go) never reads or writes
+//     s.retainedHidden; it reads capturedLayerHiddens (plain route) or stepBodyCapture's own
+//     perLayer return (ICB route), both traced above straight to the raw per-layer buffer. The two
+//     mechanisms share only their underlying stepToken/stepBody call, never a buffer. Even taken
+//     hypothetically, the direction is wrong: an unfolded unit-RMS vector has sumAbs ≈
+//     dModel·E[|N(0,1)|] ≈ 2560×0.8 ≈ 2000 — the hypothesis predicts the capture would be
+//     ABNORMALLY SMALL, but the fault is the opposite (58,654 vs the oracle's 4,659 for token 0 —
+//     12.6× too LARGE).
+//  3. Empirical bisection (capturedAttnHiddens/capturedMLPResHiddens, the existing post-attn/
+//     post-MLP split at 1913/2043): layer 35's post-attention magnitude (7,199–13,917 across the 5
+//     tokens) sits in the SAME order as layer 34's (8,057–12,139, a layer inside the ±20% band) —
+//     attention is not where this concentrates. The MLP half is: widening the existing li==5
+//     gate/up/product/down probe (2140) to layer 35 showed token 0's `product` (gate·up, sumAbs
+//     10,618) gets amplified 5.6× by the down_proj matmul into `down` (sumAbs 59,920) — down_proj
+//     is a legitimately high-gain transform at this layer, not a bug magnifying a small input.
+//  4. An INDEPENDENT fresh oracle re-run this lane did directly (transformers 5.6.0.dev0 + torch
+//     2.10.0, MPS, same real Qwen/Qwen3-4B checkpoint and prompt tokens — not the cached constants
+//     below) confirms the mechanism precisely: hidden dim 4 (a massive-activation channel) sits
+//     flat at ~4,800 (token 0) through layers ~28-33, drops to 3,280 at layer 34, then to -0.445 at
+//     layer 35 — a real, large, trained near-EXACT cancellation, deliberately annihilating an
+//     outlier channel right before the final norm/head. Our engine's OWN dim-4 trajectory moves in
+//     the SAME direction (flat ~3,200 through 28-33, 2,128 at layer 34, 928 at layer 35) — the
+//     model's trained correction the engine IS applying, just imprecisely — and dim 4 alone
+//     explains under 2% of token 0's total sumAbs excess (928 of ~53,995): the same
+//     amplified-cancellation pattern recurs across many of layer 35's other outlier-channel rows,
+//     not one dimension.
+//  5. The residual-add kernel itself is not a candidate: vv_Addbfloat16 (setBin's addPSO,
+//     decode_forward_arch_icb.go's `setBin` closure at 1885) is MLX's own shipped elementwise op
+//     (external/mlx/mlx/backend/metal/kernels/binary.metal + binary_ops.h's `struct Add { T
+//     operator()(T x,T y){return x+y;} }` instantiated over bf16.h's bfloat16_t, itself a typedef
+//     of Metal's NATIVE bfloat scalar) — a plain native-hardware add, identical for every layer,
+//     external/ (not this fence, not even engine/metal's own kernels/), and running on the SAME
+//     Apple Silicon bfloat arithmetic path transformers' MPS backend does.
+//
+// Conclusion: layers 0-34's already-accepted, in-band ~-10%/-19% undershoot (present since layer
+// 6, root cause out of THIS lane's fence too — model/arch/Qwen/qwen3/ is forbidden here just as it
+// was for the prior #67 lane) is not absorbed at layer 35 — it is AMPLIFIED, because this layer's
+// trained job is a near-exact cancellation of several outlier channels, an inherently
+// ill-conditioned operation with zero tolerance for input error. That is a property of the model's
+// weights meeting upstream imprecision, not a discrete last-layer control-flow bug reachable from
+// decode_forward_arch.go/decode_forward_arch_icb.go — both verified byte-for-byte structurally
+// identical for the last layer and every other. No fix applied here: forcing a change to either
+// fence file would be a no-op (nothing wrong found to change) or an unjustified hack risking
+// gemma4/every-other-arch's bytes for zero benefit — the "stop at diagnosis" case. A real fix
+// means either tightening the layers-6..34 upstream drift (a different fence) or adding
+// mixed/higher-precision accumulation through the affected span (touches kernels/ and/or
+// model/arch/Qwen/qwen3/, both forbidden here) — named for whichever lane owns that next.
+//
 // Oracle: transformers 5.5.4 + torch 2.13.0, bfloat16, MPS, Qwen/Qwen3-4B,
 // output_hidden_states=True over the 5 raw prompt tokens (no chat template).
 // hidden_states[layer_id+1] per the verified offset=1 above. Not required at
