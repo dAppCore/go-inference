@@ -38,7 +38,7 @@
 // HIP-hardware-behavioural — the driver semantics (seeding, KV append order,
 // device retention, HostState/mirror round-trip) are validated only by the
 // HIP-gated parity + conformance tests in inference_conformance_test.go, which
-// run on Snider's linux+AMD box. This file lands COMPILE-VERIFIED, not
+// run on a linux+AMD box. This file lands COMPILE-VERIFIED, not
 // behaviourally proven.
 package hip
 

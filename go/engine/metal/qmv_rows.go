@@ -75,7 +75,7 @@ var (
 // qmvRowsWideEnabled reads the LTHN_QMV_ROWS_WIDE lever once. OPT-IN ("1"
 // arms rows 5..8 onto the wide tile): the halved tile is byte-identical to
 // the per-row qmv (TestLthnQMVRowsWideByteBand) but LOST its live A/B on the
-// 26B MTP pair — 400-tok greedy 3-run medians 2026-07-19, wide on 120.2 vs
+// 26B MTP pair — 400-tok greedy 3-run medians, wide on 120.2 vs
 // off 122.7 tok/s with the chained draft armed — the gather's grid-Z L2
 // amortisation still wins at these dims (the small-dims pattern the chunked
 // tier hit first). The kernel + gate stay as the banked instrument: re-probe
@@ -208,7 +208,7 @@ func qmvChunksEnabled() bool {
 // per-row qmv (row math is row-independent), which is what extends the laneSet
 // GEMM byte tier past K=4 (encQMVRowsBF16ChunkedAt). This is a BYTE-TIER route
 // only: for pure throughput the gather beats it at small dims (e2b MTP verify
-// A/B 2026-07-13 — chunked 178/180 vs gather 222 tok/s; grid-Z L2-amortises a
+// A/B — chunked 178/180 vs gather 222 tok/s; grid-Z L2-amortises a
 // small weight stream better than two half-parallel tiled dispatches), so the
 // plain encQMVRowsBF16At keeps the gather for rows > lthnQMVRowsMaxM.
 func qmvRowsChunks(rows int) []int {
@@ -367,7 +367,7 @@ func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, 
 // qmvBF16KernelName routes the per-row decode by), qmv_impl's
 // (lthn_qmv_rows_general, rows 2..4) everywhere else — qmvRowsTiledKeyFor
 // matches twin to envelope, so a tiled encode is byte-identical to the per-row
-// qmv row for row on EVERY dim it serves. The refuted 2026-07-13 predecessor
+// qmv row for row on EVERY dim it serves. The refuted predecessor
 // (one packs=1 kernel claiming parity with BOTH per-row twins; ~1 ulp
 // value-dependent accumulation drift on fast dims) is exactly why the twins
 // stay separate and envelope-matched. The gather fallback remains a THROUGHPUT

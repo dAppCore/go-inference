@@ -31,7 +31,7 @@ const flashPromptBQ = 16
 // restores the composition — the A/B lever; both lanes are token-identity
 // against the multiQ oracle). Default ON: the steel BD-256 lane (v2) is
 // token-identical to the composition with rate parity at 8-62K and +4% at
-// 118K (e2b receipts, 2026-07-13), runs ONE dispatch instead of three, and
+// 118K (e2b receipts), runs ONE dispatch instead of three, and
 // never allocates the up-to-2GB sdpaPromptS scratch pair. The v1 vector
 // kernel stays in-tree as the parity oracle; 512-dim (31B) keeps the
 // composition until the split-D instantiation (phase 2b).
@@ -130,7 +130,7 @@ const (
 // QK per half, costing ~8% at 8K on 31B, crossing the composition at 32K
 // (207 vs 204). BUT the win is a BAND, not a ramp: the 235K all-defaults
 // ingest ran ≥42% SLOWER with split-D engaged (50min+ vs the 35.6min
-// baseline, 2026-07-13) — at extreme depth the kernel's serial per-tile kv
+// baseline) — at extreme depth the kernel's serial per-tile kv
 // loop (64 threads, two barrier-bracketed half-fills per block) compounds
 // past the budget-capped composition. So the 512 lane is OPT-IN
 // (LTHN_FLASH_512=1) until the upper bound is receipted and band-gated;
@@ -232,7 +232,7 @@ func encSteelAttnSplitD(enc metal.MTLComputeCommandEncoderObject, q, k, v, out m
 // nh2 (split-D 512).
 
 // flashQ8Enabled opts the q8-reading flash lane in (LTHN_FLASH_Q8=1).
-// FALSIFIED as a default (2026-07-13): the in-loader dequant runs per
+// FALSIFIED as a default: the in-loader dequant runs per
 // QUERY-TILE, so a q8 owner's prefix dequantises O(N²/BQ) times where the
 // mirror lane dequantises once per chunk — parity-correct (the gate passes)
 // but 551 vs 2171 tok/s at 62K on e2b. The mirror + bf16-flash economics

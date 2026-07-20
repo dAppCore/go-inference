@@ -14,7 +14,7 @@ import (
 // drivers over the has_sinks(25) sdpa_vector pipeline variants, and the HOST reference (the CPU
 // oracle) the byte gates compare against.
 //
-// The semantics, verified against both lineage references fetched 2026-07-19 (not recalled):
+// The semantics, verified against both lineage references, fetched from source (not recalled):
 //
 //	https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/gpt_oss/modeling_gpt_oss.py
 //	  eager_attention_forward: "combined_logits = torch.cat([attn_weights, sinks], dim=-1)"

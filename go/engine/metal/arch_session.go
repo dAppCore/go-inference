@@ -2305,7 +2305,7 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope
 // position is window-aligned; the per-model window divides it into whole windows.
 // Wider chunks raise every per-chunk GEMM's M (the projections, the qmm fold, the
 // prompt SDPA) and amortise the per-chunk seams — 2048 is the receipted sweet spot
-// (#367 2026-07-13, e2b depth ladder: 512-row chunks 2907/2594/2122 tok/s at
+// (#367, e2b depth ladder: 512-row chunks 2907/2594/2122 tok/s at
 // 8K/32K/62K vs 2048-row 3074/2669/2179; 4096 gave the gain back) and matches
 // mlx-lm's prefill_step_size. The deferred-ring lane handles wrap-crossing batches
 // at any basePos, so the width is an engine tuning choice, not a model contract.

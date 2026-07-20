@@ -280,7 +280,7 @@ func sdpaVectorPipelineForHeadDim(headDim int) (metal.MTLComputePipelineState, e
 // and seeds ONE simdgroup's online softmax with max_score = sinks[q_batch_head_idx % num_q_heads],
 // sum_exp_score = 1 — the sink joins the softmax denominator as a virtual key contributing NO value
 // mass, exactly transformers' eager reference (modeling_gpt_oss.py eager_attention_forward:
-// cat([attn_weights, sinks]) → softmax → drop the last column), fetched 2026-07-19.
+// cat([attn_weights, sinks]) → softmax → drop the last column), fetched from source.
 func sdpaVectorSinksPipeline(name string) (metal.MTLComputePipelineState, error) {
 	key := name + ":sinks"
 	sdpaPSOMu.Lock()

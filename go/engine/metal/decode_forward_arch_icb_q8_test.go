@@ -643,7 +643,7 @@ func TestKVQ8PrefillReleasesGEMMMirrors(t *testing.T) {
 // TestArchSessionCloseReleasesICBKVCaches pins the session KV lifecycle:
 // model.Generate opens and closes a session per call, and Close used to drop
 // the archICBReplay without releasing its per-owner KV set — every generate
-// leaked a complete cache set (10.7GB q8 per close on 31B@256K; the 2026-07-11
+// leaked a complete cache set (10.7GB q8 per close on 31B@256K; the
 // receipt run carried a full dead set from the CLI's first session). Three
 // open+step+close cycles must return the device allocation to baseline.
 func TestArchSessionCloseReleasesICBKVCaches(t *testing.T) {

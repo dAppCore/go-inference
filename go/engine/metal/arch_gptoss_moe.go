@@ -20,7 +20,7 @@ import (
 // (=post_attention_layernorm) → router logits + BIAS → softmax → top-k → renormalise (host) → ONE
 // MoEExpertsQuantClampedSiLU dispatch (clamped-sigmoid SwiGLU + per-expert biases) → residual.
 //
-// Reference (fetched 2026-07-19, cited in moe_clamped_swiglu.go / moe_block.go docs):
+// Reference (fetched from source, cited in moe_clamped_swiglu.go / moe_block.go docs):
 //
 //	mlx-lm gpt_oss.py — "self.router = nn.Linear(config.hidden_size, config.num_local_experts,
 //	bias=True)"; "g = self.router(x); experts, indices = mlx_topk(g, k=...); expert_weights =

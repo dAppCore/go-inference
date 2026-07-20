@@ -20,7 +20,7 @@ import (
 // prefill decodes the same bytes as a fresh one; hard Errorf), while logging
 // the raw-session diagnostics that localised the mechanism.
 //
-// VERDICT (2026-07-14, gemma-4-31B-it-4bit @ context 6144): the divergence was
+// VERDICT (gemma-4-31B-it-4bit @ context 6144): the divergence was
 // never the reuse bookkeeping — a plain PrefillTokens(prefix)+AppendTokens
 // (suffix) split diverges identically with NO reuse machinery involved. The
 // batched landing forward is intra-batch TILE-POSITION sensitive: the same

@@ -23,7 +23,7 @@ import (
 // The retrieval prefill now takes the BATCHED TQ pass (#48) — ~1.5s for the
 // ~1.1K-token prompt vs the ~11s per-token replay (LTHN_TQ_BATCHED_PREFILL=0).
 //
-// Measured (this box, 2026-07-19, greedy, 64 teacher-forced steps, real
+// Measured (this box, greedy, 64 teacher-forced steps, real
 // e2b-4bit): top-1 agreement 62/64 with max |logit Δ| 6.31 on the 2-pass lane
 // (maxLen 2048) and 62/64 with 6.76 on the single-pass lane (maxLen 512) —
 // the two lanes sit in the same codec band, and the continuation stays

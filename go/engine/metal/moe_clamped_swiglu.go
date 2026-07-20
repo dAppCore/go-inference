@@ -22,7 +22,7 @@ import (
 //
 // alpha is FIXED at 1.702 (not config-driven); limit is config.swiglu_limit (7.0 on every published
 // gpt-oss checkpoint, InferenceIllusionist's MLX-4bit conversion included). Formula verified against TWO
-// independent sources fetched 2026-07-19 (not recalled from training data — see TestClampedSwiGLUBF16
+// independent sources, fetched from source (not recalled from training data — see TestClampedSwiGLUBF16
 // for the byte gate proving it against hand-computed values):
 //
 //	https://raw.githubusercontent.com/huggingface/transformers/main/src/transformers/models/gpt_oss/modeling_gpt_oss.py
@@ -177,7 +177,7 @@ func encClampedSwiGLUGateMulBF16(enc metal.MTLComputeCommandEncoder, gate, up, o
 // gateBias/upBias (bf16 [numExperts×dFF]) and downBias (bf16 [numExperts×dModel]) are GPT-OSS's
 // per-expert ADDITIVE projection biases (mlx-lm gpt_oss.py: SwitchGLU(..., bias=True); the real
 // gpt-oss-20b MLX-4bit checkpoint ships mlp.experts.{gate,up,down}_proj.bias as BF16 [32, 2880] —
-// shard header read 2026-07-19). Each selected expert e adds its own [dFF]/[dModel] slice right
+// read from the shard header). Each selected expert e adds its own [dFF]/[dModel] slice right
 // after its matvec — gate'/up' BEFORE the clamp (the reference clamps the biased projection), down
 // before the router-weighted combine. nil biases skip the adds — the encode stream is then
 // dispatch-for-dispatch identical to the pre-bias form (the biasless-sibling regression contract;

@@ -134,7 +134,7 @@ func TestArchQuantSessionTurboQuant_Good(t *testing.T) {
 			minCos = cos
 		}
 	}
-	// Measured on this synthetic (2026-07-19): min stepwise cosine 0.999182 at
+	// Measured on this synthetic: min stepwise cosine 0.999182 at
 	// k4v4. The 0.98 floor carries margin while still catching a structural
 	// break (wrong Π, wrong γ addressing, stale codes → cosine collapses).
 	t.Logf("turboquant:4 vs native stepwise hidden cosine: min %.6f over 8 steps", minCos)

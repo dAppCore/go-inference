@@ -66,7 +66,7 @@ var olmoeCapitalGenIDs = []int32{7785, 15, 187, 187, 510, 6100, 39798, 310}
 
 // olmoeCapitalGPUGenIDsObserved is what the production ArchSession actually generated from the SAME
 // prompt/session (LoadDir -> PrefillTokens -> GenerateFromCache, MLX_METALLIB_PATH set, this
-// checkpoint cached), captured running this test 2026-07-20: decodes to "iformengynaoin- RedFlash" —
+// checkpoint cached): decodes to "iformengynaoin- RedFlash" —
 // garbage from token 0, not "coherent but wrong" (the qwen fused-chain lane's documented failure
 // mode for a bad activation binding) — consistent with 16 MoE layers each compounding the wrong
 // gate/up nonlinearity. Recorded here so a future re-run's actual numbers are diffable against this

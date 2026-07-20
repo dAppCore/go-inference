@@ -42,7 +42,7 @@ func WeightNames() model.WeightNames {
 	w.NormBiasOne = false // plain RMSNorm (no gemma "+1" fold)
 
 	// Attention sinks: every layer ships self_attn.sinks (bf16 [num_attention_heads] = [64] in the real
-	// gpt-oss-20b MLX-4bit checkpoint's shard header, read 2026-07-19) — the learned per-head softmax-
+	// gpt-oss-20b MLX-4bit checkpoint's shard header) — the learned per-head softmax-
 	// denominator logit model.Assemble loads RAW into LoadedLayer.Sinks (never through the NormBiasOne
 	// fold; a sink is a logit, not a norm) and engine/metal binds to the sdpa_vector kernels'
 	// has_sinks(25) function-constant lane (sinks buffer(16)/buffer(18) — MLX v0.32.0

@@ -28,7 +28,7 @@ import (
 // diagnosis (capture_hidden_qwen3_oracle_test.go's header and
 // TestForwardCaptureHiddensQwen3AllLayersVsRealOracle) found a real, deterministic engine fault
 // at the FINAL decoder layer (35 of 36) that corrupts the exact hidden state this test's argmax
-// reads. lane/layer35 (2026-07-20) traced decode_forward_arch.go's and decode_forward_arch_icb.go's
+// reads. #67's follow-up traced decode_forward_arch.go's and decode_forward_arch_icb.go's
 // last-layer handling line-by-line — the shared per-layer encode path #67 pointed at — and found
 // it structurally byte-identical to every other layer (see capture_hidden_qwen3_oracle_test.go's
 // "#67 UPDATE 2" for the full trace + the independent oracle re-run that pins the actual

@@ -154,7 +154,7 @@ type ChatMessage struct {
 	// echoed back by a stateless client replaying history (reasoning is the
 	// canonical spelling, reasoning_content the vLLM/DeepSeek one). The
 	// handler re-frames them into the native thought span for turns after the
-	// last user message — the gemma4 canonical-template (2026-07-09)
+	// last user message — the gemma4 canonical-template
 	// reasoning-preservation rule — so agentic tool loops keep their chain of
 	// thought across stateless replays.
 	Reasoning        string `json:"reasoning,omitempty"`

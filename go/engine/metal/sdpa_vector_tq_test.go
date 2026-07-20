@@ -24,7 +24,7 @@ import (
 // table, a wrong unpack, or a wrong γ application shows as a structural,
 // orders-larger divergence.
 //
-// Measured bands (this box, 2026-07-19, n=64/96 single-pass + n=knee+512
+// Measured bands (this box, n=64/96 single-pass + n=knee+512
 // 2-pass, hd ∈ {128, 256, 512}, modes (4,4)/(4,3)/(3,3)/(2,2), kv ∈ {1, 2}):
 // post-#48 single-pass fusion (folds Πq/Πᵀy INTO lthn_sdpa_vector_tq, no
 // intermediate bf16 rotated-q / rotated-out buffers) max |Δ| vs the f64

@@ -474,8 +474,7 @@ func doWith(t *testing.T, model inference.TextModel, method, path, body string) 
 // TestAnthropicMessagesHandler_Good_ThinkingBlock pins the typed reasoning
 // shape on non-streaming /v1/messages: the thought channel arrives as a
 // leading {"type":"thinking"} content block and the text block carries ONLY
-// the visible answer — it used to leak the reasoning into the text block
-// (handover 2026-07-18b follow-up).
+// the visible answer — it used to leak the reasoning into the text block.
 func TestAnthropicMessagesHandler_Good_ThinkingBlock(t *testing.T) {
 	rec := doWith(t, thinkingFakeModel(), http.MethodPost, "/v1/messages",
 		`{"model":"test-model","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`)

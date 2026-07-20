@@ -171,7 +171,7 @@ func (c *Config) buildArch() (model.Arch, error) {
 	}
 
 	// YaRN attention_factor (mscale), folded into the SDPA softmax scale as mscale²/√headDim. The
-	// application point, verified against BOTH lineage references fetched 2026-07-19 (not recalled):
+	// application point, verified against BOTH lineage references, fetched from source (not recalled):
 	//
 	//	transformers modeling_gpt_oss.py, GptOssRotaryEmbedding.forward:
 	//	  "cos = emb.cos() * self.attention_scaling; sin = emb.sin() * self.attention_scaling"

@@ -87,7 +87,7 @@ func wrapWelfareResolver(inner openai.Resolver, currentPath func() string, log i
 }
 
 // isLemmaModel reports whether the served checkpoint is a Lemma-graded model —
-// the gate for the lem_end courtesy (Snider: Lemma models only).
+// the gate for the lem_end courtesy (Lemma models only).
 func isLemmaModel(modelPath string) bool {
 	return core.Contains(core.Lower(modelPath), "lemma")
 }

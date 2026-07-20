@@ -3,7 +3,7 @@
 package slurs
 
 // catalogue is the curated slur list — boolean detection, hand-maintained,
-// reviewed by Snider via PR per RFC.welfare ("Slur regex — curated list").
+// reviewed via PR per RFC.welfare ("Slur regex — curated list").
 // NOT community-sourced, NOT telemetry-expanded: the failure mode of a
 // community list (a controversial-but-not-slur term getting silent
 // suppression through) is exactly what we refuse.

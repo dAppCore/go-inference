@@ -368,7 +368,7 @@ func TestLoad_EFamily_QuantAgnostic(t *testing.T) {
 			}
 			// the checkpoint decides the expectation: a conversion that ships
 			// per_layer_model_projection.scales quantised the projection (upstream
-			// re-conversions flip this — the 2026-07 e2b refresh made it 4-bit), and
+			// re-conversions flip this — e.g. an e2b refresh changed it to 4-bit), and
 			// the loader must follow the weights with no per-weight branch.
 			wantProjQuant := snapshotHasTensor(t, dir, "per_layer_model_projection.scales")
 			m, dm, err := model.Load(dir)

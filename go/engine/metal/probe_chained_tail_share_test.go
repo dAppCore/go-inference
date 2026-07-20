@@ -17,12 +17,12 @@ import (
 // the bare forward on the same lane session. The delta is the head+embed
 // tail's per-round GPU cost — the budget a BATCHED (rendezvous) tail could
 // save at K lanes is (K-1)/K of the head part, against the slowest-lane
-// alignment it re-introduces. The 26B receipt (2026-07-16): round 7.18 ms,
+// alignment it re-introduces. The 26B receipt: round 7.18 ms,
 // bare 6.51 ms, tail 0.67 ms (9.3%) — at K=4 the ~0.5 ms/round ceiling is
 // roughly cancelled by re-introduced alignment, and the rendezvous reverses
 // the ragged free-run that banked +6%: REFUTED at K≤4.
 //
-// K≥8 RE-CHECK (2026-07-16, closes the question): probe reproduced at
+// K≥8 RE-CHECK (closes the question): probe reproduced at
 // 0.563 ms (7.9%); the LIVE A/B (LTHN_CB_CHAIN=0 — two-phase rendezvous'd
 // batched Phase-1 heads — vs the chained default; 26B ctx4096, salted
 // ksweep) measured chained 107/143/173/196 tok/s at K=1/2/4/8 vs two-phase

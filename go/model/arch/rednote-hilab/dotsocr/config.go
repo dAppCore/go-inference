@@ -46,7 +46,7 @@ type VisionConfig struct {
 // fields sit flat at the top level (the Qwen2Config shape — DotsOCRConfig subclasses Qwen2Config
 // directly, and its decoder IS an unmodified Qwen2ForCausalLM, per modeling_dots_ocr.py); a
 // nested vision_config carries the ViT tower. Field-complete against the real checkpoint's
-// config.json (verified 2026-07-19 against rednote-hilab/dots.ocr's shipped file) — every field
+// config.json (verified against rednote-hilab/dots.ocr's shipped file) — every field
 // the host forward (decoder.go/vision.go/ocr.go) reads.
 type Config struct {
 	ModelType             string  `json:"model_type"`

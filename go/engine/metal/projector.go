@@ -103,7 +103,7 @@ type projector interface {
 	// this projector, not just byte-correct: bf16/dense weights are weight-bound
 	// (fold receipted 1.51× vs batched replay); 4-bit quant streams are 4× thinner
 	// and the fold's re-encode tax outweighs the saving at K ≤ lthnQMVRowsMaxM
-	// (live E2B K=4: fold ~114 vs replay ~118 tok/s, 2026-07-13). AUTO mode
+	// (live E2B K=4: fold ~114 vs replay ~118 tok/s). AUTO mode
 	// consults this; forced mode (receipts) does not.
 	foldProfitable() bool
 	// hasV reports whether a distinct V projection weight exists. gemma4 K==V layers
@@ -374,14 +374,14 @@ func (m qmvProjector) rowsCapable() bool {
 // gate carries the rule). Any weight the plan would send to the gather or
 // qmm_t fallback declines the byte tier and the fold keeps the byte-identical
 // merged ICB replay. History: the packs=1 predecessor claimed qmv_impl parity
-// for ALL 256-multiples and was refuted 2026-07-13 (value-dependent ~1 ulp
+// for ALL 256-multiples and was refuted (value-dependent ~1 ulp
 // accumulation drift — surfaced as the hd-256 fold failure at step 6); the
 // fast-twin match + this per-weight plan check replaced the blanket decline
 // that closed that exposure.
 // foldProfitable: a genuinely-quantised weight keeps the replay in AUTO mode —
 // the 4-bit stream is 4× thinner than bf16, so weight-read-once saves little
 // while the fold pays the re-encode tax the recorded replay avoids (live E2B
-// K=4: fold ~114 vs replay ~118 tok/s aggregate, 2026-07-13). An all-dense
+// K=4: fold ~114 vs replay ~118 tok/s aggregate). An all-dense
 // mixed pack is bf16 in practice and keeps the win. Revisit at K>4 tiled-M.
 func (m qmvProjector) foldProfitable() bool {
 	for p := projQ; p <= projDown; p++ {

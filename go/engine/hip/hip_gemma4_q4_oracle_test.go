@@ -1250,7 +1250,7 @@ func hipOracleEnvFloat(key string, def float64) float64 {
 // Calibrate on E2B/E4B first: they are coherent on hip and MUST match at every
 // step. If they diverge too, the oracle harness is wrong, not the engine.
 //
-// FINDING (2026-07-12, this oracle): the state-carry theory is FALSIFIED. On the
+// FINDING (this oracle): the state-carry theory is FALSIFIED. On the
 // exact production garble trajectory (12B fp16 -> token 45518 "thought" on loop),
 // incremental == recompute at every step (max/refRMS <= 0.006, argmax identical),
 // and so does coherent E2B. The embedding, all 48 per-op layer transforms, and

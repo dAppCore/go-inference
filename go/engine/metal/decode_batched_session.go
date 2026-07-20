@@ -593,7 +593,7 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 			// MMA order to the qgemv order (the fold's token-identity tier).
 			// handled=false (older metallib) keeps the composed chain below.
 			// PROMPT scale keeps the composed chain: extending the fused chain to
-			// K=512 was tried and FALSIFIED (#367 2026-07-13: 2578 vs 2901 tok/s
+			// K=512 was tried and FALSIFIED (#367: 2578 vs 2901 tok/s
 			// prefill, −11% — the qgemv-order gate that wins launch-bound small-K
 			// loses to qmm_t's MMA order at prompt K). A prompt-scale fusion needs
 			// an MMA-order fused gate kernel, not this one.
