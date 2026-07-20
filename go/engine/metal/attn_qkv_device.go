@@ -11,11 +11,11 @@ import (
 	core "dappco.re/go"
 )
 
-// composed_attn_qkv_device.go — the fused q/k/v projection for the composed stack's full-attention mixer:
+// attn_qkv_device.go — the fused q/k/v projection for the dense full-attention mixer:
 // q_proj, k_proj and v_proj encoded into ONE command buffer. All three read the same hidden h [L,D], so
 // the GEMMs are independent — no barrier between them — and share one command-buffer round-trip. Only
 // q crosses the device floor standalone (k/v are sub-floor, otherwise a serial host matmul); inside the
-// fused CB k/v ride along as free riders. Mirrors composed_mlp_device.go / gated_delta_input_device.go:
+// fused CB k/v ride along as free riders. Mirrors mlp_device.go / gated_delta_input_device.go:
 // pooled pinned scratch per shape key, resident f32 weights, one emitSteelGemm per matmul (steel nt,
 // fused kernel — device-f32 tier), one commit+wait. k/v share N=kvCols ⇒ one pipeline + one params block.
 

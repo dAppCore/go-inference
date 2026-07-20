@@ -12,7 +12,7 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// composed_mlp_device.go — the fused SwiGLU MLP for the composed stack: gate and up GEMMs, the
+// mlp_device.go — the fused SwiGLU MLP: gate and up GEMMs, the
 // silu-and-multiply glue (sigmoid + two element-wise multiplies), and the down GEMM, all encoded
 // into ONE command buffer with the [L,FF] intermediates staying device-resident. The per-projection
 // hook pays a ~330µs command-buffer round-trip per matmul (three per MLP); this pays one.

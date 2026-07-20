@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// composed_attn_core_backend_test.go gates the device attention core against a test-local
+// attn_core_backend_test.go gates the device attention core against a test-local
 // reference implementing composed's continueFromQKV math exactly (attention.go:398-520: the
 // per-head [q;gate] de-interleave, RMS-with-weight or no-op QK-norm, applyRotaryHalf partial
 // rotary at pos0+t, causal max-subtract softmax with the sliding-window first-clamp, the weighted

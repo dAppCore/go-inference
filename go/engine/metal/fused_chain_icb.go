@@ -14,7 +14,7 @@ import (
 	"github.com/tmc/apple/objc"
 )
 
-// composed_chain_icb.go — CB recording for the composed whole-token chain (#18 queue item 4):
+// fused_chain_icb.go — CB recording for the factory's whole-token chain (#18 queue item 4):
 // the L=1 decode command stream is FIXED across tokens (same kernels, same buffers, same
 // constants — only the position and the hidden's bytes change), so the chain records it once
 // into an MTLIndirectCommandBuffer and every later token replays it with ONE

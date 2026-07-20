@@ -10,7 +10,7 @@ import (
 	"dappco.re/go/inference/kv"
 )
 
-// composed_stateful_session_test.go is #25's acceptance: composedEngineSession holds ONE open
+// stateful_session_test.go is #25's acceptance: composedEngineSession holds ONE open
 // recurrent stepper across prefill/append/generate, so a continued conversation forwards only
 // its new tokens — and decodes token-identically to a cold session given the whole transcript
 // (the composed forward is deterministic, so parity is exact, not approximate). The tiny model
