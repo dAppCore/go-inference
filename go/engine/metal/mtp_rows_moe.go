@@ -74,10 +74,12 @@ var mtpRowsMoEMaxGroupSize atomic.Int64
 // qmvByteExactServable is encQMVByteExactAt's route decision WITHOUT the encode — the pure
 // probe eligibility uses so the driver can never start a verify it cannot finish. It MUST
 // mirror encQMVByteExactAt exactly (same helpers, same order); the driver's in-flight tripwire
-// error fires if they ever drift. Real-26B lesson (2026-07-20): expert dFF not %512 has NO
-// multi-row byte-exact route at any rows>=2 (tiled and chunked both require outDim%8 &&
+// error fires if they ever drift. Real-26B lesson (2026-07-20): expert dFF not %512 had NO
+// multi-row byte-exact route at any rows>=2 (tiled and chunked both required outDim%8 &&
 // inDim%512), and the coarse eligibility missed it — the pair hard-errored mid-verify on the
-// real checkpoint while every synthetic fixture chose aligned dims.
+// real checkpoint while every synthetic fixture chose aligned dims. The general tiled tier
+// (lthn_qmv_rows_general — qmv_impl's M-variant, qmvRowsTiledKeyFor) closes exactly that hole:
+// unaligned dims now serve rows 2..4 tiled and larger groups by chunked composition.
 func qmvByteExactServable(rows, outDim, inDim, gs, bits int) bool {
 	if rows <= 0 {
 		return false
@@ -87,18 +89,23 @@ func qmvByteExactServable(rows, outDim, inDim, gs, bits int) bool {
 		return err == nil
 	}
 	if rows <= qmvRowsTiledCap() {
-		plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
-		if !ok || !plan.tiled {
-			return false
+		if plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits); ok && plan.tiled {
+			_, ok = lthnQMVRowsPipeline(plan.tiledKey)
+			return ok
 		}
-		_, ok = lthnQMVRowsPipeline(plan.tiledKey)
-		return ok
+		// No tiled plan at these rows (e.g. unaligned dims past the general
+		// flat cap under an armed wide lane) — fall through: the chunked
+		// composition below may still serve byte-exactly.
 	}
-	if rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
+	if rows <= lthnQMVRowsMaxM || rows > qmvRowsMax || !qmvChunksEnabled() {
 		return false
 	}
 	for _, m := range qmvRowsChunks(rows) {
-		if _, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: m}); !ok {
+		key, ok := qmvRowsTiledKeyFor(m, outDim, inDim, gs, bits)
+		if !ok {
+			return false
+		}
+		if _, ok := lthnQMVRowsPipeline(key); !ok {
 			return false
 		}
 	}
@@ -509,11 +516,12 @@ func encQMVRowsGroupAt(enc metal.MTLComputeCommandEncoderObject, wq, scales, bia
 
 // encQMVByteExactAt encodes ONE dispatch, choosing the byte-exact route for `rows`: the plain
 // per-row qmv kernel at rows==1 (qmvBF16KernelName — the exact PSO the sequential per-row block
-// itself resolves for this projection), the register-tiled lthn_qmv_rows for 2..qmvRowsTiledCap()
-// rows (qmv_rows.go — byte-identical only when qmvRowsPlanFor reports plan.tiled; the gather
-// fallback that function can also report is a THROUGHPUT route and is deliberately never taken
-// here), or the chunked byte-tier past the tiled cap. ok=false on any geometry qmv_rows itself
-// would not serve byte-exactly.
+// itself resolves for this projection), the register-tiled lthn_qmv_rows[_general] where
+// qmvRowsPlanFor reports a tiled plan (qmv_rows.go — qmvRowsTiledKeyFor matches the fast or
+// general twin to the envelope; the gather fallback that function can also report is a
+// THROUGHPUT route and is deliberately never taken here), or the chunked byte-tier composition
+// otherwise (encQMVRowsBF16ChunkedAt carries the full gate — rows band, kill switch, per-chunk
+// keys). ok=false on any geometry qmv_rows itself would not serve byte-exactly.
 func encQMVByteExactAt(enc metal.MTLComputeCommandEncoderObject, wq, scales, biases bufView, in, out metal.MTLBuffer, inOff, outOff uint, rows, outDim, inDim, gs, bits int) (bool, error) {
 	if rows <= 0 {
 		return false, nil
@@ -527,19 +535,16 @@ func encQMVByteExactAt(enc metal.MTLComputeCommandEncoderObject, wq, scales, bia
 		return true, nil
 	}
 	if rows <= qmvRowsTiledCap() {
-		plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
-		if !ok || !plan.tiled {
-			return false, nil
+		if plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits); ok && plan.tiled {
+			pso, ok := lthnQMVRowsPipeline(plan.tiledKey)
+			if !ok {
+				return false, nil
+			}
+			emitQMVRowsTiled(encSink{enc}, pso, wq.buf, wq.off, scales.buf, scales.off, biases.buf, biases.off, in, inOff, out, outOff, inDim, outDim)
+			return true, nil
 		}
-		pso, ok := lthnQMVRowsPipeline(plan.tiledKey)
-		if !ok {
-			return false, nil
-		}
-		emitQMVRowsTiled(encSink{enc}, pso, wq.buf, wq.off, scales.buf, scales.off, biases.buf, biases.off, in, inOff, out, outOff, inDim, outDim)
-		return true, nil
-	}
-	if rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
-		return false, nil
+		// No tiled plan at these rows — fall through to the chunked
+		// composition, mirroring qmvByteExactServable exactly.
 	}
 	return encQMVRowsBF16ChunkedAt(enc, wq.buf, scales.buf, biases.buf, in, out, wq.off, scales.off, biases.off, inOff, outOff, rows, outDim, inDim, gs, bits)
 }
