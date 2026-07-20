@@ -91,6 +91,23 @@ edges are (1) `*composed.MoEMLP` in internal signatures and (2) `composed.X = �
     quant_moe_fuse_bench_test.go, composed_state_test.go → mamba2_session_state_test.go. arch_*
     (arch_gated_attn.go / arch_gated_delta.go / arch_qwen_fused.go) keep their names — already honest,
     out of scope. Names + header self-references only; zero identifier/behaviour change.
+  - **Landed (2026-07-20, lane/chainrename2 — pass 2, the last nine):** composed_attn_core_backend.go →
+    attn_core_backend.go (+ its composed_attn_core_backend_test.go twin → attn_core_backend_test.go) —
+    the shared device attention core (qprep/kprep/sdpa/gate + resident KV state) both
+    arch_qwen_fused.go's dense layer AND fused_chain_backend.go's chain call directly, not
+    composed-specific. composed_attn_qkv_device.go → attn_qkv_device.go and composed_mlp_device.go →
+    mlp_device.go (both standalone fused-projection device kernels, unreferenced by any live composed
+    import, kept as baseline/scratch — `*_device.go` family). composed_chain_icb.go → fused_chain_icb.go
+    and composed_chain_targets.go → fused_chain_targets.go (the ICB recording machinery and its
+    chainTarget op emitters — direct siblings of fused_chain_backend.go/fused_chain_moe.go, same
+    family). composed_chat_template_test.go → session_chat_template_test.go (tests
+    sessionTextModel.DeclaredChatTemplate dialect selection — no chain/seam relation).
+    composed_decode_profile_test.go → decode_profile_hybrid_test.go (a pprof wall-clock instrument for
+    the qwen-hybrid recurrent decode). composed_stateful_session_test.go → stateful_session_test.go
+    (#25's composedEngineSession continuation/cache/capture acceptance — composedEngineSession itself
+    is untouched, out of scope). `ls go/engine/metal/composed_*` now matches nothing. Names + header
+    self-references + the one external citation (gated_delta_input_device.go's "Mirrors …" line) only;
+    zero identifier/behaviour change.
 - Factory qwen vision tower port; factory MTP pair; 1-bit qmv width (#24).
 - engine/hip: wire the staged Qwen36 native guard (dense_config.go) if HIP ever grows a native route.
 

@@ -10,8 +10,8 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// composed_chain_targets.go — the composed chain's op emitters in TARGET form (see chainTarget
-// in composed_chain_icb.go): each op is written once against the target and lands either on the
+// fused_chain_targets.go — the fused chain's op emitters in TARGET form (see chainTarget
+// in fused_chain_icb.go): each op is written once against the target and lands either on the
 // live per-layer encoder (the re-encode path, byte-identical to the pre-ICB emitters) or into
 // the ICB recording. The legacy enc* wrappers used outside the chain delegate here with a live
 // target, so there is exactly one body per op — the dispatch_sink drift lesson applied at the
