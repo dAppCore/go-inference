@@ -58,6 +58,12 @@ func supportedNativeArchitecture(architecture string) bool {
 	return rocmprofile.SupportedNativeArchitecture(architecture)
 }
 
+// recognisedArchitecture is the inspection-surface predicate: known to the registry, runnable or
+// not (see rocmprofile.RecognisedArchitecture — the #50 recognised-vs-runnable split).
+func recognisedArchitecture(architecture string) bool {
+	return rocmprofile.RecognisedArchitecture(architecture)
+}
+
 func supportedNativeQuantization(bits int, quantType string) bool {
 	if bits == 0 && quantType == "" {
 		return true

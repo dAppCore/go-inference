@@ -2240,7 +2240,7 @@ func applyROCmCodebookInspection(inspection *inference.ModelPackInspection, prof
 
 func applyROCmArchitectureInspection(inspection *inference.ModelPackInspection, weightMetadataValid bool) {
 	architectureDetected := inspection.Model.Architecture != ""
-	architectureOK := supportedNativeArchitecture(inspection.Model.Architecture)
+	architectureOK := recognisedArchitecture(inspection.Model.Architecture)
 	quantizationOK := supportedNativeQuantization(inspection.Model.QuantBits, inspection.Model.QuantType)
 	inspection.Labels["architecture_detected"] = core.Sprintf("%t", architectureDetected)
 	inspection.Labels["architecture_supported"] = core.Sprintf("%t", architectureOK)

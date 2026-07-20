@@ -451,6 +451,24 @@ func KnownArchitectureProfileID(id string) bool {
 	return slices.Contains(builtinArchitectureProfileIDs, id)
 }
 
+// RecognisedArchitecture reports whether this architecture is KNOWN to the registry — a profile
+// exists or the legacy native set lists it — regardless of whether HIP can execute it. The
+// inspection surface keys on recognition: a metadata-only architecture (composed route retired,
+// #50) inspects Supported=true while its runtime_status labels carry the no-execution truth.
+// SupportedNativeArchitecture below stays the strict natively-runnable predicate for load/fit/gap
+// decisions.
+func RecognisedArchitecture(architecture string) bool {
+	if _, ok := registeredArchitectureProfileForArchitecture(architecture); ok {
+		return true
+	}
+	architecture = NormalizeArchitecture(architecture)
+	if architecture == "" {
+		return true
+	}
+	_, ok := supportedNativeArchitectures[architecture]
+	return ok
+}
+
 func SupportedNativeArchitecture(architecture string) bool {
 	if profile, ok := registeredArchitectureProfileForArchitecture(architecture); ok {
 		return profile.NativeRuntime

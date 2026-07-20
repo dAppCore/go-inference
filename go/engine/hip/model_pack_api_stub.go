@@ -617,7 +617,7 @@ func applyROCmPortableArchitectureInspection(inspection *inference.ModelPackInsp
 		return
 	}
 	architectureDetected := strings.TrimSpace(inspection.Model.Architecture) != ""
-	architectureOK := supportedNativeArchitecture(inspection.Model.Architecture)
+	architectureOK := recognisedArchitecture(inspection.Model.Architecture)
 	quantizationOK := supportedNativeQuantization(inspection.Model.QuantBits, inspection.Model.QuantType)
 	inspection.Labels["architecture_detected"] = strconv.FormatBool(architectureDetected)
 	inspection.Labels["architecture_supported"] = strconv.FormatBool(architectureOK)
@@ -968,6 +968,12 @@ func isROCmGemma4AssistantArchitecture(architecture string) bool {
 
 func supportedNativeArchitecture(architecture string) bool {
 	return rocmprofile.SupportedNativeArchitecture(architecture)
+}
+
+// recognisedArchitecture is the inspection-surface predicate: known to the registry, runnable or
+// not (see rocmprofile.RecognisedArchitecture — the #50 recognised-vs-runnable split).
+func recognisedArchitecture(architecture string) bool {
+	return rocmprofile.RecognisedArchitecture(architecture)
 }
 
 func supportedNativeQuantization(bits int, quantType string) bool {
