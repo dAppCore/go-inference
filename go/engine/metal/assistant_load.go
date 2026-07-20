@@ -2541,7 +2541,7 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	// combined with THIS round's attention/MoE wall + expert-group histogram, captured moments ago
 	// inside verifyAssistantDraftHiddens above (mtpRowsDiagLast).
 	headT0 := time.Now()
-	if mtpRowsHeadForced {
+	if mtpRowsHeadArmed {
 		if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
 			return nil, nil, gerr
 		} else if ok {

@@ -25,9 +25,9 @@ import (
 
 func restoreMTPFoldLevers(t *testing.T) {
 	t.Helper()
-	forced, disabled, rowsHead := mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadForced
+	forced, disabled, rowsHead := mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadArmed
 	t.Cleanup(func() {
-		mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadForced = forced, disabled, rowsHead
+		mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadArmed = forced, disabled, rowsHead
 	})
 }
 
