@@ -59,12 +59,20 @@ var builtinArchitectureProfileIDs = []string{
 	"rwkv7",
 }
 
+// supportedNativeArchitectures lists architecture ids HIP can genuinely execute end-to-end — the set that
+// backs SupportedNativeArchitecture/NativeRuntime/RuntimeStatus for every id NOT overridden by an explicit
+// registered profile. Config-composed/hybrid architectures are deliberately ABSENT: composed_runtime.go's
+// loadHIPComposedTextModel declines "composed", "hybrid", "qwen3_6"/"qwen3_6_moe"/"qwen3_next" (the Qwen
+// 3.5/3.6 gated-delta hybrid family — model/arch/Qwen/qwen35), "mixtral" and "qwen3_moe" (model/arch/
+// mistralai/mixtral, model/arch/Qwen/qwenmoe), and "deepseek"/"deepseek_r1" (model/arch/deepseek-ai/deepseek's
+// deepseek_v2/deepseek_v3 model_types, which normalize to these ids) outright — #50 retired the
+// model/composed detour that used to serve all of them, and nothing replaced it with a native ROCm forward.
+// They stay listed in builtinArchitectureProfileIDs (still nameable/inspectable) but MUST NOT claim
+// NativeRuntime here; see ArchitectureProfileNotes for the per-id explanation. mamba2 is unaffected — HIP
+// serves it through its own native loader (mamba2_runtime.go), never through model/composed.
 var supportedNativeArchitectures = map[string]struct{}{
 	"bert":                {},
 	"bert_rerank":         {},
-	"composed":            {},
-	"deepseek":            {},
-	"deepseek_r1":         {},
 	"diffusion_gemma":     {},
 	"gemma":               {},
 	"gemma2":              {},
@@ -80,22 +88,16 @@ var supportedNativeArchitectures = map[string]struct{}{
 	"gpt-oss":             {},
 	"granite":             {},
 	"hermes":              {},
-	"hybrid":              {},
 	"kimi":                {},
 	"llama":               {},
 	"mamba2":              {},
 	"minimax":             {},
 	"minimax_m2":          {},
 	"mistral":             {},
-	"mixtral":             {},
 	"phi":                 {},
 	"phi3":                {},
 	"qwen2":               {},
 	"qwen3":               {},
-	"qwen3_6":             {},
-	"qwen3_6_moe":         {},
-	"qwen3_moe":           {},
-	"qwen3_next":          {},
 }
 
 var (
@@ -873,17 +875,17 @@ func ArchitectureProfileNotes(id string) []string {
 	case "bert_rerank":
 		return []string{"native staged cross-encoder loader; scorer kernels pending"}
 	case "composed", "hybrid":
-		return []string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"}
+		return []string{"composed route retired (#50): no native ROCm execution path; loadHIPComposedTextModel declines this architecture outright, factory-native port pending"}
 	case "mamba2":
 		return []string{"portable recurrent Mamba2 runner is linked; projection hooks remain available for HIP++ acceleration"}
 	case "deltanet", "gla", "gsa", "mla", "moba", "nsa", "retnet", "rwkv7":
 		return []string{"go-mlx metal model family recognised for reactive route parity; ROCm runtime loader remains metadata-only"}
 	case "diffusion_gemma":
 		return []string{"block-diffusion Gemma model; trunk metadata is recognised and diffusion sampler is routed through the diffuse command"}
-	case "qwen3_6":
-		return []string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"}
+	case "qwen3_6", "qwen3_next":
+		return []string{"composed route retired (#50): the gated-delta hybrid has no native ROCm execution path; loadHIPComposedTextModel declines it outright, factory-native port pending"}
 	case "qwen3_6_moe":
-		return []string{"portable composed MoE incremental runner is linked; projection hooks remain available for HIP++ acceleration"}
+		return []string{"composed route retired (#50): the gated-delta MoE hybrid has no native ROCm execution path; loadHIPComposedTextModel declines it outright, factory-native port pending"}
 	case "qwen3_moe", "mixtral", "deepseek", "deepseek_r1", "gpt-oss", "kimi", "minimax_m2":
 		return []string{"native staged sparse/MoE config-tokenizer path; model-integrated expert decode remains pending"}
 	default:
