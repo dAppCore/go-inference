@@ -46,26 +46,32 @@ func parseTurboQuantCacheMode(mode string) (*tqKVConfig, error) {
 }
 
 // tqKVArchServable is the load-time qualification for a TurboQuant live-cache
-// request against an assembled arch: the v1 lane serves DENSE global-attention
-// layers on the recorded decode path only. MoE archs (host router — never
-// recorded), hybrid/recurrent mixers (gated-delta state, no KV rows), and
-// attention-sinks models (gpt-oss: the sink joins the softmax denominator —
-// the TQ read kernels carry no sinks lane) all refuse loudly; a stack with no
-// qualifying global owner refuses too — a "turboquant" session that would
-// quantise nothing must not pretend. layers may be nil (hand-built callers):
-// the sinks check then rides the spec-declared arch alone.
+// request against an assembled arch, applying the per-LAYER-KIND matrix
+// (docs/design-tq-moe-hybrid.md) — never a family-name blanket. MoE is an FFN
+// property, not a cache kind: a MoE stack's standard attention layers qualify
+// (it decodes on the state carrier — stepToken cannot record the host router,
+// but the KV contract is untouched). Recurrent mixers (gated-delta) hold
+// state, not KV rows — they are simply not TQ candidates, never a refusal on
+// their own. Two things still refuse arch-wide: gated full attention
+// (attn_output_gate — its KV lives in the gated/fused lane's resident state,
+// which no TQ path is wired through) and attention sinks (gpt-oss: the sink
+// joins the softmax denominator — the TQ read kernels carry no sinks lane).
+// A stack the matrix leaves with NO qualifying global owner refuses too — a
+// "turboquant" session that would quantise nothing must not pretend. layers
+// may be nil (hand-built callers): the sinks check then rides the
+// spec-declared arch alone.
 func tqKVArchServable(arch model.Arch, layers []model.LoadedLayer, tq *tqKVConfig) error {
+	if arch.AttnOutputGate {
+		return core.NewError("native: -kv-cache turboquant declines gated-attention archs (attn_output_gate KV lives in the gated/fused decode lane, which has no TurboQuant wiring, v1) — reload without -kv-cache")
+	}
 	qualifying := 0
 	for li := range arch.Layer {
 		sp := arch.Layer[li]
-		if sp.MoE {
-			return core.NewError("native: -kv-cache turboquant declines MoE archs (v1: the recorded dense decode lane) — reload without -kv-cache")
-		}
-		if sp.Mixer != model.MixerAttention {
-			return core.NewError("native: -kv-cache turboquant declines hybrid/recurrent archs (gated-delta layers hold state, not KV rows) — reload without -kv-cache")
-		}
 		if li < len(layers) && len(layers[li].Sinks) > 0 {
 			return core.NewError("native: -kv-cache turboquant declines attention-sinks models (the TQ read kernels carry no sinks lane, v1) — reload without -kv-cache")
+		}
+		if sp.Mixer != model.MixerAttention {
+			continue // recurrent state layer — no KV rows to quantise; native state by construction
 		}
 		if sp.OwnsCache() && sp.Attention == model.GlobalAttention &&
 			tqKVGeometryOK(tq.kBits, tq.vBits, headDimOf(sp, arch.HeadDim)) {

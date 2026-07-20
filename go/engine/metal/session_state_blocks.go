@@ -17,6 +17,14 @@ const nativeStateCacheModeFixed = "fixed"
 // range. KeyBytes and ValueBytes are views into the session's resident Metal
 // buffers when produced by StateBlockSource or RangeStateBlocks; callers must
 // consume or copy them before mutating/closing the source session.
+//
+// A TurboQuant layer (CacheMode nativeStateCacheModeTurboQuantCodes,
+// session_state_tq.go) carries its RAW packed code rows in KeyBytes/ValueBytes
+// — at DIFFERENT per-side strides (RowBytes / ValueRowBytes) — plus the two γ
+// planes and the bit widths. Bytes are preserved exactly, never dequantised in
+// transit; the kind is validated per layer on restore, so reinterpreting
+// bytes across kinds is structurally impossible. Every TQ-only field is zero
+// for native layers — their wire shape is byte-identical to before.
 type SessionStateLayerBlock struct {
 	Layer      int
 	CacheIndex int
@@ -27,6 +35,12 @@ type SessionStateLayerBlock struct {
 	RowBytes   int
 	KeyBytes   []byte
 	ValueBytes []byte
+	// TurboQuant kind only (zero for native layers):
+	ValueRowBytes   int    // V code row stride (K's is RowBytes — they differ under turboquant:3.5)
+	GammaRowBytes   int    // γ plane row stride (kvHeads·4)
+	KBits, VBits    int    // the codec bit widths the codes were stored at
+	KeyGammaBytes   []byte // per-row K norms (f32 bytes), row stride GammaRowBytes
+	ValueGammaBytes []byte // per-row V norms
 }
 
 // SessionStateBlock is a contiguous token range from the native session state.
@@ -132,6 +146,12 @@ type sessionStateLayerView struct {
 	keyBytes   []byte
 	valueBytes []byte
 	paged      *devicePagedKVCache
+	// TurboQuant kind only (session_state_tq.go; zero for native views):
+	vRowBytes     int
+	gammaRowBytes int
+	kBits, vBits  int
+	kGammaBytes   []byte
+	vGammaBytes   []byte
 }
 
 // StateBlockSource returns a block loader over the current resident K/V cache.
@@ -244,7 +264,9 @@ func (s *ArchSession) RestoreStateBlocks(source SessionStateBlockSource) error {
 	if source.BlockCount == 0 {
 		return s.restoreStateBlockMetadata(source)
 	}
-	targetViews, err := s.stateLayerViews()
+	// kind-aware target views: a TurboQuant target accepts turboquant-codes
+	// blocks (validated per layer — kind, bits, strides) beside native ones.
+	targetViews, err := s.stateLayerViewsRefreshingKinds(nil, true)
 	if err != nil {
 		return err
 	}
@@ -380,6 +402,14 @@ func fillStateBlockSpan(index, start, end, position int, views []sessionStateLay
 		return SessionStateBlock{}, core.NewError("native.StateBlockSource.Load: layer descriptor size mismatch")
 	}
 	for i, view := range views {
+		if view.cacheMode == nativeStateCacheModeTurboQuantCodes {
+			tqLayer, tqErr := tqFillStateBlockLayer(view, start, tokenCount, position)
+			if tqErr != nil {
+				return SessionStateBlock{}, tqErr
+			}
+			layers[i] = tqLayer
+			continue
+		}
 		keyBytes, valueBytes, err := stateBlockLayerBytes(view, start, tokenCount, position)
 		if err != nil {
 			return SessionStateBlock{}, err
@@ -480,6 +510,16 @@ func restoreStateBlock(index, expectedStart, position, ownerCount int, targetVie
 		}
 		seen[viewIndex] = true
 		view := targetViews[viewIndex]
+		if layer.CacheMode == nativeStateCacheModeTurboQuantCodes || view.cacheMode == nativeStateCacheModeTurboQuantCodes {
+			// TurboQuant kind: validated + restored entirely by the kind-aware
+			// path — BEFORE the generic checks, whose legacy cross-engine
+			// cache-mode allowlist must never wave raw code bytes into a bf16
+			// cache (or bf16 rows into a codes cache).
+			if err := tqRestoreStateBlockLayer(view, block.TokenStart, block.TokenCount, position, layer); err != nil {
+				return err
+			}
+			continue
+		}
 		if layer.KVHeads > 0 && layer.KVHeads != view.kvHeads {
 			return core.NewError("native.RestoreStateBlocks: kv-head count mismatch")
 		}
@@ -596,11 +636,22 @@ func (s *ArchSession) stateLayerViews() ([]sessionStateLayerView, error) {
 // leave other views' snapshot bytes stale, which is safe because every reader
 // refreshes through this entry first.
 func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionStateLayerView, error) {
-	// TurboQuant sessions decline every KV-view consumer (v1): snapshot capture
-	// / restore, -state sleep-wake, and the drafter export all read bf16-shaped
-	// cache bytes the packed code caches do not hold (unlike q8, which keeps
-	// bf16 mirrors). This is THE choke point every such path funnels through.
-	if s.state.icb.hasKVTQ() {
+	return s.stateLayerViewsRefreshingKinds(needed, false)
+}
+
+// stateLayerViewsRefreshingKinds is stateLayerViewsRefreshing with the cache
+// KIND surface controlled. allowTQ=false is every legacy caller: a TurboQuant
+// session (EITHER carrier — recorded-ICB or state-lane, tq_kv_state.go)
+// declines wholesale, because those callers (the monolithic SerializeState /
+// CaptureKV codecs, the MTP drafter export) read bf16-SHAPED cache bytes the
+// packed code caches do not hold. allowTQ=true is the kind-aware BLOCK codec
+// only (StateBlockSource / RangeStateBlocks / RestoreStateBlocks): TQ owner
+// layers yield turboquant-codes views (raw codes + γ, session_state_tq.go)
+// beside untouched native views — the mixed-kind snapshot surface. The
+// decline sits BEFORE the cached-views fast path, so a legacy caller can
+// never receive a cached TQ view either.
+func (s *ArchSession) stateLayerViewsRefreshingKinds(needed map[int]bool, allowTQ bool) ([]sessionStateLayerView, error) {
+	if s.hasKVTQAny() && !allowTQ {
 		return nil, core.NewError("native.ArchSession: -kv-cache turboquant declines KV snapshot / conversation-state sleep (v1) — serve stateless or drop -kv-cache")
 	}
 	ownerCount := s.ownedStateCacheLayers()
@@ -634,6 +685,15 @@ func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionS
 	}
 	for li, spec := range s.state.specs {
 		if !spec.OwnsCache() {
+			continue
+		}
+		if tqView, isTQ, tqErr := s.tqStateLayerView(li, spec); tqErr != nil {
+			return nil, tqErr
+		} else if isTQ {
+			// TurboQuant owner (either carrier): the view IS the raw code+γ
+			// surface — never a bf16 shape, never snapshotCacheViews (whose lb
+			// branch would materialise a dead bf16 cache beside the codes).
+			views = append(views, tqView)
 			continue
 		}
 		paged := s.state.layerPagedKV(li)
@@ -754,7 +814,9 @@ func (s *ArchSession) stateBlockPlan(startToken, blockSize int) (int, int, int, 
 	if s.pos < 0 || s.pos > s.maxLen {
 		return 0, 0, 0, nil, nil, core.NewError("native.StateBlockSource: position outside maxLen")
 	}
-	views, err := s.stateLayerViews()
+	// the block codec is the KIND-AWARE snapshot surface: TurboQuant layers
+	// yield turboquant-codes views beside native ones (session_state_tq.go).
+	views, err := s.stateLayerViewsRefreshingKinds(nil, true)
 	if err != nil {
 		return 0, 0, 0, nil, nil, err
 	}

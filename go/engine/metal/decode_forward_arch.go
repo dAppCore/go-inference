@@ -256,6 +256,11 @@ type archDecodeState struct {
 	// chunk-attention SDPA scores against. nil until a TQ session first prefills
 	// batched; freed at the prefill→decode transition.
 	tqPrefill *tqPrefillScratch
+	// kvTQState is the STATE-lane TurboQuant carrier (tq_kv_state.go): the
+	// codes+γ caches for sessions the arch ICB cannot record (MoE / hybrid
+	// stacks decoding via stepToken). nil on every native and recorded-TQ
+	// session — the off-path is untouched.
+	kvTQState *archStateKVTQ
 	offBuf    metal.MTLBuffer
 	offPtr    *int32
 	// offRing rotates the position buffer across step encodes. offBuf holds
@@ -583,6 +588,8 @@ func (s *archDecodeState) Close() {
 	s.denseBatch.Close()
 	s.releaseTQPrefillScratch()
 	s.tqPrefill = nil
+	s.kvTQState.release()
+	s.kvTQState = nil
 	for _, cache := range s.pagedKV {
 		if cache != nil {
 			cache.Close()
@@ -639,6 +646,13 @@ func (s *archDecodeState) ensureLBKVCaches() error {
 		if lb.kvCacheBytes == 0 || (lb.kCache != nil && lb.vCache != nil) {
 			continue
 		}
+		if s.kvTQState.on(li) {
+			// state-lane TurboQuant owner (tq_kv_state.go): its cache IS the
+			// carrier's code+γ set — a bf16 twin here would be a dead duplicate
+			// at the full KV footprint, and any lane that wrote it would be
+			// writing bytes the decode never reads.
+			continue
+		}
 		lb.kCache = device.NewBufferWithLengthOptions(lb.kvCacheBytes, metal.MTLResourceStorageModeShared)
 		lb.vCache = device.NewBufferWithLengthOptions(lb.kvCacheBytes, metal.MTLResourceStorageModeShared)
 		if lb.kCache == nil || lb.vCache == nil {
@@ -657,6 +671,14 @@ func (s *archDecodeState) initDevicePagedKV(pageSize int) error {
 func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc bool) error {
 	if s == nil {
 		return core.NewError("native.archDecodeState.initDevicePagedKV: nil state")
+	}
+	// State-lane TurboQuant (tq_kv_state.go): the paged pool is declined
+	// wholesale — the paged kernels have no code-addressing lane, so a TQ
+	// session decodes over the LINEAR caches (the attention-sinks precedent
+	// below). Declining here forces every stepToken onto that lane.
+	if s.tqStateArmed() {
+		s.pagedKV = nil
+		return nil
 	}
 	// Attention sinks (gpt_oss): the paged-attention kernels (lthn_paged_* — sdpa_paged.go) have no
 	// has_sinks lane, so a sinks session must decode over the LINEAR lb caches, where encAttnHalfKV
@@ -1846,7 +1868,16 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 				cbBroken = true
 			}
 		} else if s.specs[li].OwnsCache() {
-			if cache := s.layerPagedKV(li); cache != nil {
+			if s.kvTQState.on(li) {
+				// state-lane TurboQuant owner (tq_kv_state.go): staging store →
+				// code cache + γ at pos, SDPA over codes — the recorded lane's
+				// TQ block driven per token. Serial emitter, like the plain half.
+				toSerial()
+				if err := s.encAttnHalfKVTQ(enc, li, in, pos, rotDim, rbase, layerRopeFreqs); err != nil {
+					endEncodingFast(enc)
+					return nil, err
+				}
+			} else if cache := s.layerPagedKV(li); cache != nil {
 				var aerr error
 				if enc, encConc, aerr = encAttnHalfKVPaged(enc, cb, s.gpuProf, encConc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); aerr != nil {
 					endEncodingFast(enc)
@@ -1862,7 +1893,14 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		} else {
 			toSerial() // the shared-KV attention halves are serial emitters
 			own := s.specs[li].KVShareFrom
-			if cache := s.layerPagedKV(own); cache != nil {
+			if s.kvTQState.on(own) {
+				// sharer of a state-lane TurboQuant owner (tq_kv_state.go):
+				// q-only leg + SDPA over the owner's codes — no store.
+				if err := s.encAttnHalfSharedKVTQ(enc, li, own, in, pos, rotDim, rbase, layerRopeFreqs); err != nil {
+					endEncodingFast(enc)
+					return nil, err
+				}
+			} else if cache := s.layerPagedKV(own); cache != nil {
 				if err := encAttnHalfSharedPaged(enc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
 					endEncodingFast(enc)
 					return nil, err
