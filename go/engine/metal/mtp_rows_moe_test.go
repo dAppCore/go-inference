@@ -141,9 +141,86 @@ func TestMTPRowsMoEBatchedMatchesPerRow_Bad(t *testing.T) {
 	}
 }
 
+// mtpRowsMoETestWeightsFused is mtpRowsMoETestWeights with the expert gate/up fused into ONE
+// ExpGateUp tensor via fuseExpertGateUpQuant (load_shared.go) — the SAME synthesis
+// loadedToQuant's moeToQuant runs for every gemma4 checkpoint (Arch.FuseExpertGateUp), split or
+// already-fused. ExpGate/ExpUp are cleared, mirroring moeToQuant's own post-fuse cleanup, so a
+// test on this fixture can only pass via the fused code path — there is no split fallback left to
+// accidentally exercise instead.
+func mtpRowsMoETestWeightsFused(t testing.TB) MoEQuantLayerWeights {
+	t.Helper()
+	w := mtpRowsMoETestWeights(t)
+	const dModel, expertDFF, numExperts = mtpRowsMoETestDModel, mtpRowsMoETestExpertDFF, mtpRowsMoETestNumExperts
+	const gs, bits = mtpRowsMoETestGroupSize, mtpRowsMoETestBits
+	w.ExpGateUp = fuseExpertGateUpQuant(w.ExpGate, w.ExpUp, numExperts, expertDFF, dModel, gs, bits)
+	w.ExpGate, w.ExpUp = QuantWeight{}, QuantWeight{}
+	return w
+}
+
+// TestMTPRowsMoEBatchedMatchesPerRow_FusedGateUp_Good is
+// TestMTPRowsMoEBatchedMatchesPerRow_Good's fused-ExpGateUp twin — the LIVE gemma4 26B-A4B shape
+// (Arch.FuseExpertGateUp synthesises this at every load, TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts).
+// Byte-identical to K sequential MoEBlockQuantInto calls on the SAME fused weights, with the SAME
+// engagement guard as the split-case test (maxGroup > 1) — a lane that only proved split geometry
+// would never have a receipt for what actually ships.
+func TestMTPRowsMoEBatchedMatchesPerRow_FusedGateUp_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, dFF, K = mtpRowsMoETestDModel, mtpRowsMoETestDFF, 4
+	w := mtpRowsMoETestWeightsFused(t)
+
+	if !mtpRowsMoEEligible(w, dModel, dFF) {
+		t.Fatal("fused fixture geometry declined mtpRowsMoEEligible — the fixture must exercise the fused-expert branch")
+	}
+
+	rowBytes := dModel * bf16Size
+	hSlab := toBF16Bytes(syntheticFloat32(K*dModel, 55))
+	if len(hSlab) != K*rowBytes {
+		t.Fatalf("fixture hSlab bytes = %d, want %d", len(hSlab), K*rowBytes)
+	}
+
+	got, ok, err := mtpRowsMoEBatched(hSlab, w, dModel, dFF, K, mtpRowsMoETestEps)
+	if err != nil {
+		t.Fatalf("mtpRowsMoEBatched: %v", err)
+	}
+	if !ok {
+		t.Fatal("mtpRowsMoEBatched declined on an eligible fused fixture")
+	}
+	if len(got) != K*rowBytes {
+		t.Fatalf("mtpRowsMoEBatched out bytes = %d, want %d", len(got), K*rowBytes)
+	}
+
+	want := make([]byte, 0, K*rowBytes)
+	for r := range K {
+		row := hSlab[r*rowBytes : (r+1)*rowBytes]
+		out, rerr := MoEBlockQuantInto(nil, row, w, dModel, dFF, mtpRowsMoETestEps)
+		if rerr != nil {
+			t.Fatalf("MoEBlockQuantInto row %d: %v", r, rerr)
+		}
+		want = append(want, out...)
+	}
+
+	maxGroup := mtpRowsMoEMaxGroupSize.Load()
+	if !bytes.Equal(got, want) {
+		firstDiff := -1
+		for i := range got {
+			if got[i] != want[i] {
+				firstDiff = i
+				break
+			}
+		}
+		t.Fatalf("mtpRowsMoEBatched (fused) diverged from the per-row reference at byte %d (K=%d, maxGroup=%d)", firstDiff, K, maxGroup)
+	}
+	if maxGroup < 2 {
+		t.Fatalf("fused fixture never grouped >1 pair onto one expert (maxGroup=%d) — the compare never engaged the multi-row tiled lane", maxGroup)
+	}
+	t.Logf("mtpRowsMoEBatched (fused ExpGateUp) == %d x MoEBlockQuantInto, byte for byte; max expert group size %d", K, maxGroup)
+}
+
 // TestMTPRowsMoEEligible_Ugly pins the decline discriminators: gpt_oss (ClampedSwiGLU), qwen (a
-// bound SharedGate), and a fused ExpGateUp checkpoint all decline — mtpRowsMoEBatched must never
-// be reached on a geometry it does not implement.
+// bound SharedGate), and a malformed (wrong-shaped) fused ExpGateUp tensor all decline —
+// mtpRowsMoEBatched must never be reached on a geometry it does not implement or cannot validate.
+// A WELL-FORMED fused checkpoint is the live gemma4 26B-A4B shape and IS eligible — see
+// TestMTPRowsMoEBatchedMatchesPerRow_FusedGateUp_Good.
 func TestMTPRowsMoEEligible_Ugly(t *testing.T) {
 	requireNativeRuntime(t)
 	const dModel, dFF = mtpRowsMoETestDModel, mtpRowsMoETestDFF
@@ -161,10 +238,10 @@ func TestMTPRowsMoEEligible_Ugly(t *testing.T) {
 		t.Fatal("qwen (bound SharedGate) must decline — it decodes on encQwenMoEHalf, not this lane")
 	}
 
-	fused := base
-	fused.ExpGateUp = QuantWeight{Packed: []byte{1}, Scales: []byte{1}, Biases: []byte{1}, GroupSize: 1, Bits: 4}
-	if mtpRowsMoEEligible(fused, dModel, dFF) {
-		t.Fatal("fused ExpGateUp must decline — the grouped lane only implements split expert gate/up")
+	malformedFused := base
+	malformedFused.ExpGateUp = QuantWeight{Packed: []byte{1}, Scales: []byte{1}, Biases: []byte{1}, GroupSize: 1, Bits: 4}
+	if mtpRowsMoEEligible(malformedFused, dModel, dFF) {
+		t.Fatal("a wrong-shaped fused ExpGateUp tensor must decline — quantWeightViewsForShape validates the [numExperts*2*expertDFF, dModel] geometry")
 	}
 }
 
