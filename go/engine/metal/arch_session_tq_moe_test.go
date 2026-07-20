@@ -178,6 +178,101 @@ func TestArchQuantSessionTurboQuantMoE_Good(t *testing.T) {
 	}
 }
 
+// TestArchQuantSessionTurboQuantMoEShared_Good gates the SHARED-owner read on
+// the state carrier — the gemma4 num_kv_shared_layers tail (the 26B shape): a
+// global sharer attends its TQ owner's codes through encAttnHalfSharedKVTQ
+// (q-only leg, no store), and the whole stack stays inside the session codec
+// band against its native twin.
+func TestArchQuantSessionTurboQuantMoEShared_Good(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const numLayers = 3
+	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
+	for i := range numLayers {
+		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
+			quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
+		}
+	}
+	cfg := g4.Config{
+		HiddenSize: 64, NumHiddenLayers: numLayers, IntermediateSize: 128,
+		NumAttentionHeads: 2, NumKeyValueHeads: 1, HeadDim: 128, VocabSize: 32, RMSNormEps: 1e-6,
+		SlidingWindow: 8, LayerTypes: []string{"full_attention", "sliding_attention", "full_attention"},
+		NumKVSharedLayers: 1,
+		EnableMoEBlock:    true, NumExperts: 4, TopKExperts: 2, MoEIntermediateSize: 64,
+		Quantization: quant,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	if arch.Layer[2].OwnsCache() || arch.Layer[2].KVShareFrom != 0 {
+		t.Fatalf("fixture wants layer 2 sharing layer 0's KV, got %+v", arch.Layer[2])
+	}
+	ts := moeQuantTensors(t, arch, quant)
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, quant.GroupSize, quant.Bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	const maxLen = 32
+	native, err := newArchQuantSessionShardsWithHeadConfig(g, arch, maxLen, nil, nil, archSessionConfig{})
+	if err != nil {
+		t.Fatalf("native session: %v", err)
+	}
+	tq, err := newArchQuantSessionShardsWithHeadConfig(g, arch, maxLen, nil, nil, archSessionConfig{kvCacheMode: "turboquant:4"})
+	if err != nil {
+		t.Fatalf("turboquant session: %v", err)
+	}
+	if !tq.state.kvTQState.on(0) {
+		t.Fatal("shared GLOBAL owner 0 must arm TQ (global sharers are served; only sliding sharers force native)")
+	}
+	if tq.state.kvTQState.on(1) || tq.state.kvTQState.on(2) {
+		t.Fatal("sliding owner / sharer must never arm TQ")
+	}
+	prompt := []int32{1, 5, 3, 7}
+	if err := native.PrefillTokens(prompt); err != nil {
+		t.Fatalf("native prefill: %v", err)
+	}
+	if err := tq.PrefillTokens(prompt); err != nil {
+		t.Fatalf("tq prefill: %v", err)
+	}
+	minCos := 1.0
+	embScale := embedScaleOf(arch)
+	for step, id := range []int32{2, 9, 4, 6, 8, 1, 3, 7} {
+		emb, err := embedTokenQuant(g.Embed, g.EmbedScales, g.EmbedBiases, id, arch.Vocab, arch.Hidden, g.GroupSize, g.Bits, embScale)
+		if err != nil {
+			t.Fatalf("embed %d: %v", step, err)
+		}
+		hN, err := native.StepWithID(id, emb)
+		if err != nil {
+			t.Fatalf("native step %d: %v", step, err)
+		}
+		hT, err := tq.StepWithID(id, emb)
+		if err != nil {
+			t.Fatalf("tq step %d: %v", step, err)
+		}
+		a, b := bf16ToF32Slice(hN), bf16ToF32Slice(hT)
+		var dot, na, nb float64
+		for i := range a {
+			dot += float64(a[i]) * float64(b[i])
+			na += float64(a[i]) * float64(a[i])
+			nb += float64(b[i]) * float64(b[i])
+		}
+		cos := dot / math.Sqrt(na*nb)
+		if cos < minCos {
+			minCos = cos
+		}
+	}
+	t.Logf("turboquant:4 vs native shared-owner MoE stepwise hidden cosine: min %.6f over 8 steps", minCos)
+	if minCos < 0.98 {
+		t.Fatalf("min stepwise hidden cosine %.6f under the 0.98 codec band", minCos)
+	}
+}
+
 // TestArchQuantSessionTurboQuantMoE_Bad proves the state-carrier refusals: a
 // MoE stack whose head dim has no TQ instantiation refuses at build (never
 // silently native), and an armed state carrier declines the bf16-shaped KV

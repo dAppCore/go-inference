@@ -125,12 +125,17 @@ func allocArchStateKVTQ(specs []model.LayerSpec, lb []archLayerBufs, nHeads, nKV
 		// tqKVArchServable already refused; this is the construction belt).
 		return nil, nil
 	}
-	// ANY sharer forces its owner native on this lane: the shared-attention
-	// emitters are not TQ-wired (v1) — a sharer reading an owner's packed
-	// codes as bf16 rows is the exact mixed-cache failure this file forbids.
+	// A SLIDING sharer forces its owner native — its windowed read offset is
+	// unaddressable over packed code rows (the allocArchICBCachesTQ rule,
+	// mirrored so both carriers classify identically). GLOBAL sharers are
+	// served: encAttnHalfSharedKVTQ reads the owner's codes with the sharer's
+	// own q — the gemma4 num_kv_shared_layers tail (the 26B shape) keeps its
+	// residency win. DeriveLayers only ever shares same-type, so this guard
+	// covers hand-built specs.
 	shared := make([]bool, len(specs))
 	for li := range specs {
 		if !specs[li].OwnsCache() && specs[li].Mixer == model.MixerAttention &&
+			specs[li].Attention == model.SlidingAttention &&
 			specs[li].KVShareFrom != li && specs[li].KVShareFrom >= 0 && specs[li].KVShareFrom < len(specs) {
 			shared[specs[li].KVShareFrom] = true
 		}
@@ -348,6 +353,83 @@ func (s *archDecodeState) encAttnHalfKVTQ(enc metal.MTLComputeCommandEncoder, li
 			s.nHeads, lkv, n, kb, int64(lkv)*kb, vb, int64(lkv)*vb, s.scale, pi)
 	}
 	// output projection + residual — the native tail, byte-identical.
+	if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
+		return err
+	}
+	return encResidualMaybeNormAt(enc, in, 0, sc.attnOut, 0, sc.normed, s.hBuf, 0, postAttnNorm, s.dModel, s.eps)
+}
+
+// encAttnHalfSharedKVTQ encodes the KV-SHARING attention half over a
+// TurboQuant OWNER's code cache — encAttnHalfShared's codes sibling: the
+// sharer projects ONLY its query (own norms, own rope args) and the SDPA
+// reads the owner's codes + γ; no K/V projection, no store, no cache write.
+// Sharers of a TQ owner are GLOBAL-on-global by construction (DeriveLayers
+// shares same-type; sliding sharers force the owner native at alloc), so the
+// window is the owner's whole seq-major live length n = pos+1 — the owner
+// wrote row pos earlier this token, ordered by the encoder's hazard tracking.
+func (s *archDecodeState) encAttnHalfSharedKVTQ(enc metal.MTLComputeCommandEncoder, li, owner int, in metal.MTLBuffer, pos, rotaryDim int, base float32, ropeFreqs metal.MTLBuffer) error {
+	t := s.kvTQState
+	if !t.on(owner) {
+		return core.NewError("native.encAttnHalfSharedKVTQ: owner is not a TurboQuant owner")
+	}
+	lkv, lhd := kvHeadsOf(s.specs[owner], s.nKVHeads), headDimOf(s.specs[owner], s.headDim)
+	sc, proj := s.asc, s.lb[li].proj
+	attnNormW, postAttnNorm, qNorm := s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm
+	kBits, vBits := t.set.kBits, t.set.vBits
+	pi := tqKVPiBuffer(lhd)
+	kCent, vCent := tqKVCentroidsBuffer(lhd, kBits), tqKVCentroidsBuffer(lhd, vBits)
+	sink := encSink{enc}
+
+	if err := encRMSNormBF16At(enc, in, attnNormW.buf, sc.normed, 0, attnNormW.off, 0, s.dModel, s.eps); err != nil {
+		return err
+	}
+	if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {
+		return err
+	}
+	if gpuHasGeluKernel() && qNorm.buf != nil {
+		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, s.offBuf, 0, ropeFreqs, s.nHeads, lhd, rotaryDim, base, s.ropeScale, s.eps); err != nil {
+			return err
+		}
+	} else {
+		if qNorm.buf != nil {
+			if err := encRMSNormRowsBF16(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, s.nHeads, lhd, s.eps); err != nil {
+				return err
+			}
+		}
+		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, s.offBuf, 0, ropeFreqs, s.nHeads, lhd, rotaryDim, base, s.ropeScale); err != nil {
+			return err
+		}
+	}
+	n := pos + 1
+	kb, vb := int64(t.set.kRowBytes[owner]/lkv), int64(t.set.vRowBytes[owner]/lkv)
+	if n >= sdpa2PassMinKV && sc.p2Partials != nil && t.qRot != nil && !sdpa2PassDisabledForTest {
+		blocks := sdpa2PassBlocks(n, lkv)
+		rotPSO, rerr := tqRotRowsPipeline(false)
+		if rerr != nil {
+			return rerr
+		}
+		pso1, p1err := sdpaVector2Pass1TQPipeline(lhd, kBits, vBits, blocks)
+		if p1err != nil {
+			return p1err
+		}
+		pso2, p2err := sdpaVector2Pass2TQPipeline(lhd)
+		if p2err != nil {
+			return p2err
+		}
+		emitTQRotRows(sink, rotPSO, sc.q, pi, t.qRot, s.nHeads, lhd)
+		emitSDPAVector2Pass1TQ(sink, pso1, t.qRot, t.kCaches[owner], t.vCaches[owner], sc.p2Partials, sc.p2Sums, sc.p2Maxs,
+			t.set.kGammas[owner], t.set.vGammas[owner], kCent, vCent, nil,
+			s.nHeads, lkv, n, int(blocks), kb, int64(lkv)*kb, vb, int64(lkv)*vb, s.scale)
+		emitSDPA2Pass2TQ(sink, pso2, sc.p2Partials, sc.p2Sums, sc.p2Maxs, sc.attn, s.nHeads, int(blocks), pi)
+	} else {
+		pso, serr := sdpaVectorTQPipeline(lhd, kBits, vBits)
+		if serr != nil {
+			return serr
+		}
+		emitSDPAVectorTQ(sink, pso, sc.q, t.kCaches[owner], t.vCaches[owner], sc.attn,
+			t.set.kGammas[owner], t.set.vGammas[owner], kCent, vCent, nil,
+			s.nHeads, lkv, n, kb, int64(lkv)*kb, vb, int64(lkv)*vb, s.scale, pi)
+	}
 	if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
 		return err
 	}

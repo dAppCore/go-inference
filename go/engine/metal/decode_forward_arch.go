@@ -1893,7 +1893,14 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		} else {
 			toSerial() // the shared-KV attention halves are serial emitters
 			own := s.specs[li].KVShareFrom
-			if cache := s.layerPagedKV(own); cache != nil {
+			if s.kvTQState.on(own) {
+				// sharer of a state-lane TurboQuant owner (tq_kv_state.go):
+				// q-only leg + SDPA over the owner's codes — no store.
+				if err := s.encAttnHalfSharedKVTQ(enc, li, own, in, pos, rotDim, rbase, layerRopeFreqs); err != nil {
+					endEncodingFast(enc)
+					return nil, err
+				}
+			} else if cache := s.layerPagedKV(own); cache != nil {
 				if err := encAttnHalfSharedPaged(enc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
 					endEncodingFast(enc)
 					return nil, err
