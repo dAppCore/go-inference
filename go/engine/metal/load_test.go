@@ -40,4 +40,3 @@ func TestLoadDirReactiveDispatch(t *testing.T) {
 		t.Fatal("an unregistered model_type must resolve to no loader")
 	}
 }
-

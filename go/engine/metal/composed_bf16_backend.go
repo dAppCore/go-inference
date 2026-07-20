@@ -69,7 +69,7 @@ func MatMulBF16WF32NTInto(out, x []float32, w []byte, M, K, N int) ([]float32, e
 }
 
 // MatMulBF16WeightF32NTInto is MatMulBF16WF32NTInto over the lib's BF16Weight form — the signature
-// the composed/qwen3 hooks bind.
+// the attn.ProjBF16MatMulInto seam binds.
 func MatMulBF16WeightF32NTInto(out, x []float32, w *model.BF16Weight, M, K, N int) ([]float32, error) {
 	if w == nil || w.OutDim != N || w.InDim != K {
 		return nil, core.NewError("native.MatMulBF16WeightF32NTInto: weight geometry mismatch")

@@ -20,8 +20,8 @@ import (
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/arch/rwkv7"
 	"dappco.re/go/inference/model/arch/Qwen/qwen35"
+	"dappco.re/go/inference/model/arch/rwkv7"
 )
 
 func init() { inference.Register(metalBackend{}) }

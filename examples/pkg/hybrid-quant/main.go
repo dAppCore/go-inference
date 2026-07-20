@@ -1,9 +1,5 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-// #50 NOTE: this example rides the RETIRED composed engine's API (model/composed), which the
-// examples module still resolves from the released dappco.re/go/inference v0.12.0 pin. Port it to
-// the factory route before bumping that pin past #50.
-
 // Serve a QUANTISED hybrid (Qwen 3.6 — model_type qwen3_5) with its weights kept PACKED on device. The
 // composed hybrid stack alternates gated-delta linear-attention layers with full-attention layers; at 27B
 // a dense f32 widening is ~110 GB (dead on arrival), so the loader carries every 2-D projection PACKED
@@ -37,10 +33,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	// LoadModel routes a qwen3_5 checkpoint through the composed loader (registered in model/composed);
-	// a quantised pack keeps its projections packed and is served through the quant matvec seam. The
-	// TEXT tower only — a multimodal wrapper's vision tensors are skipped at load; image input keeps
-	// refusing cleanly through the existing text-only machinery.
+	// LoadModel routes a qwen3_5 checkpoint through the factory route (model.Load + the fused
+	// arch session — the ONLY route since #50 retired the composed engine); a quantised pack keeps
+	// its projections packed and is served through the quant matvec seam. The TEXT tower only —
+	// image input refuses cleanly through the existing text-only machinery.
 	r := inference.LoadModel(*model)
 	if !r.OK {
 		fmt.Fprintln(os.Stderr, "load:", r.Value)

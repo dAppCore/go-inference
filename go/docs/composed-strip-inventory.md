@@ -86,3 +86,11 @@ edges are (1) `*composed.MoEMLP` in internal signatures and (2) `composed.X = �
   the strip has soaked.
 - Factory qwen vision tower port; factory MTP pair; 1-bit qmv width (#24).
 - engine/hip: wire the staged Qwen36 native guard (dense_config.go) if HIP ever grows a native route.
+
+## Post-inventory finding (examples module)
+
+The root go.work builds `examples/` against the LIVE ./go tree (not the v0.12.0 pin the module
+file names), so `examples/pkg/packed-moe` — a direct composed.LoadComposed consumer — broke with
+the deletion and is retired with its subject (README row removed). A factory-route packed-MoE
+example is a board follow-up. `examples/pkg/hybrid-quant` uses only the public inference.LoadModel
+surface and serves through the factory unchanged (comment corrected).
