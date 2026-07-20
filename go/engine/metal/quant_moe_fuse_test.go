@@ -9,13 +9,13 @@ import (
 	"testing"
 )
 
-// composed_moe_fuse_test.go is the DEVICE receipt for the composed MoE gate+up fusion (#17). The composed
+// quant_moe_fuse_test.go is the DEVICE receipt for the composed MoE gate+up fusion (#17). The composed
 // lane dispatches each expert projection through the bound quant seam (composed.ProjQuantMatMulInto =
 // MatMulQuantF32NTInto), so fuseExpertGateUp turns a routed expert's TWO gate/up matvecs into ONE over the
 // [gate‖up] concat — one GPU submit per expert instead of two. Here that fusion is exercised against the
 // real Metal affine_qmv kernel: the host byte-identity (the retired composed engine's TestSwigluExpertQuantInto_-
 // FusedMatchesUnfused) is re-proven on the DEVICE, and the timing win the host cannot show (no per-submit
-// overhead there) is measured in composed_moe_fuse_bench_test.go.
+// overhead there) is measured in quant_moe_fuse_bench_test.go.
 
 // mkQMVInput fills a deterministic [D] activation for the quant matvec.
 func mkQMVInput(d int) []float32 {

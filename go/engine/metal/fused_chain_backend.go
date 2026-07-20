@@ -14,7 +14,7 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// composed_chain_backend.go — whole-token chaining for the factory's fused decode (#26/#18): every layer's
+// fused_chain_backend.go — whole-token chaining for the factory's fused decode (#26/#18): every layer's
 // encodes land on ONE retained command buffer, the hidden state ping-pongs between two device
 // buffers, and the host sees exactly one upload (Begin) and one wait+readback (End) per forward.
 // The per-layer folds this chains are the proven single-CB layer bodies; encoder boundaries

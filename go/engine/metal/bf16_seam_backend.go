@@ -14,8 +14,8 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// composed_bf16_backend.go — the dense bf16 matvec seam (#26): the exact quant-seam shape
-// (composed_quant_backend.go) for a checkpoint's UNQUANTISED bf16 projections. The weight bytes
+// bf16_seam_backend.go — the dense bf16 matvec seam (#26): the exact quant-seam shape
+// (quant_seam_backend.go) for a checkpoint's UNQUANTISED bf16 projections. The weight bytes
 // stay the mmap view (residentBytes caches the device buffer per slice); activations cross the
 // seam f32 exactly like the quant seam, cast to bf16 for the kernel. This is what stops the dense
 // serving lane widening every projection to f32 — the ×2 on bytes streamed per token AND on the

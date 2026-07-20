@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// composed_moe_fuse_bench_test.go measures the composed MoE gate+up fusion (#17) ON THE GPU at real
+// quant_moe_fuse_bench_test.go measures the composed MoE gate+up fusion (#17) ON THE GPU at real
 // 35B-A3B expert dims (D 2048, FF 512, 4-bit): the fused path is ONE quant matvec over [2·FF, D] where the
 // split path is two over [FF, D] (gate then up). Unlike the retired composed engine's host micro-bench (which came
 // out neutral — the host per-row dequant has no per-launch overhead), the device pays a submit/wait per

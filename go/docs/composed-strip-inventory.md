@@ -84,6 +84,13 @@ edges are (1) `*composed.MoEMLP` in internal signatures and (2) `composed.X = �
 - File renames: composed_chain_backend.go / composed_chain_moe.go / composed_bf16_backend.go /
   composed_quant_backend.go / arch_* keep historic "composed" names — rename to chain_*/seam_* once
   the strip has soaked.
+  - **Landed (2026-07-20, lane/chainrename):** composed_chain_backend.go → fused_chain_backend.go,
+    composed_chain_moe.go → fused_chain_moe.go, composed_bf16_backend.go → bf16_seam_backend.go,
+    composed_quant_backend.go → quant_seam_backend.go, plus their test companions
+    composed_moe_fuse_test.go → quant_moe_fuse_test.go, composed_moe_fuse_bench_test.go →
+    quant_moe_fuse_bench_test.go, composed_state_test.go → mamba2_session_state_test.go. arch_*
+    (arch_gated_attn.go / arch_gated_delta.go / arch_qwen_fused.go) keep their names — already honest,
+    out of scope. Names + header self-references only; zero identifier/behaviour change.
 - Factory qwen vision tower port; factory MTP pair; 1-bit qmv width (#24).
 - engine/hip: wire the staged Qwen36 native guard (dense_config.go) if HIP ever grows a native route.
 

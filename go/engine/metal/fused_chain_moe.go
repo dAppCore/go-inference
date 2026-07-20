@@ -12,7 +12,7 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// composed_chain_moe.go — the Qwen hybrid's Mixture-of-Experts FFN tail in chainTarget form,
+// fused_chain_moe.go — the Qwen hybrid's Mixture-of-Experts FFN tail in chainTarget form,
 // so a qwen3_5_moe layer rides the factory's whole-token chain instead of firing its own
 // per-expert command buffers. The dense SwiGLU tail (chainResidualNormMLPQuantTail) already rides
 // the chain; this is its MoE twin — residual add → RMSNorm → cast bf16 → [router → gather experts →
