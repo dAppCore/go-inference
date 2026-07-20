@@ -95,15 +95,29 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 // shared expert whose width differs from the routed experts') lived entirely upstream, in
 // model.assembleMoE's SharedDown InDim (fixed via the new arch.SharedExpertFF field); this mapping was
 // always geometry-agnostic pass-through, so it inherits the fix with zero lines changed. See
-// TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good for the pinning proof. STILL OPEN: ExpertDFF
-// below is the ROUTED width only — engine/metal has no shared-width field on MoEQuantLayerWeights, and
-// arch_qwen_moe.go's non-fused decode dispatch (encQwenMoEHalf) sizes its shared-expert matvec off this
-// same ExpertDFF, a decode-time gap #57 does not close (out of this change's file fence — see
-// qwenmoe/weights.go's "STILL OPEN" doc for the full trace).
+// TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good for the pinning proof.
+//
+// #61 CLOSED (was STILL OPEN here): ExpertDFF below is, and remains, the ROUTED width only —
+// MoEQuantLayerWeights now carries a SEPARATE SharedDFF (moe_block.go), resolved below from
+// arch.SharedExpertFF with an arch.ExpertFF fallback (mirroring model.assembleMoE's SharedDown InDim
+// fallback, #57), so arch_qwen_moe.go's non-fused decode dispatch (encQwenMoEHalf) can size its
+// shared-expert matvec off the shared expert's OWN width instead of borrowing ExpertDFF. See
+// TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good (distinct widths) and
+// TestMoeToQuant_SharedDFFFallsBackToExpertDFF_Ugly (no distinct width declared) for the pinning
+// proofs, and qwenmoe/weights.go's doc for the full historical trace.
 func moeToQuant(e *model.LoadedMoE, arch model.Arch) *MoEQuantLayerWeights {
 	experts, topK, expertFF, dModel, fuseGateUp := arch.Experts, arch.TopK, arch.ExpertFF, arch.Hidden, arch.FuseExpertGateUp
+	// sharedFF (#61): the shared expert's OWN intermediate size — arch.SharedExpertFF when the arch
+	// declares one (real llama4 Scout: 16384 shared vs 8192 routed; Qwen1.5-MoE-A2.7B: 5632 vs 1408),
+	// else expertFF — so an arch that doesn't declare a distinct shared width (every arch but qwen's
+	// shared-expert family and llama4, today) derives the SAME SharedDFF as ExpertDFF, byte-identical
+	// to before this field existed.
+	sharedFF := arch.SharedExpertFF
+	if sharedFF == 0 {
+		sharedFF = expertFF
+	}
 	q := &MoEQuantLayerWeights{
-		NumExperts: experts, TopK: topK, ExpertDFF: expertFF,
+		NumExperts: experts, TopK: topK, ExpertDFF: expertFF, SharedDFF: sharedFF,
 		PreFFNormW: e.PreFFNorm, PreFFNorm2W: e.PreFFNorm2,
 		PostFFNorm1W: e.PostFFNorm1, PostFFNorm2W: e.PostFFNorm2, PostFFNormW: e.PostFFNorm,
 		LocalGate:         qw(e.LocalGate),

@@ -76,6 +76,18 @@ func (s *archDecodeState) encQwenMoEHalf(li int, moe *MoEQuantLayerWeights, out 
 	if nE <= 0 || topK <= 0 || ff <= 0 {
 		return core.NewError("native.encQwenMoEHalf: bad MoE geometry")
 	}
+	// sharedFF (#61): the shared expert's OWN width, from moe.SharedDFF (moeToQuant resolves it from
+	// arch.SharedExpertFF, falling back to arch.ExpertFF when the arch declares no distinct width —
+	// load_shared.go). A checkpoint like real llama4 Scout ships shared and routed genuinely distinct
+	// (16384 vs 8192); using ff (the ROUTED width) for both — the pre-#61 bug — sized the shared
+	// dispatch wrong, which MoEExpertsQuantSiLU's packed-length check turns into a hard error on every
+	// decode step for such a checkpoint, not silently wrong output. Falls back to ff here too so a
+	// MoEQuantLayerWeights built before this field existed (a hand-built test fixture, say) keeps the
+	// historic ff-for-everything behaviour instead of a spurious zero-width dispatch.
+	sharedFF := moe.SharedDFF
+	if sharedFF == 0 {
+		sharedFF = ff
+	}
 	h := bf16BufToF32(s.hBuf, 0, D)
 	normed := rmsNormHostF32(h, bf16VecToF32(moe.PreFFNormW), s.eps)
 
@@ -137,14 +149,15 @@ func (s *archDecodeState) encQwenMoEHalf(li int, moe *MoEQuantLayerWeights, out 
 
 	// Shared expert: the SAME kernel as a degenerate 1-of-1 call — numExperts=topK=1, the combine weight IS
 	// σ(normed·SharedSigmoid), so the gate scale fuses into the dispatch instead of a separate host multiply.
-	// Shared FF == moe_intermediate (ff).
+	// Sized off sharedFF (#61) — the shared expert's OWN width, NOT necessarily ff (the routed width);
+	// see sharedFF's doc above for why the two genuinely differ on a real checkpoint.
 	if len(moe.SharedGate.Packed) > 0 {
 		g, err := sharedGateSigmoid(moe.SharedSigmoid, normed, D)
 		if err != nil {
 			return err
 		}
 		sr := f32ToBF16(float32(g))
-		sharedBytes, err := MoEExpertsQuantSiLU(normedBF, []int32{0}, []byte{byte(sr), byte(sr >> 8)}, moe.SharedGate, moe.SharedUp, moe.SharedDown, 1, 1, D, ff, moe.SharedGate.GroupSize, moe.SharedGate.Bits)
+		sharedBytes, err := MoEExpertsQuantSiLU(normedBF, []int32{0}, []byte{byte(sr), byte(sr >> 8)}, moe.SharedGate, moe.SharedUp, moe.SharedDown, 1, 1, D, sharedFF, moe.SharedGate.GroupSize, moe.SharedGate.Bits)
 		if err != nil {
 			return err
 		}

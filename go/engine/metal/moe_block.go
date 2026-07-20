@@ -1174,6 +1174,16 @@ type MoEQuantLayerWeights struct {
 	// (SharedSigmoid, [1×dModel]) added to the routed output. A bound SharedGate MARKS a qwen MoE layer,
 	// which decodes on the host (encQwenMoEHalf) rather than the gemma device MoE (#18).
 	SharedGate, SharedUp, SharedDown, SharedSigmoid QuantWeight
+	// SharedDFF (#61) is the shared expert's OWN intermediate size — moeToQuant resolves it from
+	// arch.SharedExpertFF with an arch.ExpertFF fallback (load_shared.go), mirroring
+	// model.assembleMoE's SharedDown InDim resolution (#57). encQwenMoEHalf sizes its shared-expert
+	// MoEExpertsQuantSiLU dispatch from THIS field, not ExpertDFF (the ROUTED width) — a checkpoint
+	// whose shared and routed widths genuinely differ (real llama4 Scout: 16384 shared vs 8192
+	// routed; Qwen1.5-MoE-A2.7B: 5632 vs 1408) previously sized the shared dispatch off the wrong
+	// width, which MoEExpertsQuantSiLU's own packed-length check turns into a hard decode-time error
+	// rather than silently wrong output. Zero (an unpopulated field, e.g. a pre-#61 hand-built test
+	// fixture) falls back to ExpertDFF at the encQwenMoEHalf call site — see its "sharedFF" doc.
+	SharedDFF int
 
 	// gpt_oss (#37): ClampedSwiGLU MARKS a gpt_oss MoE layer — clamped-sigmoid SwiGLU experts
 	// (MoEExpertsQuantClampedSiLU at SwigluLimit) + an additive router bias, no local dense MLP, no

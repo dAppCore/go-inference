@@ -100,23 +100,28 @@ func qwen35_35B_A3B() []byte {
 // hybrid schedule (every full_attention_interval-th layer is MixerAttention with a KV cache + resolved
 // geometry, the rest MixerGatedDelta with no cache), the MoE-per-layer flag, and the neutral Arch
 // declarations (experts/top-k/shared-expert, SiLU activation, gated attention, partial rotary, rope theta).
+// sharedExpertFF (#61) pins Arch.SharedExpertFF's derivation from shared_expert_intermediate_size: zero
+// on the dense config (no MoE fields at all) and 512 on the real MoE fixture — which happens to equal
+// expertFF (moe_intermediate_size) on every published Qwen 3.6 checkpoint today, but the field is still
+// wired as a direct passthrough (mirroring qwenmoe.Config.Arch, #57) so a future same-family checkpoint
+// that DOES diverge (as Qwen1.5-MoE-A2.7B and real llama4 Scout already do) sizes correctly.
 func TestConfigArch(t *testing.T) {
 	cases := []struct {
-		name                                              string
-		cfg                                               []byte
-		layers, interval, heads, kvHeads, headDim, vocab  int
-		experts, topK, expertFF, sharedExperts, rotaryDim int
-		moe                                               bool
+		name                                                              string
+		cfg                                                               []byte
+		layers, interval, heads, kvHeads, headDim, vocab                  int
+		experts, topK, expertFF, sharedExperts, sharedExpertFF, rotaryDim int
+		moe                                                               bool
 	}{
 		{
 			name: "qwen3_5_dense_27B", cfg: qwen35_27B(),
 			layers: 64, interval: 4, heads: 24, kvHeads: 4, headDim: 256, vocab: 248320,
-			experts: 0, topK: 0, expertFF: 0, sharedExperts: 0, rotaryDim: 64, moe: false,
+			experts: 0, topK: 0, expertFF: 0, sharedExperts: 0, sharedExpertFF: 0, rotaryDim: 64, moe: false,
 		},
 		{
 			name: "qwen3_5_moe_35B_A3B", cfg: qwen35_35B_A3B(),
 			layers: 40, interval: 4, heads: 16, kvHeads: 2, headDim: 256, vocab: 248320,
-			experts: 256, topK: 8, expertFF: 512, sharedExperts: 1, rotaryDim: 64, moe: true,
+			experts: 256, topK: 8, expertFF: 512, sharedExperts: 1, sharedExpertFF: 512, rotaryDim: 64, moe: true,
 		},
 	}
 	for _, tc := range cases {
@@ -157,6 +162,10 @@ func TestConfigArch(t *testing.T) {
 			if arch.Experts != tc.experts || arch.TopK != tc.topK || arch.ExpertFF != tc.expertFF || arch.SharedExperts != tc.sharedExperts {
 				t.Errorf("moe experts/topK/expertFF/shared = %d/%d/%d/%d, want %d/%d/%d/%d",
 					arch.Experts, arch.TopK, arch.ExpertFF, arch.SharedExperts, tc.experts, tc.topK, tc.expertFF, tc.sharedExperts)
+			}
+			// SharedExpertFF (#61): the shared expert's OWN width, wired from shared_expert_intermediate_size.
+			if arch.SharedExpertFF != tc.sharedExpertFF {
+				t.Errorf("SharedExpertFF = %d, want %d (shared_expert_intermediate_size)", arch.SharedExpertFF, tc.sharedExpertFF)
 			}
 			if tc.moe {
 				if arch.MoEGating != model.MoEGatingSoftmax {
