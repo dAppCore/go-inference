@@ -7,6 +7,7 @@ package native
 import (
 	"bytes"
 	"os"
+	"slices"
 	"testing"
 	"unsafe"
 
@@ -327,9 +328,12 @@ func tqHybridMixedKindsTestQuantModel(t *testing.T) (*QuantModel, model.Arch) {
 
 // TestStateBlocksTurboQuantHybridMixedKinds_Good gates the mixed-kind round trip on a PLAIN-
 // attention + gated-delta hybrid (#48 declared boundary #1): one block stream carries a native
-// bf16 ring (sliding) beside turboquant codes+γ (global), byte-exact on restore, while the
-// gated-delta layer's absence from the KV block stream is itself asserted — CacheIndex -1 means
-// it owns no cache and must never appear as a block layer, never mis-tagged into either kind.
+// bf16 ring (sliding) beside turboquant codes+γ (global) beside the gated-delta layer's OWN
+// gated-delta-state host view (#62) — three coexisting kinds, never mis-tagged into one another.
+// The gated-delta layer still owns no KV cache (CacheIndex -1) and never appears as either KV kind;
+// it appears under its own kind instead, present (HostStatePresent true) only on the block whose
+// span reaches the stream's position, absent on every earlier block — see
+// TestStateBlocksTurboQuantHybridGatedDeltaStateRestored_Good for the byte-exact conv/delta receipt.
 func TestStateBlocksTurboQuantHybridMixedKinds_Good(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
@@ -368,12 +372,13 @@ func TestStateBlocksTurboQuantHybridMixedKinds_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StateBlockSource: %v", err)
 	}
-	// The stream carries BOTH KV kinds, with the TQ layer's payload at the code strides + γ
-	// planes and the native layer untouched — and NOTHING for the gated-delta layer: it owns no
-	// cache (CacheIndex -1), so it must never surface as a block layer of either kind.
-	sawTQ, sawNative, layerCount := false, false, 0
+	// The stream carries ALL THREE kinds: the TQ layer's payload at the code strides + γ planes,
+	// the native layer untouched, and the gated-delta layer's own host-state kind — present only
+	// on the block reaching pos, explicitly absent (never omitted, never mis-tagged) elsewhere.
+	sawTQ, sawNative, sawGD, layerCount := false, false, false, 0
 	if err := saved.RangeStateBlocks(4, func(block SessionStateBlock) (bool, error) {
 		layerCount = len(block.Layers)
+		isFinal := block.TokenStart+block.TokenCount == pos
 		for _, layer := range block.Layers {
 			switch layer.CacheMode {
 			case nativeStateCacheModeTurboQuantCodes:
@@ -395,6 +400,22 @@ func TestStateBlocksTurboQuantHybridMixedKinds_Good(t *testing.T) {
 				if layer.ValueRowBytes != 0 || len(layer.KeyGammaBytes) != 0 {
 					t.Fatalf("native layer carries TQ fields: %+v", layer)
 				}
+			case nativeStateCacheModeGatedDeltaState:
+				if layer.Layer != 1 {
+					t.Fatalf("gated-delta block layer wrong: %+v", layer)
+				}
+				if layer.HostStatePresent != isFinal {
+					t.Fatalf("block [%d,%d) (pos %d): gated-delta HostStatePresent=%v, want %v",
+						block.TokenStart, block.TokenStart+block.TokenCount, pos, layer.HostStatePresent, isFinal)
+				}
+				if isFinal {
+					sawGD = true
+					if len(layer.KeyBytes) == 0 || len(layer.ValueBytes) == 0 {
+						t.Fatalf("final block's gated-delta payload is empty: %+v", layer)
+					}
+				} else if len(layer.KeyBytes) != 0 || len(layer.ValueBytes) != 0 {
+					t.Fatalf("absent gated-delta block still carries bytes: %+v", layer)
+				}
 			default:
 				t.Fatalf("unexpected cache mode %q", layer.CacheMode)
 			}
@@ -403,11 +424,11 @@ func TestStateBlocksTurboQuantHybridMixedKinds_Good(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RangeStateBlocks: %v", err)
 	}
-	if !sawTQ || !sawNative {
-		t.Fatalf("stream did not carry both KV kinds: tq=%v native=%v", sawTQ, sawNative)
+	if !sawTQ || !sawNative || !sawGD {
+		t.Fatalf("stream did not carry all three kinds: tq=%v native=%v gated-delta=%v", sawTQ, sawNative, sawGD)
 	}
-	if layerCount != 2 {
-		t.Fatalf("block carries %d layers, want 2 — the gated-delta layer owns no cache (CacheIndex -1) and must never appear", layerCount)
+	if layerCount != 3 {
+		t.Fatalf("block carries %d layers, want 3 (native + TQ + gated-delta-state)", layerCount)
 	}
 
 	restored, err := newArchQuantSessionShardsWithHeadConfig(g, arch, maxLen, nil, nil, archSessionConfig{kvCacheMode: "turboquant:4"})
@@ -474,20 +495,19 @@ func TestStateBlocksTurboQuantHybridMixedKinds_Good(t *testing.T) {
 	}
 }
 
-// TestStateBlocksTurboQuantHybridGatedDeltaStateNotRestored_Ugly pins a boundary this campaign
-// discovered rather than introduced: the state-block codec (stateLayerViewsRefreshingKinds,
-// session_state_blocks.go) iterates only cache-OWNING layers (spec.OwnsCache()) — a MixerGatedDelta
-// layer's CacheIndex is -1 by construction (docs/design-tq-moe-hybrid.md's own words: "it can never
-// be handed a KV cache of any kind"), so it never appears in a block's Layers at all. Its recurrent
-// state (gatedDeltaLayer.conv/delta — host Go fields threaded token to token, arch_gated_delta.go)
-// is consequently invisible to StateBlockSource / RestoreStateBlocks: a restored session's
-// gated-delta layer starts from a FRESH (empty) recurrence, not the saved one's accumulated history.
-// This predates #48 (the recurrence itself is #18); the design doc's mixed-kind codec is scoped to
-// the KV-cache axis only and never claims recurrent-state fidelity. Surprising but valid — pinned
-// explicitly so a caller resuming a hybrid conversation via the block codec, or a future maintainer
-// reading TestStateBlocksTurboQuantHybridMixedKinds_Good's passing continuation receipt, does not
-// mistake either for a guarantee that gated-delta memory survives a save/restore round trip.
-func TestStateBlocksTurboQuantHybridGatedDeltaStateNotRestored_Ugly(t *testing.T) {
+// TestStateBlocksTurboQuantHybridGatedDeltaStateRestored_Good closes #62
+// (docs/design-gd-state-blocks.md): the state-block codec (stateLayerViewsRefreshingKinds,
+// session_state_blocks.go) used to iterate only cache-OWNING layers (spec.OwnsCache()) — a
+// MixerGatedDelta layer's CacheIndex is -1 by construction (docs/design-tq-moe-hybrid.md's own
+// words: "it can never be handed a KV cache of any kind"), so it never appeared in a block's Layers
+// at all, and its recurrent state (gatedDeltaLayer.conv/delta — host Go fields threaded token to
+// token, arch_gated_delta.go) was invisible to StateBlockSource / RestoreStateBlocks. The layer now
+// carries its own gated-delta-state host view beside the KV kinds: a restored session's gated-delta
+// layer holds the SAME conv/delta the saved one held, byte-exact, and its continuation now matches
+// the live session's because the recurrence — not just the KV cache — carried over. Supersedes
+// TestStateBlocksTurboQuantHybridGatedDeltaStateNotRestored_Ugly, which pinned the gap this closes;
+// TestStateBlocksTurboQuantHybridMixedKinds_Good's own continuation receipt note pointed here.
+func TestStateBlocksTurboQuantHybridGatedDeltaStateRestored_Good(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
@@ -515,7 +535,9 @@ func TestStateBlocksTurboQuantHybridGatedDeltaStateNotRestored_Ugly(t *testing.T
 	if len(saved.state.gatedDelta) <= 1 || saved.state.gatedDelta[1] == nil {
 		t.Fatal("fixture wants a bound gated-delta holder on layer 1")
 	}
-	if len(saved.state.gatedDelta[1].conv) == 0 || len(saved.state.gatedDelta[1].delta) == 0 {
+	wantConv := append([]float32(nil), saved.state.gatedDelta[1].conv...)
+	wantDelta := append([]float32(nil), saved.state.gatedDelta[1].delta...)
+	if len(wantConv) == 0 || len(wantDelta) == 0 {
 		t.Fatal("prefill+decode must have advanced the gated-delta recurrence — the compare below would be vacuous")
 	}
 
@@ -530,14 +552,90 @@ func TestStateBlocksTurboQuantHybridGatedDeltaStateNotRestored_Ugly(t *testing.T
 	if err := restored.RestoreStateBlocks(source); err != nil {
 		t.Fatalf("RestoreStateBlocks: %v", err)
 	}
-	// The KV side restored correctly (proven byte-exact by the sibling _Good test); the recurrent
-	// side did not move at all — it is still the fresh session's zero-value, untouched by restore.
+	// The KV side restores correctly (proven byte-exact by the sibling _Good test); the recurrent
+	// side now moves too — direct equality against what the SAVED session held at capture time.
 	if len(restored.state.gatedDelta) <= 1 || restored.state.gatedDelta[1] == nil {
 		t.Fatal("restored session lost its gated-delta holder entirely")
 	}
-	if len(restored.state.gatedDelta[1].conv) != 0 || len(restored.state.gatedDelta[1].delta) != 0 {
-		t.Fatalf("restored gated-delta state is no longer empty (conv=%d delta=%d) — the codec grew recurrent-state support; update this test's premise and comment",
-			len(restored.state.gatedDelta[1].conv), len(restored.state.gatedDelta[1].delta))
+	gotConv := restored.state.gatedDelta[1].conv
+	gotDelta := restored.state.gatedDelta[1].delta
+	if !slices.Equal(wantConv, gotConv) {
+		t.Fatalf("restored gated-delta conv state differs:\nwant %v\ngot  %v", wantConv, gotConv)
+	}
+	if !slices.Equal(wantDelta, gotDelta) {
+		t.Fatalf("restored gated-delta delta state differs:\nwant %v\ngot  %v", wantDelta, gotDelta)
+	}
+
+	// Continuation receipt: now that the recurrence itself carried over (not just the KV cache), the
+	// restored session's greedy continuation matches the live one at the token level — the guarantee
+	// TestStateBlocksTurboQuantHybridGatedDeltaStateNotRestored_Ugly proved this codec did NOT make.
+	wantGen, err := saved.GenerateFromCache(3, -1)
+	if err != nil {
+		t.Fatalf("saved GenerateFromCache: %v", err)
+	}
+	gotGen, err := restored.GenerateFromCache(3, -1)
+	if err != nil {
+		t.Fatalf("restored GenerateFromCache: %v", err)
+	}
+	if len(wantGen) != len(gotGen) {
+		t.Fatalf("continuation lengths differ: %v vs %v", wantGen, gotGen)
+	}
+	for i := range wantGen {
+		if wantGen[i] != gotGen[i] {
+			t.Fatalf("continuation diverged at %d: %v vs %v", i, wantGen, gotGen)
+		}
+	}
+}
+
+// TestRestoreStateBlocksGatedDeltaKindMismatch_Bad proves the gated-delta host-state kind is ALSO a
+// wall, mirroring TestStateBlocksTurboQuantKindMismatch_Bad's proof for the TQ kind: a block tagged
+// gated-delta-state refuses to land on a KV (native) view, and a native-tagged block refuses to land
+// on a gated-delta-state view. Unlike the TQ mismatch test, there is no session-CONFIG axis that
+// turns the gated-delta-state kind on/off for the SAME arch (it is unconditional whenever the arch
+// declares a MixerGatedDelta layer) — two live sessions can't be made to disagree on it the way
+// native-vs-turboquant kv-cache-mode disagrees. So this drives restoreStateBlock (session_state_blocks.go)
+// directly, at the same dispatch layer TestStateBlocksTurboQuantKindMismatch_Bad exercises through a
+// full session round trip: it isolates the exact kind check precisely, with no cross-arch fixture
+// needed. See docs/design-gd-state-blocks.md.
+func TestRestoreStateBlocksGatedDeltaKindMismatch_Bad(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := tqHybridMixedKindsTestQuantModel(t)
+	const maxLen = 32
+	saved, err := newArchQuantSessionShardsWithHeadConfig(g, arch, maxLen, nil, nil, archSessionConfig{kvCacheMode: "turboquant:4"})
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if err := saved.PrefillTokens([]int32{1, 5, 3}); err != nil {
+		t.Fatalf("prefill: %v", err)
+	}
+	gd := saved.state.gatedDelta[1]
+	if gd == nil || len(gd.conv) == 0 || len(gd.delta) == 0 {
+		t.Fatal("fixture wants a populated gated-delta holder on layer 1")
+	}
+
+	gdView := sessionStateLayerView{layer: 1, cacheMode: nativeStateCacheModeGatedDeltaState, gd: gd}
+	nativeView := sessionStateLayerView{
+		layer: 1, cacheMode: nativeStateCacheModeFixed, rowBytes: 8, cacheRows: maxLen,
+		keyBytes: make([]byte, 8*maxLen), valueBytes: make([]byte, 8*maxLen),
+	}
+
+	// A native-shaped block lands on a gated-delta-state view: refuse.
+	nativeBlock := SessionStateBlock{Index: 0, TokenStart: 0, TokenCount: 3, Layers: []SessionStateLayerBlock{{
+		Layer: 1, CacheMode: nativeStateCacheModeFixed, RowBytes: 8, KeyBytes: make([]byte, 24), ValueBytes: make([]byte, 24),
+	}}}
+	if err := restoreStateBlock(0, 0, 3, 1, []sessionStateLayerView{gdView}, nativeBlock); err == nil {
+		t.Fatal("native block restored onto a gated-delta-state view: expected the kind refusal")
+	}
+
+	// A gated-delta-state block lands on a native (KV) view: refuse.
+	gdBlock := SessionStateBlock{Index: 0, TokenStart: 0, TokenCount: 3, Layers: []SessionStateLayerBlock{{
+		Layer: 1, CacheMode: nativeStateCacheModeGatedDeltaState, HostStatePresent: true,
+		KeyBytes: float32Bytes(gd.conv), ValueBytes: float32Bytes(gd.delta),
+	}}}
+	if err := restoreStateBlock(0, 0, 3, 1, []sessionStateLayerView{nativeView}, gdBlock); err == nil {
+		t.Fatal("gated-delta-state block restored onto a native view: expected the kind refusal")
 	}
 }
 
