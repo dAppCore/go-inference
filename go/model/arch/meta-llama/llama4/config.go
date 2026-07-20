@@ -127,7 +127,13 @@ func (c Config) Arch() (model.Arch, error) {
 		Hidden: c.HiddenSize, Heads: c.NumAttentionHeads, KVHeads: kvHeads, HeadDim: headDim,
 		GlobalHeadDim: headDim, GlobalKVHeads: kvHeads, FF: c.IntermediateSizeMLP, Vocab: c.VocabSize,
 		Experts: c.NumLocalExperts, TopK: c.NumExpertsPerTok, ExpertFF: c.IntermediateSize,
-		MoEGating: model.MoEGatingSigmoid, NormaliseMoETopK: false, SharedExperts: 1,
+		// SharedExpertFF (#61): Llama 4's always-on shared expert is structurally the SAME dense
+		// SwiGLU block as a non-MoE layer's MLP, so it shares intermediate_size_mlp — genuinely
+		// DISTINCT from ExpertFF (intermediate_size) above: real Scout ships 16384 (shared,
+		// IntermediateSizeMLP, == FF above) vs 8192 (routed, IntermediateSize/ExpertFF), a live 2x
+		// mismatch reaching engine/metal/arch_qwen_moe.go's encQwenMoEHalf shared-expert dispatch.
+		SharedExpertFF: c.IntermediateSizeMLP,
+		MoEGating:      model.MoEGatingSigmoid, NormaliseMoETopK: false, SharedExperts: 1,
 		Eps: eps, AttnScale: float32(1 / core.Pow(float64(headDim), 0.5)), EmbedScale: 1,
 		RopeBase: rope, RopeLocalBase: rope, RopeScale: ropeScale, RotaryDim: headDim, RotaryDimLocal: headDim,
 		RopeOriginalContext: c.RopeScaling.OriginalMaxPositionEmbeddings,

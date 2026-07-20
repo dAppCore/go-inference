@@ -33,6 +33,12 @@ func TestConfig_Arch_Good(t *testing.T) {
 	if arch.Experts != 16 || arch.TopK != 1 || arch.ExpertFF != 8192 || arch.SharedExperts != 1 || arch.NormaliseMoETopK {
 		t.Fatalf("MoE declaration = experts %d top-k %d expert FF %d shared %d normalise %v", arch.Experts, arch.TopK, arch.ExpertFF, arch.SharedExperts, arch.NormaliseMoETopK)
 	}
+	// SharedExpertFF (#61): Llama 4's shared expert reuses intermediate_size_mlp (16384) — genuinely
+	// distinct from ExpertFF's intermediate_size (8192) above, a live 2x mismatch that reaches
+	// engine/metal/arch_qwen_moe.go's encQwenMoEHalf shared-expert dispatch on a real checkpoint.
+	if arch.SharedExpertFF != 16384 {
+		t.Fatalf("SharedExpertFF = %d, want 16384 (intermediate_size_mlp — the shared expert's OWN width, distinct from ExpertFF's routed 8192)", arch.SharedExpertFF)
+	}
 	if arch.MoEGating != model.MoEGatingSigmoid || arch.FF != 16384 || arch.QKNormalization != model.QKL2Norm {
 		t.Fatalf("text declaration = gating %q dense FF %d qk norm %q", arch.MoEGating, arch.FF, arch.QKNormalization)
 	}

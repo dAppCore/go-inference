@@ -248,6 +248,12 @@ func (c *Config) Arch() (model.Arch, error) {
 		a.NormaliseMoETopK = eff.normTopKProb()
 		if eff.SharedExpertIntermediateSize > 0 {
 			a.SharedExperts = 1
+			// SharedExpertFF (#61): the shared expert's OWN intermediate size — real Qwen 3.6 MoE
+			// fixtures ship it equal to ExpertFF today, but the field is a direct passthrough (the
+			// same idiom qwenmoe.Config.Arch uses, #57) so a same-family checkpoint that DOES diverge
+			// sizes correctly. Feeds engine/metal/arch_qwen_moe.go's encQwenMoEHalf (#61) via
+			// model.assembleMoE's SharedDown InDim and engine/metal's MoEQuantLayerWeights.SharedDFF.
+			a.SharedExpertFF = eff.SharedExpertIntermediateSize
 		}
 	}
 	return a, nil

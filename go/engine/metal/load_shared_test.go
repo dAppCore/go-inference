@@ -44,7 +44,8 @@ func TestLoadedToQuantRejectsNilModel(t *testing.T) {
 // ExpDown are given DELIBERATELY DIFFERENT geometry (mirroring what a genuinely mismatched-width
 // checkpoint like Qwen1.5-MoE-A2.7B produces post-fix: GroupSize 8/Bits 4 for the 5632-wide shared
 // expert vs GroupSize 32/Bits 8 for the 1408-wide routed experts) to prove the two are never conflated
-// or overwritten by a model-wide value.
+// or overwritten by a model-wide value. Also pins the #61 SharedDFF derivation on the SAME distinct-width
+// fixture: SharedDFF must carry arch.SharedExpertFF (5632), never ExpertDFF's routed 1408.
 func TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good(t *testing.T) {
 	e := &model.LoadedMoE{
 		Router:  &model.Linear{Weight: make([]byte, 8)},
@@ -69,12 +70,35 @@ func TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good(t *testing.T) {
 	if q.ExpDown.GroupSize != 32 || q.ExpDown.Bits != 8 {
 		t.Fatalf("ExpDown geometry = GroupSize %d Bits %d, want GroupSize 32 Bits 8 — moeToQuant must not conflate the routed and shared geometries", q.ExpDown.GroupSize, q.ExpDown.Bits)
 	}
-	// ExpertDFF is model-wide and carries ONLY the routed width (arch.ExpertFF) — MoEQuantLayerWeights has
-	// no shared-width counterpart field today (the #57 follow-up load_shared.go's doc now names: the
-	// non-fused decode dispatch in arch_qwen_moe.go still sizes its shared-expert matvec off ExpertDFF).
-	// Pinning this here (rather than assuming a field that doesn't exist) keeps this test honest about
-	// what #57 did and did not reach.
+	// ExpertDFF is model-wide and carries ONLY the routed width (arch.ExpertFF).
 	if q.ExpertDFF != 1408 {
 		t.Fatalf("ExpertDFF = %d, want 1408 (arch.ExpertFF — the routed width)", q.ExpertDFF)
+	}
+	// #61: SharedDFF carries the shared expert's OWN width (arch.SharedExpertFF), distinct from
+	// ExpertDFF — this is what lets encQwenMoEHalf (arch_qwen_moe.go) size its shared-expert dispatch
+	// correctly instead of borrowing the routed width.
+	if q.SharedDFF != 5632 {
+		t.Fatalf("SharedDFF = %d, want 5632 (arch.SharedExpertFF — the shared width, not ExpertDFF's routed 1408)", q.SharedDFF)
+	}
+}
+
+// TestMoeToQuant_SharedExpertWidthFallsBackToExpertDFF_Ugly is the #61 zero-change guard: an arch that
+// does NOT declare a distinct shared-expert width (arch.SharedExpertFF == 0 — every arch but qwen's
+// shared-expert family and llama4, e.g. a GraniteMoE-shaped checkpoint, or gemma4's routed-only MoE)
+// must derive SharedDFF byte-identical to ExpertDFF, so encQwenMoEHalf's shared-expert dispatch — for an
+// arch that even binds a shared expert without declaring SharedExpertFF — sizes exactly as it did before
+// this field existed.
+func TestMoeToQuant_SharedExpertWidthFallsBackToExpertDFF_Ugly(t *testing.T) {
+	e := &model.LoadedMoE{
+		Router:  &model.Linear{Weight: make([]byte, 8)},
+		ExpGate: &model.Linear{Weight: make([]byte, 8), GroupSize: 32, Bits: 8},
+	}
+	arch := model.Arch{Experts: 8, TopK: 2, ExpertFF: 1408, Hidden: 2048} // SharedExpertFF left zero
+	q := moeToQuant(e, arch)
+	if q.SharedDFF != q.ExpertDFF {
+		t.Fatalf("SharedDFF = %d, want %d (== ExpertDFF — arch declares no distinct shared width)", q.SharedDFF, q.ExpertDFF)
+	}
+	if q.SharedDFF != 1408 {
+		t.Fatalf("SharedDFF = %d, want 1408", q.SharedDFF)
 	}
 }
