@@ -6,6 +6,7 @@ package native
 
 import (
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -61,46 +62,125 @@ import (
 // itself, even if the primitive's own counter moved on some OTHER, unrelated call.
 var mtpRowsDriverEngaged atomic.Int64
 
+// mtpRowsDiagAttnWall / mtpRowsDiagMoEWall accumulate ONE verify round's layer-major wall-clock
+// split between the attention half (encRowsAttnLinear/encRowsAttnPaged) and the batched MoE half
+// (mtpRowsMoEBatched, including the per-layer output scalar) — the #53 diagnostic's per-stage
+// breakdown ("mtp-diag rows-moe", mtpRowsDiagEmitRound). stepRowsMoEBatched resets both to zero
+// at the start of every round and sums across all layers in the block; verifyRowsMoEBatchedHiddens
+// reads them the moment the round completes. Package-level and NOT atomic, like
+// mtpDiagDraftCalls/mtpDiagVerifyRowsCalls (mtp.go): a decode session drives one goroutine (mtp.go's
+// own contract), so there is no concurrent-round hazard.
+var (
+	mtpRowsDiagAttnWall time.Duration
+	mtpRowsDiagMoEWall  time.Duration
+)
+
+// mtpRowsDiagRoundsSeen counts verify rounds that reached verifyRowsMoEBatchedHiddens (engaged or
+// declined) — the #53 diagnostic's round number and its "first round" gate: round 1 always logs
+// (mtp-diag rows-moe), every later round only under LTHN_MTP_DIAG (mtpDiagForTest, mtp.go) —
+// matching the cache-plan/load-summary precedent of an always-on trace-class log kept off the
+// serve hot path's per-round rate without a NEW env var.
+var mtpRowsDiagRoundsSeen int
+
+// mtpRowsDiagSnapshot is one verify round's #53 instrument state, populated by
+// verifyRowsMoEBatchedHiddens (both the decline and the engage path) and consumed once by
+// mtpRowsDiagEmitRound — called from the caller one frame up (verifyAssistantDraftRows,
+// assistant_load.go) after it has ALSO measured the head/greedy stage, which this driver has no
+// visibility into (the head runs on the hiddens THIS function returns, after it has returned
+// them).
+type mtpRowsDiagSnapshot struct {
+	Engaged                        bool
+	Reason                         string // decline condition (mtpRowsDriverDeclineReason); "" when Engaged
+	K                              int
+	Hist1, Hist2, Hist3, Hist4Plus int64 // expert-group sizes seen this round, summed over layers
+	MaxGroup                       int64
+	AttnWall, MoEWall              time.Duration
+}
+
+// mtpRowsDiagLast is the most recently completed round's snapshot — single-goroutine, like every
+// other #53/#352 diag var in this package.
+var mtpRowsDiagLast mtpRowsDiagSnapshot
+
 // mtpRowsDriverEligible reports whether the WHOLE verify block — every layer, not just the MoE
 // weights — can take the layer-major batched driver. false always means "the caller keeps the
 // row-major per-row lane" — this function is the ONLY gate; stepRowsMoEBatched trusts it and
 // treats any mid-block inconsistency as an error, not a fallback (see stepRowsMoEBatched's doc).
+// A thin bool wrapper over mtpRowsDriverDeclineReason so existing callers/tests keep the plain
+// contract; the #53 diagnostic (verifyRowsMoEBatchedHiddens, "mtp-diag rows-moe") wants the
+// SPECIFIC reason a real serve session declined, which a bare bool can never carry.
 func mtpRowsDriverEligible(s *archDecodeState, maxRows int) bool {
-	if s == nil || len(s.specs) == 0 || len(s.lb) != len(s.specs) || s.dModel <= 0 || s.dFF <= 0 {
-		return false
+	return mtpRowsDriverDeclineReason(s, maxRows) == ""
+}
+
+// mtpRowsDriverDeclineReason walks the SAME eligibility checks as mtpRowsDriverEligible, in the
+// SAME order, but returns the specific condition that declined instead of a bare false. The #53
+// diagnostic instrument (verifyRowsMoEBatchedHiddens, mtp-diag rows-moe) names this in its
+// per-round trace line so a live serve decline (hypothesis A: the driver never engages on the
+// real 26B geometry) is distinguishable from an engage-but-scatter decline (hypothesis B: the
+// driver runs but the expert grouping degenerates) without re-deriving the walk by hand. ""
+// means eligible (mtpRowsDriverEligible's true). Per-layer reasons carry the layer index (@L<n>)
+// since a real checkpoint's layers are not uniform BY ASSUMPTION, only uniform by construction
+// for gemma4 — the index is the fastest way to confirm that construction actually held.
+func mtpRowsDriverDeclineReason(s *archDecodeState, maxRows int) string {
+	if s == nil {
+		return "nil-state"
+	}
+	if len(s.specs) == 0 {
+		return "no-layer-specs"
+	}
+	if len(s.lb) != len(s.specs) {
+		return "lb-specs-length-mismatch"
+	}
+	if s.dModel <= 0 || s.dFF <= 0 {
+		return "dmodel-or-dff-invalid"
 	}
 	// state-level: no diagnostic/test hook, no PLE tower, no chained live-decode tail, no resident
 	// ICB replay. icb is nil by construction whenever a session loads quant MoE (session build's
 	// icbEligible excludes MoE) — checked here anyway as a hard guarantee, not an assumption.
-	if s.trace || s.gpuProf != nil || s.chainTail != nil || len(s.ple) > 0 || s.icb != nil {
-		return false
+	if s.trace {
+		return "trace-hook-active"
 	}
-	if layerSpanProbeForTest != nil || captureLayerHiddens {
-		return false
+	if s.gpuProf != nil {
+		return "gpu-profile-active"
+	}
+	if s.chainTail != nil {
+		return "chain-tail-active"
+	}
+	if len(s.ple) > 0 {
+		return "ple-tower-present"
+	}
+	if s.icb != nil {
+		return "icb-resident"
+	}
+	if layerSpanProbeForTest != nil {
+		return "layer-span-test-probe-active"
+	}
+	if captureLayerHiddens {
+		return "capture-layer-hiddens-active"
 	}
 	for li := range s.specs {
 		spec := s.specs[li]
 		if spec.Mixer == model.MixerGatedDelta {
-			return false // Qwen3.5 gated-delta recurrence: no KV cache, a different mixer entirely
+			return core.Sprintf("gated-delta-mixer@L%d", li) // Qwen3.5 gated-delta recurrence: no KV cache, a different mixer entirely
 		}
 		if s.gatedAttn != nil && li < len(s.gatedAttn) && s.gatedAttn[li] != nil {
-			return false // Qwen3.5 gated full-attention (attn_output_gate): a different fused lane
+			return core.Sprintf("gated-attention-gate@L%d", li) // Qwen3.5 gated full-attention (attn_output_gate): a different fused lane
 		}
 		if !spec.OwnsCache() {
-			return false // cross-layer KV sharing: not implemented (encAttnHalfShared[Paged]'s shape)
+			return core.Sprintf("shared-kv-cache@L%d", li) // cross-layer KV sharing: not implemented (encAttnHalfShared[Paged]'s shape)
 		}
 		if s.kvTQState.on(li) {
-			return false // TurboQuant KV state lane: not implemented by this driver
+			return core.Sprintf("turboquant-kv-state@L%d", li) // TurboQuant KV state lane: not implemented by this driver
 		}
 		moeQ := moeQuantAt(s.moeQuant, li)
 		if moeQ == nil {
-			return false // uniform-MoE only: a dense or bf16-MoE layer is out of scope
+			return core.Sprintf("non-uniform-moe-layer@L%d", li) // uniform-MoE only: a dense or bf16-MoE layer is out of scope
 		}
 		if !mtpRowsMoEEligible(*moeQ, s.dModel, s.dFF, maxRows) {
-			return false
+			return core.Sprintf("moe-geometry-ineligible@L%d", li)
 		}
 	}
-	return true
+	return ""
 }
 
 // stepRowsMoEBatched is the layer-major verify driver. embs holds K rows' input embeddings
@@ -159,6 +239,13 @@ func (s *archDecodeState) stepRowsMoEBatched(embs []byte, startPos, K int) ([]by
 		offSlots[r] = int32(startPos + r)
 	}
 
+	// #53 diag (mtpRowsDiagEmitRound, assistant_load.go): reset the round-scoped attention/MoE
+	// wall-clock split and expert-group histogram HERE, once per verify round, so a multi-layer
+	// block's per-layer contributions sum cleanly and never leak into the NEXT round's numbers.
+	mtpRowsDiagAttnWall = 0
+	mtpRowsDiagMoEWall = 0
+	mtpRowsMoEGroupHistReset()
+
 	curInHost := embs // layer 0 input: the K embedded rows
 	for li := range s.specs {
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
@@ -174,11 +261,13 @@ func (s *archDecodeState) stepRowsMoEBatched(embs []byte, startPos, K int) ([]by
 			hSlabHost []byte
 			err       error
 		)
+		attnT0 := time.Now()
 		if cache := s.layerPagedKV(li); cache != nil {
 			hSlabHost, err = s.encRowsAttnPaged(cache, curInHost, offPacked, li, K, rowBytes, startPos, lhd, lkv, slideW, rotDim, rbase, layerRopeFreqs)
 		} else {
 			hSlabHost, err = s.encRowsAttnLinear(curInHost, offPacked, li, K, rowBytes, startPos, lhd, lkv, slideW, rotDim, rbase, layerRopeFreqs)
 		}
+		mtpRowsDiagAttnWall += time.Since(attnT0)
 		if err != nil {
 			return nil, err
 		}
@@ -187,6 +276,7 @@ func (s *archDecodeState) stepRowsMoEBatched(embs []byte, startPos, K int) ([]by
 		if moeQ == nil {
 			return nil, core.NewError("native.archDecodeState.stepRowsMoEBatched: layer lost its quant MoE weights mid-block")
 		}
+		moeT0 := time.Now()
 		outHost, ok, err := mtpRowsMoEBatched(hSlabHost, *moeQ, s.dModel, s.dFF, K, s.eps)
 		if err != nil {
 			return nil, err
@@ -201,6 +291,9 @@ func (s *archDecodeState) stepRowsMoEBatched(embs []byte, startPos, K int) ([]by
 				return nil, err
 			}
 		}
+		// Timed through the (optional) layer-scalar application too — it is the MoE output's own
+		// per-layer scale, applied before the residual feeds the next layer's attention.
+		mtpRowsDiagMoEWall += time.Since(moeT0)
 		curInHost = outHost
 	}
 
@@ -322,7 +415,17 @@ func (s *archDecodeState) applyLayerScalarRows(rowsHost []byte, layerScalar meta
 // work) unless mtpRowsDriverEligible already passed.
 func (s *ArchSession) verifyRowsMoEBatchedHiddens(draftTokens []int32, rowBytes int) ([][]byte, bool, error) {
 	K := len(draftTokens)
-	if K < 1 || s.perLayerInput != nil || !mtpRowsDriverEligible(&s.state, K) {
+	reason := ""
+	switch {
+	case K < 1:
+		reason = "k-lt-1"
+	case s.perLayerInput != nil:
+		reason = "per-layer-input-active"
+	default:
+		reason = mtpRowsDriverDeclineReason(&s.state, K)
+	}
+	if reason != "" {
+		mtpRowsDiagLast = mtpRowsDiagSnapshot{K: K, Reason: reason}
 		return nil, false, nil
 	}
 	embs := make([]byte, K*rowBytes)
@@ -352,5 +455,44 @@ func (s *ArchSession) verifyRowsMoEBatchedHiddens(draftTokens []int32, rowBytes 
 	for i := range rows {
 		rows[i] = append([]byte(nil), out[i*rowBytes:(i+1)*rowBytes]...)
 	}
+	mtpRowsDiagLast = mtpRowsDiagSnapshot{
+		Engaged:   true,
+		K:         K,
+		Hist1:     mtpRowsMoEGroupHist1.Load(),
+		Hist2:     mtpRowsMoEGroupHist2.Load(),
+		Hist3:     mtpRowsMoEGroupHist3.Load(),
+		Hist4Plus: mtpRowsMoEGroupHist4Plus.Load(),
+		MaxGroup:  mtpRowsMoEMaxGroupSize.Load(),
+		AttnWall:  mtpRowsDiagAttnWall,
+		MoEWall:   mtpRowsDiagMoEWall,
+	}
 	return rows, true, nil
+}
+
+// mtpRowsDiagEmitRound closes out the #53 per-round instrument ("mtp-diag rows-moe"): combines
+// mtpRowsDiagLast — the attention/MoE wall split, expert-group histogram, and engaged-or-declined
+// reason verifyRowsMoEBatchedHiddens captured THIS round — with headWall, the LM-head/greedy
+// stage's wall time, which only the caller can measure (verifyAssistantDraftRows,
+// assistant_load.go: the head runs one call-frame up, on the hiddens this driver returns, so it
+// is invisible from here — the reason that file is in the #53 file fence at all). Always logs the
+// session's first round (so a serve log always carries at least one #53 receipt even with
+// LTHN_MTP_DIAG unset); every later round only under LTHN_MTP_DIAG (mtpDiagForTest) — the
+// per-round rate is serve noise otherwise, matching the cache-plan/load-summary precedent
+// (cache_plan.go, device.go) of an always-on trace-class log with no NEW env gate.
+func mtpRowsDiagEmitRound(headWall time.Duration) {
+	mtpRowsDiagRoundsSeen++
+	if mtpRowsDiagRoundsSeen != 1 && !mtpDiagForTest {
+		return
+	}
+	d := mtpRowsDiagLast
+	headMs := float64(headWall.Microseconds()) / 1000
+	if !d.Engaged {
+		nativeTraceLog(core.Sprintf("mtp-diag rows-moe round=%d engaged=false reason=%s K=%d wall{head=%.2fms}\n",
+			mtpRowsDiagRoundsSeen, d.Reason, d.K, headMs))
+		return
+	}
+	nativeTraceLog(core.Sprintf(
+		"mtp-diag rows-moe round=%d engaged=true K=%d hist{1=%d 2=%d 3=%d 4+=%d} maxGroup=%d wall{attn=%.2fms moe=%.2fms head=%.2fms}\n",
+		mtpRowsDiagRoundsSeen, d.K, d.Hist1, d.Hist2, d.Hist3, d.Hist4Plus, d.MaxGroup,
+		float64(d.AttnWall.Microseconds())/1000, float64(d.MoEWall.Microseconds())/1000, headMs))
 }
