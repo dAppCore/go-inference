@@ -15,7 +15,7 @@ import (
 	state "dappco.re/go/inference/model/state"
 )
 
-// composed_state_test.go proves composedEngineSession's multi-turn -state (#379): the recurrent
+// mamba2_session_state_test.go proves composedEngineSession's multi-turn -state (#379): the recurrent
 // conv/delta state has no kv.Snapshot Layers representation, so save/restore is a TOKEN-PREFIX
 // snapshot — CaptureKVWithOptions emits Tokens with no Layers, and a session restored from those
 // tokens produces a continuation byte-identical to an unbroken one because the deterministic

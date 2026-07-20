@@ -12,7 +12,7 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// composed_quant_backend.go binds the packed-projection quant matvec seam — attn.ProjQuantMatMulInto
+// quant_seam_backend.go binds the packed-projection quant matvec seam — attn.ProjQuantMatMulInto
 // (the factory host path's projection op: arch_gated_attn.go's projQuantAttn and model/attn's
 // gated-delta projections) — to the metallib's MLX affine BF16 kernels. A quant checkpoint keeps its
 // 2-D projections PACKED on device; this is the op that serves them without widening a 27B weight to
