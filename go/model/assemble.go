@@ -28,11 +28,11 @@ type WeightNames struct {
 	// [heads] logit vector that joins each head's softmax denominator; see LoadedLayer.Sinks). "" (the
 	// StandardWeightNames default, and every non-sink arch) loads nil — byte-identical to before the
 	// field existed. Loaded RAW (never through the NormBiasOne fold: a sink is a logit, not a norm).
-	Sinks string
-	MLPNorm, Gate, Up, Down, PostFFNorm                                                       string // dense MLP (suffixes)
-	PerLayerGate, PerLayerProjection                                                          string // PLE per-layer (suffixes)
-	PostPerLayerInputNorm                                                                     string
-	MoE                                                                                       MoEWeightNames
+	Sinks                               string
+	MLPNorm, Gate, Up, Down, PostFFNorm string // dense MLP (suffixes)
+	PerLayerGate, PerLayerProjection    string // PLE per-layer (suffixes)
+	PostPerLayerInputNorm               string
+	MoE                                 MoEWeightNames
 	// NormBiasOne folds the gemma "(1 + weight)" RMSNorm convention into every norm weight at load
 	// (see norm_bias.go), so the plain RMSNorm kernel reproduces gemma's (1+w)·rms(x). gemma/gemma2/
 	// gemma3/gemma4 set it; mistral and non-gemma arches leave it false.
@@ -223,6 +223,17 @@ func assembleMoE(t map[string]safetensors.Tensor, p string, arch Arch, names MoE
 	d := arch.Hidden
 	expGate := lin(p+names.ExpGate, d)
 	expUp := lin(p+names.ExpUp, d)
+	// sharedFF is the shared expert's OWN intermediate size (#57): arch.SharedExpertFF when the arch
+	// declares one (qwenmoe's shared_expert_intermediate_size, distinct from the routed experts' width),
+	// else arch.ExpertFF — the pre-#57 assumption, kept as the fallback so every arch that doesn't
+	// declare a distinct shared width (every arch but qwenmoe's shared-expert family, today) derives the
+	// SAME SharedDown InDim as before this field existed. Only SharedDown needs it: SharedGate/SharedUp
+	// project FROM hidden (InDim == d regardless of the expert FF width), only Down projects FROM the FF
+	// width back to hidden.
+	sharedFF := arch.SharedExpertFF
+	if sharedFF == 0 {
+		sharedFF = arch.ExpertFF
+	}
 	return &LoadedMoE{
 		PreFFNorm:      norm(p + names.PreFFNorm),
 		PreFFNorm2:     norm(p + names.PreFFNorm2),
@@ -241,7 +252,7 @@ func assembleMoE(t map[string]safetensors.Tensor, p string, arch Arch, names MoE
 		ExpDown:        lin(p+names.ExpDown, arch.ExpertFF),
 		SharedGate:     lin(p+names.SharedGate, d),
 		SharedUp:       lin(p+names.SharedUp, d),
-		SharedDown:     lin(p+names.SharedDown, arch.ExpertFF),
+		SharedDown:     lin(p+names.SharedDown, sharedFF),
 		SharedSigmoid:  lin(p+names.SharedSigmoid, d),
 	}
 }
