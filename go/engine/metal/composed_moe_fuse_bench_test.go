@@ -11,7 +11,7 @@ import (
 
 // composed_moe_fuse_bench_test.go measures the composed MoE gate+up fusion (#17) ON THE GPU at real
 // 35B-A3B expert dims (D 2048, FF 512, 4-bit): the fused path is ONE quant matvec over [2·FF, D] where the
-// split path is two over [FF, D] (gate then up). Unlike the host micro-bench (model/composed, which comes
+// split path is two over [FF, D] (gate then up). Unlike the retired composed engine's host micro-bench (which came
 // out neutral — the host per-row dequant has no per-launch overhead), the device pays a submit/wait per
 // matvec (~0.77ms/token gap, #23), so removing one submit per routed expert is the composed lane's slice of
 // the metal lane's measured ~34% MoE win — visible only here. Byte-identity of the two is pinned by

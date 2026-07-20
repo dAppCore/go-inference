@@ -3,6 +3,7 @@
 package qwen35
 
 import (
+	"strings"
 	"testing"
 
 	"dappco.re/go/inference/model"
@@ -16,12 +17,9 @@ var qwenHybridReleasedIDs = []string{
 	"qwen3_6", "qwen3_6_moe", "qwen3_next",
 }
 
-// TestArchSpecRegistration_Good is the #50 archzoo bar for qwen3_6/qwen3_6_moe/qwen3_next: every released
-// name of the hybrid resolves through the registry to a DUAL-route spec — Parse + Weights (the factory
-// route, model.Assemble + arch_session) AND a Composed hook (model/composed — the A/B reference / escape
-// hatch, unchanged) both present. Parse != nil is precisely the condition model.Load checks before
-// rejecting a composed-only arch (load.go: "spec.Composed != nil && spec.Parse == nil"), so this is also
-// the direct proof none of these three ids requires model/composed to load any more.
+// TestArchSpecRegistration_Good is the #50 bar for the hybrid family: every released name resolves
+// through the registry to the factory spec — Parse + Weights (model.Assemble + arch_session), the
+// ONLY route since the composed engine's retirement.
 func TestArchSpecRegistration_Good(t *testing.T) {
 	want := WeightNames()
 	for _, mt := range qwenHybridReleasedIDs {
@@ -30,13 +28,10 @@ func TestArchSpecRegistration_Good(t *testing.T) {
 			t.Fatalf("model_type %q not registered", mt)
 		}
 		if spec.Parse == nil {
-			t.Fatalf("model_type %q: Parse is nil — model.Load would still reject this as composed-only", mt)
+			t.Fatalf("model_type %q: Parse is nil — model.Load cannot reach the factory route", mt)
 		}
 		if spec.Weights != want {
 			t.Fatalf("model_type %q: Weights = %+v, want the shared qwen35 WeightNames()", mt, spec.Weights)
-		}
-		if spec.Composed == nil {
-			t.Fatalf("model_type %q: Composed hook is nil — the composed escape hatch/A-B reference is gone", mt)
 		}
 	}
 }
@@ -67,5 +62,22 @@ func TestArchSpecRegistration_Ugly(t *testing.T) {
 			t.Fatalf("qwenHybridReleasedIDs lists %q twice", mt)
 		}
 		seen[mt] = true
+	}
+}
+
+// TestMTPDrafterRefusal_Bad proves the MTP drafter ids stay REGISTERED (a user pointing lem at the
+// MTP submodule gets direction, not "unknown model architecture") while refusing a standalone load
+// with the pairing named — the refusal that moved here from the retired composed engine (#50).
+func TestMTPDrafterRefusal_Bad(t *testing.T) {
+	for _, mt := range []string{"qwen3_5_mtp", "qwen3_5_mtp_text", "qwen3_6_mtp"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok {
+			t.Fatalf("model_type %q not registered — the drafter must be recognised to be redirected", mt)
+		}
+		if _, err := spec.Parse([]byte(`{"model_type":"` + mt + `"}`)); err == nil {
+			t.Fatalf("model_type %q: standalone Parse succeeded, want the paired-serve refusal", mt)
+		} else if got := err.Error(); !strings.Contains(got, "MTP drafter") || !strings.Contains(got, "lem pair") {
+			t.Fatalf("model_type %q refusal = %q, want it to name the MTP drafter and direct to lem pair", mt, got)
+		}
 	}
 }

@@ -5,8 +5,6 @@ package mpt
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
-	"math"
 	"testing"
 )
 
@@ -65,23 +63,6 @@ func TestConfig_InferFromWeights_Ugly(t *testing.T) {
 	c.InferFromWeights(nil)
 	if _, err := c.Arch(); err == nil {
 		t.Fatal("unknown model_type became valid after InferFromWeights")
-	}
-}
-
-// TestTinyMPTForward_Good uses varied deterministic fills through the shared ALiBi op.
-func TestTinyMPTForward_Good(t *testing.T) {
-	w := make([]float32, 16)
-	for i := range w {
-		w[i] = float32((i*7)%11-5) / 17
-	}
-	m := composed.NewAttnMixer(&composed.AttnWeights{QProj: w, KProj: w, VProj: w, OProj: w}, composed.AttnConfig{Heads: 2, KVHeads: 2, HeadDim: 2, ALiBi: true})
-	x := []float32{.2, -.1, .4, .3, -.3, .5, .1, -.2}
-	got, _, err := m.Forward(x, 2, 4, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if math.Float32bits(got[4]) != math.Float32bits(0.0039271647) {
-		t.Fatalf("golden=%g", got[4])
 	}
 }
 

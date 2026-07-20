@@ -15,7 +15,6 @@ import (
 	"dappco.re/go/inference/kv"
 	sharedmodel "dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/mamba2"
-	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
 
@@ -58,10 +57,10 @@ func hipComposedTestBlockWeights(cfg mamba2.BlockConfig, d, seed int) *mamba2.Bl
 // hipComposedTestTokenModel builds a small, deterministic sharedmodel.SessionModel fixture for
 // exercising hipComposedTextModel/hipComposedEngineSession — the generic token-prefix bridge these
 // tests target. It is backed by model/arch/mamba2 (the SAME package mamba2_runtime.go's
-// loadHIPMamba2TextModel uses in production), not model/composed: #50 retired composed_runtime.go's use
-// of model/composed, and this fixture follows suit rather than keeping a needless test-only import
-// alive. mamba2.MambaTokenModel's HiddenSize/NumLayers methods are documented (token_model.go) as
-// mirroring model/composed.ComposedTokenModel's, so it is a faithful drop-in for what these tests need.
+// loadHIPMamba2TextModel uses in production), not the composed engine: #50 retired composed_runtime.go's use
+// of the composed engine, and this fixture follows suit rather than keeping a needless test-only import
+// alive. mamba2.MambaTokenModel's HiddenSize/NumLayers methods carry the layer/hidden
+// geometry shape the serve bridge probes, so it is a faithful drop-in for what these tests need.
 func hipComposedTestTokenModel(layers int) *mamba2.MambaTokenModel {
 	const d, vocab = 8, 32
 	cfg := hipComposedTestBlockConfig()
@@ -140,7 +139,7 @@ func TestHIPComposedTextModel_DeclaresQwenChatML_Good(t *testing.T) {
 
 // TestHIPComposedTextModel_DeclaresGemmaChatForNonQwenArchitecture_Bad proves DeclaredChatTemplate's
 // replacement lookup (hipArchitectureChatTemplate, via HIP's own architecture-profile registry — #50
-// dropped the model/composed.ChatMLDialect call this used to make) falls back to the Gemma template for
+// dropped the composed engine's ChatMLDialect call this used to make) falls back to the Gemma template for
 // an architecture that is not qwen-family, exactly as the retired composed.ChatMLDialect check did.
 func TestHIPComposedTextModel_DeclaresGemmaChatForNonQwenArchitecture_Bad(t *testing.T) {
 	source := &hipComposedTextModel{model: hipComposedTestTokenModel(1), modelType: "mamba2", numLayers: 1}
@@ -149,22 +148,12 @@ func TestHIPComposedTextModel_DeclaresGemmaChatForNonQwenArchitecture_Bad(t *tes
 	core.AssertTrue(t, template.Open != "<|im_start|>")
 }
 
-func hipComposedTestRegisterComposedArch(modelType string) {
-	sharedmodel.RegisterArch(sharedmodel.ArchSpec{
-		ModelTypes: []string{modelType},
-		Composed: func(map[string]safetensors.Tensor, []byte) (sharedmodel.TokenModel, error) {
-			return nil, core.NewError("hip test double: composed hook must never run — #50 retired HIP's model/composed route")
-		},
-	})
-}
-
 // TestLoadHIPComposedTextModel_DeclinesRegisteredComposedArchitecture_Good proves a checkpoint whose
-// config.json declares a model_type registered with an ArchSpec.Composed hook gets a clean, named
-// decline — #50 retired HIP's model/composed detour, so nothing in this package calls into
-// LoadComposedDir (or the arch's own Composed closure) any more.
+// config.json declares a retired-composed family model_type (rocmRetiredComposedArchDecline) gets a
+// clean, named decline — #50 retired HIP's composed-engine detour, so nothing in this package can
+// serve these architectures any more.
 func TestLoadHIPComposedTextModel_DeclinesRegisteredComposedArchitecture_Good(t *testing.T) {
-	const modelType = "hip_composed_retired_direct_test"
-	hipComposedTestRegisterComposedArch(modelType)
+	const modelType = "qwen3_6"
 	dir := t.TempDir()
 	core.RequireNoError(t, coreio.Local.Write(core.PathJoin(dir, "config.json"), `{"model_type":"`+modelType+`"}`))
 
@@ -189,12 +178,11 @@ func TestLoadHIPComposedTextModel_UnreadableConfigDefersToNextLoader_Bad(t *test
 }
 
 // TestLoadHIPComposedTextModel_DeclinesNestedTextConfigComposedArchitecture_Ugly proves the
-// multimodal-wrapper fallback LoadComposedDir used to apply (top-level model_type unregistered, nested
-// text_config.model_type carries the Composed hook) still declines correctly, naming the NESTED
-// architecture rather than silently passing the wrapper through to HIP's native pipeline.
+// multimodal-wrapper fallback (top-level model_type unknown, nested text_config.model_type carries a
+// retired-composed family) still declines correctly, naming the NESTED architecture rather than
+// silently passing the wrapper through to HIP's native pipeline.
 func TestLoadHIPComposedTextModel_DeclinesNestedTextConfigComposedArchitecture_Ugly(t *testing.T) {
-	const textModelType = "hip_composed_retired_text_wrapper_test"
-	hipComposedTestRegisterComposedArch(textModelType)
+	const textModelType = "qwen3_5_moe"
 	dir := t.TempDir()
 	core.RequireNoError(t, coreio.Local.Write(core.PathJoin(dir, "config.json"),
 		`{"model_type":"hip_composed_retired_wrapper_test","text_config":{"model_type":"`+textModelType+`"}}`))
@@ -223,10 +211,9 @@ func (runtime *hipComposedRouteRuntime) LoadModel(string, nativeLoadConfig) (nat
 // TestROCmBackend_DeclinesRegisteredComposedArchitectureBeforeNativeRuntime_Good proves the full
 // loadModelWithROCmConfigMode pipeline still short-circuits BEFORE ever reaching the native ROCm
 // runtime for a composed-registered architecture — only now the short circuit is a clean decline
-// (#50) rather than a successful load through model/composed.
+// (#50) rather than a successful load through the retired composed engine.
 func TestROCmBackend_DeclinesRegisteredComposedArchitectureBeforeNativeRuntime_Good(t *testing.T) {
-	const modelType = "hip_composed_retired_backend_test"
-	hipComposedTestRegisterComposedArch(modelType)
+	const modelType = "mixtral"
 	dir := t.TempDir()
 	core.RequireNoError(t, coreio.Local.Write(core.PathJoin(dir, "config.json"), `{"model_type":"`+modelType+`","max_position_embeddings":8192}`))
 
@@ -252,7 +239,7 @@ func TestROCmBackend_DeclinesRegisteredComposedArchitectureBeforeNativeRuntime_G
 // profile/architecture.go's ArchitectureProfileNotes/LookupArchitectureProfile report
 // NativeRuntime=true plus "portable composed incremental runner is linked" for qwen3_6/qwen3_6_moe/
 // composed/hybrid — all true only because loadHIPComposedTextModel used to actually serve those
-// checkpoints via model/composed. It no longer does (see loadHIPComposedTextModel's doc comment in
+// checkpoints via the retired composed engine. It no longer does (see loadHIPComposedTextModel's doc comment in
 // composed_runtime.go); these two files were not in scope here and need their own follow-up so HIP's
 // capability reporting stops claiming a runner that composed_runtime.go's retirement removed.
 func TestReactiveSequenceMixerReport_ComposedRunnerLinked_Good(t *testing.T) {

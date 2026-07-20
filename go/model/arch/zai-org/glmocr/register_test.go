@@ -7,7 +7,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/safetensors"
 )
 
 // testConfigJSON mirrors the field names/values confirmed live from
@@ -19,8 +18,8 @@ const testConfigJSON = `{"model_type":"glm_ocr","text_config":{"model_type":"glm
 // contract: model.LookupArch succeeds for both the wrapper id and its nested text_config alias
 // (a user pointing lem at a GLM-OCR checkpoint gets direction, not "unknown model
 // architecture"), Parse succeeds far enough to report what the arch is, and both the Arch and
-// Composed refusal seams name the arch and say why the forward is missing — mirroring
-// composed.TestComposedMTPRefusal's discipline for a non-hybrid vision-language arch.
+// Arch refusal seam names the arch and says why the forward is missing — the
+// recognised-with-its-own-verb discipline for a non-hybrid vision-language arch.
 func TestGlmocrRegistered_Good(t *testing.T) {
 	for _, mt := range []string{"glm_ocr", "glm_ocr_text"} {
 		spec, ok := model.LookupArch(mt)
@@ -29,9 +28,6 @@ func TestGlmocrRegistered_Good(t *testing.T) {
 		}
 		if spec.Parse == nil {
 			t.Fatalf("%q registered without a Parse hook", mt)
-		}
-		if spec.Composed == nil {
-			t.Fatalf("%q registered without a Composed hook", mt)
 		}
 	}
 
@@ -55,16 +51,5 @@ func TestGlmocrRegistered_Good(t *testing.T) {
 		t.Fatal("Arch: expected a clean forward refusal, got a resolved architecture")
 	} else if !core.Contains(err.Error(), "glm_ocr") || !core.Contains(err.Error(), "not yet implemented") {
 		t.Fatalf("Arch refusal %q must name glm_ocr and say the forward is not yet implemented", err.Error())
-	}
-
-	tm, err := spec.Composed(map[string]safetensors.Tensor{}, []byte(testConfigJSON))
-	if err == nil {
-		t.Fatal("Composed: expected a clean forward refusal, got a model")
-	}
-	if tm != nil {
-		t.Fatal("Composed: refusal must return a nil model")
-	}
-	if !core.Contains(err.Error(), "glm_ocr") || !core.Contains(err.Error(), "not yet implemented") {
-		t.Fatalf("Composed refusal %q must name glm_ocr and say the forward is not yet implemented", err.Error())
 	}
 }

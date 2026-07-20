@@ -41,7 +41,7 @@ func TestWeightMap_Good(t *testing.T) {
 func TestLlama4Registered_Good(t *testing.T) {
 	for _, modelType := range []string{"llama4", "llama4_text"} {
 		spec, ok := model.LookupArch(modelType)
-		if !ok || spec.Parse == nil || spec.Composed == nil {
+		if !ok || spec.Parse == nil {
 			t.Fatalf("Llama 4 registration %q = found %v spec %+v", modelType, ok, spec)
 		}
 	}

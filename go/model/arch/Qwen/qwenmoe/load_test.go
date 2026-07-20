@@ -4,6 +4,7 @@ package qwenmoe_test
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	core "dappco.re/go"
@@ -48,7 +49,7 @@ const tinyQwen3MoEConfig = `{"model_type":"qwen3_moe","hidden_size":8,"intermedi
 	`"num_experts_per_tok":2,"vocab_size":32,"norm_topk_prob":true,"tie_word_embeddings":false}`
 
 // TestTinyQwen2MoEFactoryLoad_Good is the #50 bar for this arch: model.Load (the factory route —
-// model.Assemble + arch_session, no model/composed involved) now succeeds for Qwen2-MoE, where it used to
+// model.Assemble + arch_session) now succeeds for Qwen2-MoE, where it used to
 // fail (Weights was the zero-value model.WeightNames{}, so Assemble rejected the checkpoint as missing
 // model.embed_tokens rather than routing it correctly). It also proves the "same tensor maps" parity
 // method for the routed experts (packed bytes == the checkpoint's own per-expert tensors, concatenated in
@@ -60,7 +61,7 @@ func TestTinyQwen2MoEFactoryLoad_Good(t *testing.T) {
 
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
-		t.Fatalf("model.Load: %v (Qwen2-MoE must no longer require model/composed to load)", err)
+		t.Fatalf("model.Load: %v (Qwen2-MoE must load through the factory route alone)", err)
 	}
 	defer func() { _ = mapping.Close() }()
 
@@ -142,7 +143,7 @@ func TestTinyQwen3MoEFactoryLoad_Good(t *testing.T) {
 
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
-		t.Fatalf("model.Load: %v (Qwen3-MoE must no longer require model/composed to load)", err)
+		t.Fatalf("model.Load: %v (Qwen3-MoE must load through the factory route alone)", err)
 	}
 	defer func() { _ = mapping.Close() }()
 
@@ -161,32 +162,53 @@ func TestTinyQwen3MoEFactoryLoad_Good(t *testing.T) {
 	}
 }
 
-// TestQwenmoeFactoryAndComposed_AgreeOnRegistration proves both qwen2_moe and qwen3_moe carry the dual
-// route: the SAME model_type resolves to a spec carrying BOTH Parse+Weights (the factory route this
-// file's Good tests exercise) AND a working Composed hook (the existing TestQwen2MoEForward_Good/
-// TestQwen3MoEForward_Good route in integration_test.go) — composed is demoted to an available
-// alternative, not removed, exactly mirroring the qwen35/mixtral/granitemoe dual-route pattern (#18/#50).
-func TestQwenmoeFactoryAndComposed_AgreeOnRegistration(t *testing.T) {
-	for _, modelType := range []string{"qwen2_moe", "qwen3_moe"} {
-		spec, ok := model.LookupArch(modelType)
-		if !ok {
-			t.Fatalf("%s not registered", modelType)
-		}
-		if spec.Parse == nil || spec.Weights.MoE.ExpGate == "" {
-			t.Fatalf("%s spec missing the factory route (Parse + Weights)", modelType)
-		}
-		if spec.Composed == nil {
-			t.Fatalf("%s spec missing the Composed route — composed must stay available, not be removed", modelType)
-		}
-	}
+// --- synthetic checkpoint fixtures (moved from the deleted composed-route integration_test.go, #50) ---
 
-	tensors, _ := tinyQwen2MoEWeights()
-	dir := writeTinyQwenMoEDir(t, tensors, tinyQwen2MoEConfig)
-	if _, _, err := model.Load(dir); err != nil {
-		t.Fatalf("factory route: %v", err)
+func tinyQwen2MoEWeights() (map[string]safetensors.Tensor, []float32) {
+	const hidden, vocab, expertFF, sharedFF, heads, kvHeads, headDim, experts = 8, 32, 6, 10, 2, 1, 4, 4
+	s := seededWeights{state: 0x2a3e1234}
+	router := s.values(experts * hidden)
+	tensors := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight":                         f32Tensor(s.values(vocab*hidden), vocab, hidden),
+		"model.norm.weight":                                 f32Tensor(s.values(hidden), hidden),
+		"lm_head.weight":                                    f32Tensor(s.values(vocab*hidden), vocab, hidden),
+		"model.layers.0.input_layernorm.weight":             f32Tensor(s.values(hidden), hidden),
+		"model.layers.0.post_attention_layernorm.weight":    f32Tensor(s.values(hidden), hidden),
+		"model.layers.0.self_attn.q_proj.weight":            f32Tensor(s.values(heads*headDim*hidden), heads*headDim, hidden),
+		"model.layers.0.self_attn.k_proj.weight":            f32Tensor(s.values(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.v_proj.weight":            f32Tensor(s.values(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.o_proj.weight":            f32Tensor(s.values(hidden*heads*headDim), hidden, heads*headDim),
+		"model.layers.0.mlp.gate.weight":                    f32Tensor(router, experts, hidden),
+		"model.layers.0.mlp.shared_expert.gate_proj.weight": f32Tensor(s.values(sharedFF*hidden), sharedFF, hidden),
+		"model.layers.0.mlp.shared_expert.up_proj.weight":   f32Tensor(s.values(sharedFF*hidden), sharedFF, hidden),
+		"model.layers.0.mlp.shared_expert.down_proj.weight": f32Tensor(s.values(hidden*sharedFF), hidden, sharedFF),
+		"model.layers.0.mlp.shared_expert_gate.weight":      f32Tensor(s.values(hidden), 1, hidden),
 	}
-	tm, ok, err := model.LoadComposedDir(dir)
-	if err != nil || !ok || tm == nil {
-		t.Fatalf("composed route: ok=%v err=%v tm=%v — the escape hatch must still work", ok, err, tm)
+	for expert := range experts {
+		prefix := core.Sprintf("model.layers.0.mlp.experts.%d.", expert)
+		tensors[prefix+"gate_proj.weight"] = f32Tensor(s.values(expertFF*hidden), expertFF, hidden)
+		tensors[prefix+"up_proj.weight"] = f32Tensor(s.values(expertFF*hidden), expertFF, hidden)
+		tensors[prefix+"down_proj.weight"] = f32Tensor(s.values(hidden*expertFF), hidden, expertFF)
 	}
+	return tensors, router
+}
+
+type seededWeights struct{ state uint32 }
+
+func f32Tensor(values []float32, shape ...int) safetensors.Tensor {
+	data := make([]byte, len(values)*4)
+	for i, value := range values {
+		bits := math.Float32bits(value)
+		data[4*i], data[4*i+1], data[4*i+2], data[4*i+3] = byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24)
+	}
+	return safetensors.Tensor{Dtype: "F32", Shape: shape, Data: data}
+}
+
+func (s *seededWeights) values(n int) []float32 {
+	out := make([]float32, n)
+	for i := range out {
+		s.state = 1664525*s.state + 1013904223
+		out[i] = float32(int32(s.state>>24)-128) / 512
+	}
+	return out
 }

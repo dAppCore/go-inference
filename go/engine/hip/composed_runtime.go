@@ -14,43 +14,42 @@ import (
 	sharedmodel "dappco.re/go/inference/model"
 )
 
-// loadHIPComposedTextModel used to detour any config-composed architecture (an ArchSpec registered
-// with a Composed hook — the Qwen 3.6 gated-delta hybrid family, plus the arch-zoo's other hybrid/MoE
-// registrations) through model/composed's LoadComposedDir, ahead of HIP's own GGUF/safetensors native
-// loader. #50 retires model/composed; HIP was one of its last two consumers in go-inference (the
-// other: cmd/mtp-probe) — this function no longer imports, or calls into, model/composed.
-//
-// It still probes config.json — through the shared, composed-free model.ProbeDirArch/ProbeModelTypes/
-// LookupArch (the root "dappco.re/go/inference/model" package, not model/composed) — to recognise a
-// checkpoint that WOULD have matched a Composed hook, so a retired checkpoint gets a clean, NAMED
-// decline instead of silently falling into HIP's regular native pipeline. That matters: HIP's own
-// architecture-profile metadata (engine/hip/profile) lists several composed-only archs as "supported"
-// for INSPECTION/labelling purposes (qwen3_6, qwen3_6_moe, qwen3_next, deepseek, deepseek_r1, mixtral,
-// composed, hybrid, …), but that table is proven insufficient as a stand-in for "HIP has a working
-// forward kernel" — qwen3_6 sits in that very table and STILL needed the composed detour, because HIP's
-// native runtime has no gated-delta linear-attention kernel (see dense_config.go's staged, unwired
-// IsQwen36Hybrid/Qwen36NativeGuardMessage — written for a native guard that was never wired in because
-// the composed fallback made it unnecessary). Letting a composed-registered checkpoint fall through
-// unchecked risks the native pipeline silently misreading a hybrid/MoE/MLA tensor layout as a plain
-// dense transformer — a coherent-but-wrong decode, not a clean failure. So every architecture that
-// carries a Composed hook declines HERE, named, rather than falling through unexamined. The full set
-// affected today (queried live off the registry, not hardcoded): qwen3_5/qwen3_5_moe(+text aliases)/
-// qwen3_6/qwen3_6_moe/qwen3_next (dual-route, model/arch/Qwen/qwen35), mixtral/dbrx/olmoe/granitemoe/
-// qwen2_moe/qwen3_moe (dual-route, each with its own factory port elsewhere — HIP has none), jetmoe/
-// deepseek_v2/deepseek_v3/deepseek_vl_v2/glm_ocr(+text)/dots_ocr(+1_5)/llama4(+text) (composed-only,
-// several already refuse unconditionally inside their own Composed hook), the generic "composed"/
-// "hybrid" ids, and the qwen3_5_mtp/qwen3_6_mtp/qwen3_5_mtp_text drafter ids.
-//
-// Route (a) — routing through HIP's native runtime via the shared factory route (model.Load) — is not
-// available for any of these architectures: HIP's nativeRuntime interface only ever consumes
-// nativeLoadConfig (HIP's own GGUF/safetensors-tensor-shaped struct); nothing converts a
-// *model.LoadedModel (model.Load's reactive Assemble output) into one. The only caller of model.Load in
-// this package loads Gemma4's vision/audio TOWER as a sub-component (gemma4_vision_encoder.go,
-// gemma4_unified_vision.go, gemma4_audio_tower.go) — there is no glue for a full text decode. Building
-// that glue — plus a HIP-side hybrid/MoE/MLA forward to actually execute what Assemble describes —
-// mirrors engine/metal's arch_qwen_fused.go, itself a substantial GPU-kernel investment; it is a new
-// engine seam, not a same-file sever. Route (b) — a clean typed decline — applies uniformly to every
-// architecture this loader used to reach.
+// rocmRetiredComposedArchDecline reports whether a model_type is one the retired composed engine's
+// fallback used to catch for HIP — an architecture with NO native ROCm execution path (#50). HIP's
+// native runtime only ever consumes nativeLoadConfig (its own GGUF/safetensors-tensor-shaped
+// struct); nothing converts a *model.LoadedModel (the shared factory route's reactive Assemble
+// output) into one, and HIP has no gated-delta / MoE / MLA forward kernels. Letting one of these
+// checkpoints fall through unchecked risks the native pipeline silently misreading a hybrid/MoE/MLA
+// tensor layout as a plain dense transformer — a coherent-but-wrong decode, not a clean failure. So
+// they decline HERE, named. The set is HIP's own capability statement (engine/hip/profile's table is
+// proven insufficient as a stand-in — it lists several of these as "supported" for INSPECTION only):
+// the qwen gated-delta hybrid family + its MTP drafter ids, the MoE arch zoo (each with a factory
+// port on metal — HIP has none), the MLA/OCR refusal families, and the retired generic ids. Building
+// a native HIP route for any of these (the staged, unwired IsQwen36Hybrid guard in dense_config.go
+// was written for exactly that) removes it from this set.
+func rocmRetiredComposedArchDecline(modelType string) bool {
+	switch modelType {
+	case "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
+		"qwen3_6", "qwen3_6_moe", "qwen3_next",
+		"qwen3_5_mtp", "qwen3_5_mtp_text", "qwen3_6_mtp",
+		"mixtral", "dbrx", "olmoe", "granitemoe", "qwen2_moe", "qwen3_moe", "jetmoe",
+		"llama4", "llama4_text",
+		"deepseek_v2", "deepseek_v3", "deepseek_vl_v2",
+		"glm_ocr", "glm_ocr_text", "dots_ocr", "dots_ocr_1_5",
+		"composed", "hybrid":
+		return true
+	}
+	return false
+}
+
+// loadHIPComposedTextModel used to detour any config-composed architecture through the retired
+// composed engine's LoadComposedDir, ahead of HIP's own GGUF/safetensors native loader. #50 retired
+// that engine; this function no longer imports, or calls into, it. It still probes config.json —
+// through the shared model.ProbeDirArch/ProbeModelTypes — so a checkpoint that WOULD have matched
+// gets a clean, NAMED decline (rocmRetiredComposedArchDecline above) instead of silently falling
+// into HIP's regular native pipeline. The multimodal-wrapper fallback (top-level model_type unknown,
+// nested text_config.model_type carries the family) resolves exactly as the retired registry
+// resolution did.
 func loadHIPComposedTextModel(path string, _ inference.LoadConfig) (inference.TextModel, bool, error) {
 	stat := core.Stat(path)
 	if !stat.OK {
@@ -67,26 +66,22 @@ func loadHIPComposedTextModel(path string, _ inference.LoadConfig) (inference.Te
 		// the same failure to whichever loader in native.go's pipeline runs next.
 		return nil, false, nil
 	}
-	spec, matched := sharedmodel.LookupArch(modelType)
 	declared := modelType
-	if !matched {
-		// Multimodal wrapper fallback, mirroring LoadComposedDir's own resolution: the top-level
-		// model_type is unregistered, but a nested text_config.model_type carries the Composed hook.
-		if _, textModelType := sharedmodel.ProbeModelTypes(configJSON); textModelType != "" {
-			if textSpec, textMatched := sharedmodel.LookupArch(textModelType); textMatched {
-				spec, matched, declared = textSpec, true, textModelType
-			}
+	if !rocmRetiredComposedArchDecline(declared) {
+		// Multimodal wrapper fallback: the top-level model_type is not a declined family, but a
+		// nested text_config.model_type may carry one.
+		if _, textModelType := sharedmodel.ProbeModelTypes(configJSON); textModelType != "" && rocmRetiredComposedArchDecline(textModelType) {
+			declared = textModelType
+		} else {
+			return nil, false, nil
 		}
 	}
-	if !matched || spec.Composed == nil {
-		return nil, false, nil
-	}
-	return nil, true, core.NewError("rocm.LoadModel: " + declared + " is a config-composed/hybrid architecture with no native ROCm execution path — the model/composed fallback that used to serve it is retired (#50)")
+	return nil, true, core.NewError("rocm.LoadModel: " + declared + " is a config-composed/hybrid architecture with no native ROCm execution path — the composed-engine fallback that used to serve it is retired (#50)")
 }
 
 // hipComposedTextModel bridges a backend-neutral, token-prefix sharedmodel.SessionModel into HIP's
 // shared engine serving surface (OpenEngineSession → hipComposedEngineSession). Despite the name, it is
-// no longer composed-specific: loadHIPComposedTextModel (above) retired its use of model/composed
+// no longer composed-specific: loadHIPComposedTextModel (above) retired its use of the composed engine
 // (#50), so the only remaining constructor is mamba2_runtime.go's loadHIPMamba2TextModel, wrapping a
 // model/arch/mamba2 recurrent SessionModel. The type keeps its historical name because
 // mamba2_runtime.go (outside this sever's scope) already references it by that name — a rename is a
@@ -125,8 +120,7 @@ func (*hipComposedTextModel) Close() error { return nil }
 // DeclaredChatTemplate reports the ChatML template for a qwen-family architecture and the Gemma
 // template otherwise, resolved through HIP's own architecture-profile registry
 // (hipArchitectureChatTemplate/ROCmChatTemplateID, inference_model.go + profile/architecture.go) rather
-// than model/composed's ChatMLDialect helper — the last direct reference this file held to model/
-// composed, removed as part of #50's sever.
+// than the retired composed engine's ChatMLDialect helper (#50).
 func (model *hipComposedTextModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	if model == nil {
 		return engine.ChatTemplate{}, false

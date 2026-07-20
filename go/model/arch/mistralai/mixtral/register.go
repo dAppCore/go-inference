@@ -5,7 +5,6 @@ package mixtral
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -58,13 +57,6 @@ func init() {
 				return packed
 			}
 			return tensors // malformed/absent experts — Assemble's nil-safe load surfaces the gap downstream
-		},
-		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
-			cm, err := composed.LoadComposed(NormalizeWeights(tensors), configJSON)
-			if err != nil {
-				return nil, core.E("mixtral.Load", "assemble composed model", err)
-			}
-			return composed.NewTokenModel(cm), nil
 		},
 	})
 }

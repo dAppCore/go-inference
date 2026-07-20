@@ -14,7 +14,7 @@ import (
 // (RWKV/RWKV7-Goose-World2.8-0.1B-HF). It is DELIBERATELY SEPARATE from block.go's BlockWeights/
 // BlockForward*: those model a simplified stand-in (six full-rank projections straight from x, no
 // token-shift, no LoRA decay/gate, no kk/k-update, no GroupNorm, no r_k bonus) kept for the composed-hybrid
-// Mixer adapter (model/composed/rwkv7.go) and engine/metal's device-GEMM seam — extending it in place would
+// Mixer adapter (retired with the composed engine, #50) and engine/metal's device-GEMM seam — extending it in place would
 // have broken its golden-bit-pattern tests AND those two consumers. This file reuses the one piece of
 // existing code that IS the real architecture already: recurrence.go's WKV7F32 (its r/w/k/v/a/b kernel-
 // level convention matches fla's chunk_rwkv7/fused_recurrent_rwkv7 exactly, verified line-by-line against

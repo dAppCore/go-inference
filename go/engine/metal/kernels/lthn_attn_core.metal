@@ -3,7 +3,7 @@
 // lthn_attn_core.metal — the composed lane's attention core on device (#26 / #18 S6a): the four
 // kernels that replace continueFromQKV's host loops between the fold CBs, so an attention layer
 // runs as ONE command buffer over a device-resident KV cache. Ported line-for-line from
-// go/model/composed/attention.go (qprep/kprep mirror the de-interleave + per-head norm +
+// the retired composed engine's attention.go (#50; qprep/kprep mirror the de-interleave + per-head norm +
 // applyRotaryHalf block; sdpa mirrors the causal max-subtract softmax loop, window clamp
 // included; gate mirrors the σ-gate multiply). All f32 — the composed lane's activation tier.
 //

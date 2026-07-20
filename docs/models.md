@@ -66,14 +66,16 @@ auto-arms a detected drafter). Two rules, both measured:
 | EmbeddingGemma 300M | `google/embeddinggemma-300m` | RAG / vector search (2K ctx, 128–768 dims) |
 | ShieldGemma 2 4B | `google/shieldgemma-2-4b-it` | content moderation, run beside the primary |
 
-## Qwen 3.5 / 3.6 hybrids — the composed lane
+## Qwen 3.5 / 3.6 hybrids — the factory route
 
 Gated-delta linear attention interleaved with full attention (`full_attention_interval 4`),
-262144-token context, served through `go/model/composed` with the device gated-delta block
-(`docs/design-hybrid-recurrence.md`). Native MTP head supported (the trained checkpoint head, not
-a bolt-on drafter). Both artefact forms serve: the mlx-community 4-bit conversions (the serving
-form) and the official `Qwen/` bf16 exports (the source/eval form — the loader applies their
-zero-centred RMSNorm convention, `TestLoadComposedQwenNormShift`).
+262144-token context, served through the factory route (`model.Assemble` + arch_session with the
+fused whole-token chain decode, `engine/metal/arch_qwen_fused.go`; the parallel composed engine
+retired in #50) with the device gated-delta block (`docs/design-hybrid-recurrence.md`). Both
+artefact forms serve: the mlx-community 4-bit conversions (the serving form) and the official
+`Qwen/` bf16 exports (the source/eval form). Post-#50 declines, by name: sub-2-bit packs (no
+factory qmv width, #24), the 35B's vision tower on image turns (factory serves the text stack;
+vision port pending), and the MTP `-draft` pairing (factory pair route pending).
 
 Numbers: M3 Ultra, `lem bench` tg-512 greedy, 2026-07-16.
 

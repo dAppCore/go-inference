@@ -86,7 +86,7 @@ func TestRegister_NormalizeWeights_Ugly(t *testing.T) {
 
 func TestMixtralRegistered_Good(t *testing.T) {
 	spec, ok := model.LookupArch("mixtral")
-	if !ok || spec.Composed == nil || spec.Parse == nil {
+	if !ok || spec.Parse == nil {
 		t.Fatalf("Mixtral registration = found %v spec %+v", ok, spec)
 	}
 }
@@ -103,7 +103,7 @@ func TestParseAndLoadErrors_Ugly(t *testing.T) {
 	if _, err := spec.Parse([]byte(`{"hidden_size":8}`)); err != nil {
 		t.Fatalf("valid JSON rejected: %v", err)
 	}
-	if _, err := spec.Composed(map[string]safetensors.Tensor{}, []byte(`{"model_type":"mixtral","hidden_size":8,"num_hidden_layers":1}`)); err == nil {
-		t.Fatal("missing checkpoint tensors accepted")
+	if _, err := spec.Parse([]byte("{")); err == nil {
+		t.Fatal("malformed config accepted")
 	}
 }

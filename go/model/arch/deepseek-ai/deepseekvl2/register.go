@@ -3,9 +3,7 @@
 package deepseekvl2
 
 import (
-	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/safetensors"
 )
 
 // init registers deepseek_vl_v2 — the DeepSeek-VL2 architecture DeepSeek-OCR / OCR-2 reuse
@@ -24,13 +22,6 @@ func init() {
 		ModelTypes: []string{"deepseek_vl_v2"},
 		Parse: func(data []byte) (model.ArchConfig, error) {
 			return ParseConfig(data)
-		},
-		Composed: func(_ map[string]safetensors.Tensor, cfgJSON []byte) (model.TokenModel, error) {
-			mt, _ := model.ProbeModelTypes(cfgJSON)
-			if mt == "" {
-				mt = "deepseek_vl_v2"
-			}
-			return nil, core.NewError(mt + " (DeepSeek-OCR) is a dual-tower vision encoder + MoE decoder OCR architecture, not a decoder-only causal-LM — use `lem ocr --model <dir> <image>` instead")
 		},
 	})
 }

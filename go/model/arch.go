@@ -121,7 +121,7 @@ func (a Arch) HasMoE() bool {
 // as Arch.AttnScale / EmbedScale). Today the metal router ships softmax top-k; sigmoid
 // gating, top-k weight renormalisation (norm_topk_prob), routed-scaling, and always-on
 // shared experts — the deepseek / qwen3 / composed variants — each earn a value plus a
-// router branch as they land (model/composed/moe.go already implements softmax +
+// router branch as they land (the retired composed engine's moe.go already implemented softmax +
 // norm-topk + shared expert on the reference path).
 type MoEGating string
 

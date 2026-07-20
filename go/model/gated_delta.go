@@ -8,7 +8,7 @@ package model
 // mixer is a GENERIC flash-linear-attention block (the causal conv is mamba2's, the recurrence is
 // deltanet's — both shared primitives), so an arch only SELECTS it, it does not own it. qwen3 keeps a
 // thin alias while its callers migrate; the alias + the mis-homed override are deleted once the arch
-// factory builds and decodes the kind directly (retiring model/composed — the parallel-engine fork).
+// factory builds and decodes the kind directly (retiring the composed engine — the parallel-engine fork, #50).
 
 // GatedDeltaConfig is one gated-delta layer's geometry. The delta state is square, so KeyHeadDim ==
 // ValueHeadDim == HeadDim; q/k use KeyHeads (GQA-repeated up to ValueHeads), v uses ValueHeads.

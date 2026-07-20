@@ -39,7 +39,7 @@ func writeTinyGraniteMoEDir(t *testing.T) string {
 }
 
 // TestTinyGraniteMoEFactoryLoad_Good is the #50 bar for this arch: model.Load (the factory route —
-// model.Assemble + arch_session, no model/composed involved) now succeeds for GraniteMoE, where it used
+// model.Assemble + arch_session) now succeeds for GraniteMoE, where it used
 // to fail (Weights was the zero-value model.WeightNames{}, so Assemble rejected the checkpoint as missing
 // model.embed_tokens rather than routing it correctly). It also proves the "same tensor maps" parity
 // method: the loaded MoE weights are byte-identical to the checkpoint's own input_linear/output_linear/
@@ -50,7 +50,7 @@ func TestTinyGraniteMoEFactoryLoad_Good(t *testing.T) {
 
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
-		t.Fatalf("model.Load: %v (GraniteMoE must no longer require model/composed to load)", err)
+		t.Fatalf("model.Load: %v (GraniteMoE must load through the factory route alone)", err)
 	}
 	defer func() { _ = mapping.Close() }()
 
@@ -100,29 +100,40 @@ func TestTinyGraniteMoEFactoryLoad_Good(t *testing.T) {
 	}
 }
 
-// TestTinyGraniteMoEFactoryAndComposed_AgreeOnRegistration proves GraniteMoE's dual route: the SAME
-// model_type resolves to a spec carrying BOTH Parse+Weights (the factory route this file's Good test
-// exercises) AND a working Composed hook (the existing TestTinyGraniteMoEForward_Good route in
-// integration_test.go) — composed is demoted to an available alternative, not removed, exactly mirroring
-// the qwen35/mixtral dual-route pattern (#18/#50).
-func TestTinyGraniteMoEFactoryAndComposed_AgreeOnRegistration(t *testing.T) {
-	spec, ok := model.LookupArch("granitemoe")
-	if !ok {
-		t.Fatal("granitemoe not registered")
-	}
-	if spec.Parse == nil || spec.Weights.MoE.ExpGateUp == "" {
-		t.Fatal("granitemoe spec missing the factory route (Parse + Weights)")
-	}
-	if spec.Composed == nil {
-		t.Fatal("granitemoe spec missing the Composed route — composed must stay available, not be removed")
-	}
+// --- synthetic checkpoint fixtures (moved from the deleted composed-route integration_test.go, #50) ---
 
-	dir := writeTinyGraniteMoEDir(t)
-	if _, _, err := model.Load(dir); err != nil {
-		t.Fatalf("factory route: %v", err)
+func tinyWeights() map[string]safetensors.Tensor {
+	const hidden, vocab, ff, heads, kvHeads, headDim, experts = 8, 32, 4, 2, 1, 4, 4
+	seed := seededValues{state: 0x6772616e}
+	norm := func() safetensors.Tensor {
+		values := seed.next(hidden)
+		for i := range values {
+			values[i] += 1
+		}
+		return tensor(values, hidden)
 	}
-	tm, ok, err := model.LoadComposedDir(dir)
-	if err != nil || !ok || tm == nil {
-		t.Fatalf("composed route: ok=%v err=%v tm=%v — the escape hatch must still work", ok, err, tm)
+	return map[string]safetensors.Tensor{
+		"model.embed_tokens.weight":                            tensor(seed.next(vocab*hidden), vocab, hidden),
+		"model.norm.weight":                                    norm(),
+		"model.layers.0.input_layernorm.weight":                norm(),
+		"model.layers.0.post_attention_layernorm.weight":       norm(),
+		"model.layers.0.self_attn.q_proj.weight":               tensor(seed.next(heads*headDim*hidden), heads*headDim, hidden),
+		"model.layers.0.self_attn.k_proj.weight":               tensor(seed.next(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.v_proj.weight":               tensor(seed.next(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.o_proj.weight":               tensor(seed.next(hidden*heads*headDim), hidden, heads*headDim),
+		"model.layers.0.block_sparse_moe.input_linear.weight":  tensor(seed.next(experts*2*ff*hidden), experts, 2*ff, hidden),
+		"model.layers.0.block_sparse_moe.output_linear.weight": tensor(seed.next(experts*hidden*ff), experts, hidden, ff),
+		"model.layers.0.block_sparse_moe.router.layer.weight":  tensor(seed.next(experts*hidden), experts, hidden),
 	}
+}
+
+type seededValues struct{ state uint32 }
+
+func (s *seededValues) next(n int) []float32 {
+	out := make([]float32, n)
+	for i := range out {
+		s.state = 1664525*s.state + 1013904223
+		out[i] = float32(int32(s.state>>24)-128) / 256
+	}
+	return out
 }

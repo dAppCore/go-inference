@@ -5,7 +5,7 @@ package qwen35
 import "dappco.re/go/inference/model"
 
 // WeightNames returns the Qwen 3.6 hybrid tensor layout for model.Assemble — StandardWeightNames with the
-// qwen overrides. It is the (norm-mapping + MoE-name) half of retiring model/composed: the reactive
+// qwen overrides. It is the (norm-mapping + MoE-name) half of retiring the composed engine (#50): the reactive
 // assembler reacts to this data instead of composed's hand-rolled tensor reads.
 //
 // The load-bearing override is the NORM MAPPING. qwen is the llama/mistral 2-norm shape, not gemma's

@@ -16,7 +16,7 @@ import (
 // convs) → net_2/net_3 (two stride-2 convs), the tower's own spatial "optical compression" from a
 // 64×64 patch grid down to 16×16. All tensors are kept row-major [H*W,C] channel-last (a flat
 // token sequence) throughout, converting to/from PyTorch's NCHW only inside conv2D's own indexing
-// — the same convention model/composed/vision.go's Qwen-VL tower uses, so a conv here is just
+// — the same convention the retired composed engine's Qwen-VL tower used, so a conv here is just
 // "a token's neighbourhood" rather than a distinct tensor layout to track.
 
 // conv2D runs one Conv2d(inC,outC,kernel,stride,padding) over input[H,W,inC] (channel-last),

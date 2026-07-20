@@ -11,13 +11,12 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
-	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
 // arch_qwen_fused.go — the DEVICE decode for the factory session's Qwen hybrid layers (#18 fusion).
 // The host halves (encGatedDeltaHalf / encGatedAttnHalf) pay ~15 submit+wait round trips per layer per
-// token; these lanes run the WHOLE layer through the composed lane's proven single-command-buffer
+// token; these lanes run the WHOLE layer through the chain's proven single-command-buffer
 // seams instead — gatedDeltaQuantLayerRun (norm → 4 packed projections → conv/gates/recurrence with
 // device-resident state → out_proj → SiLU FFN tail) and AttnQuantFullLayerDevice (norm → packed q/k/v
 // → rope/QK-norm prep → resident-KV SDPA → σ output gate → o_proj → SiLU FFN tail). One x upload and
@@ -25,7 +24,7 @@ import (
 // cannot serve (and for the captureLayerHiddens diff probe, which needs the split halves). Attention
 // layers without the output gate and every gemma path are untouched.
 
-// archQuantToModel views a native QuantWeight as the model-typed form the composed seams take. The
+// archQuantToModel views a native QuantWeight as the model-typed form the chain seams take. The
 // packed/scales/biases bytes are shared, not copied; dims are the projection's logical [out,in].
 // nil for an absent or bf16 (unquantised) weight — the fused lanes are packed-only.
 func archQuantToModel(w QuantWeight, outDim, inDim int) *model.QuantWeight {
@@ -38,11 +37,11 @@ func archQuantToModel(w QuantWeight, outDim, inDim int) *model.QuantWeight {
 	}
 }
 
-// qwenChainMoE builds the minimal composed.MoEMLP view the chain's MoE tail resolves its weights
+// qwenChainMoE builds the minimal chainMoE view the chain's MoE tail resolves its weights
 // from, out of the factory's native MoE holder — batched switch_mlp experts, softmax top-k router
 // (dequantised to f32 once), the shared expert trio and its σ gate. Dims are DERIVED from the packed
 // byte strides (the don't-guess rule). nil when the layer is not a chain-servable qwen MoE.
-func qwenChainMoE(moe *MoEQuantLayerWeights, D int) *composed.MoEMLP {
+func qwenChainMoE(moe *MoEQuantLayerWeights, D int) *chainMoE {
 	if moe == nil || len(moe.SharedGate.Packed) == 0 || moe.NumExperts <= 0 || moe.TopK <= 0 || moe.ExpertDFF <= 0 {
 		return nil
 	}
@@ -92,13 +91,12 @@ func qwenChainMoE(moe *MoEQuantLayerWeights, D int) *composed.MoEMLP {
 			return nil
 		}
 	}
-	return &composed.MoEMLP{
-		Router: router, Experts: make([]composed.MoEExpert, moe.NumExperts), TopK: moe.TopK,
+	return &chainMoE{
+		Router: router, NumExperts: moe.NumExperts, TopK: moe.TopK,
 		NormTopKProb: true, Gating: model.MoEGatingSoftmax,
 		GateBatchedQ: gate, UpBatchedQ: up, DownBatchedQ: down,
-		Shared:     &composed.MoEExpert{GateQ: sGate, UpQ: sUp, DownQ: sDown},
+		Shared:     &chainMoEShared{GateQ: sGate, UpQ: sUp, DownQ: sDown},
 		SharedGate: sharedGate,
-		MoEBits:    moe.ExpGate.Bits, MoEGroupSize: moe.ExpGate.GroupSize,
 	}
 }
 
@@ -322,7 +320,7 @@ func (s *archDecodeState) encGatedDeltaFusedLayer(li int, in, out metal.MTLBuffe
 }
 
 // qwenChainReady latches whether EVERY layer of this session can ride the whole-token chain — the
-// all-or-nothing gate for the composed chain walk (one command buffer for the entire layer stack,
+// all-or-nothing gate for the whole-token chain walk (one command buffer for the entire layer stack,
 // state resident, ComposedChainBegin/End). Pre-flighted per layer BEFORE the first walk so a failed
 // usability check can never leave the recurrent state part-advanced mid-token.
 func (s *archDecodeState) qwenChainReady() bool {
@@ -368,7 +366,7 @@ func (s *archDecodeState) qwenChainReady() bool {
 }
 
 // qwenChainWalk drives every layer's chain call against a live or recording chain context — the
-// one walk both the record pass and the live encode share (mirroring composed.chainWalk).
+// one walk both the record pass and the live encode share.
 func (s *archDecodeState) qwenChainWalk(ctx any, pos int) error {
 	for li := range s.specs {
 		if gd := s.layerGatedDelta(li); gd != nil {
@@ -414,9 +412,8 @@ func (s *archDecodeState) qwenChainWalk(ctx any, pos int) error {
 	return nil
 }
 
-// stepTokenQwenChain decodes ONE token through the composed chain machinery: replay the recorded
-// command stream when one is valid (one executeCommandsInBuffer, no re-encode — mirroring
-// composed.forwardChain), else record once and run the live walk (one command buffer for the whole
+// stepTokenQwenChain decodes ONE token through the whole-token chain machinery: replay the recorded
+// command stream when one is valid (one executeCommandsInBuffer, no re-encode), else record once and run the live walk (one command buffer for the whole
 // layer stack, resident state). Writes the final hidden (bf16) into `out` and returns it. The
 // caller skips the per-layer loop entirely.
 func (s *archDecodeState) stepTokenQwenChain(inputBuf, out metal.MTLBuffer, pos int) (metal.MTLBuffer, error) {

@@ -13,9 +13,6 @@ func TestLlamaRegistered_Good(t *testing.T) {
 	if !ok {
 		t.Fatal("model_type llama is not registered")
 	}
-	if spec.Composed != nil {
-		t.Fatal("dense llama must use the reactive transformer assembler")
-	}
 	if spec.Weights.Embed != "model.embed_tokens" || spec.Weights.LMHead != "lm_head" || spec.Weights.FinalNorm != "model.norm.weight" {
 		t.Fatalf("model weight names = %+v", spec.Weights)
 	}

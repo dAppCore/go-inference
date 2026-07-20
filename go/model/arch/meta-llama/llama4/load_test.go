@@ -42,7 +42,7 @@ func writeTinyLlama4Dir(t *testing.T, tensors map[string]safetensors.Tensor, con
 }
 
 // TestTinyLlama4FactoryLoad_Good is the #50 bar for this arch: model.Load (the factory route —
-// model.Assemble, no model/composed involved) now succeeds for Llama 4, where previously spec.Weights
+// model.Assemble) now succeeds for Llama 4, where previously spec.Weights
 // was the WeightNames zero value (every lookup missed) and model.Assemble rejected the checkpoint
 // outright. It also proves the first half of the #18 parity method — "same tensor maps": the packed
 // MoE expert weights model.Assemble loads are byte-identical to NormalizeWeights' own
@@ -54,7 +54,7 @@ func TestTinyLlama4FactoryLoad_Good(t *testing.T) {
 
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
-		t.Fatalf("model.Load: %v (Llama 4 must no longer require model/composed to load)", err)
+		t.Fatalf("model.Load: %v (Llama 4 must load through the factory route alone)", err)
 	}
 	defer func() { _ = mapping.Close() }()
 
@@ -128,32 +128,45 @@ func TestTinyLlama4FactoryLoad_Good(t *testing.T) {
 	}
 }
 
-// TestLlama4FactoryAndComposed_AgreeOnRegistration proves Llama 4's dual route: both "llama4" and
-// "llama4_text" resolve to a spec carrying BOTH Parse+Weights (the factory route
-// TestTinyLlama4FactoryLoad_Good exercises) AND a working Composed hook (the existing
-// TestTinyLlama4TextForwardAndGenerate_Good route in integration_test.go) — composed is demoted to an
-// available alternative, not removed, exactly mirroring the dbrx/qwenmoe/mixtral/granitemoe
-// dual-route pattern (#18/#50).
-func TestLlama4FactoryAndComposed_AgreeOnRegistration(t *testing.T) {
-	for _, modelType := range []string{"llama4", "llama4_text"} {
-		spec, ok := model.LookupArch(modelType)
-		if !ok {
-			t.Fatalf("%s not registered", modelType)
-		}
-		if spec.Parse == nil || spec.Weights.MoE.ExpGate == "" {
-			t.Fatalf("%s spec missing the factory route (Parse + Weights)", modelType)
-		}
-		if spec.Composed == nil {
-			t.Fatalf("%s spec missing the Composed route — composed must stay available, not be removed", modelType)
-		}
-	}
+// --- synthetic checkpoint fixtures (moved from the deleted composed-route integration_test.go, #50) ---
 
-	dir := writeTinyLlama4Dir(t, tinyWeights(), tinyLlama4Config)
-	if _, _, err := model.Load(dir); err != nil {
-		t.Fatalf("factory route: %v", err)
+func tinyWeights() map[string]safetensors.Tensor {
+	const d, vocab, expertFF, denseFF, heads, kvHeads, headDim, experts = 8, 32, 4, 12, 2, 1, 4, 2
+	norm := func() safetensors.Tensor { return tensor(d, d) }
+	w := map[string]safetensors.Tensor{
+		"language_model.model.embed_tokens.weight": tensor(vocab*d, vocab, d),
+		"language_model.model.norm.weight":         norm(), "language_model.lm_head.weight": tensor(vocab*d, vocab, d),
 	}
-	tm, ok, err := model.LoadComposedDir(dir)
-	if err != nil || !ok || tm == nil {
-		t.Fatalf("composed route: ok=%v err=%v tm=%v — the escape hatch must still work", ok, err, tm)
+	for layer := range 2 {
+		p := core.Sprintf("language_model.model.layers.%d.", layer)
+		w[p+"input_layernorm.weight"], w[p+"post_attention_layernorm.weight"] = norm(), norm()
+		w[p+"self_attn.q_proj.weight"] = tensor(heads*headDim*d, heads*headDim, d)
+		w[p+"self_attn.k_proj.weight"] = tensor(kvHeads*headDim*d, kvHeads*headDim, d)
+		w[p+"self_attn.v_proj.weight"] = tensor(kvHeads*headDim*d, kvHeads*headDim, d)
+		w[p+"self_attn.o_proj.weight"] = tensor(d*heads*headDim, d, heads*headDim)
+		if layer == 0 {
+			w[p+"feed_forward.gate_proj.weight"] = tensor(denseFF*d, denseFF, d)
+			w[p+"feed_forward.up_proj.weight"] = tensor(denseFF*d, denseFF, d)
+			w[p+"feed_forward.down_proj.weight"] = tensor(d*denseFF, d, denseFF)
+		} else {
+			w[p+"feed_forward.router.weight"] = tensor(experts*d, experts, d)
+			w[p+"feed_forward.experts.gate_up_proj"] = tensor(experts*d*2*expertFF, experts, d, 2*expertFF)
+			w[p+"feed_forward.experts.down_proj"] = tensor(experts*expertFF*d, experts, expertFF, d)
+			w[p+"feed_forward.shared_expert.gate_proj.weight"] = tensor(expertFF*d, expertFF, d)
+			w[p+"feed_forward.shared_expert.up_proj.weight"] = tensor(expertFF*d, expertFF, d)
+			w[p+"feed_forward.shared_expert.down_proj.weight"] = tensor(d*expertFF, d, expertFF)
+		}
 	}
+	return w
+}
+
+func tensor(n int, shape ...int) safetensors.Tensor {
+	data := make([]byte, n*2)
+	state := uint32(n + 17)
+	for i := range n {
+		state = 1664525*state + 1013904223
+		value := uint16(0x3c00 + (state>>29)&3)
+		data[2*i], data[2*i+1] = byte(value), byte(value>>8)
+	}
+	return safetensors.Tensor{Dtype: "BF16", Shape: shape, Data: data}
 }

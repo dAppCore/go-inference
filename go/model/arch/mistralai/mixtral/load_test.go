@@ -38,7 +38,7 @@ func writeTinyMixtralDir(t *testing.T) string {
 }
 
 // TestTinyMixtralFactoryLoad_Good is the #50 bar for this arch: model.Load (the factory route —
-// model.Assemble + arch_session, no model/composed involved) now succeeds for Mixtral, where it used to
+// model.Assemble + arch_session) now succeeds for Mixtral, where it used to
 // reject it as composed-only (see model.Load's "is a composed/hybrid arch" check). It also proves the
 // first half of the #18 parity method — "same tensor maps": the packed MoE expert weights model.Assemble
 // loads are byte-identical to the checkpoint's own per-expert tensors, concatenated in expert-index order,
@@ -48,7 +48,7 @@ func TestTinyMixtralFactoryLoad_Good(t *testing.T) {
 
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
-		t.Fatalf("model.Load: %v (Mixtral must no longer require model/composed to load)", err)
+		t.Fatalf("model.Load: %v (Mixtral must load through the factory route alone)", err)
 	}
 	defer func() { _ = mapping.Close() }()
 
@@ -96,29 +96,54 @@ func TestTinyMixtralFactoryLoad_Good(t *testing.T) {
 	}
 }
 
-// TestTinyMixtralFactoryAndComposed_AgreeOnRegistration proves Mixtral's dual route: the SAME model_type
-// resolves to a spec carrying BOTH Parse+Weights (the factory route this file's Good test exercises) AND a
-// working Composed hook (the existing TestTinyMixtralForwardAndGenerate_Good route in integration_test.go)
-// — composed is demoted to an available alternative, not removed, exactly mirroring the qwen35 dual-route
-// pattern (#18).
-func TestTinyMixtralFactoryAndComposed_AgreeOnRegistration(t *testing.T) {
-	spec, ok := model.LookupArch("mixtral")
-	if !ok {
-		t.Fatal("mixtral not registered")
-	}
-	if spec.Parse == nil || spec.Weights.MoE.ExpGate == "" {
-		t.Fatal("mixtral spec missing the factory route (Parse + Weights)")
-	}
-	if spec.Composed == nil {
-		t.Fatal("mixtral spec missing the Composed route — composed must stay available, not be removed")
-	}
+// --- synthetic checkpoint fixtures (moved from the deleted composed-route integration_test.go, #50) ---
 
-	dir := writeTinyMixtralDir(t)
-	if _, _, err := model.Load(dir); err != nil {
-		t.Fatalf("factory route: %v", err)
+type seededWeights struct{ state uint32 }
+
+func (s *seededWeights) values(n int) []uint16 {
+	out := make([]uint16, n)
+	for i := range out {
+		s.state = 1664525*s.state + 1013904223
+		out[i] = 0x3c00 + uint16((s.state>>28)&7)
 	}
-	tm, ok, err := model.LoadComposedDir(dir)
-	if err != nil || !ok || tm == nil {
-		t.Fatalf("composed route: ok=%v err=%v tm=%v — the escape hatch must still work", ok, err, tm)
+	return out
+}
+
+func tinyMixtralWeights() map[string]safetensors.Tensor {
+	const hidden, vocab, expertFF, heads, kvHeads, headDim, experts = 8, 32, 12, 2, 1, 4, 2
+	s := seededWeights{state: 0x5eed1234}
+	norm := func() safetensors.Tensor {
+		values := make([]uint16, hidden)
+		for i := range values {
+			values[i] = 0x3f80
+		}
+		return bf16Tensor(values, hidden)
 	}
+	tensors := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight":                      bf16Tensor(s.values(vocab*hidden), vocab, hidden),
+		"model.norm.weight":                              norm(),
+		"lm_head.weight":                                 bf16Tensor(s.values(vocab*hidden), vocab, hidden),
+		"model.layers.0.input_layernorm.weight":          norm(),
+		"model.layers.0.post_attention_layernorm.weight": norm(),
+		"model.layers.0.self_attn.q_proj.weight":         bf16Tensor(s.values(heads*headDim*hidden), heads*headDim, hidden),
+		"model.layers.0.self_attn.k_proj.weight":         bf16Tensor(s.values(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.v_proj.weight":         bf16Tensor(s.values(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.o_proj.weight":         bf16Tensor(s.values(hidden*heads*headDim), hidden, heads*headDim),
+		"model.layers.0.block_sparse_moe.gate.weight":    bf16Tensor(s.values(experts*hidden), experts, hidden),
+	}
+	for expert := range experts {
+		prefix := core.Sprintf("model.layers.0.block_sparse_moe.experts.%d", expert)
+		tensors[prefix+".w1.weight"] = bf16Tensor(s.values(expertFF*hidden), expertFF, hidden)
+		tensors[prefix+".w2.weight"] = bf16Tensor(s.values(hidden*expertFF), hidden, expertFF)
+		tensors[prefix+".w3.weight"] = bf16Tensor(s.values(expertFF*hidden), expertFF, hidden)
+	}
+	return tensors
+}
+
+func bf16Tensor(values []uint16, shape ...int) safetensors.Tensor {
+	data := make([]byte, len(values)*2)
+	for i, value := range values {
+		data[2*i], data[2*i+1] = byte(value), byte(value>>8)
+	}
+	return safetensors.Tensor{Dtype: "BF16", Shape: shape, Data: data}
 }

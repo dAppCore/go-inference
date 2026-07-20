@@ -4,6 +4,7 @@ package olmoe_test
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	core "dappco.re/go"
@@ -40,7 +41,7 @@ func writeTinyOLMoEDir(t *testing.T) string {
 }
 
 // TestTinyOLMoEFactoryLoad_Good is the #50 bar for this arch: model.Load (the factory route —
-// model.Assemble, no model/composed involved) now succeeds for OLMoE, where previously spec.Weights was the
+// model.Assemble) now succeeds for OLMoE, where previously spec.Weights was the
 // WeightNames zero value (every lookup missed) and model.Assemble rejected the checkpoint outright. It also
 // proves the first half of the #18 parity method — "same tensor maps": the packed MoE expert weights
 // model.Assemble loads are byte-identical to the checkpoint's own per-expert tensors, concatenated in
@@ -50,7 +51,7 @@ func TestTinyOLMoEFactoryLoad_Good(t *testing.T) {
 
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
-		t.Fatalf("model.Load: %v (OLMoE must no longer require model/composed to load)", err)
+		t.Fatalf("model.Load: %v (OLMoE must load through the factory route alone)", err)
 	}
 	defer func() { _ = mapping.Close() }()
 
@@ -103,29 +104,52 @@ func TestTinyOLMoEFactoryLoad_Good(t *testing.T) {
 	}
 }
 
-// TestTinyOLMoEFactoryAndComposed_AgreeOnRegistration proves OLMoE's dual route: the SAME model_type
-// resolves to a spec carrying BOTH Parse+Weights (the factory route this file's Good test exercises) AND a
-// working Composed hook (the existing TestTinyOLMoEForward_Good route in integration_test.go) — composed is
-// demoted to an available alternative, not removed, mirroring the mixtral/qwen35 dual-route pattern
-// (#18/#50).
-func TestTinyOLMoEFactoryAndComposed_AgreeOnRegistration(t *testing.T) {
-	spec, ok := model.LookupArch("olmoe")
-	if !ok {
-		t.Fatal("olmoe not registered")
-	}
-	if spec.Parse == nil || spec.Weights.MoE.ExpGate == "" {
-		t.Fatal("olmoe spec missing the factory route (Parse + Weights)")
-	}
-	if spec.Composed == nil {
-		t.Fatal("olmoe spec missing the Composed route — composed must stay available, not be removed")
-	}
+// --- synthetic checkpoint fixtures (moved from the deleted composed-route integration_test.go, #50) ---
 
-	dir := writeTinyOLMoEDir(t)
-	if _, _, err := model.Load(dir); err != nil {
-		t.Fatalf("factory route: %v", err)
+type seededWeights struct{ state uint32 }
+
+func (s *seededWeights) values(n int) []float32 {
+	out := make([]float32, n)
+	for i := range out {
+		s.state = 1664525*s.state + 1013904223
+		out[i] = float32(int32(s.state>>24)-128) / 512
 	}
-	tm, ok, err := model.LoadComposedDir(dir)
-	if err != nil || !ok || tm == nil {
-		t.Fatalf("composed route: ok=%v err=%v tm=%v — the escape hatch must still work", ok, err, tm)
+	return out
+}
+
+func f32Tensor(values []float32, shape ...int) safetensors.Tensor {
+	data := make([]byte, len(values)*4)
+	for i, value := range values {
+		bits := math.Float32bits(value)
+		data[4*i], data[4*i+1], data[4*i+2], data[4*i+3] = byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24)
 	}
+	return safetensors.Tensor{Dtype: "F32", Shape: shape, Data: data}
+}
+
+func tinyOLMoEWeights() map[string]safetensors.Tensor {
+	const hidden, vocab, expertFF, heads, kvHeads, headDim, experts = 8, 32, 12, 2, 1, 4, 4
+	s := seededWeights{state: 0x01e0e123}
+	embed := s.values(vocab * hidden)
+	router := s.values(experts * hidden)
+	tensors := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight":                      f32Tensor(embed, vocab, hidden),
+		"model.norm.weight":                              f32Tensor(s.values(hidden), hidden),
+		"lm_head.weight":                                 f32Tensor(s.values(vocab*hidden), vocab, hidden),
+		"model.layers.0.input_layernorm.weight":          f32Tensor(s.values(hidden), hidden),
+		"model.layers.0.post_attention_layernorm.weight": f32Tensor(s.values(hidden), hidden),
+		"model.layers.0.self_attn.q_proj.weight":         f32Tensor(s.values(heads*headDim*hidden), heads*headDim, hidden),
+		"model.layers.0.self_attn.k_proj.weight":         f32Tensor(s.values(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.v_proj.weight":         f32Tensor(s.values(kvHeads*headDim*hidden), kvHeads*headDim, hidden),
+		"model.layers.0.self_attn.o_proj.weight":         f32Tensor(s.values(hidden*heads*headDim), hidden, heads*headDim),
+		"model.layers.0.self_attn.q_norm.weight":         f32Tensor(s.values(headDim), headDim),
+		"model.layers.0.self_attn.k_norm.weight":         f32Tensor(s.values(headDim), headDim),
+		"model.layers.0.mlp.gate.weight":                 f32Tensor(router, experts, hidden),
+	}
+	for expert := range experts {
+		prefix := core.Sprintf("model.layers.0.mlp.experts.%d", expert)
+		tensors[prefix+".gate_proj.weight"] = f32Tensor(s.values(expertFF*hidden), expertFF, hidden)
+		tensors[prefix+".down_proj.weight"] = f32Tensor(s.values(hidden*expertFF), hidden, expertFF)
+		tensors[prefix+".up_proj.weight"] = f32Tensor(s.values(expertFF*hidden), expertFF, hidden)
+	}
+	return tensors
 }

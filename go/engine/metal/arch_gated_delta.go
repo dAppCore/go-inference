@@ -11,12 +11,11 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
-	"dappco.re/go/inference/model/composed"
 	"github.com/tmc/apple/metal"
 )
 
 // arch_gated_delta.go decodes a MixerGatedDelta layer in the arch (factory) session — the unified
-// engine's gated-delta mixer, replacing the composed lane's per-seam decode (#18). Correctness-first:
+// engine's gated-delta mixer, replacing the retired composed engine's per-seam decode (#18/#50). Correctness-first:
 // the recurrence runs on the HOST through model/attn (the proven GatedDeltaForwardScratchF32), the state
 // (conv ring + delta) threads on the layer struct, and the pre-norm residual is applied exactly as
 // encAttnHalfKV does for attention (h = in + maybe_postNorm(mixer(RMSNorm(in)))). The attention layers
@@ -38,7 +37,7 @@ type gatedDeltaLayer struct {
 	inNorm, ffNorm       []float32
 	ffGate, ffUp, ffDown *model.QuantWeight
 	dff                  int
-	moe                  *composed.MoEMLP
+	moe                  *chainMoE
 	fusedDense, fusedMoE bool
 	devChecked, devOK    bool
 	y                    []float32

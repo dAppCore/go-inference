@@ -5,48 +5,31 @@
 package native
 
 import (
-	"os"
-
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/arch/rwkv7"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
 
-// isQwen35FactoryType reports whether a model_type is a Qwen 3.6 hybrid id carrying the DUAL route (a
-// Composed hook AND Parse+Weights, registered by model/arch/Qwen/qwen35) — the set that DEFAULTS to
-// the factory route (model.Assemble + arch_session, #18); LTHN_QWEN_COMPOSED=1 reverts it to the
-// composed loader. Kept in sync with qwen35's ArchSpec.ModelTypes — all seven released names (qwen3_5/
-// qwen3_5_moe + their text_config aliases, qwen3_6/qwen3_6_moe, and qwen3_next, Qwen 3.6's predecessor)
-// share ONE dual-route declaration (#50 archzoo), so they move together here too. Any other composed arch
-// (mixtral, granitemoe, qwenmoe, …) is untouched by this lever — each of those now carries its OWN
-// factory route (model.Load succeeds directly), but reaching it means calling model.Load, not
-// LoadTokenModelDir: this qwen-specific switch does not generalise to "prefer the factory for any
-// dual-route arch".
-func isQwen35FactoryType(mt string) bool {
-	switch mt {
-	case "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6", "qwen3_6_moe", "qwen3_next":
-		return true
-	}
-	return false
-}
-
-// qwenFactoryQuantServable reports whether a qwen3_5 checkpoint's declared quantisation is a width
-// the factory's device paths serve. The affine qmv kernels have no sub-2-bit instantiation, so a
-// 1-bit pack (Bonsai) keeps the composed route. An absent/unparseable quantization block (bf16) is
-// servable.
-func qwenFactoryQuantServable(cfg []byte) bool {
+// subTwoBitQuantDecline returns a typed refusal when the checkpoint's declared quantisation is a
+// width no factory device path serves: the affine qmv kernels have no sub-2-bit instantiation
+// (#24's open half), so a 1-bit pack (Bonsai) cannot decode. The retired composed engine used to
+// serve these host-side (#50); refusing with the gap named beats a missing-kernel error deep in the
+// head build. An absent/unparseable quantization block (bf16) is servable — nil.
+func subTwoBitQuantDecline(cfg []byte) error {
 	var q struct {
 		Quantization struct {
 			Bits int `json:"bits"`
 		} `json:"quantization"`
 	}
 	if r := core.JSONUnmarshal(cfg, &q); !r.OK {
-		return true
+		return nil
 	}
-	return q.Quantization.Bits == 0 || q.Quantization.Bits >= 2
+	if q.Quantization.Bits > 0 && q.Quantization.Bits < 2 {
+		return core.NewError("native.LoadTokenModelDir: this checkpoint declares a sub-2-bit quant pack — the factory qmv kernels have no sub-2-bit width (#24) and the composed host lane that served it is retired (#50)")
+	}
+	return nil
 }
 
 // load.go is the native backend's directory loader: it delegates to the engine's reactive loader
@@ -179,18 +162,16 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		// Default to the checkpoint's trained window instead, capped.
 		maxLen = resolveDefaultContext(model.ProbeDirContextWindow(dir))
 	}
-	// SSM / hybrid families don't fit the reactive transformer Assemble — route them to their own loader
-	// before the registered path. mamba2 is a standalone recurrent SSM; qwen3_5/3.6 is a config-composed
-	// hybrid (linear_attention gated-delta + full attention) built by the composed loader.
-	// (They keep the plain window-capped default: their state geometry isn't the
-	// transformer KV plan the RAM-aware clamp below budgets.)
+	// Standalone recurrent SSMs don't fit the reactive transformer Assemble — route them to their
+	// own loaders before the registered path. (They keep the plain window-capped default: their
+	// state geometry isn't the transformer KV plan the RAM-aware clamp below budgets.)
 	if mt, cfg, perr := model.ProbeDirArch(dir); perr == nil {
 		if mt == "mamba2" {
 			if tqMode != nil {
 				return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines recurrent archs (mamba2 holds SSM state, not a KV cache) — reload without -kv-cache")
 			}
 			// mamba2 is a standalone recurrent SSM with its own loader — it registers no
-			// ArchSpec, so it is reached by name here rather than through the composed registry.
+			// ArchSpec, so it is reached by name here.
 			return loadMamba2TokenModel(dir, cfg)
 		}
 		if mt == "rwkv7" {
@@ -202,33 +183,16 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 			// It registers no ArchSpec, so it is reached by name here.
 			return loadRWKV7TokenModel(dir, cfg)
 		}
-		// Composed/hybrid archs route through the neutral registry: each registers an
-		// ArchSpec.Composed hook, and model.LoadComposedDir looks it up and builds the
-		// serve-ready TokenModel. A future qwenX checkpoint therefore loads with ZERO edits
-		// here — it is a new model-package init(), not an engine change. ok=false means the
-		// model_type is a plain transformer (no composed arch registered for it): fall through.
-		// The Qwen 3.5 hybrid (qwen3_5/qwen3_5_moe + text aliases) DEFAULTS to the factory route
-		// (model.Assemble + arch_session with the fused whole-token chain decode — #18; faster than
-		// the composed lane on both hybrids: 0.8B 217 vs 195 tok/s, 35B 30 vs 19). The factory
-		// serves the TEXT stack only — a vision-towered qwen checkpoint (35B ships one) answers
-		// image turns with the clean 400 refusal; LTHN_QWEN_COMPOSED=1 is the escape hatch back to
-		// the composed loader (vision-capable serving + the A/B / revert-safety lever). A sub-2-bit
-		// pack (Bonsai 1-bit) stays composed too: the factory's qmv kernels have no 1-bit width
-		// (#24's open half). Every other composed arch (qwen3_6/qwen3_next/mixtral/…) is untouched.
-		qwenFactory := isQwen35FactoryType(mt) && os.Getenv("LTHN_QWEN_COMPOSED") != "1" &&
-			qwenFactoryQuantServable(cfg)
-		if !qwenFactory {
-			if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
-				return nil, cerr
-			} else if ok {
-				if tqMode != nil {
-					// The composed lane (hybrids, arch zoo) holds its own state
-					// shapes the TQ lane never touches — refusing beats a
-					// silently-native "turboquant" session.
-					return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines composed/hybrid archs (v1: dense global-attention layers on the recorded decode lane) — reload without -kv-cache")
-				}
-				return tm, nil
-			}
+		// Every registered arch loads through the ONE factory route below (model.Load: parse →
+		// infer → derive → assemble). The retired composed engine's registry detour
+		// (model.LoadComposedDir) is gone (#50): qwen3_5/3.6 hybrids ride the factory's fused
+		// whole-token chain (#18 — faster than the composed lane was on both released hybrids),
+		// and a checkpoint the factory cannot serve fails HERE with a named error instead of
+		// falling back silently. Known capability gaps are declined by name: sub-2-bit packs
+		// (below) and the qwen vision tower (the factory serves the TEXT stack; an image turn
+		// on a vision-towered qwen checkpoint gets the engine's clean not-a-vision-model refusal).
+		if derr := subTwoBitQuantDecline(cfg); derr != nil {
+			return nil, derr
 		}
 	}
 	lm, dm, err := loadRegistered(dir)
@@ -409,28 +373,6 @@ func mamba2EpsFromConfig(cfg []byte) float32 {
 	default:
 		return 1e-5
 	}
-}
-
-// loadComposedTokenModel loads a config-composed hybrid checkpoint (Qwen 3.6) into the host-f32
-// ComposedModel and wraps it as a model.SessionModel. LoadComposed widens every weight to f32, so the
-// shard mmap is unmapped before return. Host f32 today (correct, the orchestration scaffold); a device
-// path (the projections already have a GEMM seam; attention is a later device kernel) is the perf follow-up.
-//
-// NOT called from LoadTokenModelDirWithConfig any more: every model_type this once served as the switch's
-// fallback arm (qwen3_6/qwen3_6_moe/composed/hybrid) now registers a Composed hook in model/composed, so
-// model.LoadComposedDir reaches the identical LoadComposed+NewTokenModel pair through the registry. Kept for
-// TestNativeTokenModelSpecialLoaderErrors, which exercises it directly.
-func loadComposedTokenModel(dir string, cfg []byte) (model.TokenModel, error) {
-	dm, err := safetensors.LoadDirMmap(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = dm.Close() }()
-	cm, err := composed.LoadComposed(dm.Tensors, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return composed.NewTokenModel(cm), nil
 }
 
 // loadRegistered delegates to the reactive engine loader (model.Load): probe model_type → the registered

@@ -3,9 +3,7 @@
 package dotsocr
 
 import (
-	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/safetensors"
 )
 
 // init registers dots_ocr and its dots_ocr_1_5 successor
@@ -23,13 +21,6 @@ func init() {
 		ModelTypes: []string{"dots_ocr", "dots_ocr_1_5"},
 		Parse: func(data []byte) (model.ArchConfig, error) {
 			return ParseConfig(data)
-		},
-		Composed: func(_ map[string]safetensors.Tensor, cfgJSON []byte) (model.TokenModel, error) {
-			mt, _ := model.ProbeModelTypes(cfgJSON)
-			if mt == "" {
-				mt = "dots_ocr"
-			}
-			return nil, core.NewError(mt + " (DOTS-OCR) is a recognised OCR vision-language arch; its vision encoder + OCR decoder forward is not yet implemented in this engine")
 		},
 	})
 }

@@ -14,13 +14,13 @@
 //
 //	import _ "dappco.re/go/inference/model/builtin" // all arches resolvable
 //
-// composed IS listed: it registers the Qwen 3.6 hybrids (qwen3_5 / qwen3_5_moe /
-// qwen3_next) as top-level model_types through [model.ArchSpec].Composed, so a
-// serve binary resolves them by model_type here rather than relying on an engine
-// blank-import. The remaining component packages (deltanet, rwkv7) carry no
+// The Qwen 3.6 hybrid family (qwen3_5 / qwen3_5_moe / qwen3_6 / qwen3_next +
+// aliases) registers through arch/Qwen/qwen35 like every other arch — the
+// parallel composed engine that used to carry a second registry route is
+// retired (#50). The remaining component packages (deltanet, rwkv7) carry no
 // top-level model_type and ride in transitively through the arches that compose
-// them; the recurrent SSM mamba2 is reached by the backend's own hybrid/SSM
-// branch, not this registry.
+// them; the recurrent SSM mamba2 is reached by the backend's own SSM branch,
+// not this registry.
 package builtin
 
 import (
@@ -29,7 +29,7 @@ import (
 	_ "dappco.re/go/inference/model/arch/LGAI-EXAONE/exaone4"     // EXAONE 4 dense text
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"              // qwen2 / qwen2.5 dense text
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen3"              // qwen3
-	_ "dappco.re/go/inference/model/arch/Qwen/qwen35"             // qwen3_5 / qwen3_5_moe hybrid (factory route DEFAULT + composed delegate; LTHN_QWEN_COMPOSED reverts)
+	_ "dappco.re/go/inference/model/arch/Qwen/qwen35"             // qwen3_5/3.6 hybrid family + qwen3_next (factory route — the ONLY route since #50) + the MTP-drafter refusal ids
 	_ "dappco.re/go/inference/model/arch/Qwen/qwenmoe"            // qwen2_moe / qwen3_moe sparse transformers
 	_ "dappco.re/go/inference/model/arch/allenai/olmo"            // OLMo / OLMo 2
 	_ "dappco.re/go/inference/model/arch/allenai/olmoe"           // AllenAI OLMoE sparse transformer
@@ -46,7 +46,7 @@ import (
 	_ "dappco.re/go/inference/model/arch/ibm-granite/granitemoe"  // IBM Granite sparse MoE
 	_ "dappco.re/go/inference/model/arch/jetmoe"                  // JetMoE routed FFN (MoA gap reported explicitly)
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"        // llama (dense text)
-	_ "dappco.re/go/inference/model/arch/meta-llama/llama4"       // llama4 / llama4_text — MoE Llama, composed host forward (packed zero-copy)
+	_ "dappco.re/go/inference/model/arch/meta-llama/llama4"       // llama4 / llama4_text — MoE Llama (packed-expert factory route)
 	_ "dappco.re/go/inference/model/arch/microsoft/phi"           // phi / phi3
 	_ "dappco.re/go/inference/model/arch/mistralai/mistral"       // mistral
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"       // mixtral sparse MoE
@@ -61,6 +61,5 @@ import (
 	_ "dappco.re/go/inference/model/arch/tiiuae/falcon"           // falcon (ALiBi transformer; excludes Falcon-H1)
 	_ "dappco.re/go/inference/model/arch/zai-org/glm4"            // GLM-4 dense text
 	_ "dappco.re/go/inference/model/arch/zai-org/glmocr"          // glm_ocr / glm_ocr_text (GLM-OCR arch; recognised, forward refused)
-	_ "dappco.re/go/inference/model/composed"                     // qwen3_6 / qwen3_next + generic composed/hybrid (ArchSpec.Composed); qwen3_5* now register in arch/Qwen/qwen35
 	_ "dappco.re/go/inference/model/gemma4"                       // gemma4 / gemma4_text / gemma4_unified (+ assistant) — NOT yet homed under model/arch/google: the fenced engine/hip imports it (see report)
 )

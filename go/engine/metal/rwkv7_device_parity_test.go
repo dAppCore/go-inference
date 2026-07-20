@@ -19,8 +19,8 @@ import (
 // own config.json, not guessed: hidden_size=768, head_dim=64 (H=12 heads, K=V=64 so H*K=H*V=768),
 // decay_low_rank_dim=64 (w_lora), a_low_rank_dim=64 (a_lora), gate_low_rank_dim=128 (g_lora),
 // v_low_rank_dim=32 (v_lora), intermediate_size=3072 (channel-mix). block.go's BlockWeights (flat
-// AProj/BProj, no LoRA) is a DIFFERENT, simplified architecture used only by model/composed's mixer
-// adapter — out of scope here (task explicitly excludes model/composed/) — so this file targets the real
+// AProj/BProj, no LoRA) was a DIFFERENT, simplified architecture used only by the retired composed
+// engine's mixer adapter (#50) — so this file targets the real
 // timeMixWeights/lora/channelMixWeights shapes the standalone RWKV7Session (bin/lem generate's actual
 // path for a pure RWKV-7 checkpoint) drives.
 

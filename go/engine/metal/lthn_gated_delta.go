@@ -5,6 +5,7 @@
 package native
 
 import (
+	"os"
 	"sync"
 	"unsafe"
 
@@ -20,6 +21,22 @@ import (
 // and the pre-integration benches drive. The kernel replaces deltanet.GatedDeltaRuleF32's host
 // triple-loop for engine-metal builds; the host form stays the parity reference and every other
 // build's implementation.
+
+// gdBlockEnabled gates the device gated-delta BLOCK (conv ring + gates + recurrence + gated norm in
+// one command buffer, recurrent state resident on device — #18 S2). Default on; LTHN_GD_BLOCK=0
+// leaves the hooks unbound so the mixer runs the host block — the "before" arm of a same-binary A/B.
+var gdBlockEnabled = os.Getenv("LTHN_GD_BLOCK") != "0"
+
+// The model/attn device seams the factory host path consults (GatedDelta*DeviceTry): binding them
+// here keeps the hooks beside their implementations. These used to be bound from the retired
+// composed engine's backend file (#50); the seams themselves are engine-neutral model/attn hooks.
+func init() {
+	if gdBlockEnabled {
+		attn.GatedDeltaBlockDevice = gatedDeltaBlockDeviceHook             // the whole post-projection gated-delta block in one CB, state device-resident (#18 S2)
+		attn.GatedDeltaDeviceStateExport = gatedDeltaDeviceStateExportHook // snapshot/clone readback for the resident state
+		attn.GatedDeltaQuantLayerDevice = gatedDeltaQuantLayerDeviceHook   // the WHOLE packed layer in one CB — norm + five packed projections + block + FFN tail (#18 S3)
+	}
+}
 
 var (
 	gatedDeltaDK128Once sync.Once

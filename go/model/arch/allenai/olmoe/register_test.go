@@ -43,7 +43,7 @@ func TestWeightMap_Good(t *testing.T) {
 
 func TestOLMoERegistered_Good(t *testing.T) {
 	spec, ok := model.LookupArch("olmoe")
-	if !ok || spec.Parse == nil || spec.Composed == nil {
+	if !ok || spec.Parse == nil {
 		t.Fatalf("OLMoE registration = found %v spec %+v", ok, spec)
 	}
 }

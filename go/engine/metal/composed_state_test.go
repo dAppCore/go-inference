@@ -11,7 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
+	"dappco.re/go/inference/model/arch/mamba2"
 	state "dappco.re/go/inference/model/state"
 )
 
@@ -19,13 +19,13 @@ import (
 // conv/delta state has no kv.Snapshot Layers representation, so save/restore is a TOKEN-PREFIX
 // snapshot — CaptureKVWithOptions emits Tokens with no Layers, and a session restored from those
 // tokens produces a continuation byte-identical to an unbroken one because the deterministic
-// composed forward recomputes byte-identical recurrent state from the identical prefix (the
+// recurrent forward recomputes byte-identical state from the identical prefix (the
 // stateful session re-prefills once on the first call that needs live state — #25). The tiny
 // model here is pure host f32 (no Metal device), so these run under the plain `go test ./...` gate.
 
-// synComposedF32 is the deterministic weight filler model/composed's own unit tests use, so the tiny model
-// below decodes deterministically (a fixed greedy continuation to compare across save/restore).
-func synComposedF32(n, seed int) []float32 {
+// synStateF32 is a deterministic synthetic vector (seeded), values in [-1, 1) — the same generator
+// shape model/arch/mamba2's own tests use (scan_test.go: syn).
+func synStateF32(n, seed int) []float32 {
 	out := make([]float32, n)
 	for i := range out {
 		out[i] = float32((i*seed+7)%101-50) * 0.02
@@ -33,45 +33,47 @@ func synComposedF32(n, seed int) []float32 {
 	return out
 }
 
-// newTinyComposedModel builds a minimal host-f32 composed hybrid (a gated-delta mixer + SwiGLU MLP per
-// layer) as a model.SessionModel — enough to drive composedEngineSession's decode + snapshot path on the
-// CPU. It mirrors model/composed's mkComposedModel fixture; D/vocab/FF are fixed small.
-func newTinyComposedModel(nLayers int) model.SessionModel {
-	const D, vocab, FF = 8, 32, 16
-	cfg := model.GatedDeltaConfig{KeyHeads: 2, ValueHeads: 4, HeadDim: 8, ConvKernel: 4, Eps: 1e-5}
-	vd := cfg.ValueHeads * cfg.HeadDim
-	cd := 2*cfg.KeyHeads*cfg.HeadDim + cfg.ValueHeads*cfg.HeadDim
-	layers := make([]composed.Layer, nLayers)
+// newTinyStateModel builds a minimal host-f32 recurrent model.SessionModel — a mamba2 stack, the
+// SAME package load.go's loadMamba2TokenModel serves in production — to drive composedEngineSession's
+// decode + snapshot path on the CPU. The retired composed engine's hybrid used to be this fixture's
+// substrate (#50); mamba2 is the faithful drop-in: deterministic, recurrent (no kv.Snapshot Layers
+// representation), and speaking nothing but the neutral model.SessionModel contract. Geometry mirrors
+// mamba2's own small test shapes (block_test.go): NumHeads=2, HeadDim=8, StateDim=8, ConvKernel=4.
+func newTinyStateModel(nLayers int) model.SessionModel {
+	const d, vocab = 8, 32
+	cfg := mamba2.BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	dInner := cfg.NumHeads * cfg.HeadDim
+	convDim := dInner + 2*cfg.NumGroups*cfg.StateDim
+	projDim := 2*dInner + 2*cfg.NumGroups*cfg.StateDim + cfg.NumHeads
+	layers := make([]mamba2.MambaLayer, nLayers)
 	for li := range layers {
 		seed := li*13 + 20
-		w := &model.GatedDeltaWeights{
-			InProjQKV:  synComposedF32(cd*D, seed+1),
-			ConvWeight: synComposedF32(cd*cfg.ConvKernel, seed+2),
-			ConvBias:   synComposedF32(cd, seed+3),
-			InProjA:    synComposedF32(cfg.ValueHeads*D, seed+4),
-			ALog:       synComposedF32(cfg.ValueHeads, seed+5),
-			DtBias:     synComposedF32(cfg.ValueHeads, seed+6),
-			InProjB:    synComposedF32(cfg.ValueHeads*D, seed+7),
-			InProjZ:    synComposedF32(vd*D, seed+8),
-			Norm:       synComposedF32(cfg.HeadDim, seed+9),
-			OutProj:    synComposedF32(D*vd, seed+10),
-		}
-		layers[li] = composed.Layer{
-			InputNorm:    synComposedF32(D, li*13+1),
-			Mixer:        composed.NewGatedDeltaMixer(w, cfg),
-			PostAttnNorm: synComposedF32(D, li*13+2),
-			MLP:          &composed.MLP{Gate: synComposedF32(FF*D, li*13+3), Up: synComposedF32(FF*D, li*13+4), Down: synComposedF32(D*FF, li*13+5), FF: FF},
+		layers[li] = mamba2.MambaLayer{
+			Norm: synStateF32(d, li*13+1),
+			W: &mamba2.BlockWeights{
+				InProj:     synStateF32(projDim*d, seed+1),
+				ConvWeight: synStateF32(convDim*cfg.ConvKernel, seed+2),
+				ConvBias:   synStateF32(convDim, seed+3),
+				ALog:       synStateF32(cfg.NumHeads, seed+4),
+				D:          synStateF32(cfg.NumHeads, seed+5),
+				DtBias:     synStateF32(cfg.NumHeads, seed+6),
+				Norm:       synStateF32(dInner, seed+7),
+				OutProj:    synStateF32(d*dInner, seed+8),
+			},
 		}
 	}
-	m := &composed.ComposedModel{
-		Embed: synComposedF32(vocab*D, 100), Layers: layers, NormF: synComposedF32(D, 101), Output: nil,
-		D: D, Vocab: vocab, Eps: 1e-5,
-	}
-	return composed.NewTokenModel(m)
+	return mamba2.NewTokenModel(&mamba2.MambaModel{
+		Embed:  synStateF32(vocab*d, 100),
+		NormF:  synStateF32(d, 101),
+		Layers: layers,
+		Cfg:    cfg,
+		D:      d,
+		Vocab:  vocab,
+	})
 }
 
 func newTinyComposedSession(nLayers int) *composedEngineSession {
-	return &composedEngineSession{sm: newTinyComposedModel(nLayers), arch: "qwen3_next", numLayers: nLayers, pending: -1}
+	return &composedEngineSession{sm: newTinyStateModel(nLayers), arch: "mamba2", numLayers: nLayers, pending: -1}
 }
 
 // TestComposedEngineSession_CaptureKVWithOptions_Good captures a prefilled+appended session and checks the
@@ -97,8 +99,8 @@ func TestComposedEngineSession_CaptureKVWithOptions_Good(t *testing.T) {
 	if snap.TokenOffset != len(want) {
 		t.Fatalf("TokenOffset %d, want %d", snap.TokenOffset, len(want))
 	}
-	if snap.Architecture != "qwen3_next" {
-		t.Fatalf("Architecture %q, want qwen3_next", snap.Architecture)
+	if snap.Architecture != "mamba2" {
+		t.Fatalf("Architecture %q, want mamba2", snap.Architecture)
 	}
 	if snap.NumLayers != nLayers {
 		t.Fatalf("NumLayers %d, want %d", snap.NumLayers, nLayers)
@@ -133,7 +135,7 @@ func TestComposedEngineSession_CaptureKVWithOptions_Bad(t *testing.T) {
 // checks the prefix is reinstated (Pos matches) and copied, not aliased to the snapshot's slice.
 func TestComposedEngineSession_RestoreFromKV_Good(t *testing.T) {
 	tokens := []int32{3, 1, 4, 1, 5}
-	snap := &kv.Snapshot{Version: kv.SnapshotVersion, Architecture: "qwen3_next", Tokens: tokens, TokenOffset: len(tokens)}
+	snap := &kv.Snapshot{Version: kv.SnapshotVersion, Architecture: "mamba2", Tokens: tokens, TokenOffset: len(tokens)}
 	sess := newTinyComposedSession(2)
 	if err := sess.RestoreFromKV(context.Background(), snap); err != nil {
 		t.Fatalf("restore: %v", err)
@@ -269,8 +271,8 @@ func TestComposedEngineSession_RangeKVBlocks_Good(t *testing.T) {
 		if b.Snapshot.SeqLen != b.TokenCount {
 			t.Fatalf("block[%d].Snapshot.SeqLen = %d, want %d", i, b.Snapshot.SeqLen, b.TokenCount)
 		}
-		if b.Snapshot.Architecture != "qwen3_next" || b.Snapshot.NumLayers != nLayers {
-			t.Fatalf("block[%d] snapshot arch/layers = %q/%d, want qwen3_next/%d", i, b.Snapshot.Architecture, b.Snapshot.NumLayers, nLayers)
+		if b.Snapshot.Architecture != "mamba2" || b.Snapshot.NumLayers != nLayers {
+			t.Fatalf("block[%d] snapshot arch/layers = %q/%d, want mamba2/%d", i, b.Snapshot.Architecture, b.Snapshot.NumLayers, nLayers)
 		}
 	}
 	if nextStart != len(prompt) {

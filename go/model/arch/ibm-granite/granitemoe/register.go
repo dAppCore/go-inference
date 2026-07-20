@@ -5,7 +5,6 @@ package granitemoe
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -58,28 +57,5 @@ func init() {
 		// doc: the checkpoint already ships its packed expert tensors in the exact byte layout the
 		// factory MoE loader expects.
 		Weights: FactoryWeightNames(),
-		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
-			r := ParseConfig(configJSON)
-			if !r.OK {
-				return nil, core.E("granitemoe.Load", r.Error(), nil)
-			}
-			cfg := r.Value.(*Config)
-			arch, err := cfg.Arch()
-			if err != nil {
-				return nil, core.E("granitemoe.Load", "resolve architecture", err)
-			}
-			normalized, err := NormalizeWeights(tensors, cfg)
-			if err != nil {
-				return nil, err
-			}
-			// Zero-copy: NormalizeWeights re-exposes the checkpoint tensors (the pass-through map entries keep
-			// their mmap-backed bytes), so the packed quant projection weights VIEW the mapped checkpoint
-			// rather than being copied. model.LoadComposedDir hands the model the mapping via RetainMmap.
-			cm, err := composed.LoadComposedWithArchMmap(normalized, configJSON, arch)
-			if err != nil {
-				return nil, core.E("granitemoe.Load", "assemble composed model", err)
-			}
-			return composed.NewTokenModel(cm), nil
-		},
 	})
 }

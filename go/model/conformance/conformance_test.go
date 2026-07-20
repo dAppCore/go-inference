@@ -10,7 +10,6 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	_ "dappco.re/go/inference/model/builtin"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
@@ -48,7 +47,7 @@ func registeredFamilies() []familyCase {
 		{modelType: "llama", config: dense("llama")},
 		{modelType: "mistral3", config: dense("mistral3")}, {modelType: "ministral3", config: dense("ministral3")},
 		{modelType: "mistral", config: dense("mistral")}, {modelType: "ministral", config: dense("ministral")},
-		{modelType: "mixtral", skip: "sparse MoE synthetic construction is covered by model/mixtral integration; its registered Composed hook is not a dense Assemble path"},
+		{modelType: "mixtral", skip: "sparse MoE synthetic construction is covered by model/mixtral integration; its packed-expert synthesis is not a dense Assemble path"},
 		{modelType: "olmo", config: dense("olmo")}, {modelType: "olmo2", config: dense("olmo2")},
 		{modelType: "opt", config: `{"model_type":"opt","hidden_size":8,"word_embed_proj_dim":8,"num_attention_heads":2,"num_hidden_layers":1,"ffn_dim":16,"max_position_embeddings":32,"vocab_size":32,"do_layer_norm_before":true,"tie_word_embeddings":true}`},
 		{modelType: "phi", config: dense("phi")}, {modelType: "phi3", config: `{"model_type":"phi3",` + denseConfig + `,"num_key_value_heads":2}`},
@@ -62,9 +61,12 @@ func registeredFamilies() []familyCase {
 	}
 }
 
-// TestBuiltinFamiliesConformance keeps registration honesty and the portable
-// load/forward/generate surface in one table: adding a builtin without adding a
-// row fails the registry round-trip exercised by the new package's own CI review.
+// TestBuiltinFamiliesConformance keeps registration honesty and the reactive
+// load surface in one table: adding a builtin without adding a row fails the
+// registry round-trip exercised by the new package's own CI review. (The
+// portable host forward/generate half of this contract retired with the
+// composed engine, #50 — engine-level decode is covered by each engine's own
+// suite.)
 func TestBuiltinFamiliesConformance(t *testing.T) {
 	for _, tc := range registeredFamilies() {
 		t.Run(tc.modelType, func(t *testing.T) {
@@ -95,41 +97,6 @@ func TestBuiltinFamiliesConformance(t *testing.T) {
 				t.Fatalf("loaded shape = hidden %d layers %d, want %d/%d", loaded.Arch.Hidden, len(loaded.Layers), arch.Hidden, len(arch.Layer))
 			}
 
-			// The portable host executor consumes canonical tensor roles. Keeping
-			// this copy separate from the on-disk family map makes the reactive
-			// name mapping above part of the contract rather than bypassing it.
-			hostConfig := core.Sprintf(`{"model_type":"%s","hidden_size":%d,"intermediate_size":%d,"num_hidden_layers":%d,"num_attention_heads":%d,"num_key_value_heads":%d,"head_dim":%d,"vocab_size":%d,"rms_norm_eps":0.00001}`, tc.modelType, arch.Hidden, arch.FF, len(arch.Layer), arch.Heads, arch.KVHeads, arch.HeadDim, arch.Vocab)
-			host, err := composed.LoadComposed(canonicalWeights(arch), []byte(hostConfig))
-			if err != nil {
-				t.Fatalf("host load: %v", err)
-			}
-			tm := composed.NewTokenModel(host)
-			inputs := make([][]byte, 3)
-			for i, id := range []int32{1, 5, 9} {
-				inputs[i], err = tm.Embed(id)
-				if err != nil {
-					t.Fatalf("embed: %v", err)
-				}
-			}
-			hidden, err := tm.DecodeForward(inputs)
-			if err != nil {
-				t.Fatalf("forward: %v", err)
-			}
-			if len(hidden) != 3 || len(hidden[0]) != arch.Hidden*2 {
-				t.Fatalf("forward shape = [%d,%d]", len(hidden), len(hidden[0]))
-			}
-			for row := range hidden {
-				for i := 0; i < len(hidden[row]); i += 2 {
-					v := math.Float32frombits(uint32(hidden[row][i])<<16 | uint32(hidden[row][i+1])<<24)
-					if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-						t.Fatalf("hidden is not finite")
-					}
-				}
-			}
-			got, err := model.Generate(tm, []int32{1, 5, 9}, 4, -1)
-			if err != nil || len(got) != 4 {
-				t.Fatalf("greedy generate = %v, %v; want four tokens", got, err)
-			}
 		})
 	}
 }
@@ -166,15 +133,6 @@ func (p *prng) norm(n int) safetensors.Tensor {
 }
 
 func seededWeights(names model.WeightNames, arch model.Arch) map[string]safetensors.Tensor {
-	return weightsFor(names, arch, 0x5eed1234)
-}
-func canonicalWeights(arch model.Arch) map[string]safetensors.Tensor {
-	names := model.StandardWeightNames()
-	names.MLPNorm = ".post_attention_layernorm.weight"
-	names.PostAttnNorm = ""
-	names.PostFFNorm = ""
-	names.QNorm = ""
-	names.KNorm = ""
 	return weightsFor(names, arch, 0x5eed1234)
 }
 func weightsFor(n model.WeightNames, a model.Arch, seed uint32) map[string]safetensors.Tensor {

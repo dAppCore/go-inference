@@ -4,6 +4,7 @@ package dbrx
 
 import (
 	"bytes"
+	"math"
 	"testing"
 
 	core "dappco.re/go"
@@ -40,7 +41,7 @@ func writeTinyDBRXDir(t *testing.T, fill float32) string {
 }
 
 // TestTinyDBRXFactoryLoad_Good is the #50 bar for this arch: model.Load (the factory route —
-// model.Assemble, no model/composed involved) now succeeds for DBRX, where previously spec.Weights was the
+// model.Assemble) now succeeds for DBRX, where previously spec.Weights was the
 // WeightNames zero value (every lookup missed) and model.Assemble rejected the checkpoint outright. It also
 // proves the first half of the #18 parity method — "same tensor maps": the packed MoE expert weights
 // model.Assemble loads are byte-identical to NormalizeWeights' own (separately-tested) decode of the fused
@@ -50,7 +51,7 @@ func TestTinyDBRXFactoryLoad_Good(t *testing.T) {
 
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
-		t.Fatalf("model.Load: %v (DBRX must no longer require model/composed to load)", err)
+		t.Fatalf("model.Load: %v (DBRX must load through the factory route alone)", err)
 	}
 	defer func() { _ = mapping.Close() }()
 
@@ -104,28 +105,44 @@ func TestTinyDBRXFactoryLoad_Good(t *testing.T) {
 	}
 }
 
-// TestTinyDBRXFactoryAndComposed_AgreeOnRegistration proves DBRX's dual route: the SAME model_type resolves
-// to a spec carrying BOTH Parse+Weights (the factory route this file's Good test exercises) AND a working
-// Composed hook (the existing TestTinyDBRXForward_Good route in integration_test.go) — composed is demoted
-// to an available alternative, not removed, mirroring the mixtral/qwen35 dual-route pattern (#18/#50).
-func TestTinyDBRXFactoryAndComposed_AgreeOnRegistration(t *testing.T) {
-	spec, ok := model.LookupArch("dbrx")
-	if !ok {
-		t.Fatal("dbrx not registered")
-	}
-	if spec.Parse == nil || spec.Weights.MoE.ExpGate == "" {
-		t.Fatal("dbrx spec missing the factory route (Parse + Weights)")
-	}
-	if spec.Composed == nil {
-		t.Fatal("dbrx spec missing the Composed route — composed must stay available, not be removed")
-	}
+// --- synthetic checkpoint fixtures (moved from the deleted composed-route integration_test.go, #50) ---
 
-	dir := writeTinyDBRXDir(t, 0.02)
-	if _, _, err := model.Load(dir); err != nil {
-		t.Fatalf("factory route: %v", err)
+type seededWeights struct{ state uint32 }
+
+func (s *seededWeights) values(n int, fill float32) []float32 {
+	out := make([]float32, n)
+	for i := range out {
+		s.state = 1664525*s.state + 1013904223
+		out[i] = fill + float32(int32(s.state>>24)-128)/512
 	}
-	tm, ok, err := model.LoadComposedDir(dir)
-	if err != nil || !ok || tm == nil {
-		t.Fatalf("composed route: ok=%v err=%v tm=%v — the escape hatch must still work", ok, err, tm)
+	return out
+}
+
+func f32Tensor(values []float32, shape ...int) safetensors.Tensor {
+	data := make([]byte, len(values)*4)
+	for i, value := range values {
+		bits := math.Float32bits(value)
+		data[4*i], data[4*i+1], data[4*i+2], data[4*i+3] = byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24)
+	}
+	return safetensors.Tensor{Dtype: "F32", Shape: shape, Data: data}
+}
+
+func tinyDBRXWeights(fill float32) map[string]safetensors.Tensor {
+	const hidden, vocab, expertFF, heads, kvHeads, headDim, experts = 8, 32, 12, 2, 1, 4, 4
+	s := seededWeights{state: 0xd8b01234}
+	ones := make([]float32, hidden)
+	for i := range ones {
+		ones[i] = 1
+	}
+	return map[string]safetensors.Tensor{
+		"transformer.wte.weight": f32Tensor(s.values(vocab*hidden, fill), vocab, hidden), "transformer.norm_f.weight": f32Tensor(ones, hidden),
+		"lm_head.weight": f32Tensor(s.values(vocab*hidden, fill), vocab, hidden),
+		"transformer.blocks.0.norm_attn_norm.norm_1.weight": f32Tensor(ones, hidden), "transformer.blocks.0.norm_attn_norm.norm_2.weight": f32Tensor(ones, hidden),
+		"transformer.blocks.0.norm_attn_norm.attn.Wqkv.weight":     f32Tensor(s.values((heads+2*kvHeads)*headDim*hidden, fill), (heads+2*kvHeads)*headDim, hidden),
+		"transformer.blocks.0.norm_attn_norm.attn.out_proj.weight": f32Tensor(s.values(hidden*hidden, fill), hidden, hidden),
+		"transformer.blocks.0.ffn.router.layer.weight":             f32Tensor(s.values(experts*hidden, fill), experts, hidden),
+		"transformer.blocks.0.ffn.experts.mlp.w1":                  f32Tensor(s.values(experts*expertFF*hidden, fill), experts, expertFF, hidden),
+		"transformer.blocks.0.ffn.experts.mlp.v1":                  f32Tensor(s.values(experts*expertFF*hidden, -fill), experts, expertFF, hidden),
+		"transformer.blocks.0.ffn.experts.mlp.w2":                  f32Tensor(s.values(experts*hidden*expertFF, fill), experts, hidden, expertFF),
 	}
 }

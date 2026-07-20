@@ -5,7 +5,6 @@ package llama4
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -133,28 +132,6 @@ func init() {
 				return packed
 			}
 			return normalised // malformed/absent experts on a declared MoE layer — nil ExpGate/ExpUp/ExpDown surfaces downstream
-		},
-		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
-			cfg, err := parseConfig(configJSON)
-			if err != nil {
-				return nil, err
-			}
-			arch, err := cfg.Arch()
-			if err != nil {
-				return nil, core.E("llama4.Load", "resolve architecture", err)
-			}
-			normalised, err := NormalizeWeights(tensors)
-			if err != nil {
-				return nil, core.E("llama4.Load", "normalise weights", err)
-			}
-			// Zero-copy: NormalizeWeights re-exposes the checkpoint tensors (the pass-through map entries keep
-			// their mmap-backed bytes), so the packed quant projection weights VIEW the mapped checkpoint
-			// rather than being copied. model.LoadComposedDir hands the model the mapping via RetainMmap.
-			cm, err := composed.LoadComposedWithArchMmap(normalised, configJSON, arch)
-			if err != nil {
-				return nil, core.E("llama4.Load", "assemble composed model", err)
-			}
-			return composed.NewTokenModel(cm), nil
 		},
 	})
 }
