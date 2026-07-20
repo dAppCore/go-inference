@@ -92,6 +92,19 @@ func init() {
 			}
 			return &cfg, nil
 		},
+		// Weights + NormalizeConfig give DBRX the factory route (model.Assemble — the #18 unification
+		// target), dual-registered alongside the Composed hook below exactly as mixtral and qwen35 carry
+		// both: Composed stays the A/B reference + the route a caller that deliberately bypasses model.Load
+		// still reaches, while model.Load now succeeds instead of rejecting DBRX as composed-only (#50).
+		Weights: FactoryWeightNames(),
+		NormalizeConfig: func(tensors map[string]safetensors.Tensor, ac model.ArchConfig) map[string]safetensors.Tensor {
+			cfg := ac.(*Config)
+			normalised := NormalizeWeights(tensors, *cfg)
+			if packed, err := packExperts(normalised, cfg.Layers, cfg.FFN.Experts); err == nil {
+				return packed
+			}
+			return normalised // malformed/absent experts — Assemble's nil-safe load surfaces the gap downstream
+		},
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
 			var cfg Config
 			if r := core.JSONUnmarshal(configJSON, &cfg); !r.OK {
