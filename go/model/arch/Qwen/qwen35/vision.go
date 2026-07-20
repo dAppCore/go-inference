@@ -127,6 +127,13 @@ type VisionTower struct {
 	// separate file with separate provenance, see vision_preprocess.go). The zero value degrades
 	// safely to the pre-#59 behaviour (VisionPreprocessConfig.normalized()'s doc comment).
 	Preprocess VisionPreprocessConfig
+	// DeviceSeam is an opaque hook a backend may attach its own device-resident encode state to —
+	// engine/metal's #59 device-tower follow-up (docs/design-qwen-vision-factory.md §6) stores its
+	// bf16 buffer mirror here once built. qwen35 never reads or writes it beyond the nil zero value
+	// (AX-8: this package never imports engine); its lifetime is exactly the VisionTower's, so a
+	// backend's device state is released whenever the tower itself becomes unreachable — no separate
+	// package-level cache to evict on model unload.
+	DeviceSeam any
 }
 
 // isqrt returns the integer square root of n (⌊√n⌋), or -1 for n<0 — used to recover the merger's

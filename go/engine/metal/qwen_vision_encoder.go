@@ -25,6 +25,14 @@ import (
 // and activations are host f64/f32 exactly as the reference computed them. The gemma4 SigLIP tower in
 // vision.go is a DIFFERENT architecture (RMSNorm, no merger, pooling) — only geluTanhScalar is
 // genuinely shared and reused; everything qwen-specific is ported, not adapted.
+//
+// This file is the HOST tier only — the #59 device-tower follow-up (design doc §6,
+// qwen_vision_device.go) adds a THIRD tier, a bf16-everywhere device-resident forward
+// (QwenVisionTowerForwardDevice) that reuses this file's small scalar helpers (qwenVisionRMSNormHead,
+// qwenVisionRope2D, qwenVisionRotaryTable, qwenVisionSilu) for the same tiny per-head/gate maths, but
+// runs every GEMM/LayerNorm/attention/GELU stage through the engine's bf16 kernels instead. The two
+// tiers are DIFFERENT precisions (f32/f64 host vs bf16 device), not just different dispatch floors —
+// qwen_vision_device_test.go pins how far they can disagree.
 
 // qwenVisionDeviceMinWork is the M·K·N floor below which a projection ignores the device GEMM — a
 // tiny GEMV's command-buffer round-trip outweighs its compute (the composed lane's deviceMinWork,
@@ -329,7 +337,16 @@ func qwenVisionMergerForward(m *qwen35.VisionMerger, x []float32, gridH, gridW i
 // (qwen35.ImageToPatchGrid's output): patch embed → an optional additive LEARNED position embedding
 // (bilinearly resampled onto a non-native grid) → N bidirectional blocks → the merger, returning the
 // projected soft-token features [softTokens,TextHidden] and softTokens.
+//
+// This is the HOST tier — the oracle and fallback the #59 device-tower follow-up (§6,
+// qwen_vision_device.go) keeps: a tower that went device-resident has its f32 weights freed
+// (freeQwenVisionHostWeights), so calling this on one fails cleanly below rather than computing over
+// empty slices. Callers that want the fast/lean path go through QwenVisionTowerForwardDevice instead
+// (qwen_vision.go's projectQwenImage picks whichever the load seam attached).
 func QwenVisionTowerForward(patches []float32, gridH, gridW int, tower *qwen35.VisionTower) (features []float32, softTokens int, err error) {
+	if len(tower.Patch.W) == 0 {
+		return nil, 0, core.NewError("native.QwenVisionTowerForward: tower weights are device-resident only (the host f32 copy was freed after the bf16 upload) — use QwenVisionTowerForwardDevice")
+	}
 	cfg := tower.Cfg
 	L := gridH * gridW
 	if L <= 0 {
