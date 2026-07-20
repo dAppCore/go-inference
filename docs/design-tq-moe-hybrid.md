@@ -25,7 +25,7 @@ by the arch's family name:
 |------------------------------------------------------------------|-------------------|-----|
 | Attention mixer, GLOBAL owner, geometry OK, ungated, no sinks    | **TQ codes + γ**  | the unbounded-growth cache TQ exists for |
 | Attention mixer, SLIDING owner                                   | native bf16 ring  | bounded residency — nothing to win; ring slot rebind is unaddressable over packed codes |
-| Attention sharer (`KVShareFrom ≠ self`)                          | reads owner's kind| ICB lane: TQ read wired (sliding sharers already force the owner bf16). State lane v1: ANY sharer forces the owner native — the shared-attention emitters are not TQ-wired there |
+| Attention sharer (`KVShareFrom ≠ self`)                          | reads owner's kind| BOTH lanes: a SLIDING sharer forces its owner native (windowed read offset unaddressable over packed codes); GLOBAL sharers read the owner's codes (state lane: `encAttnHalfSharedKVTQ`, q-only leg) — the gemma4 `num_kv_shared_layers` tail keeps its residency win |
 | `MixerGatedDelta` (linear attention / conv / recurrent state)    | native state      | no KV rows exist; nothing to quantise. `CacheIndex == -1` by construction — it can never be handed a KV cache of any kind |
 | Gated full attention (`arch.AttnOutputGate` — qwen3_5/next)      | native (own lane) | KV lives in the gated/fused lane's resident state (`gatedAttnLayer`/`arch_qwen_fused.go`), not in `lb`/ICB caches — a different seam (see non-goals) |
 | Attention sinks (gpt_oss)                                        | arch-wide decline | the TQ read kernels carry no sinks lane (unchanged v1 rule) |
@@ -86,10 +86,14 @@ session_state_blocks.go) becomes kind-aware; the monolithic bf16-shaped APIs
 (`CaptureKV`) keep their v1 decline — they cannot represent codes.
 
 - `sessionStateLayerView` / `SessionStateLayerBlock` gain a second cache mode:
-  `"turboquant"` beside `"fixed"`, plus additive fields — per-side row strides
-  (K and V differ under `turboquant:3.5`), the two γ planes, and the bit
-  widths. Zero values everywhere for native layers: the wire shape of a
-  native layer's block is byte-identical to today.
+  `"turboquant-codes"` beside `"fixed"`, plus additive fields — per-side row
+  strides (K and V differ under `turboquant:3.5`), the two γ planes, and the
+  bit widths. Zero values everywhere for native layers: the wire shape of a
+  native layer's block is byte-identical to today. The string is DELIBERATELY
+  distinct from the legacy cross-engine `"turboquant"` snapshot vocabulary
+  (session_kv_snapshot.go), which names bf16-shaped payloads and sits in
+  `nativeKVRestorableSourceCacheMode`'s pass-through allowlist — raw code
+  bytes must never ride that waiver into a bf16 cache.
 - A TQ layer's block payload is its RAW code rows (Key/ValueBytes at code row
   stride) + γ rows — bytes preserved exactly, never dequantised in transit.
   Row-range slicing works unchanged: codes and γ are row-addressed exactly
