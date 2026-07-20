@@ -243,31 +243,63 @@ func TestROCmBackend_DeclinesRegisteredComposedArchitectureBeforeNativeRuntime_G
 	core.AssertTrue(t, core.Contains(err.Error(), modelType))
 }
 
-// TestReactiveSequenceMixerReport_ComposedRunnerLinked_Good is UNCHANGED by #50's sever — it tests
-// reactive_sequence_mixer.go's baseReactiveSequenceMixerReport and engine/hip/profile's
-// ArchitectureProfileNotes/LookupArchitectureProfile, none of which this change touches (out of this
-// lane's file fence). Flagging it honestly: those two files now make a STALE claim.
-// baseReactiveSequenceMixerReport hardcodes RunnerReady=true and
-// labels["sequence_mixer_runner_status"]="portable_composed_session_model" unconditionally, and
-// profile/architecture.go's ArchitectureProfileNotes/LookupArchitectureProfile report
-// NativeRuntime=true plus "portable composed incremental runner is linked" for qwen3_6/qwen3_6_moe/
-// composed/hybrid — all true only because loadHIPComposedTextModel used to actually serve those
-// checkpoints via model/composed. It no longer does (see loadHIPComposedTextModel's doc comment in
-// composed_runtime.go); these two files were not in scope here and need their own follow-up so HIP's
-// capability reporting stops claiming a runner that composed_runtime.go's retirement removed.
-func TestReactiveSequenceMixerReport_ComposedRunnerLinked_Good(t *testing.T) {
+// TestReactiveSequenceMixerReport_ComposedRunnerRetired_Good proves reactive_sequence_mixer.go's
+// baseReactiveSequenceMixerReport and engine/hip/profile's ArchitectureProfileNotes/LookupArchitectureProfile
+// now tell the truth about #50's sever: composed_runtime.go's loadHIPComposedTextModel declines every
+// config-composed/hybrid architecture outright (no native ROCm execution path, and nothing replaced the
+// retired model/composed detour), so RunnerReady, the runner-status label, the architecture notes, and
+// NativeRuntime must all say so rather than describe a runner that no longer exists. This test used to be
+// named TestReactiveSequenceMixerReport_ComposedRunnerLinked_Good and asserted the opposite
+// (RunnerReady=true, NativeRuntime=true, "portable composed incremental runner is linked") — that was
+// accurate before #50, when loadHIPComposedTextModel actually routed these checkpoints through
+// model/composed; it went stale the moment the severing lane retired that route without updating the report
+// that described it (flagged, not fixed, in that lane's own doc comment — this lane closes the gap).
+func TestReactiveSequenceMixerReport_ComposedRunnerRetired_Good(t *testing.T) {
 	report := baseReactiveSequenceMixerReport("/models/qwen", nil)
-	core.AssertTrue(t, report.RunnerReady)
-	core.AssertEqual(t, "portable_composed_session_model", report.Labels["sequence_mixer_runner_status"])
+	core.AssertFalse(t, report.RunnerReady)
+	core.AssertEqual(t, "composed_route_retired", report.Labels["sequence_mixer_runner_status"])
 	core.AssertEqual(t,
-		[]string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"},
+		[]string{"composed route retired (#50): the gated-delta hybrid has no native ROCm execution path; loadHIPComposedTextModel declines it outright, factory-native port pending"},
 		rocmprofile.ArchitectureProfileNotes("qwen3_6"),
 	)
-	for _, architecture := range []string{"composed", "hybrid", "qwen3_6", "qwen3_6_moe"} {
+	core.AssertEqual(t,
+		[]string{"composed route retired (#50): the gated-delta MoE hybrid has no native ROCm execution path; loadHIPComposedTextModel declines it outright, factory-native port pending"},
+		rocmprofile.ArchitectureProfileNotes("qwen3_6_moe"),
+	)
+	core.AssertEqual(t,
+		[]string{"composed route retired (#50): no native ROCm execution path; loadHIPComposedTextModel declines this architecture outright, factory-native port pending"},
+		rocmprofile.ArchitectureProfileNotes("composed"),
+	)
+
+	// The Qwen 3.5/3.6 gated-delta hybrid family and the generic composed/hybrid ids: #50 declined them
+	// outright, so NativeRuntime must flip false — but Generation/Chat stay true (unchanged; out of this
+	// lane's flagged scope). ROCmChatTemplateID's family fallback (architecture_registry.go) still resolves
+	// "qwen" from profile.Family alone even with ChatTemplate cleared, so engine/hip's own chat-template
+	// tests for these ids (TestHIPInferenceModel_DeclaredQwenChatTemplate_Good,
+	// TestHIPRuntime_ApplyChatTemplateUsesQwenChatML_Good) are unaffected by this change.
+	for _, architecture := range []string{"composed", "hybrid", "qwen3_6", "qwen3_6_moe", "qwen3_next"} {
 		profile, ok := rocmprofile.LookupArchitectureProfile(architecture)
 		core.RequireTrue(t, ok)
-		core.RequireTrue(t, profile.NativeRuntime)
-		core.RequireTrue(t, profile.Generation)
-		core.RequireTrue(t, profile.Chat)
+		core.AssertFalse(t, profile.NativeRuntime)
+		core.AssertEqual(t, inference.FeatureRuntimeMetadataOnly, profile.RuntimeStatus)
+		core.AssertTrue(t, profile.Generation)
+		core.AssertTrue(t, profile.Chat)
 	}
+
+	// mixtral/qwen3_moe/deepseek/deepseek_r1 already reported Generation=false before #50 (their MoE expert
+	// decode was never wired even while composed served them) — #50 only moves NativeRuntime here, from a
+	// stale true to a truthful false; Generation/Chat were already honest and stay untouched.
+	for _, architecture := range []string{"qwen3_moe", "mixtral", "deepseek", "deepseek_r1"} {
+		profile, ok := rocmprofile.LookupArchitectureProfile(architecture)
+		core.RequireTrue(t, ok)
+		core.AssertFalse(t, profile.NativeRuntime)
+		core.AssertEqual(t, inference.FeatureRuntimeMetadataOnly, profile.RuntimeStatus)
+		core.AssertFalse(t, profile.Generation)
+	}
+
+	// mamba2 is untouched by #50: HIP serves it through its own native loader (mamba2_runtime.go), never
+	// through model/composed, so it must keep reporting a real runner.
+	mamba2Profile, ok := rocmprofile.LookupArchitectureProfile("mamba2")
+	core.RequireTrue(t, ok)
+	core.AssertTrue(t, mamba2Profile.NativeRuntime)
 }
