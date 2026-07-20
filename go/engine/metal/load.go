@@ -18,11 +18,16 @@ import (
 // isQwen35FactoryType reports whether a model_type is a Qwen 3.6 hybrid id carrying the DUAL route (a
 // Composed hook AND Parse+Weights, registered by model/arch/Qwen/qwen35) — the set that DEFAULTS to
 // the factory route (model.Assemble + arch_session, #18); LTHN_QWEN_COMPOSED=1 reverts it to the
-// composed loader. Kept in sync with qwen35's ArchSpec.ModelTypes; any other composed arch (mixtral,
-// qwen3_next, …) is untouched by the lever.
+// composed loader. Kept in sync with qwen35's ArchSpec.ModelTypes — all seven released names (qwen3_5/
+// qwen3_5_moe + their text_config aliases, qwen3_6/qwen3_6_moe, and qwen3_next, Qwen 3.6's predecessor)
+// share ONE dual-route declaration (#50 archzoo), so they move together here too. Any other composed arch
+// (mixtral, granitemoe, qwenmoe, …) is untouched by this lever — each of those now carries its OWN
+// factory route (model.Load succeeds directly), but reaching it means calling model.Load, not
+// LoadTokenModelDir: this qwen-specific switch does not generalise to "prefer the factory for any
+// dual-route arch".
 func isQwen35FactoryType(mt string) bool {
 	switch mt {
-	case "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text":
+	case "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_6", "qwen3_6_moe", "qwen3_next":
 		return true
 	}
 	return false
