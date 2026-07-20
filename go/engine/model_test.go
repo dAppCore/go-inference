@@ -63,6 +63,39 @@ func newFixtureTokenizer(t *testing.T) *tokenizer.Tokenizer {
 	return tok
 }
 
+// noEOSTokenizerJSON is a tokenizer.json that declares no <eos>/<end_of_turn>/
+// <|im_end|>/<|eot_id|>/<turn|> special at all — the shape a checkpoint whose
+// tokenizer genuinely lacks a stop token takes. decode/tokenizer.LoadTokenizer
+// then leaves eosToken at the int32 zero value, id 0 — and this fixture's
+// vocab deliberately maps its own content symbol ("z") to that same id 0, so
+// a test decoding it exercises exactly the packed-moe example's failure mode
+// (#64): a checkpoint that greedily emits id 0 must decode it as ordinary
+// content, not stop there.
+const noEOSTokenizerJSON = `{
+  "model": {
+    "type": "BPE",
+    "vocab": {"z": 0},
+    "merges": []
+  },
+  "added_tokens": []
+}`
+
+// newNoEOSTokenizer loads noEOSTokenizerJSON through the production
+// LoadTokenizer path — see its doc comment for why id 0 is significant.
+func newNoEOSTokenizer(t *testing.T) *tokenizer.Tokenizer {
+	t.Helper()
+	dir := t.TempDir()
+	path := core.JoinPath(dir, "tokenizer.json")
+	if err := coreio.Local.Write(path, noEOSTokenizerJSON); err != nil {
+		t.Fatalf("write no-EOS fixture tokenizer: %v", err)
+	}
+	tok, err := tokenizer.LoadTokenizer(path)
+	if err != nil {
+		t.Fatalf("load no-EOS fixture tokenizer: %v", err)
+	}
+	return tok
+}
+
 // defaultFakeGenIDs is a generous canned decode stream: enough ids to satisfy
 // any budget these tests ask for, none equal to the fixture tokenizer's EOS
 // (2) or BOS (1), so a plain budget-bounded generation runs the full budget
@@ -430,6 +463,54 @@ func TestModel_TextModel_Generate_Ugly(t *testing.T) {
 	}
 	if r := m.Err(); r.OK {
 		t.Fatal("want a failure Result when OpenEngineSession fails")
+	}
+}
+
+// TestModel_TextModel_Generate_UndeclaredEOSNotArmed is the full #64
+// regression found by the packed-moe example: a checkpoint whose tokenizer
+// declared no EOS at all greedily emitted id 0 on its very first decode step,
+// and buildStopTokens armed decode/tokenizer's fallback EOS() zero value as a
+// live stop token — silently truncating Generate to that single token. With
+// the HasEOSToken() gate, id 0 decodes as ordinary content and Generate runs
+// the full requested budget straight past it.
+func TestModel_TextModel_Generate_UndeclaredEOSNotArmed(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{genIDs: []int32{0, 5, 6, 7}}, newNoEOSTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+	var got []inference.Token
+	// The no-EOS fixture declares no <bos> either, so the prompt must encode
+	// to at least one real id itself: "z" is the fixture's one vocab entry.
+	for tok := range m.Generate(context.Background(), "z", inference.WithMaxTokens(4)) {
+		got = append(got, tok)
+	}
+	if len(got) != 4 {
+		t.Fatalf("Generate produced %d tokens, want 4 (id 0 must not truncate generation): %+v", len(got), got)
+	}
+	if got[0].ID != 0 {
+		t.Fatalf("Generate()[0].ID = %d, want 0 (the undeclared-EOS zero value emitted as content)", got[0].ID)
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("Err() after a clean generation = %+v, want OK", r)
+	}
+}
+
+// TestModel_TextModel_Generate_DeclaredEOSStops is #64's positive-case
+// counterpart: a tokenizer.json that DOES declare <eos> (the fixture
+// tokenizer's id 2) still halts Generate exactly there. The HasEOSToken()
+// gate must withhold arming only when a checkpoint genuinely lacks a declared
+// stop — it must never silence a real one.
+func TestModel_TextModel_Generate_DeclaredEOSStops(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{genIDs: []int32{10, 2, 11, 12}}, newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+	var got []inference.Token
+	for tok := range m.Generate(context.Background(), "hi", inference.WithMaxTokens(4)) {
+		got = append(got, tok)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Generate produced %d tokens, want 2 (must stop at the declared <eos>): %+v", len(got), got)
+	}
+	if got[1].ID != 2 {
+		t.Fatalf("Generate()[1].ID = %d, want 2 (the declared <eos>)", got[1].ID)
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("Err() after a clean generation = %+v, want OK", r)
 	}
 }
 
@@ -1157,6 +1238,18 @@ func TestStopTokensNoTokenizer(t *testing.T) {
 	got := m.stopTokens(inference.GenerateConfig{StopTokens: []int32{5}})
 	if len(got) != 1 || got[0] != 5 {
 		t.Fatalf("stopTokens = %v, want [5]", got)
+	}
+}
+
+// TestStopTokensUndeclaredEOS pins #64: a tokenizer with no declared EOS
+// leaves decode/tokenizer's EOS() at the int32 zero value — a real vocabulary
+// id, not a "no EOS" sentinel. buildStopTokens must NOT arm that fallback id,
+// or a checkpoint whose greedy decode reaches id 0 truncates on it.
+func TestStopTokensUndeclaredEOS(t *testing.T) {
+	m := &TextModel{tok: newNoEOSTokenizer(t)}
+	got := m.stopTokens(inference.GenerateConfig{StopTokens: []int32{99}})
+	if len(got) != 1 || got[0] != 99 {
+		t.Fatalf("stopTokens = %v, want [99] (id 0 must not be armed with no declared EOS)", got)
 	}
 }
 

@@ -821,6 +821,33 @@ func (m *TextModel) stopTokens(cfg inference.GenerateConfig) []int32 {
 	return m.buildStopTokens(cfg)
 }
 
+// EOSDeclarer is the optional [TextTokenizer] capability for tokenizers that
+// can distinguish a genuinely declared EOS/stop token from int32(0), the Go
+// zero value EOS() falls back to when a tokenizer.json declares none of
+// <eos>/<end_of_turn>/<|im_end|>/<|eot_id|>/<turn|> at all (decode/tokenizer.
+// Tokenizer implements it). Without this gate, buildStopTokens armed that
+// fallback zero as a live stop token, so a checkpoint whose tokenizer lacked a
+// declared EOS silently truncated Generate the first time greedy decoding
+// produced token id 0 (#64). A tokenizer whose EOS() is a fixed, always-
+// present terminator regardless of any declaration — rwkv7.WorldTokenizer's
+// reserved id 0, kept outside its byte-trie vocabulary specifically so it can
+// never collide with a real content token — need not implement this
+// capability: hasDeclaredEOS treats an unasserted capability as "the id is
+// real", preserving that tokenizer's own contract unchanged.
+type EOSDeclarer interface {
+	HasEOSToken() bool
+}
+
+// hasDeclaredEOS reports whether tok's EOS() id should be armed as a stop
+// token. Tokenizers implementing EOSDeclarer are asked directly; a tokenizer
+// without that capability is trusted as before — its own EOS() contract
+// already resolves the question (e.g. engine/hip's decoder returns -1, not a
+// fallback zero, when it carries no declared EOS).
+func hasDeclaredEOS(tok TextTokenizer) bool {
+	d, ok := tok.(EOSDeclarer)
+	return !ok || d.HasEOSToken()
+}
+
 // buildStopTokens assembles the stop set from scratch: request stop tokens
 // first, then the tokenizer's EOS, the template turn-close id, any
 // template-implied stop strings, and a checkpoint-declared stop set — each
@@ -830,7 +857,7 @@ func (m *TextModel) buildStopTokens(cfg inference.GenerateConfig) []int32 {
 	stop := append([]int32(nil), cfg.StopTokens...)
 	tmpl := m.chatTemplate()
 	if m.tok != nil {
-		if eos := m.tok.EOS(); eos >= 0 {
+		if eos := m.tok.EOS(); eos >= 0 && hasDeclaredEOS(m.tok) {
 			stop = append(stop, eos)
 		}
 		// The turn-close marker ends an assistant turn on chat-tuned checkpoints
