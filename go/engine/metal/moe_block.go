@@ -11,34 +11,106 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
 
-// MoELayerWeights holds the bf16 weights AND the MoE-specific shape of one gemma4 MoE
-// feed-forward block: the five independent RMSNorm weights, the local dense MLP, the
-// router, and the experts. Norm weights are dModel bf16. RouterNormWScaled is the
-// router's own norm weight ALREADY scaled by RootSize (folded at load like metal's
-// cached ScaleScaled — see MoERouter). PerExpertScale is optional (nil to skip). The
-// local MLP runs at the model-wide dFF; the experts run at ExpertDFF (gemma4 gives
-// them a distinct MoEIntermediateSize). The MoE-specific dims (NumExperts/TopK/
-// ExpertDFF) live here so a MoE layer is self-describing — model-wide dModel/dFF/eps
-// stay executor parameters shared by dense and MoE layers alike.
+// MoELayerWeights holds the bf16 weights AND the MoE-specific shape of one MoE feed-forward block.
+// gemma4's shape populates every field: five independent RMSNorm weights sandwiching a dual-branch
+// FFN (an always-on local dense MLP alongside the routed experts), plus a router with its OWN
+// internal norm. Norm weights are dModel bf16. RouterNormWScaled is the router's own norm weight
+// ALREADY scaled by RootSize (folded at load like metal's cached ScaleScaled — see MoERouter).
+// PerExpertScale is optional (nil to skip). The local MLP runs at the model-wide dFF; the experts
+// run at ExpertDFF (gemma4 gives them a distinct MoEIntermediateSize).
+//
+// A llama-family zoo layer (mixtral/dbrx/olmoe — #59) declares a SIMPLER shape: ONE pre-FFN norm
+// (post_attention_layernorm), no local dense MLP, no post-combine sandwich norms, and no router-own
+// norm (HF's router is a plain nn.Linear on the SAME normed hidden state the experts consume, not a
+// second independent RMSNorm). It populates PreFFNormW only, leaving PreFFNorm2W/PostFFNorm1W/
+// PostFFNorm2W/PostFFNormW/RouterNormWScaled/WGate/WUp/WDown nil. Every executor consuming this
+// struct (moeBlockBF16AfterRouterWithBufferPooled and the router-norm callers below) treats each of
+// those absent fields as identity/skip — nil local MLP ⇒ no local branch; nil PreFFNorm2W ⇒ the
+// expert branch normalises on PreFFNormW instead (the one norm the zoo arch declares); nil
+// PostFFNorm1W/PostFFNorm2W/PostFFNormW ⇒ that norm step is skipped, so a local-less layer with none
+// of the three sandwich norms reduces to out = h + expertAcc, exactly HF's llama-family MoE residual
+// add; nil RouterNormWScaled ⇒ routerNormWeight() falls back to PreFFNormW so the router scores the
+// SAME normed input the experts consume, with no second norm. gemma4's checkpoint always populates
+// every field, so none of these fallbacks ever engage for it — zero behaviour change (TestMoEBlock
+// gates that byte-for-byte). The MoE-specific dims (NumExperts/TopK/ExpertDFF) live here so a MoE
+// layer is self-describing — model-wide dModel/dFF/eps stay executor parameters shared by dense and
+// MoE layers alike.
 type MoELayerWeights struct {
 	NumExperts, TopK, ExpertDFF int // MoE shape (model-wide dModel/dFF/eps are args)
 
-	PreFFNormW   []byte // local MLP input norm
-	PreFFNorm2W  []byte // expert-branch input norm
-	PostFFNorm1W []byte // post local-MLP norm
-	PostFFNorm2W []byte // post-expert norm
-	PostFFNormW  []byte // final combined-branch norm
+	PreFFNormW   []byte // local-branch input norm (gemma4); the ARCH's one pre-FFN norm (zoo)
+	PreFFNorm2W  []byte // expert-branch input norm; nil (zoo) ⇒ falls back to PreFFNormW
+	PostFFNorm1W []byte // post local-MLP norm; nil (zoo, no local branch) ⇒ skipped
+	PostFFNorm2W []byte // post-expert norm; nil (zoo) ⇒ skipped
+	PostFFNormW  []byte // final combined-branch norm; nil (zoo) ⇒ skipped
 
-	WGate, WUp, WDown []byte // local dense MLP (dFF)
+	WGate, WUp, WDown []byte // local dense MLP (dFF); all nil (zoo) ⇒ no local branch at all
 
-	RouterNormWScaled []byte // router internal norm (pre-scaled by RootSize)
+	RouterNormWScaled []byte // router internal norm (pre-scaled by RootSize); nil (zoo) ⇒ see routerNormWeight
 	RouterW           []byte // [NumExperts × dModel] expert-score projection
 	PerExpertScale    []byte // [NumExperts] optional (nil to skip)
 
-	ExpGateW, ExpUpW, ExpDownW []byte // experts ([NumExperts × …] at ExpertDFF)
+	ExpGateW, ExpUpW, ExpDownW []byte // experts ([NumExperts × …] at ExpertDFF) — always required
+}
+
+// routerNormWeight is the norm weight MoERouter applies internally before the router's score
+// projection. gemma4 declares a DEDICATED router norm (RouterNormWScaled — see the field doc); a
+// llama-family zoo layer (mixtral/dbrx/olmoe/qwenmoe — #59) has none: HF's router is a plain
+// nn.Linear consuming the SAME already-normed hidden state the expert branch does, with no second
+// norm of its own. Falling back to PreFFNormW reproduces exactly that — MoERouter(h, PreFFNormW, …)
+// computes RMSNorm(h, PreFFNormW) internally, the identical value the expert branch normalises to
+// (see moeBlockBF16AfterRouterWithBufferPooled's pre2W fallback). gemma4 always sets
+// RouterNormWScaled, so this fallback never engages for it.
+func (w MoELayerWeights) routerNormWeight() []byte {
+	if len(w.RouterNormWScaled) != 0 {
+		return w.RouterNormWScaled
+	}
+	return w.PreFFNormW
+}
+
+// moeLoadedToBF16 maps the shared loader's MoE block (model.LoadedMoE, model.Assemble's neutral
+// output) onto the native bf16 MoELayerWeights — the bf16 sibling of load_shared.go's moeToQuant,
+// for any MoE arch model.Assemble can build: gemma4's dual-branch shape (every field populated) or
+// a llama-family zoo layer's single-norm shape (mixtral/dbrx/olmoe — #59; only PreFFNorm/Router/
+// ExpGate/ExpUp/ExpDown set, everything else nil). Every field maps straight across; an absent
+// LoadedMoE field (nil *Linear or nil/empty []byte) yields the matching nil MoELayerWeights field
+// — the identity/skip convention moeBlockBF16AfterRouterWithBufferPooled now honours (see
+// MoELayerWeights' doc). NumExperts/TopK/ExpertDFF come from arch (model-wide), mirroring
+// moeToQuant exactly.
+//
+// NOT YET WIRED into load_shared.go's loadedToBF16 (that file is a concurrent lane's — #59's file
+// fence names it explicitly out of bounds here): loadedToBF16 maps every OTHER per-layer field from
+// model.LoadedModel onto DecodeLayerWeights but never sets .MoE, so today's bf16 factory route
+// (model.Load → loadedToBF16 → LoadDir/LoadTokenModelDir) drops every MoE layer's weights on the
+// floor before decode is ever reached — a gap upstream of (and distinct from) the decode-shape
+// fix this file otherwise makes. This function is the missing conversion, ready for the one-line
+// wire-up (`l.MoE = moeLoadedToBF16(L.MoE, m.Arch)` beside loadedToBF16's other per-layer fields) —
+// named honestly here rather than silently patched into the forbidden file. Until that lands, a
+// bf16 MoE checkpoint's factory Generate is exercised by calling this conversion directly (see
+// TestFactoryLoadZoo…Generate_Good), the same LoadedMoE→native mapping the quant route already
+// gets automatically through moeToQuant.
+func moeLoadedToBF16(e *model.LoadedMoE, arch model.Arch) *MoELayerWeights {
+	if e == nil {
+		return nil
+	}
+	bw := func(lin *model.Linear) []byte {
+		if lin == nil {
+			return nil
+		}
+		return lin.Weight
+	}
+	return &MoELayerWeights{
+		NumExperts: arch.Experts, TopK: arch.TopK, ExpertDFF: arch.ExpertFF,
+		PreFFNormW: e.PreFFNorm, PreFFNorm2W: e.PreFFNorm2,
+		PostFFNorm1W: e.PostFFNorm1, PostFFNorm2W: e.PostFFNorm2, PostFFNormW: e.PostFFNorm,
+		WGate: bw(e.LocalGate), WUp: bw(e.LocalUp), WDown: bw(e.LocalDown),
+		RouterNormWScaled: e.RouterScale, RouterW: bw(e.Router), PerExpertScale: e.PerExpertScale,
+		ExpGateW: bw(e.ExpGate), ExpUpW: bw(e.ExpUp), ExpDownW: bw(e.ExpDown),
+	}
 }
 
 // mlpTransformBF16 is the gemma SwiGLU MLP transform on an ALREADY-normed input:
@@ -805,14 +877,37 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 	if len(idx) != topK || len(weights) != topK*bf16Size {
 		return nil, core.NewError("native.moeBlockBF16AfterRouter: idx/weights length must equal topK")
 	}
-	if len(w.PreFFNormW) != size || len(w.PreFFNorm2W) != size || len(w.PostFFNorm1W) != size || len(w.PostFFNorm2W) != size || len(w.PostFFNormW) != size {
-		return nil, core.NewError("native.moeBlockBF16AfterRouter: norm weights must be dModel bf16 bytes")
+	// PreFFNormW is always required: gemma4's local-branch input norm, and — for a llama-family zoo
+	// layer with no local branch at all (mixtral/dbrx/olmoe: see MoELayerWeights doc) — the single
+	// pre-FFN norm shared by the router and the expert branch. Every OTHER norm here is OPTIONAL:
+	// nil/empty = identity/skip, matching what the arch actually declares. gemma4's checkpoint always
+	// populates all five, so this is zero behaviour change for it (TestMoEBlock gates that).
+	if len(w.PreFFNormW) != size {
+		return nil, core.NewError("native.moeBlockBF16AfterRouter: PreFFNormW must be dModel bf16 bytes")
 	}
-	if len(w.WGate) != dFF*dModel*bf16Size || len(w.WUp) != dFF*dModel*bf16Size {
-		return nil, core.NewError("native.moeBlockBF16AfterRouter: local gate/up weights must be dFF*dModel bf16 bytes")
+	if len(w.PreFFNorm2W) != 0 && len(w.PreFFNorm2W) != size {
+		return nil, core.NewError("native.moeBlockBF16AfterRouter: PreFFNorm2W must be dModel bf16 bytes or absent")
 	}
-	if len(w.WDown) != dModel*dFF*bf16Size {
-		return nil, core.NewError("native.moeBlockBF16AfterRouter: local down weight must be dModel*dFF bf16 bytes")
+	if len(w.PostFFNorm1W) != 0 && len(w.PostFFNorm1W) != size {
+		return nil, core.NewError("native.moeBlockBF16AfterRouter: PostFFNorm1W must be dModel bf16 bytes or absent")
+	}
+	if len(w.PostFFNorm2W) != 0 && len(w.PostFFNorm2W) != size {
+		return nil, core.NewError("native.moeBlockBF16AfterRouter: PostFFNorm2W must be dModel bf16 bytes or absent")
+	}
+	if len(w.PostFFNormW) != 0 && len(w.PostFFNormW) != size {
+		return nil, core.NewError("native.moeBlockBF16AfterRouter: PostFFNormW must be dModel bf16 bytes or absent")
+	}
+	// hasLocal marks gemma4's always-on dense MLP branch running alongside the routed experts; a zoo
+	// layer (mixtral/dbrx/olmoe) declares none of the three (see MoELayerWeights doc), so the local
+	// branch — its pipelines, its pre/post norms — is skipped entirely below.
+	hasLocal := len(w.WGate) != 0 || len(w.WUp) != 0 || len(w.WDown) != 0
+	if hasLocal {
+		if len(w.WGate) != dFF*dModel*bf16Size || len(w.WUp) != dFF*dModel*bf16Size {
+			return nil, core.NewError("native.moeBlockBF16AfterRouter: local gate/up weights must be dFF*dModel bf16 bytes")
+		}
+		if len(w.WDown) != dModel*dFF*bf16Size {
+			return nil, core.NewError("native.moeBlockBF16AfterRouter: local down weight must be dModel*dFF bf16 bytes")
+		}
 	}
 	gateSz, downSz := expertDFF*dModel*bf16Size, dModel*expertDFF*bf16Size
 	if len(w.ExpGateW) != numExperts*gateSz || len(w.ExpUpW) != numExperts*gateSz || len(w.ExpDownW) != numExperts*downSz {
@@ -832,7 +927,7 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 	} else {
 		out = make([]byte, size)
 	}
-	if dModel == 0 || dFF == 0 || expertDFF == 0 {
+	if dModel == 0 || expertDFF == 0 || (hasLocal && dFF == 0) {
 		if bufferOut && size > 0 {
 			clear(unsafe.Slice((*byte)(outputBuf.Contents()), size))
 			return nil, nil
@@ -843,22 +938,51 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 		return out, nil
 	}
 
-	pre1Buf := bf16WeightView(w.PreFFNormW, bufView{})
-	pre2Buf := bf16WeightView(w.PreFFNorm2W, bufView{})
-	post1Buf := bf16WeightView(w.PostFFNorm1W, bufView{})
-	post2Buf := bf16WeightView(w.PostFFNorm2W, bufView{})
-	postBuf := bf16WeightView(w.PostFFNormW, bufView{})
-	localGate, localUp, localDown := residentBytes(w.WGate), residentBytes(w.WUp), residentBytes(w.WDown)
-	expertGate, expertUp, expertDown := residentBytes(w.ExpGateW), residentBytes(w.ExpUpW), residentBytes(w.ExpDownW)
-	localInBM, localInBN, localInSM, localInSN, localInTM, localInTN := gemvTiles(dModel, dFF)
-	localInPSO, err := pipelineFor(gemvKernelName("bfloat16", localInBM, localInBN, localInSM, localInSN, localInTM, localInTN))
-	if err != nil {
-		return nil, err
+	// pre2W is the expert branch's input norm. A zoo layer sets only PreFFNormW (the single pre-FFN
+	// norm shared by router + experts — see MoEWeightNames doc); fall back to it when PreFFNorm2W is
+	// absent, so the expert branch normalises on exactly the value HF's llama-family MoE feeds its
+	// router AND its experts. gemma4 always sets PreFFNorm2W distinctly, so this fallback never
+	// engages for it.
+	pre2W := w.PreFFNorm2W
+	if len(pre2W) == 0 {
+		pre2W = w.PreFFNormW
 	}
-	localDownBM, localDownBN, localDownSM, localDownSN, localDownTM, localDownTN := gemvTiles(dFF, dModel)
-	localDownPSO, err := pipelineFor(gemvKernelName("bfloat16", localDownBM, localDownBN, localDownSM, localDownSN, localDownTM, localDownTN))
-	if err != nil {
-		return nil, err
+	hasPost1 := len(w.PostFFNorm1W) != 0
+	hasPost2 := len(w.PostFFNorm2W) != 0
+	hasPostCombine := len(w.PostFFNormW) != 0
+
+	pre1Buf := bf16WeightView(w.PreFFNormW, bufView{})
+	pre2Buf := bf16WeightView(pre2W, bufView{})
+	var post1Buf, post2Buf, postBuf bufView
+	if hasPost1 {
+		post1Buf = bf16WeightView(w.PostFFNorm1W, bufView{})
+	}
+	if hasPost2 {
+		post2Buf = bf16WeightView(w.PostFFNorm2W, bufView{})
+	}
+	if hasPostCombine {
+		postBuf = bf16WeightView(w.PostFFNormW, bufView{})
+	}
+	var localGate, localUp, localDown metal.MTLBuffer
+	if hasLocal {
+		localGate, localUp, localDown = residentBytes(w.WGate), residentBytes(w.WUp), residentBytes(w.WDown)
+	}
+	expertGate, expertUp, expertDown := residentBytes(w.ExpGateW), residentBytes(w.ExpUpW), residentBytes(w.ExpDownW)
+	var localInBM, localInBN, localInSM, localInSN, localInTM, localInTN int
+	var localDownBM, localDownBN, localDownSM, localDownSN, localDownTM, localDownTN int
+	var localInPSO, localDownPSO metal.MTLComputePipelineState
+	if hasLocal {
+		var err error
+		localInBM, localInBN, localInSM, localInSN, localInTM, localInTN = gemvTiles(dModel, dFF)
+		localInPSO, err = pipelineFor(gemvKernelName("bfloat16", localInBM, localInBN, localInSM, localInSN, localInTM, localInTN))
+		if err != nil {
+			return nil, err
+		}
+		localDownBM, localDownBN, localDownSM, localDownSN, localDownTM, localDownTN = gemvTiles(dFF, dModel)
+		localDownPSO, err = pipelineFor(gemvKernelName("bfloat16", localDownBM, localDownBN, localDownSM, localDownSN, localDownTM, localDownTN))
+		if err != nil {
+			return nil, err
+		}
 	}
 	expertInBM, expertInBN, expertInSM, expertInSN, expertInTM, expertInTN := gemvTiles(dModel, expertDFF)
 	expertInPSO, err := pipelineFor(gemvKernelName("bfloat16", expertInBM, expertInBN, expertInSM, expertInSN, expertInTM, expertInTN))
@@ -982,14 +1106,16 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 		emitAdd := func(a, b, out metal.MTLBuffer) {
 			emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
 		}
-		emitRMS(inputBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
-		emitLocalInGemv(localGate, scratch.localIn, msc.gate, 0)
-		emitLocalInGemv(localUp, scratch.localIn, msc.up, 0)
-		if encErr = emitGelu(msc.gate, msc.up, msc.gated, dFF); encErr != nil {
-			endEncodingFast(enc)
-			return
+		if hasLocal {
+			emitRMS(inputBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
+			emitLocalInGemv(localGate, scratch.localIn, msc.gate, 0)
+			emitLocalInGemv(localUp, scratch.localIn, msc.up, 0)
+			if encErr = emitGelu(msc.gate, msc.up, msc.gated, dFF); encErr != nil {
+				endEncodingFast(enc)
+				return
+			}
+			emitLocalDownGemv(localDown, msc.gated, scratch.localOut)
 		}
-		emitLocalDownGemv(localDown, msc.gated, scratch.localOut)
 		emitRMS(inputBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 		for i := range topK {
 			e := int(idx[i])
@@ -1014,11 +1140,35 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 				emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
 			}
 		}
-		emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
-		emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
-		emitAdd(scratch.localNormed, scratch.expertNormed, scratch.combined)
-		emitRMS(scratch.combined, postBuf.buf, scratch.ffResidual, postBuf.off)
-		emitAdd(inputBuf, scratch.ffResidual, finalOutBuf)
+		// Combine: gemma4 sums BOTH branches (each independently post-normed) then post-norms the sum.
+		// A zoo layer with no local branch (hasLocal false) skips straight to the expert accumulator —
+		// HF's llama-family MoE adds the routed output directly to the residual, no sandwich norm at
+		// all (see MoELayerWeights doc) — and any INDIVIDUAL norm this arch omits is skipped in place
+		// (nil/empty = identity), so a hybrid shape degrades gracefully too. Dispatch order matches the
+		// original unconditional gemma4 sequence exactly (localNormed, then expertNormed, then the
+		// combine add, then the post-combine norm) so gemma4's byte-for-byte output is untouched.
+		var localBranch metal.MTLBuffer
+		if hasLocal {
+			localBranch = scratch.localOut
+			if hasPost1 {
+				emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
+				localBranch = scratch.localNormed
+			}
+		}
+		ffResidualSrc := scratch.expertAcc
+		if hasPost2 {
+			emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
+			ffResidualSrc = scratch.expertNormed
+		}
+		if hasLocal {
+			emitAdd(localBranch, ffResidualSrc, scratch.combined)
+			ffResidualSrc = scratch.combined
+		}
+		if hasPostCombine {
+			emitRMS(ffResidualSrc, postBuf.buf, scratch.ffResidual, postBuf.off)
+			ffResidualSrc = scratch.ffResidual
+		}
+		emitAdd(inputBuf, ffResidualSrc, finalOutBuf)
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
 		waitUntilCompletedFast(cb)
@@ -1080,8 +1230,9 @@ func moeBlockBF16WithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuffe
 		return core.NewError("native.MoEBlockBF16: h must be dModel bf16 bytes")
 	}
 	numExperts, topK := w.NumExperts, w.TopK
+	routerNormW := w.routerNormWeight() // zoo layers (no RouterNormWScaled) fall back to PreFFNormW
 
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps); ok || err != nil {
+	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps); ok || err != nil {
 		if err != nil {
 			return err
 		}
@@ -1089,7 +1240,7 @@ func moeBlockBF16WithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuffe
 		putRouterDeviceScratch(routerScratch)
 		return err
 	}
-	idx, weights, err := MoERouter(h, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps)
+	idx, weights, err := MoERouter(h, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps)
 	if err != nil {
 		return err
 	}
@@ -1118,8 +1269,10 @@ func moeBlockBF16WithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffer
 		return blockOut, blockErr
 	}
 
-	// router decision on the raw residual (the router applies its own norm).
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps); ok || err != nil {
+	// router decision on the raw residual (the router applies its own norm) — or, for a zoo layer
+	// with no router-own norm, on routerNormWeight()'s PreFFNormW fallback (see MoELayerWeights doc).
+	routerNormW := w.routerNormWeight()
+	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps); ok || err != nil {
 		if err != nil {
 			return nil, err
 		}
@@ -1132,7 +1285,7 @@ func moeBlockBF16WithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffer
 		putRouterDeviceScratch(routerScratch)
 		return blockOut, err
 	}
-	idx, weights, err := MoERouter(h, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps)
+	idx, weights, err := MoERouter(h, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps)
 	if err != nil {
 		return nil, err
 	}
@@ -1187,6 +1340,19 @@ type MoEQuantLayerWeights struct {
 	SwigluLimit                         float32
 	RouterBias                          []byte
 	ExpGateBias, ExpUpBias, ExpDownBias []byte
+}
+
+// routerNorm is MoELayerWeights.routerNormWeight() for the quant struct: the norm weight (bytes
+// AND its pre-resolved view, paired) the quant router applies internally before the score
+// projection. gemma4 declares a dedicated router norm (RouterNormWScaled); a llama-family zoo layer
+// (mixtral/dbrx/olmoe/qwenmoe — #59) has none, so it falls back to PreFFNormW/preFFNormView — the
+// SAME value the expert branch normalises to (see moeBlockQuantAfterRouterWithDeviceIndexBufferPooled's
+// pre2W fallback). gemma4 always sets RouterNormWScaled, so this fallback never engages for it.
+func (w MoEQuantLayerWeights) routerNorm() ([]byte, bufView) {
+	if len(w.RouterNormWScaled) != 0 {
+		return w.RouterNormWScaled, w.routerNormView
+	}
+	return w.PreFFNormW, w.preFFNormView
 }
 
 type mlpTransformScratch struct {
@@ -2213,24 +2379,47 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 	if (!idxOnDevice && len(idx) != topK) || (idxOnDevice && idx != nil && len(idx) != topK) || (!weightsOnDevice && len(weights) != topK*bf16Size) || (weightsOnDevice && weights != nil && len(weights) != topK*bf16Size) {
 		return nil, core.NewError("native.moeBlockQuantAfterRouter: idx/weights length must equal topK")
 	}
-	if len(w.PreFFNormW) != size || len(w.PreFFNorm2W) != size || len(w.PostFFNorm1W) != size || len(w.PostFFNorm2W) != size || len(w.PostFFNormW) != size {
-		return nil, core.NewError("native.moeBlockQuantAfterRouter: norm weights must be dModel bf16 bytes")
+	// PreFFNormW is always required (see MoELayerWeights doc's bf16 rationale — the SAME zoo-vs-gemma4
+	// shape split applies here); every OTHER norm is OPTIONAL: nil/empty = identity/skip. gemma4's
+	// checkpoint always populates all five, so this is zero behaviour change for it.
+	if len(w.PreFFNormW) != size {
+		return nil, core.NewError("native.moeBlockQuantAfterRouter: PreFFNormW must be dModel bf16 bytes")
 	}
-	localGatePacked, localGateScales, localGateBiases, localGateGroupSize, localGateBits, err := quantWeightViewsForShape("native.moeBlockQuantAfterRouter: local gate", w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits)
-	if err != nil {
-		return nil, err
+	if len(w.PreFFNorm2W) != 0 && len(w.PreFFNorm2W) != size {
+		return nil, core.NewError("native.moeBlockQuantAfterRouter: PreFFNorm2W must be dModel bf16 bytes or absent")
 	}
-	localUpPacked, localUpScales, localUpBiases, localUpGroupSize, localUpBits, err := quantWeightViewsForShape("native.moeBlockQuantAfterRouter: local up", w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits)
-	if err != nil {
-		return nil, err
+	if len(w.PostFFNorm1W) != 0 && len(w.PostFFNorm1W) != size {
+		return nil, core.NewError("native.moeBlockQuantAfterRouter: PostFFNorm1W must be dModel bf16 bytes or absent")
 	}
-	localDownPacked, localDownScales, localDownBiases, localDownGroupSize, localDownBits, err := quantWeightViewsForShape("native.moeBlockQuantAfterRouter: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)
-	if err != nil {
-		return nil, err
+	if len(w.PostFFNorm2W) != 0 && len(w.PostFFNorm2W) != size {
+		return nil, core.NewError("native.moeBlockQuantAfterRouter: PostFFNorm2W must be dModel bf16 bytes or absent")
 	}
-	localGateView := quantMLPProjView{packed: localGatePacked, scales: localGateScales, biases: localGateBiases, groupSize: localGateGroupSize, bits: localGateBits}
-	localUpView := quantMLPProjView{packed: localUpPacked, scales: localUpScales, biases: localUpBiases, groupSize: localUpGroupSize, bits: localUpBits}
-	localDownView := quantMLPProjView{packed: localDownPacked, scales: localDownScales, biases: localDownBiases, groupSize: localDownGroupSize, bits: localDownBits}
+	if len(w.PostFFNormW) != 0 && len(w.PostFFNormW) != size {
+		return nil, core.NewError("native.moeBlockQuantAfterRouter: PostFFNormW must be dModel bf16 bytes or absent")
+	}
+	// hasLocal marks gemma4's always-on dense MLP branch (see MoELayerWeights doc); a zoo layer
+	// (mixtral/dbrx/olmoe) declares none of the three, so the local branch's quant views/pipelines are
+	// skipped entirely below — resolving quantWeightViewsForShape against an absent LocalGate/Up/Down
+	// would otherwise fail the shape check (0 packed bytes) before hasLocal is even consulted.
+	hasLocal := len(w.LocalGate.Packed) != 0 || len(w.LocalUp.Packed) != 0 || len(w.LocalDown.Packed) != 0
+	var localGateView, localUpView, localDownView quantMLPProjView
+	if hasLocal {
+		localGatePacked, localGateScales, localGateBiases, localGateGroupSize, localGateBits, lerr := quantWeightViewsForShape("native.moeBlockQuantAfterRouter: local gate", w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits)
+		if lerr != nil {
+			return nil, lerr
+		}
+		localUpPacked, localUpScales, localUpBiases, localUpGroupSize, localUpBits, lerr := quantWeightViewsForShape("native.moeBlockQuantAfterRouter: local up", w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits)
+		if lerr != nil {
+			return nil, lerr
+		}
+		localDownPacked, localDownScales, localDownBiases, localDownGroupSize, localDownBits, lerr := quantWeightViewsForShape("native.moeBlockQuantAfterRouter: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)
+		if lerr != nil {
+			return nil, lerr
+		}
+		localGateView = quantMLPProjView{packed: localGatePacked, scales: localGateScales, biases: localGateBiases, groupSize: localGateGroupSize, bits: localGateBits}
+		localUpView = quantMLPProjView{packed: localUpPacked, scales: localUpScales, biases: localUpBiases, groupSize: localUpGroupSize, bits: localUpBits}
+		localDownView = quantMLPProjView{packed: localDownPacked, scales: localDownScales, biases: localDownBiases, groupSize: localDownGroupSize, bits: localDownBits}
+	}
 
 	fusedExperts := len(w.ExpGateUp.Packed) > 0
 	expertGatePackedPer, expertGateScalePer := 0, 0
@@ -2240,6 +2429,7 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 	var expGateUpPacked, expGateUpScales, expGateUpBiases bufView
 	var expDownPacked, expDownScales, expDownBiases bufView
 	var expGateGroupSize, expGateBits, expUpGroupSize, expUpBits, expGateUpGroupSize, expGateUpBits, expDownGroupSize, expDownBits int
+	var err error
 	if fusedExperts {
 		expGateUpPacked, expGateUpScales, expGateUpBiases, expGateUpGroupSize, expGateUpBits, err = quantWeightViewsForShape("native.moeBlockQuantAfterRouter: expert gate_up", w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 		if err != nil {
@@ -2292,7 +2482,7 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 	} else {
 		out = make([]byte, size)
 	}
-	if dModel == 0 || dFF == 0 || expertDFF == 0 {
+	if dModel == 0 || expertDFF == 0 || (hasLocal && dFF == 0) {
 		if bufferOut && size > 0 {
 			clear(unsafe.Slice((*byte)(outputBuf.Contents()), size))
 			return nil, nil
@@ -2305,7 +2495,7 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 	qmvPSO := func(outDim, inDim, groupSize, bits int) (metal.MTLComputePipelineState, error) {
 		return pipelineFor(qmvBF16KernelName(outDim, inDim, groupSize, bits))
 	}
-	useLocalMega := ffnMegaDefaultGeometry(dModel, dFF) && ffnMegaSupported(localGateView, localUpView, localDownView, dModel, dFF)
+	useLocalMega := hasLocal && ffnMegaDefaultGeometry(dModel, dFF) && ffnMegaSupported(localGateView, localUpView, localDownView, dModel, dFF)
 	var localMegaPSO metal.MTLComputePipelineState
 	if useLocalMega {
 		localMegaPSO, err = ffnMegaPipelineBits(localGateView.bits)
@@ -2314,16 +2504,16 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 		}
 	}
 	var localGatePSO, localUpPSO, localDownPSO metal.MTLComputePipelineState
-	if !useLocalMega {
-		localGatePSO, err = qmvPSO(dFF, dModel, localGateGroupSize, localGateBits)
+	if hasLocal && !useLocalMega {
+		localGatePSO, err = qmvPSO(dFF, dModel, localGateView.groupSize, localGateView.bits)
 		if err != nil {
 			return nil, err
 		}
-		localUpPSO, err = qmvPSO(dFF, dModel, localUpGroupSize, localUpBits)
+		localUpPSO, err = qmvPSO(dFF, dModel, localUpView.groupSize, localUpView.bits)
 		if err != nil {
 			return nil, err
 		}
-		localDownPSO, err = qmvPSO(dModel, dFF, localDownGroupSize, localDownBits)
+		localDownPSO, err = qmvPSO(dModel, dFF, localDownView.groupSize, localDownView.bits)
 		if err != nil {
 			return nil, err
 		}
@@ -2404,11 +2594,31 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 	if scaleErr != nil && len(weights) != topK*bf16Size {
 		return nil, core.NewError("native.moeBlockQuantAfterRouter: host weights required when device scalar scaling is unavailable")
 	}
+	// pre2W/pre2View are the expert branch's input norm. A zoo layer sets only PreFFNormW (see
+	// MoELayerWeights doc's bf16 rationale — the same convention applies here); fall back to it
+	// (bytes AND its pre-resolved view together) when PreFFNorm2W is absent. post1Buf/post2Buf/
+	// postBuf stay the zero bufView (never resolved — resolving an absent norm's empty bytes would
+	// panic in residentBytes) when their norm is absent; hasPost1/2/Combine below gate every emit
+	// that would otherwise read them.
+	pre2W, pre2View := w.PreFFNorm2W, w.preFFNorm2View
+	if len(pre2W) == 0 {
+		pre2W, pre2View = w.PreFFNormW, w.preFFNormView
+	}
+	hasPost1 := len(w.PostFFNorm1W) != 0
+	hasPost2 := len(w.PostFFNorm2W) != 0
+	hasPostCombine := len(w.PostFFNormW) != 0
 	pre1Buf := bf16WeightView(w.PreFFNormW, w.preFFNormView)
-	pre2Buf := bf16WeightView(w.PreFFNorm2W, w.preFFNorm2View)
-	post1Buf := bf16WeightView(w.PostFFNorm1W, w.postFFNorm1View)
-	post2Buf := bf16WeightView(w.PostFFNorm2W, w.postFFNorm2View)
-	postBuf := bf16WeightView(w.PostFFNormW, w.postFFNormView)
+	pre2Buf := bf16WeightView(pre2W, pre2View)
+	var post1Buf, post2Buf, postBuf bufView
+	if hasPost1 {
+		post1Buf = bf16WeightView(w.PostFFNorm1W, w.postFFNorm1View)
+	}
+	if hasPost2 {
+		post2Buf = bf16WeightView(w.PostFFNorm2W, w.postFFNorm2View)
+	}
+	if hasPostCombine {
+		postBuf = bf16WeightView(w.PostFFNormW, w.postFFNormView)
+	}
 
 	var encErr error
 	run := func() {
@@ -2522,17 +2732,19 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 		emitAdd := func(a, b, out metal.MTLBuffer) {
 			emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
 		}
-		emitRMS(inputBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
-		if useLocalMega {
-			emitFFNMega(sink, localMegaPSO, scratch.localIn, 0, localGateView, localUpView, localDownView, scratch.localMegaGated, scratch.localOut, 0, scratch.localMegaArrive, dModel, dFF)
-		} else {
-			emitQ(localGatePSO, localGatePacked.buf, localGateScales.buf, localGateBiases.buf, scratch.localIn, msc.gate, localGatePacked.off, localGateScales.off, localGateBiases.off, 0, dModel, dFF)
-			emitQ(localUpPSO, localUpPacked.buf, localUpScales.buf, localUpBiases.buf, scratch.localIn, msc.up, localUpPacked.off, localUpScales.off, localUpBiases.off, 0, dModel, dFF)
-			if encErr = emitGelu(msc.gate, msc.up, msc.gated, dFF); encErr != nil {
-				endEncodingFast(enc)
-				return
+		if hasLocal {
+			emitRMS(inputBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
+			if useLocalMega {
+				emitFFNMega(sink, localMegaPSO, scratch.localIn, 0, localGateView, localUpView, localDownView, scratch.localMegaGated, scratch.localOut, 0, scratch.localMegaArrive, dModel, dFF)
+			} else {
+				emitQ(localGatePSO, localGateView.packed.buf, localGateView.scales.buf, localGateView.biases.buf, scratch.localIn, msc.gate, localGateView.packed.off, localGateView.scales.off, localGateView.biases.off, 0, dModel, dFF)
+				emitQ(localUpPSO, localUpView.packed.buf, localUpView.scales.buf, localUpView.biases.buf, scratch.localIn, msc.up, localUpView.packed.off, localUpView.scales.off, localUpView.biases.off, 0, dModel, dFF)
+				if encErr = emitGelu(msc.gate, msc.up, msc.gated, dFF); encErr != nil {
+					endEncodingFast(enc)
+					return
+				}
+				emitQ(localDownPSO, localDownView.packed.buf, localDownView.scales.buf, localDownView.biases.buf, msc.gated, scratch.localOut, localDownView.packed.off, localDownView.scales.off, localDownView.biases.off, 0, dFF, dModel)
 			}
-			emitQ(localDownPSO, localDownPacked.buf, localDownScales.buf, localDownBiases.buf, msc.gated, scratch.localOut, localDownPacked.off, localDownScales.off, localDownBiases.off, 0, dFF, dModel)
 		}
 		emitRMS(inputBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 		for i := range topK {
@@ -2585,11 +2797,34 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 				emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
 			}
 		}
-		emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
-		emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
-		emitAdd(scratch.localNormed, scratch.expertNormed, scratch.combined)
-		emitRMS(scratch.combined, postBuf.buf, scratch.ffResidual, postBuf.off)
-		emitAdd(inputBuf, scratch.ffResidual, finalOutBuf)
+		// Combine: gemma4 sums BOTH branches (each independently post-normed) then post-norms the sum.
+		// A zoo layer with no local branch (hasLocal false) skips straight to the expert accumulator —
+		// HF's llama-family MoE adds the routed output directly to the residual, no sandwich norm at
+		// all (see MoELayerWeights doc) — and any INDIVIDUAL norm this arch omits is skipped in place
+		// (nil/empty = identity). Dispatch order matches the original unconditional gemma4 sequence
+		// exactly so gemma4's byte-for-byte output is untouched.
+		var localBranch metal.MTLBuffer
+		if hasLocal {
+			localBranch = scratch.localOut
+			if hasPost1 {
+				emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
+				localBranch = scratch.localNormed
+			}
+		}
+		ffResidualSrc := scratch.expertAcc
+		if hasPost2 {
+			emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
+			ffResidualSrc = scratch.expertNormed
+		}
+		if hasLocal {
+			emitAdd(localBranch, ffResidualSrc, scratch.combined)
+			ffResidualSrc = scratch.combined
+		}
+		if hasPostCombine {
+			emitRMS(ffResidualSrc, postBuf.buf, scratch.ffResidual, postBuf.off)
+			ffResidualSrc = scratch.ffResidual
+		}
+		emitAdd(inputBuf, ffResidualSrc, finalOutBuf)
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
 		// The decode loop's fully-device path (session-OWNED scratch, device h/idx/weights,
@@ -2925,9 +3160,10 @@ func moeBlockQuantWithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuff
 		return core.NewError("native.MoEBlockQuant: h must be dModel bf16 bytes")
 	}
 	numExperts, topK := w.NumExperts, w.TopK
+	routerNormW, routerNormView := w.routerNorm() // zoo layers (no RouterNormWScaled) fall back to PreFFNormW
 
 	if quantMoEDeviceRouterBuffersUsable(w, dModel) {
-		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
 		if ok || err != nil {
 			if err != nil {
 				return err
@@ -2941,7 +3177,7 @@ func moeBlockQuantWithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuff
 			return err
 		}
 	}
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
+	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
 		if err != nil {
 			return err
 		}
@@ -2954,7 +3190,7 @@ func moeBlockQuantWithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuff
 		putRouterDeviceScratch(routerScratch)
 		return err
 	}
-	idx, weights, err := moeRouterQuantWithViews(h, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	idx, weights, err := moeRouterQuantWithViews(h, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
 	if err != nil {
 		return err
 	}
@@ -2983,8 +3219,9 @@ func moeBlockQuantWithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffe
 		return blockOut, blockErr
 	}
 
+	routerNormW, routerNormView := w.routerNorm() // zoo layers (no RouterNormWScaled) fall back to PreFFNormW
 	if quantMoEDeviceRouterBuffersUsable(w, dModel) {
-		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
 		if ok || err != nil {
 			if err != nil {
 				return nil, err
@@ -2998,7 +3235,7 @@ func moeBlockQuantWithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffe
 			return blockOut, err
 		}
 	}
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
+	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
 		if err != nil {
 			return nil, err
 		}
@@ -3011,7 +3248,7 @@ func moeBlockQuantWithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffe
 		putRouterDeviceScratch(routerScratch)
 		return blockOut, err
 	}
-	idx, weights, err := moeRouterQuantWithViews(h, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	idx, weights, err := moeRouterQuantWithViews(h, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
 	if err != nil {
 		return nil, err
 	}

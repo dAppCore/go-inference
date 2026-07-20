@@ -219,17 +219,31 @@ func validateMoEQuantLayerWeights(fn string, w *MoEQuantLayerWeights, dModel, dF
 	if w.NumExperts <= 0 || w.TopK <= 0 || w.TopK > w.NumExperts || w.ExpertDFF <= 0 {
 		return core.NewError(fn + ": invalid MoE quant geometry")
 	}
-	for _, norm := range [][]byte{w.PreFFNormW, w.PreFFNorm2W, w.PostFFNorm1W, w.PostFFNorm2W, w.PostFFNormW, w.RouterNormWScaled} {
-		if len(norm) != dModel*bf16Size {
+	// PreFFNormW is always required (see MoELayerWeights doc's bf16 rationale — the same zoo-vs-
+	// gemma4 shape split applies to the quant struct); every other norm — including the router's
+	// own norm, RouterNormWScaled — is OPTIONAL: nil/empty = identity/skip. A llama-family zoo layer
+	// (mixtral/dbrx/olmoe) sets PreFFNormW only; gemma4's checkpoint always populates all six, so
+	// this is zero behaviour change for it.
+	if len(w.PreFFNormW) != dModel*bf16Size {
+		return core.NewError(fn + ": MoE PreFFNormW size mismatch")
+	}
+	for _, norm := range [][]byte{w.PreFFNorm2W, w.PostFFNorm1W, w.PostFFNorm2W, w.PostFFNormW, w.RouterNormWScaled} {
+		if len(norm) != 0 && len(norm) != dModel*bf16Size {
 			return core.NewError(fn + ": MoE norm weight size mismatch")
 		}
 	}
 	if w.PerExpertScale != nil && len(w.PerExpertScale) != w.NumExperts*bf16Size {
 		return core.NewError(fn + ": MoE per-expert scale size mismatch")
 	}
-	if !quantWeightShapeOK(w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
-		!quantWeightShapeOK(w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
-		!quantWeightShapeOK(w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits) {
+	// hasLocal marks gemma4's always-on dense MLP branch (see MoELayerWeights doc); a zoo layer
+	// declares none of the three, so the shape check below — which would otherwise reject an
+	// absent local branch's zero-value QuantWeights — only runs when at least one is present (a
+	// PARTIALLY specified local branch is still a malformed layer and still rejected).
+	hasLocal := len(w.LocalGate.Packed) != 0 || len(w.LocalUp.Packed) != 0 || len(w.LocalDown.Packed) != 0
+	if hasLocal &&
+		(!quantWeightShapeOK(w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
+			!quantWeightShapeOK(w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
+			!quantWeightShapeOK(w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)) {
 		return core.NewError(fn + ": MoE local MLP quant size mismatch")
 	}
 	if !quantWeightShapeOK(w.Router, w.NumExperts, dModel, w.RouterGroupSize, w.RouterBits) {
@@ -364,7 +378,7 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		proj := qmvProjector{
 			q: mkW(ql.Q), k: mkW(ql.K), v: mkW(ql.V), o: mkW(ql.O),
 			bQ: normView(ql.BQ), bK: normView(ql.BK), bV: normView(ql.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
-			bO:     normView(ql.BO),                                       // gpt_oss o_proj bias (zero bufView otherwise)
+			bO:     normView(ql.BO), // gpt_oss o_proj bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 			groupSize: ql.GroupSize, bits: ql.Bits,
 		}
