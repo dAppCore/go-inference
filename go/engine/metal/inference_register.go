@@ -204,9 +204,12 @@ var (
 // visionModel probes the underlying session model for the vision capability
 // (the engine.VisionTokenModel method set, satisfiable BY SHAPE — a model
 // package cannot import engine, AX-8). No surviving SessionModel carries a
-// vision tower (the retired composed engine's qwen tower was the one user,
-// #50), so today this answers false and the serve path's image-refusal is
-// unchanged; the seam stays for the factory vision port.
+// vision tower: the retired composed engine's qwen tower was the one user
+// (#50), and its factory replacement (#59 item 1) landed on the
+// *NativeTokenModel lane instead (qwen35 hybrids serve there, not here —
+// token_model.go's qwenVision), so this adapter's arms (rwkv7, mamba2) answer
+// false and the serve path's image-refusal is unchanged. The seam stays for a
+// future SessionModel-served arch that grows a tower.
 func (m *sessionTextModel) visionModel() (engine.VisionTokenModel, bool) {
 	if m == nil || m.sm == nil {
 		return nil, false

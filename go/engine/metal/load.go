@@ -170,9 +170,10 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		// and a checkpoint the factory cannot serve fails HERE with a named error instead of
 		// falling back silently. Sub-2-bit packs (Bonsai 1-bit) serve through the LoadLinear
 		// b1→b2 exact repack + the owned-weight resident binding (#60) — the up-front decline
-		// they used to hit is gone. The remaining named gap is the qwen vision tower (the
-		// factory serves the TEXT stack; an image turn on a vision-towered qwen checkpoint gets
-		// the engine's clean not-a-vision-model refusal).
+		// they used to hit is gone. The qwen vision tower gap is closed too (#59 item 1): a
+		// vision-towered qwen checkpoint attaches its factory tower at the vision seam below
+		// (loadQwenVisionTower) and serves image turns; only a TEXT-ONLY checkpoint keeps the
+		// engine's clean not-a-vision-model refusal.
 	}
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
