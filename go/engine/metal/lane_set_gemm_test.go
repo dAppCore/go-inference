@@ -373,11 +373,11 @@ func retireTerminal(t *testing.T, ls *laneSet, steps []inference.LaneStep) {
 
 // laneSetQuantFixtureModel builds a synthetic 4-bit quant gemma4 whose hidden
 // width (256) sits OFF the fast-twin envelope: Q/K/V/gate/up read inDim 256,
-// and 256%512 != 0 routes their per-row oracle to the qmv_impl twin the tiled
-// kernel does not reproduce — so the byte tier must DECLINE this model. The
-// off-envelope decline fixture for TestLaneSetGEMMQuantOffEnvelopeDeclinesFold;
-// the positive quant byte-identity receipt rides the fast-twin fixture
-// (laneSetQuantFastFixtureModelMax, every inDim a 512-multiple).
+// and 256%512 != 0 routes their per-row oracle to the qmv_impl twin — served
+// by the GENERAL tiled M-variant (lthn_qmv_rows_general), so the byte tier now
+// accepts this model. The off-envelope fixture for
+// TestLaneSetGEMMQuantOffEnvelopeFoldByteIdentity; the fast-twin receipt rides
+// laneSetQuantFastFixtureModelMax (every inDim a 512-multiple).
 func laneSetQuantFixtureModel(t *testing.T) *NativeTokenModel {
 	return laneSetQuantFixtureModelMax(t, 32)
 }
@@ -423,9 +423,9 @@ func laneSetQuantFixtureModelMax(t *testing.T, maxLen int) *NativeTokenModel {
 		t.Skip("quant fixture is not recorded-ICB eligible on this metallib")
 	}
 	// No rowsByteTier guard: this fixture's inDim 256 fails the fast-twin
-	// envelope (inDim%512), so the byte tier declines it regardless of the
-	// tiled kernel's availability — precisely what the sole caller
-	// (TestLaneSetGEMMQuantOffEnvelopeDeclinesFold) pins. Recorded-ICB
+	// envelope (inDim%512) and rides the general tiled tier instead — the
+	// boundary its sole caller
+	// (TestLaneSetGEMMQuantOffEnvelopeFoldByteIdentity) pins. Recorded-ICB
 	// eligibility is the only precondition.
 	_ = as.Close()
 	return m
@@ -507,17 +507,21 @@ func laneSetQuantFixtureFromConfig(t *testing.T, cfg g4.Config, maxLen int, muta
 	return m
 }
 
-// TestLaneSetGEMMQuantOffEnvelopeDeclinesFold pins the projection SAFETY GATE:
-// a DENSE 4-bit quant model whose dims sit OFF the fast-twin envelope (hidden
-// 256 → inDim 256, 256%512 != 0) — no PLE, no sliding, no KV-share, so the
-// proven-envelope exclusions do NOT apply — declines the weight-read-once
-// fold, because its per-row oracle routes to the qmv_impl twin (safe-loaded
-// final block, moved-back out-tile) that the tiled qmv_fast M-variant does not
-// reproduce. Even with the forward armed (gemmMode 1) the lane set falls back
-// to the per-lane ICB replay byte-for-byte and the GEMM counter stays zero.
-// The positive fast-twin receipt is TestLaneSetGEMMQuantByteIdentityHiddens;
-// this pin guards the boundary between the twins.
-func TestLaneSetGEMMQuantOffEnvelopeDeclinesFold(t *testing.T) {
+// TestLaneSetGEMMQuantOffEnvelopeFoldByteIdentity pins the twin boundary AFTER
+// the general tier: a DENSE 4-bit quant model whose dims sit OFF the fast-twin
+// envelope (hidden 256 → inDim 256, 256%512 != 0) — no PLE, no sliding, no
+// KV-share — now FIRES the armed weight-read-once fold, because its per-row
+// oracle's qmv_impl twin has its own M-variant (lthn_qmv_rows_general,
+// qmvRowsTiledKeyFor's general branch) and rowsByteTier accepts the tiled
+// plan. The receipt is unchanged in kind: byte-identical hiddens and tokens to
+// the per-lane ICB replay at every step, with the GEMM counter now PROVING the
+// fold ran (its predecessor, TestLaneSetGEMMQuantOffEnvelopeDeclinesFold,
+// pinned counter==0 back when off-envelope dims had no byte-exact tiled route
+// — the boundary this test guards moved when the general twin landed; the
+// gather/qmm_t fallback transparency it also proved is preserved because a
+// declined fold still replays byte-for-byte). The fast-twin receipt is
+// TestLaneSetGEMMQuantByteIdentityHiddens.
+func TestLaneSetGEMMQuantOffEnvelopeFoldByteIdentity(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set — GPU decode fixture")
 	}
@@ -545,7 +549,7 @@ func TestLaneSetGEMMQuantOffEnvelopeDeclinesFold(t *testing.T) {
 		return ls, handles
 	}
 
-	lsG, hG := open(1) // fold armed — must DECLINE (projection safety gate)
+	lsG, hG := open(1) // fold armed — must FIRE on the general tiled tier
 	lsR, hR := open(2) // pure ICB replay
 	defer lsG.Close()
 	defer lsR.Close()
@@ -582,8 +586,8 @@ func TestLaneSetGEMMQuantOffEnvelopeDeclinesFold(t *testing.T) {
 		retireTerminal(t, lsR, sr)
 	}
 
-	if lsG.gemmFwdCount != 0 {
-		t.Fatalf("off-envelope quant ran %d batched-GEMM forwards — the projection safety gate must decline dims whose per-row oracle routes to the qmv_impl twin", lsG.gemmFwdCount)
+	if lsG.gemmFwdCount == 0 {
+		t.Fatal("off-envelope quant never ran a batched-GEMM forward — the general tiled tier (lthn_qmv_rows_general) must serve the fold at qmv_impl dims")
 	}
 	if lsR.gemmFwdCount != 0 {
 		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
