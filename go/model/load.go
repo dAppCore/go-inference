@@ -93,6 +93,11 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 			return nil, nil, err
 		}
 	}
+	// Register every load-time synthesised tensor (a packExperts MoE pack, a b1→b2-repacked
+	// weight — any normaliser/assembler output whose Data is fresh heap, not a shard view) with
+	// the mapping, so a zero-copy binder binds them resident instead of failing its wrong-mapping
+	// guard, and evicts their device buffers with the session. See safetensors owned.go.
+	dm.AdoptOwnedTensors()
 	return m, dm, nil
 }
 

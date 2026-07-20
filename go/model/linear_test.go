@@ -3,8 +3,10 @@
 package model
 
 import (
+	"bytes"
 	"testing"
 
+	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -100,6 +102,84 @@ func TestLoadLinear_AdditiveBias(t *testing.T) {
 	// the same weight without .bias leaves Bias nil — the bias is genuinely optional.
 	if nb := LoadLinear(map[string]safetensors.Tensor{"w.weight": mk(out, in)}, "w", in, "affine"); nb.Bias != nil {
 		t.Fatalf("absent .bias should leave Bias nil, got %d bytes", len(nb.Bias))
+	}
+}
+
+// TestLoadLinear_B1RepacksToB2 — a 1-bit affine weight (Bonsai's width: no b_1 device kernel
+// ships) loads as its EXACT b2 widening: Bits reports 2, the packed codes equal
+// mlxaffine.RepackB1ToB2's output, the repacked weight is written back into the tensor map
+// (Data + packed shape) so a tied second read loads the b2 form instead of repacking again,
+// and scales/biases keep the ORIGINAL tensor views (invariant under the widening — they stay
+// on the zero-copy path).
+func TestLoadLinear_B1RepacksToB2(t *testing.T) {
+	const out, in, gs = 4, 64, 32
+	packed := make([]byte, out*(in/32)*4)
+	for i := range packed {
+		packed[i] = byte(i*37 + 11)
+	}
+	scales := make([]byte, out*(in/gs)*2)
+	biases := make([]byte, out*(in/gs)*2)
+	for i := range scales {
+		scales[i], biases[i] = byte(i+1), byte(i+2)
+	}
+	tensors := map[string]safetensors.Tensor{
+		"w.weight": {Dtype: "U32", Shape: []int{out, in / 32}, Data: packed},
+		"w.scales": {Dtype: "BF16", Shape: []int{out, in / gs}, Data: scales},
+		"w.biases": {Dtype: "BF16", Shape: []int{out, in / gs}, Data: biases},
+	}
+	wantPacked, _, _, err := mlxaffine.RepackB1ToB2(packed, scales, biases, out, in, gs)
+	if err != nil {
+		t.Fatalf("reference RepackB1ToB2: %v", err)
+	}
+	l := LoadLinear(tensors, "w", in, "affine")
+	if l == nil || !l.Quantised() {
+		t.Fatalf("LoadLinear = %+v, want a quantised weight", l)
+	}
+	if l.Bits != 2 || l.GroupSize != gs {
+		t.Fatalf("geometry after repack = bits %d gs %d, want bits 2 gs %d", l.Bits, l.GroupSize, gs)
+	}
+	if !bytes.Equal(l.Weight, wantPacked) {
+		t.Fatal("repacked Weight bytes != RepackB1ToB2 reference")
+	}
+	if &l.Scales[0] != &scales[0] || &l.Biases[0] != &biases[0] {
+		t.Fatal("scales/biases must keep the original tensor views (zero-copy invariant)")
+	}
+	// Writeback: the map now holds the b2 tensor, so a tied second read derives b2 from the
+	// SAME backing array — no second repack, no second owned buffer.
+	w2 := tensors["w.weight"]
+	if lastDim(w2.Shape) != in*2/32 {
+		t.Fatalf("written-back packed shape = %v, want last dim %d (b2 words per row)", w2.Shape, in*2/32)
+	}
+	l2 := LoadLinear(tensors, "w", in, "affine")
+	if l2.Bits != 2 || &l2.Weight[0] != &l.Weight[0] {
+		t.Fatalf("tied second read = bits %d, want 2 over the SAME repacked buffer", l2.Bits)
+	}
+}
+
+// TestLoadLinear_B1RepackError — a malformed b1 pack (scales length not [out, in/gs]) passes
+// through UNMODIFIED (Bits stays 1, bytes untouched, no writeback): the missing-b1-kernel
+// condition then surfaces at session build, named, instead of a silent half-repack.
+func TestLoadLinear_B1RepackError(t *testing.T) {
+	const out, in = 4, 64
+	packed := make([]byte, out*(in/32)*4)
+	shortScales := make([]byte, 8) // not out*(in/gs)*2 for any gs the shape declares
+	tensors := map[string]safetensors.Tensor{
+		"w.weight": {Dtype: "U32", Shape: []int{out, in / 32}, Data: packed},
+		"w.scales": {Dtype: "BF16", Shape: []int{out, 2}, Data: shortScales},
+		"w.biases": {Dtype: "BF16", Shape: []int{out, 2}, Data: shortScales},
+	}
+	l := LoadLinear(tensors, "w", in, "affine")
+	if l == nil {
+		t.Fatal("LoadLinear returned nil for a present weight")
+	}
+	if l.Bits != 1 {
+		t.Fatalf("Bits = %d after a failed repack, want 1 (pass through unmodified)", l.Bits)
+	}
+	if &l.Weight[0] != &packed[0] {
+		t.Fatal("failed repack must leave the original packed view in place")
+	}
+	if lastDim(tensors["w.weight"].Shape) != in/32 {
+		t.Fatal("failed repack must not write back a changed shape")
 	}
 }
 

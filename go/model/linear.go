@@ -2,7 +2,10 @@
 
 package model
 
-import "dappco.re/go/inference/model/safetensors"
+import (
+	"dappco.re/go/inference/model/quant/mlxaffine"
+	"dappco.re/go/inference/model/safetensors"
+)
 
 // Linear is a backend-agnostic linear weight: bf16-dense OR affine-quantised, the choice
 // made PER WEIGHT by the presence of a ".scales" tensor — mirroring the metal model
@@ -59,6 +62,23 @@ func LoadLinear(t map[string]safetensors.Tensor, prefix string, inDim int, kind 
 		}
 		lin.Kind = kind
 		lin.GroupSize, lin.Bits = affineGeometry(inDim, s.Shape, w.Shape)
+		if lin.Bits == 1 {
+			// 1-bit affine (Bonsai): no b_1 device kernel ships, so widen the codes to the exact
+			// b2 form the stock qmv kernels dispatch (zero quality change — see mlxaffine
+			// repack.go). Scales/biases are invariant under the widening, so they KEEP the
+			// original mmap views (zero-copy); only the packed weight becomes an owned buffer,
+			// written back into the tensor map so a tied second read loads the b2 form instead
+			// of repacking again and the post-Assemble owned-tensor adoption sweep
+			// (safetensors.AdoptOwnedTensors) registers it for resident device binding. A repack
+			// error (a malformed pack) passes the weight through unmodified — the missing-b1-
+			// kernel condition then surfaces at session build, named.
+			if p2, _, _, err := mlxaffine.RepackB1ToB2(lin.Weight, lin.Scales, lin.Biases, lin.OutDim, inDim, lin.GroupSize); err == nil {
+				lin.Weight, lin.Bits = p2, 2
+				w.Data = p2
+				w.Shape = []int{lin.OutDim, mlxaffine.PackedWords(inDim, 2)}
+				t[string(append(append(kb[:0], prefix...), ".weight"...))] = w
+			}
+		}
 	}
 	return lin
 }
