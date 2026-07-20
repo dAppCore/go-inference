@@ -5,6 +5,8 @@
 package native
 
 import (
+	"math"
+	"sort"
 	"testing"
 
 	core "dappco.re/go"
@@ -82,6 +84,40 @@ import (
 // is the DOMINANT term, not the whole story — a smaller residual gap survives
 // that fix alone, left for that fix's own lane to close and re-measure.
 //
+// #67 UPDATE (2026-07-20, this lane): the EmbedScale fix above landed (d946853a) and this
+// file's own 5-sample band (target_layer_ids [1,9,17,25,33], spaced 8 apart) already passes on
+// it (grand -11.2%, inside the ±15% band, tightened below to ±13% now that this is precisely
+// characterised and confirmed deterministic run-to-run). But #67's brief named a real, separate
+// symptom the 5 samples cannot see: ordinary greedy decode on this checkpoint is STILL wrong.
+// TestForwardCaptureHiddensQwen3AllLayersVsRealOracle below extends the capture to EVERY
+// decoder layer (0..35) and finds why: layer 35 — the FINAL decoder layer, not one of DFlash's 5
+// sampled indices — diverges by +454%/+456% (icb-default/icb-disabled), an order of magnitude
+// past every other layer's worst case (±20%, ordinary cross-implementation bf16 noise). The
+// oracle SHRINKS every token's magnitude at this one layer (raw sumAbs ~54,707-61,843 at layer
+// 34 down to ~20,411 at layer 35 — a real trained cancellation of the massive-activation
+// dimensions carried since layer 6's onset); the engine GROWS instead, for every token, not one
+// position (ruling out an earlier "attention sink at token 0" hypothesis this lane also checked
+// and rejected — token 0 dominates the ABSOLUTE excess but every token overshoots). Independently
+// checked and ruled out: (1) not a premature-final-norm artefact — model.norm applied to the
+// oracle's OWN raw layer-35 output barely moves its magnitude (~4,660→~4,920), nothing like the
+// engine's ~58,654 for the same token; (2) not ICB-specific — icb-disabled (the plain
+// captureLayerHiddens route) reproduces the same fault to 2 decimal places of relative error,
+// so both routes share whatever computes this wrong, not either route's own capture bookkeeping;
+// (3) not a qwen3.go config-derivation bug — every Config.Arch() field (rope theta, attention
+// scale, QK-norm eps/placement, head_dim, layer classification) was individually checked against
+// the real checkpoint's config.json and HF's modeling_qwen3.py/configuration_qwen3.py and found
+// correct AND uniform across layers, and Qwen3Config has no schema capacity to declare a
+// per-layer override for a non-hybrid checkpoint in the first place (layer_types is the only
+// per-layer knob, and it resolves to "full_attention" for all 36 layers on this checkpoint,
+// confirmed both from config.json's use_sliding_window:false and from Qwen3Config.__post_init__'s
+// own derivation). The fault is deterministic (byte-identical per-token values across repeat
+// runs — not stale/uninitialised memory) and lands squarely in the shared per-layer attention/MLP
+// encode path (decode_forward_arch.go / decode_forward_arch_icb.go) both ICB and non-ICB routes
+// call into — outside this lane's fence (model/arch/Qwen/qwen3/ only). Named here, not fixed:
+// TestForwardCaptureHiddensQwen3AllLayersVsRealOracle's per-layer band gate fails loudly on
+// layer 35 alone until that seam's owner closes it, at which point the whole depth should
+// collapse toward the ±20%-or-better band every OTHER layer already sits in.
+//
 // Oracle: transformers 5.5.4 + torch 2.13.0, bfloat16, MPS, Qwen/Qwen3-4B,
 // output_hidden_states=True over the 5 raw prompt tokens (no chat template).
 // hidden_states[layer_id+1] per the verified offset=1 above. Not required at
@@ -101,11 +137,15 @@ const (
 	// hidden dims, of |hidden_states[layer_id+1]| for layer_id in {1,9,17,25,33}.
 	oracleGrandTotalSumAbs = 117450.5478515625
 	// oracleParityBandFrac is how far the engine's own grand-total sumAbs may sit from
-	// oracleGrandTotalSumAbs (relative) and still count as "matches". 0.15 clearly fails
-	// today's unfixed +88.8%-over state and sits just outside the identified EmbedScale
-	// fix's own -11.2%-under residual (see header) — deliberately not wide enough to call
-	// that partial fix a pass, since a further factor is known to remain.
-	oracleParityBandFrac = 0.15
+	// oracleGrandTotalSumAbs (relative) and still count as "matches". Tightened by #67
+	// (2026-07-20) from a pre-EmbedScale-fix 0.15 to bracket the now-precisely-measured,
+	// repeat-run-deterministic -11.2% residual these 5 samples land on post-fix, with headroom
+	// for legitimate cross-implementation bf16 noise but not much more: #67's own all-layer
+	// instrument (TestForwardCaptureHiddensQwen3AllLayersVsRealOracle below) found a SEPARATE,
+	// much larger fault (layer 35, +454%) these 5 samples cannot see at all — none of
+	// {1,9,17,25,33} is layer 35 — so this band passing is NOT itself evidence ordinary decode
+	// is healthy; see that other test and this file's header for the fault this one is blind to.
+	oracleParityBandFrac = 0.13
 )
 
 // oracleAuxLayerTotalSumAbs is the per-aux-layer total (all 5 tokens, all 2560 dims) from
@@ -266,6 +306,223 @@ func TestForwardCaptureHiddensQwen3FaithfulToOrdinaryDecode(t *testing.T) {
 			t.Fatalf("%s: capture's final-hidden argmax (%d) diverges from ordinary Generate's next token (%d) — a REAL tap regression", label, capturedArgmax, next[0])
 		}
 		t.Logf("%s: capture argmax == ordinary Generate next token == %d (both faithful to the SAME underlying forward)", label, next[0])
+	}
+
+	t.Run("icb-default", func(t *testing.T) { check(t, "icb-default") })
+	t.Run("icb-disabled", func(t *testing.T) {
+		prev := icbDisabledForTest
+		icbDisabledForTest = true
+		defer func() { icbDisabledForTest = prev }()
+		check(t, "icb-disabled")
+	})
+}
+
+// oracleAllLayerTotalSumAbs is the #67 bisection instrument's FULL-DEPTH oracle: the same
+// per-layer total sumAbs (all 5 prompt tokens, all 2560 hidden dims) as
+// oracleAuxLayerTotalSumAbs above, but for EVERY decoder layer (0..35), not just DFlash's 5
+// target_layer_ids (which are spaced 8 apart — too coarse to tell a genuine depth-compounding
+// trend from a per-layer-CLASS fault). Keyed the same way: perLayerOut[l] (Go's 0-indexed
+// decoder-layer output) == hidden_states[l+1] (the verified offset=1 convention). The 5 indices
+// shared with oracleAuxLayerTotalSumAbs (1, 9, 17, 25, 33) are byte-identical to that map,
+// because both were read from the SAME extraction (same process, same forward pass) — see
+// qwen3resid_alllayers.py's cross-check in this lane's own working notes, reproduced inline by
+// TestOracleAllLayerTotalSumAbsAgreesWithFiveLayerOracle below.
+//
+// Generated 2026-07-20 (#67, this lane): transformers 5.5.4 + torch 2.13.0, bfloat16, MPS,
+// Qwen/Qwen3-4B (local snapshot, the same LTHN_DFLASH_ZLAB_TARGET checkpoint),
+// output_hidden_states=True over the same 5 raw prompt tokens ("The capital of France is", no
+// chat template, no BOS). Not required at test time; this is the readout of that one-time
+// extraction, exactly as oracleAuxLayerTotalSumAbs is.
+var oracleAllLayerTotalSumAbs = map[int]float64{
+	0:  1792.79541015625,
+	1:  2387.3935546875,
+	2:  2664.96044921875,
+	3:  2902.5625,
+	4:  3592.69775390625,
+	5:  4400.53076171875,
+	6:  14259.818359375,
+	7:  14770.841796875,
+	8:  16003.388671875,
+	9:  16304.04296875,
+	10: 15816.4150390625,
+	11: 15921.939453125,
+	12: 15914.5439453125,
+	13: 16145.29296875,
+	14: 16160.49609375,
+	15: 16371.6953125,
+	16: 16733.80859375,
+	17: 16815.525390625,
+	18: 17200.99609375,
+	19: 17955.25390625,
+	20: 18298.1875,
+	21: 18856.3828125,
+	22: 19838.76953125,
+	23: 22036.65625,
+	24: 23367.728515625,
+	25: 26315.84375,
+	26: 28295.87109375,
+	27: 30875.6015625,
+	28: 33642.65625,
+	29: 37293.359375,
+	30: 41463.5703125,
+	31: 47096.0703125,
+	32: 50895.984375,
+	33: 55627.7421875,
+	34: 61843.16015625,
+	35: 20410.583984375,
+}
+
+const (
+	// oracleAllLayerGrandTotalSumAbs is the sum of oracleAllLayerTotalSumAbs over all 36 layers —
+	// the same "grand total" metric oracleGrandTotalSumAbs computes over just the 5 DFlash
+	// layers, widened to the full depth.
+	oracleAllLayerGrandTotalSumAbs = 780273.1669921875
+	// oracleAllLayerGrandTotalBandFrac is a coarse, WEAK sanity check on the all-layer grand
+	// total: #67's own bisection found it nearly USELESS as a diagnostic — a +454% single-layer
+	// fault at layer 35 (see oracleAllLayerPerLayerBandFrac below) happens to land the grand
+	// total at only +1.4%/+1.71% (icb-default/icb-disabled) because 34 layers running ~11-20%
+	// UNDER the oracle happen to cancel most of one layer running massively OVER it. Kept as a
+	// coarse regression trip-wire, NOT the real gate — see the per-layer check for that.
+	oracleAllLayerGrandTotalBandFrac = 0.05
+	// oracleAllLayerPerLayerBandFrac is the REAL gate: #67's bisection found every layer except
+	// the last (35) sits within this band (worst "background" case: layer 6 at -19.71%, the
+	// massive-activation onset the file header already names) — legible as ordinary
+	// cross-implementation bf16 noise (Metal vs MPS/PyTorch), not a defect. Layer 35 (the FINAL
+	// decoder layer) fails it by over an order of magnitude (+454.50%/+456.63%): the oracle
+	// SHRINKS every token's magnitude at this layer (a real trained cancellation of the
+	// massive-activation dims carried since layer 6 — confirmed by an independent transformers
+	// check: model.norm applied to the oracle's own raw layer-35 output barely moves its
+	// magnitude, so this is not a premature-final-norm artefact either), while the engine GROWS
+	// instead — for EVERY token, not just one position. #67 could not find any qwen3.go
+	// Config.Arch() field (rope theta, attention scale, QK-norm eps/placement, head_dim, layer
+	// classification — all individually verified against real_checkpoint's config.json and HF's
+	// modeling_qwen3.py, and all uniform across layers by construction: Qwen3Config has no
+	// per-layer override capability for a non-hybrid checkpoint) that could explain a fault
+	// isolated to one specific layer. Identical (to 2 decimal places of relative error) under
+	// BOTH icb-default and icb-disabled, so it is not ICB replay/recording bookkeeping either —
+	// see this file's header for the named seam this points to instead.
+	oracleAllLayerPerLayerBandFrac = 0.25
+)
+
+// TestOracleAllLayerTotalSumAbsAgreesWithFiveLayerOracle pins the two oracle tables together:
+// oracleAllLayerTotalSumAbs must reproduce oracleAuxLayerTotalSumAbs exactly at the 5 shared
+// indices, since both were read from the same transformers extraction. A host-side (no
+// checkpoint, no MLX_METALLIB_PATH) guard against the two tables drifting apart under future
+// editing — not an oracle-vs-engine comparison.
+func TestOracleAllLayerTotalSumAbsAgreesWithFiveLayerOracle(t *testing.T) {
+	for layerID, want := range oracleAuxLayerTotalSumAbs {
+		got, ok := oracleAllLayerTotalSumAbs[layerID]
+		if !ok {
+			t.Fatalf("oracleAllLayerTotalSumAbs missing shared index %d", layerID)
+		}
+		if got != want {
+			t.Errorf("oracleAllLayerTotalSumAbs[%d]=%v disagrees with oracleAuxLayerTotalSumAbs[%d]=%v — the two oracle tables drifted apart", layerID, got, layerID, want)
+		}
+	}
+}
+
+// TestForwardCaptureHiddensQwen3AllLayersVsRealOracle is the #67 bisection instrument:
+// TestForwardCaptureHiddensQwen3VsRealOracle's 5 DFlash target_layer_ids are spaced 8 apart,
+// too coarse to distinguish a genuine depth-compounding trend from a per-layer-CLASS fault
+// (e.g. a layer classification the checkpoint declares uniform but the engine derives
+// unevenly). This test captures and compares EVERY decoder layer against the oracle, logging a
+// full per-layer (got/want/rel%) table SORTED BY LAYER — the diagnosis instrument, not just a
+// pass/fail gate — under BOTH the ICB replay (the session's default) AND the plain
+// captureLayerHiddens route (icbDisabledForTest), the same two-route split
+// TestForwardCaptureHiddensQwen3FaithfulToOrdinaryDecode above already uses: if only one route
+// shows a given layer's fault, the fault is in that route's OWN capture bookkeeping, not the
+// shared per-layer forward both routes replay (#67 found both routes agree to 2 decimal places
+// of relative error at every layer, ruling ICB out). Soft-gated (t.Errorf, not t.Fatalf) on TWO
+// checks: a weak whole-depth grand total (a coarse trip-wire only — #67 found it nearly blind to
+// a single catastrophic layer, since that layer's excess happens to cancel the other layers'
+// shared undershoot) and the real gate, a PER-LAYER band every layer must individually sit
+// inside — mirroring TestForwardCaptureHiddensQwen3VsRealOracle's own soft-gate shape, but
+// unwilling to let one bad layer hide behind 35 good ones.
+func TestForwardCaptureHiddensQwen3AllLayersVsRealOracle(t *testing.T) {
+	requireNativeRuntime(t)
+	targetDir := core.Getenv("LTHN_DFLASH_ZLAB_TARGET")
+	if core.Trim(targetDir) == "" {
+		t.Skip("set LTHN_DFLASH_ZLAB_TARGET to a local Qwen/Qwen3-4B snapshot (see file doc comment)")
+	}
+	ids := []int32{oraclePromptTok0, oraclePromptTok1, oraclePromptTok2, oraclePromptTok3, oraclePromptTok4}
+
+	check := func(t *testing.T, label string) {
+		t.Helper()
+		target, err := LoadDir(targetDir, 0)
+		if err != nil {
+			t.Fatalf("%s: LoadDir: %v", label, err)
+		}
+		defer func() { _ = target.Close() }()
+
+		_, perLayer, err := target.ForwardCaptureHiddens(ids)
+		if err != nil {
+			t.Fatalf("%s: ForwardCaptureHiddens: %v", label, err)
+		}
+		if len(perLayer) != len(oracleAllLayerTotalSumAbs) {
+			t.Fatalf("%s: ForwardCaptureHiddens returned %d layers, oracle table has %d — checkpoint layer count changed?", label, len(perLayer), len(oracleAllLayerTotalSumAbs))
+		}
+		rowBytes := target.arch.Hidden * bf16Size
+		T := len(ids)
+
+		sumAbs := func(row []byte) float64 {
+			var s float64
+			for _, v := range bf16ToF32Slice(row) {
+				if v < 0 {
+					v = -v
+				}
+				s += float64(v)
+			}
+			return s
+		}
+
+		layers := make([]int, 0, len(perLayer))
+		for l := range perLayer {
+			layers = append(layers, l)
+		}
+		sort.Ints(layers)
+
+		grandGot := 0.0
+		worstLayer, worstRel := -1, 0.0
+		var worstPerTok []float64
+		var violations []string
+		t.Logf("%s: %4s  %14s  %14s  %9s", label, "L", "got", "want", "rel%")
+		for _, l := range layers {
+			want, ok := oracleAllLayerTotalSumAbs[l]
+			if !ok {
+				t.Fatalf("%s: oracleAllLayerTotalSumAbs missing layer %d", label, l)
+			}
+			row := perLayer[l]
+			if len(row) != T*rowBytes {
+				t.Fatalf("%s: perLayer[%d] is %d bytes, want %d", label, l, len(row), T*rowBytes)
+			}
+			got := 0.0
+			perTok := make([]float64, T)
+			for tok := 0; tok < T; tok++ {
+				perTok[tok] = sumAbs(row[tok*rowBytes : (tok+1)*rowBytes])
+				got += perTok[tok]
+			}
+			rel := (got - want) / want
+			t.Logf("%s: %4d  %14.2f  %14.2f  %+8.2f%%", label, l, got, want, rel*100)
+			grandGot += got
+			if rel < -oracleAllLayerPerLayerBandFrac || rel > oracleAllLayerPerLayerBandFrac {
+				violations = append(violations, core.Sprintf("layer %d (rel=%+.2f%%, per-token sumAbs got=%v)", l, rel*100, perTok))
+			}
+			if worstLayer < 0 || math.Abs(rel) > math.Abs(worstRel) {
+				worstLayer, worstRel, worstPerTok = l, rel, perTok
+			}
+		}
+		grandRel := (grandGot - oracleAllLayerGrandTotalSumAbs) / oracleAllLayerGrandTotalSumAbs
+		t.Logf("%s: grand (all %d layers): got=%.2f want=%.2f rel=%+.2f%% (weak sanity band=±%.0f%%); worst single layer=%d (rel=%+.2f%%, per-token sumAbs got=%v)",
+			label, len(layers), grandGot, oracleAllLayerGrandTotalSumAbs, grandRel*100, oracleAllLayerGrandTotalBandFrac*100, worstLayer, worstRel*100, worstPerTok)
+
+		if grandRel < -oracleAllLayerGrandTotalBandFrac || grandRel > oracleAllLayerGrandTotalBandFrac {
+			t.Errorf("%s: capture-vs-oracle all-layer grand total outside the weak %.0f%% sanity band (rel=%+.2f%%) — see the per-layer table above for the divergence shape",
+				label, oracleAllLayerGrandTotalBandFrac*100, grandRel*100)
+		}
+		if len(violations) > 0 {
+			t.Errorf("%s: %d layer(s) outside the %.0f%% per-layer band (KNOWN, root-caused OUTSIDE this lane's fence — see this file's header): %s",
+				label, len(violations), oracleAllLayerPerLayerBandFrac*100, core.Join("; ", violations...))
+		}
 	}
 
 	t.Run("icb-default", func(t *testing.T) { check(t, "icb-default") })
