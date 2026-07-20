@@ -123,9 +123,9 @@ func TestMTPRowsDriverVerifyMatchesRowMajor_Good(t *testing.T) {
 
 	run := func(forced bool) (hiddens [][]byte, kv [][2][]byte, greedy []int32) {
 		t.Helper()
-		saved := mtpRowsMoEForced
-		mtpRowsMoEForced = forced
-		defer func() { mtpRowsMoEForced = saved }()
+		saved := mtpRowsMoEArmed
+		mtpRowsMoEArmed = forced
+		defer func() { mtpRowsMoEArmed = saved }()
 
 		sess := mtpRowsDriverNewSession(t, arch, quant, ts, prompt)
 		hs, err := sess.verifyAssistantDraftHiddens(draft, true)
@@ -150,7 +150,7 @@ func TestMTPRowsDriverVerifyMatchesRowMajor_Good(t *testing.T) {
 	hiddensOff, kvOff, greedyOff := run(false)
 	engagedAfterOff := mtpRowsDriverEngaged.Load()
 	if engagedAfterOff != engagedBefore {
-		t.Fatal("the layer-major driver engaged with the lever OFF — mtpRowsMoEForced routing is broken")
+		t.Fatal("the layer-major driver engaged with the lever OFF — mtpRowsMoEArmed routing is broken")
 	}
 
 	hiddensOn, kvOn, greedyOn := run(true)

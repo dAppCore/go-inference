@@ -248,10 +248,10 @@ func TestMTPRowsMoEEligible_Ugly(t *testing.T) {
 // TestMTPRowsMoEForced_Good pins the LTHN_MTP_ROWS_MOE env parsing — mirrors mtpVerifyFoldForced's
 // own test idiom (mtp_exact_lane_test.go).
 func TestMTPRowsMoEForced_Good(t *testing.T) {
-	if os.Getenv("LTHN_MTP_ROWS_MOE") == "1" && !mtpRowsMoEForced {
-		t.Fatal("LTHN_MTP_ROWS_MOE=1 in the environment but mtpRowsMoEForced is false")
+	if os.Getenv("LTHN_MTP_ROWS_MOE") == "0" && mtpRowsMoEArmed {
+		t.Fatal("LTHN_MTP_ROWS_MOE=0 in the environment but mtpRowsMoEArmed is true")
 	}
-	if os.Getenv("LTHN_MTP_ROWS_MOE") != "1" && mtpRowsMoEForced {
-		t.Fatal("mtpRowsMoEForced is true without LTHN_MTP_ROWS_MOE=1 in the environment")
+	if os.Getenv("LTHN_MTP_ROWS_MOE") != "0" && !mtpRowsMoEArmed {
+		t.Fatal("mtpRowsMoEArmed is false without LTHN_MTP_ROWS_MOE=0 in the environment — the lane must default ON")
 	}
 }

@@ -14,7 +14,7 @@ import (
 )
 
 // mtp_rows_driver.go — the #53 WIRING lane: a layer-major verify driver that finally consults
-// mtpRowsMoEForced (mtp_rows_moe.go), which every prior lane left "recognised but not consulted".
+// mtpRowsMoEArmed (mtp_rows_moe.go), which every prior lane left "recognised but not consulted".
 //
 // THE PROBLEM (written up in mtp_rows_moe.go's header and commit 7946dacc): the byte-exact greedy
 // verify block steps K drafted rows ROW-MAJOR (verifyAssistantDraftHiddens's per-row stepID loop,
@@ -315,8 +315,9 @@ func (s *archDecodeState) applyLayerScalarRows(rowsHost []byte, layerScalar meta
 }
 
 // verifyRowsMoEBatchedHiddens is the ArchSession-level #53 entry point, called only from the
-// byte-exact greedy verify lane (verifyAssistantDraftHiddens, exact=true) when LTHN_MTP_ROWS_MOE=1
-// (mtpRowsMoEForced). ok=false (nil error) means declined — the caller falls back to the existing
+// byte-exact greedy verify lane (verifyAssistantDraftHiddens, exact=true) while the lane is armed
+// (mtpRowsMoEArmed — default ON; LTHN_MTP_ROWS_MOE=0 opts out). ok=false (nil error) means
+// declined — the caller falls back to the existing
 // per-row stepID loop UNCHANGED; nothing here has side-effected the session (no embedding, no GPU
 // work) unless mtpRowsDriverEligible already passed.
 func (s *ArchSession) verifyRowsMoEBatchedHiddens(draftTokens []int32, rowBytes int) ([][]byte, bool, error) {

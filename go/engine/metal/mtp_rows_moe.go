@@ -31,7 +31,7 @@ import (
 // incidentally be safe, because the risk of a batching-order regression in the selection stage is
 // not worth the (small) router cost.
 //
-// LIVE WIRING: mtp_rows_driver.go consults mtpRowsMoEForced from the byte-exact greedy verify
+// LIVE WIRING: mtp_rows_driver.go consults mtpRowsMoEArmed from the byte-exact greedy verify
 // lane (verifyAssistantDraftHiddens, assistant_load.go) via a layer-major driver that interleaves
 // K rows' attention (sequential — each row's SDPA depends on the K/V the PRECEDING rows in the
 // SAME block just wrote) with this batched MoE step BETWEEN layers — reusing the SAME single-row
@@ -48,10 +48,12 @@ import (
 // for every checkpoint (TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts); a lane that only
 // served split geometry would never engage on any real loaded gemma4 26B-A4B session.
 
-// mtpRowsMoEForced arms the grouped-by-expert MoE lane (LTHN_MTP_ROWS_MOE=1) — default OFF, the
-// #53 lever, mirroring the LTHN_MTP_VERIFY_FOLD idiom (mtp.go). Read once at package init like
-// its siblings; tests save/restore the var directly (no env re-read needed mid-run).
-var mtpRowsMoEForced = os.Getenv("LTHN_MTP_ROWS_MOE") == "1"
+// mtpRowsMoEArmed arms the grouped-by-expert MoE lane — default ON (the byte-identity receipts
+// make it the exact lane's implementation, not an experiment; MTP's pair is already opt-in via
+// -draft, so there is no second opt-in to stack). LTHN_MTP_ROWS_MOE=0 is the escape hatch for
+// A/B against the row-major path and for rollback. Read once at package init like its siblings;
+// tests save/restore the var directly (no env re-read needed mid-run).
+var mtpRowsMoEArmed = os.Getenv("LTHN_MTP_ROWS_MOE") != "0"
 
 // mtpRowsMoEMaxGroupSize is the largest single-expert pair-group the most recent
 // mtpRowsMoEBatched call processed — the engagement counter (mirrors routerFusedDispatches):
@@ -142,7 +144,7 @@ func mtpRowsMoEEligible(w MoEQuantLayerWeights, dModel, dFF int) bool {
 // input the per-row block's h/hBuf takes); the returned outSlab is K contiguous rows of the same
 // shape (the residual-added layer output). ok=false means the geometry declined — the caller
 // falls back to the per-row path; this never returns a wrong-but-silent answer. LTHN_MTP_ROWS_MOE
-// is NOT consulted here — callers gate on mtpRowsMoEForced themselves (see the file header for
+// is NOT consulted here — callers gate on mtpRowsMoEArmed themselves (see the file header for
 // why no call site does that yet).
 func mtpRowsMoEBatched(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, K int, eps float32) (outSlab []byte, ok bool, err error) {
 	if err := ensureInit(); err != nil {

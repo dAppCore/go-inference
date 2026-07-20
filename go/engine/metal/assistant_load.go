@@ -2687,7 +2687,7 @@ func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32, exact boo
 	// instead of paying it once per row. Declines cleanly (ok=false, no side effect) on any geometry
 	// it does not implement, falling straight through to the unchanged per-row lane below. The
 	// sampled fold lane (verifyBatchedHiddens above) is untouched by this lever.
-	if exact && mtpRowsMoEForced {
+	if exact && mtpRowsMoEArmed {
 		if rows, ok, rerr := s.verifyRowsMoEBatchedHiddens(draftTokens, rowBytes); rerr != nil {
 			return nil, rerr
 		} else if ok {
