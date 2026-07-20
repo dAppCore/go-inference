@@ -54,7 +54,13 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 	// nothing to widen and stays byte-identical + zero-copy. tensors aliases dm.Tensors, so the
 	// in-place widen is visible to Assemble.
 	dm.WidenF16TensorsToBF16()
-	ac.InferFromWeights(NormalizeWrapperNames(tensors)) // resolve omitted dims from the shapes (don't-guess)
+	// Alias the multimodal wrapper names INTO the mapping's own tensor map (not a transient copy):
+	// Assemble's NormalizeWrapperNames then passes this SAME map through, so LoadLinear's b1→b2
+	// repack writeback stays visible to the owned-tensor adoption below. Aliased after the widen so
+	// alias and original share one (possibly widened) Data buffer. (#60 — the Bonsai wrapper miss.)
+	tensors = NormalizeWrapperNames(tensors)
+	dm.Tensors = tensors
+	ac.InferFromWeights(tensors) // resolve omitted dims from the shapes (don't-guess)
 	arch, err := ac.Arch()
 	if err != nil {
 		_ = dm.Close()

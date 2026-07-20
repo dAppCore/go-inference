@@ -32,6 +32,40 @@ func TestWrapperNames_NormalizeWrapperNames_Good(t *testing.T) {
 	}
 }
 
+// TestWrapperNames_NormalizeWrapperNames_SameMapWhenAliased covers the load-bearing #60
+// contract: once every wrapped tensor's stripped alias exists, the function returns the SAME
+// map (no fresh copy) — so model.Load can alias dm.Tensors once and Assemble's own call passes
+// that map through, keeping LoadLinear's repack writeback visible to the owned-tensor adoption.
+// A pre-existing stripped name is never clobbered by an alias.
+func TestWrapperNames_NormalizeWrapperNames_SameMapWhenAliased(t *testing.T) {
+	in := map[string]safetensors.Tensor{
+		"language_model.model.embed_tokens.weight": {Shape: []int{4, 4}},
+		"vision_tower.patch_embed.weight":          {Shape: []int{4, 4}},
+	}
+	first := NormalizeWrapperNames(in)
+	if len(first) != 3 {
+		t.Fatalf("first pass len = %d, want 3", len(first))
+	}
+	// Second pass: everything already aliased → the SAME map comes back, so a writeback into it
+	// is visible to every holder of the map.
+	second := NormalizeWrapperNames(first)
+	marker := safetensors.Tensor{Shape: []int{1}, Data: []byte{1, 2}}
+	second["model.embed_tokens.weight"] = marker
+	if got := first["model.embed_tokens.weight"]; len(got.Data) != 2 {
+		t.Fatal("second pass returned a fresh map — writebacks would be swallowed (the Bonsai wrapper miss)")
+	}
+	// No-clobber: a checkpoint that genuinely ships BOTH the wrapped and the bare name keeps its
+	// own bare tensor authoritative.
+	both := map[string]safetensors.Tensor{
+		"language_model.model.norm.weight": {Shape: []int{8}},
+		"model.norm.weight":                {Shape: []int{4}},
+	}
+	out := NormalizeWrapperNames(both)
+	if got := out["model.norm.weight"]; len(got.Shape) != 1 || got.Shape[0] != 4 {
+		t.Fatalf("pre-existing bare tensor was clobbered by the alias: %+v", got)
+	}
+}
+
 // TestWrapperNames_NormalizeWrapperNames_Bad covers the flat text-only pack: no tensor
 // carries the "language_model." prefix, so the map is returned UNCHANGED (same length, same
 // keys) rather than gaining spurious aliases.
