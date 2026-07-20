@@ -130,6 +130,7 @@ var (
 	tqRotRowsPSOCache   = map[bool]metal.MTLComputePipelineState{}
 	sdpaVectorTQPSOs    = map[[3]int]metal.MTLComputePipelineState{}
 	sdpaV2P1TQPSOCache  = map[[4]int]metal.MTLComputePipelineState{}
+	sdpaV2P2TQPSOCache  = map[int]metal.MTLComputePipelineState{}
 )
 
 // tqKVStorePipeline resolves lthn_tq_kv_store_bf16_bN for bits ∈ {2,3,4}.
@@ -276,7 +277,9 @@ func sdpaVectorTQPipeline(headDim, kBits, vBits int) (metal.MTLComputePipelineSt
 
 // sdpaVector2Pass1TQPipeline resolves the TQ pass-1 with the block count baked
 // as function constant 26 (the MLX 2-pass convention) beside the bit widths.
-// Pass 2 is MLX's sdpa_vector_2pass_2 unchanged (it never touches K/V).
+// Pass 2 (below) is TQ's OWNED fork of MLX's sdpa_vector_2pass_2, folding the
+// output unrotation into its epilogue — see sdpaVector2Pass2TQPipeline and
+// kernels/lthn_tq_kv.metal's header.
 func sdpaVector2Pass1TQPipeline(headDim, kBits, vBits int, blocks int32) (metal.MTLComputePipelineState, error) {
 	if !tqKVGeometryOK(kBits, vBits, headDim) {
 		return nil, core.NewError("native.sdpaVector2Pass1TQPipeline: unsupported (headDim, kBits, vBits)")
@@ -305,6 +308,42 @@ func sdpaVector2Pass1TQPipeline(headDim, kBits, vBits int, blocks int32) (metal.
 		return nil, perr
 	}
 	sdpaV2P1TQPSOCache[key] = pso
+	return pso, nil
+}
+
+// sdpaVector2Pass2TQPipeline resolves (and caches) lthn_sdpa_vector_2pass_2_tq
+// — TQ's OWNED fork of MLX's sdpa_vector_2pass_2 merge kernel, folding the
+// output unrotation into its epilogue (kernels/lthn_tq_kv.metal's header has
+// the full reasoning). No function constants — blocks arrives as a runtime
+// buffer, matching MLX's own pass 2 — so, unlike pass 1, ONE pipeline per
+// headDim serves every block count.
+func sdpaVector2Pass2TQPipeline(headDim int) (metal.MTLComputePipelineState, error) {
+	if !tqKVHeadDimOK(headDim) {
+		return nil, core.NewError("native.sdpaVector2Pass2TQPipeline: unsupported head dim")
+	}
+	tqKVPSOMu.Lock()
+	defer tqKVPSOMu.Unlock()
+	if pso, ok := sdpaV2P2TQPSOCache[headDim]; ok {
+		if pso == nil {
+			return nil, core.NewError("native.sdpaVector2Pass2TQPipeline: kernel unavailable")
+		}
+		return pso, nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass2TQPipeline: custom library unavailable")
+	}
+	name := core.Sprintf("lthn_sdpa_vector_2pass_2_tq_bf16_%d", headDim)
+	fn := customLibrary.NewFunctionWithName(name)
+	if fn == nil || fn.GetID() == 0 {
+		sdpaV2P2TQPSOCache[headDim] = nil
+		return nil, core.NewError("native.sdpaVector2Pass2TQPipeline: kernel " + name + " not found")
+	}
+	pso, err := device.NewComputePipelineStateWithFunctionError(fn)
+	if err != nil {
+		sdpaV2P2TQPSOCache[headDim] = nil
+		return nil, err
+	}
+	sdpaV2P2TQPSOCache[headDim] = pso
 	return pso, nil
 }
 
@@ -368,11 +407,12 @@ func emitTQRotRows[S dispatchSink](sink S, pso metal.MTLComputePipelineState, in
 // sink (#48 perf recovery): q is RAW (the kernel computes Πq itself, once,
 // into threadgroup memory) and out receives the FINAL unrotated output (the
 // kernel computes Πᵀy itself in its epilogue) — no separate q-rotation or
-// output-unrotation dispatch either side, unlike the 2-pass pair
-// (emitSDPAVector2Pass1TQ), which still needs the caller to bracket it with
-// emitTQRotRows (see that pipeline's own doc: fusing the rotation into a
-// per-block-replicated kernel would multiply its O(d²) cost by the block
-// count, and pass 2 is shared MLX kernel code this lane does not own).
+// output-unrotation dispatch either side. The 2-pass pair still needs the
+// caller to bracket pass 1 with an explicit emitTQRotRows q pre-rotation
+// (fusing that into a per-block-replicated kernel would multiply its O(d²)
+// cost by the block count — see emitSDPAVector2Pass1TQ's own doc) but the
+// output unrotation now folds into emitSDPA2Pass2TQ's epilogue instead of a
+// mirroring emitTQRotRows call after it.
 // Strides are BYTES of the code planes: head stride = ceil(headDim·bits/8),
 // seq stride = kvHeads·headStride; the kernel derives the γ-plane strides
 // from their ratio. ABI: q=0 k=1 v=2 out=3 gqa=4 N=5 (nBuf when non-nil — the
@@ -411,9 +451,10 @@ func emitSDPAVectorTQ[S dispatchSink](sink S, pso metal.MTLComputePipelineState,
 // kGammas 13; vGammas 14; vCentroids 15 — NEVER 16: the recorded arch ICB is
 // built with maxKernelBufferBindCount 16, so an index-16 bind records as a
 // silent no-op and the kernel reads garbage) and the decode grid
-// (nKVHeads, 1, blocks) of (32, gqa, 1). Pass 2 is MLX's sdpa_vector_2pass_2
-// unchanged; its merged output stays in rotated space and the recorded
-// unrotation op lands it.
+// (nKVHeads, 1, blocks) of (32, gqa, 1). Its (partials, sums, maxs) output is
+// consumed by emitSDPA2Pass2TQ below — TQ's owned fork of MLX's
+// sdpa_vector_2pass_2, which now folds the output unrotation into its
+// epilogue instead of leaving the merged output in rotated space.
 func emitSDPAVector2Pass1TQ[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q, k, v, partials metal.MTLBuffer, sums, maxs metal.MTLBuffer, kGammas, vGammas, kCentroids, vCentroids metal.MTLBuffer, nBuf metal.MTLBuffer, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
 	sink.setPSO(pso)
 	sink.setBuf(q, 0, 0)
@@ -439,6 +480,28 @@ func emitSDPAVector2Pass1TQ[S dispatchSink](sink S, pso metal.MTLComputePipeline
 	sink.dispatchThreadgroups(
 		metal.MTLSize{Width: uint(nKVHeads), Height: 1, Depth: uint(blocks)},
 		metal.MTLSize{Width: 32, Height: uint(nHeads / nKVHeads), Depth: 1},
+	)
+}
+
+// emitSDPA2Pass2TQ records the TQ-owned merge+unrotate pass through any sink
+// — partials=0 sums=1 maxs=2 out=3 blocks=4 (the SAME 0..4 ABI
+// emitSDPA2Pass2/emitSDPA2Pass2At use against MLX's stock kernel) pi=5 (the
+// resident Π [d,d] this fold reads — the only addition; kernels/lthn_tq_kv.
+// metal's header has the full reasoning). out receives the FINAL (unrotated)
+// value directly, unlike emitSDPA2Pass2 against the stock kernel — no
+// rotated-space scratch buffer or trailing emitTQRotRows call needed. Same
+// grid as emitSDPA2Pass2: one threadgroup per head, 1024 threads.
+func emitSDPA2Pass2TQ[S dispatchSink](sink S, pso metal.MTLComputePipelineState, partials, sums, maxs, out metal.MTLBuffer, nHeads, blocks int, pi metal.MTLBuffer) {
+	sink.setPSO(pso)
+	sink.setBuf(partials, 0, 0)
+	sink.setBuf(sums, 0, 1)
+	sink.setBuf(maxs, 0, 2)
+	sink.setBuf(out, 0, 3)
+	sink.setI32(int32(blocks), 4)
+	sink.setBuf(pi, 0, 5)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(nHeads), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 1024, Height: 1, Depth: 1},
 	)
 }
 
@@ -590,10 +653,12 @@ func TurboQuantKVDequantDevice(codes []byte, gammas []float32, heads, headDim, b
 // (twoPass=false) is the FUSED kernel (#48): q pre-rotation and output
 // unrotation happen INSIDE lthn_sdpa_vector_tq, so this driver just uploads
 // q raw and reads the final out straight back. twoPass=true still brackets
-// the pass-1/pass-2 pair with the explicit emitTQRotRows calls — that lane's
-// rotation stays a separate dispatch (see emitSDPAVector2Pass1TQ's doc: a
-// per-block-replicated kernel cannot fold an O(d²) op without multiplying its
-// cost by the block count). q is [nHeads×headDim] bf16; kCodes/vCodes are
+// pass 1 with an explicit emitTQRotRows q pre-rotation — that half stays a
+// separate dispatch (see emitSDPAVector2Pass1TQ's doc: a per-block-replicated
+// kernel cannot fold an O(d²) op without multiplying its cost by the block
+// count) — but the output unrotation now folds into emitSDPA2Pass2TQ's
+// epilogue, so outBuf receives the FINAL value directly with no trailing
+// unrotate dispatch. q is [nHeads×headDim] bf16; kCodes/vCodes are
 // [n × nKVHeads × bytesPerHead] packed rows; kGammas/vGammas are
 // [n × nKVHeads] f32.
 func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []float32, nHeads, nKVHeads, headDim, n, kBits, vBits int, scale float32, twoPass bool) ([]byte, error) {
@@ -609,17 +674,14 @@ func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []fl
 		len(vCodes) != n*nKVHeads*vBytesPerHead || len(kGammas) != n*nKVHeads || len(vGammas) != n*nKVHeads {
 		return nil, core.NewError("native.TurboQuantSDPADevice: size mismatch")
 	}
-	// twoPass alone still brackets the pass-1/pass-2 pair with the SEPARATE
-	// rotate/unrotate kernels — resolved up front (function-level error, same
-	// as every other pipeline lookup here) so the closure below never needs a
-	// mid-encode early return that would skip its unconditional end/commit tail.
-	var rotPSO, unrotPSO metal.MTLComputePipelineState
+	// twoPass alone still brackets pass 1 with the SEPARATE q pre-rotation
+	// kernel — resolved up front (function-level error, same as every other
+	// pipeline lookup here) so the closure below never needs a mid-encode
+	// early return that would skip its unconditional end/commit tail.
+	var rotPSO metal.MTLComputePipelineState
 	if twoPass {
 		var err error
 		if rotPSO, err = tqRotRowsPipeline(false); err != nil {
-			return nil, err
-		}
-		if unrotPSO, err = tqRotRowsPipeline(true); err != nil {
 			return nil, err
 		}
 	}
@@ -654,13 +716,14 @@ func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []fl
 		pi := tqKVPiBuffer(headDim)
 		kCent := tqKVCentroidsBuffer(headDim, kBits)
 		vCent := tqKVCentroidsBuffer(headDim, vBits)
-		// twoPass-only rotated-space scratch — allocated here (still before any
-		// cb/enc exists) so an allocation failure returns before there is
-		// anything to end/commit, exactly like every other buffer above.
-		var qRot, oRot metal.MTLBuffer
+		// twoPass-only rotated-q scratch (pass 1 reads a pre-rotated q) —
+		// allocated here (still before any cb/enc exists) so an allocation
+		// failure returns before there is anything to end/commit, exactly
+		// like every other buffer above. No rotated-OUTPUT scratch any more —
+		// emitSDPA2Pass2TQ writes the FINAL value straight to outBuf.
+		var qRot metal.MTLBuffer
 		if twoPass {
 			qRot = alloc(device.NewBufferWithLengthOptions(uint(len(q)), metal.MTLResourceStorageModeShared))
-			oRot = alloc(device.NewBufferWithLengthOptions(uint(len(out)), metal.MTLResourceStorageModeShared))
 		}
 		if encErr != nil {
 			return
@@ -670,15 +733,18 @@ func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []fl
 		enc := computeCommandEncoderFast(cb)
 		sink := encSink{enc}
 		if twoPass {
-			// unfused: rotate q into its own scratch, run the pass-1/pass-2 pair
-			// into a ROTATED-space scratch, then unrotate that into outBuf.
+			// q pre-rotation stays a separate dispatch into its own scratch
+			// (unchanged); pass 1 fans the KV scan over `blocks` threadgroups;
+			// pass 2 is TQ's OWNED merge kernel — it folds the output
+			// unrotation into its epilogue, so outBuf receives the FINAL
+			// value directly (#48 long-context slice: 4 dispatches -> 3).
 			emitTQRotRows(sink, rotPSO, qBuf, pi, qRot, nHeads, headDim)
 			blocks := sdpa2PassBlocks(n, nKVHeads)
 			pso1, perr := sdpaVector2Pass1TQPipeline(headDim, kBits, vBits, blocks)
 			if perr != nil {
 				encErr = perr
 			}
-			pso2, p2err := sdpaVector2Pass2PipelineForHeadDim(headDim)
+			pso2, p2err := sdpaVector2Pass2TQPipeline(headDim)
 			if p2err != nil {
 				encErr = p2err
 			}
@@ -689,11 +755,8 @@ func TurboQuantSDPADevice(q []byte, kCodes, vCodes []byte, kGammas, vGammas []fl
 				if encErr == nil {
 					emitSDPAVector2Pass1TQ(sink, pso1, qRot, kBuf, vBuf, partials, sums, maxs, kgBuf, vgBuf, kCent, vCent, nil,
 						nHeads, nKVHeads, n, int(blocks), int64(kBytesPerHead), int64(nKVHeads*kBytesPerHead), int64(vBytesPerHead), int64(nKVHeads*vBytesPerHead), scale)
-					emitSDPA2Pass2At(sink, pso2, partials, sums, maxs, oRot, 0, 1, nHeads, int(blocks))
+					emitSDPA2Pass2TQ(sink, pso2, partials, sums, maxs, outBuf, nHeads, int(blocks), pi)
 				}
-			}
-			if encErr == nil {
-				emitTQRotRows(sink, unrotPSO, oRot, pi, outBuf, nHeads, headDim)
 			}
 		} else {
 			// fused: the kernel rotates q and unrotates its own output — q raw
