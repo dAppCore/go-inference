@@ -195,9 +195,13 @@ func (s *shardBuffers) bufForAligned(weight []byte, align uint) (bufView, error)
 		}
 	}
 	// A tensor widened from F16 to BF16 at load (WidenF16TensorsToBF16) is a fresh heap buffer, not a
-	// shard mmap view — legitimately off-mmap. Bind it resident (a small companion copy). This keeps
-	// the strict guard below for a NON-widened off-shard weight, which is still a wrong-mapping bug.
-	if s.dm != nil && s.dm.IsWidened(weight) {
+	// shard mmap view — legitimately off-mmap. Bind it resident (a small companion copy). Likewise a
+	// REGISTERED OWNED tensor — a load-time synthesis the mapping adopted (a packExperts MoE pack, a
+	// b1→b2-repacked weight; safetensors.AdoptOwnedTensors): residentBytes pins the slice beside its
+	// device buffer, so the heap bytes can neither move nor be collected while bound, and Close
+	// evicts the owned ranges with the session. This keeps the strict guard below for a NON-registered
+	// off-shard weight, which is still a wrong-mapping bug.
+	if s.dm != nil && (s.dm.IsWidened(weight) || s.dm.IsOwned(weight)) {
 		return bufView{buf: residentBytes(weight), off: 0}, nil
 	}
 	return bufView{}, core.NewError("native.shardBuffers.bufForAligned: weight is not a view into any mapped shard")
@@ -258,6 +262,11 @@ func (s *shardBuffers) Close() error {
 	if s == nil || s.dm == nil {
 		return nil
 	}
+	// Registered owned tensors (repacked/synthesised heap buffers — see bufForAligned) bound
+	// resident through this session: release their device buffers and unpin with the session,
+	// exactly like the shard-range eviction below. Owned packs can be GBs (a fully repacked
+	// checkpoint), so session-scoped eviction is load-bearing, not tidiness.
+	evictResidentBufsForRanges(s.dm.OwnedRanges())
 	evictResidentBufsForRanges(s.bases, s.ends)
 	unregisterMappedShardRanges(s.bases, s.ends)
 	err := s.dm.Close()
