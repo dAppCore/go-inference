@@ -1807,13 +1807,17 @@ func (pair *AssistantPair) GenerateFromSession(target *ArchSession, promptIDs []
 
 // GenerateFromSessionEach is GenerateFromSession with per-token streaming.
 //
-// Scheduling (#299): drafting is adaptive, gated on measured token rates. A
-// low-accept patience bail no longer retires the drafter for the request — it
-// runs a bounded plain stretch (whose rate is measured live), then re-probes
-// drafting and stays engaged only while the delivered rate holds at or above
-// plain (see the re-engagement constants above nativeAssistantLowAcceptPatience
-// for the full policy). LTHN_MTP_REENGAGE=0 restores the permanent bail — with
-// it set, the token stream is byte-identical to the pre-#299 loop.
+// Scheduling: with the verify fold armed (mtpVerifyFoldArmed — the default),
+// the stream rides ONE deterministic lane: drafting stays engaged, and the
+// only bail is the count-based low-accept patience, which finishes the
+// request plain permanently. The #299 wall-clock re-engagement machinery
+// (bounded plain stretches, rate-measured probes, deep bootstrap) runs only
+// on the byte-exact per-row lane (LTHN_MTP_VERIFY_FOLD=0), where byte-parity
+// with plain decode keeps its timing-dependent lane composition invisible in
+// the emitted stream; on the fold tier that same composition would surface
+// as flipped near-tie tokens (the q8race bistability), so it is pinned off.
+// LTHN_MTP_REENGAGE=0 pins the wall-clock machinery off on the per-row lane
+// too (the pre-#299 permanent bail).
 func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptIDs []int32, maxNew, eosID, draftTokens int, suppress []int32, yield AssistantTokenSink) (AssistantGenerateResult, error) {
 	if pair == nil || pair.Assistant == nil {
 		return AssistantGenerateResult{}, core.NewError("native.assistant generation requires a validated pair")
@@ -1841,6 +1845,15 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 	stopped := false
 	lowAcceptStreak := 0
 	var reng mtpReengage
+	// The fold rearm's determinism pin: when the greedy verify rides the fold
+	// (mtpVerifyFoldArmed — the default), its stream is not byte-identical to
+	// plain decode, so the wall-clock re-engage machinery (probe/cooldown/
+	// deep-bootstrap, #299) would make TIMING observable as flipped near-tie
+	// tokens — the q8race bistability. One lane per stream: wall-clock
+	// re-engagement runs only on the byte-exact per-row lane
+	// (LTHN_MTP_VERIFY_FOLD=0); folding streams keep the count-based
+	// low-accept bail (deterministic) and finish plain permanently on it.
+	wallReengage := !mtpReengageDisabled && !mtpVerifyFoldArmed()
 	dl := newMTPDraftLen(draftTokens)
 	// runPlainStretch runs the bounded cooldown stretch (committing a pending
 	// lead first), measures the live plain rate, and re-arms drafting into a
@@ -1940,7 +1953,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			dl.cycle(true, target.pos)
 			lowAcceptStreak = 0
 			carryLead = -1
-			if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+			if wallReengage && !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 				if mtpDiagForTest {
 					nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 				}
@@ -1952,17 +1965,19 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 				}
 				continue
 			}
-			bail := false
-			if wasProbing {
-				bail = reng.probeCycle(newDrafts, len(result.Tokens))
-			} else {
-				bail = reng.engagedCycle(newDrafts, time.Since(cycleT0).Seconds(), len(result.Tokens))
-			}
-			if bail && !mtpConfForce {
-				if done, perr := runPlainStretch(carryLead); perr != nil {
-					return result, perr
-				} else if done {
-					break
+			if wallReengage {
+				bail := false
+				if wasProbing {
+					bail = reng.probeCycle(newDrafts, len(result.Tokens))
+				} else {
+					bail = reng.engagedCycle(newDrafts, time.Since(cycleT0).Seconds(), len(result.Tokens))
+				}
+				if bail && !mtpConfForce {
+					if done, perr := runPlainStretch(carryLead); perr != nil {
+						return result, perr
+					} else if done {
+						break
+					}
 				}
 			}
 			continue
@@ -1983,7 +1998,9 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		// Give up on drafting only after the drafter has stayed weak for several
 		// consecutive blocks — one near-tie block is transient, not a mismatched pair.
 		if !mtpConfForce && !stopped && len(result.Tokens) < maxNew && lowAcceptStreak >= nativeAssistantLowAcceptPatience {
-			if mtpReengageDisabled {
+			if !wallReengage {
+				// Count-based and permanent: the deterministic bail shape both
+				// LTHN_MTP_REENGAGE=0 and the folding greedy lane take.
 				if err := nativeAssistantFinishLowAcceptFromTargetCache(target, &result, replacement, maxNew, eosID, suppress, yield); err != nil {
 					return result, err
 				}
@@ -2004,7 +2021,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		if stopped {
 			break
 		}
-		if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+		if wallReengage && !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 			if mtpDiagForTest {
 				nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 			}
@@ -2016,17 +2033,19 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			}
 			continue
 		}
-		bail := false
-		if wasProbing {
-			bail = reng.probeCycle(newDrafts, len(result.Tokens))
-		} else {
-			bail = reng.engagedCycle(newDrafts+1, time.Since(cycleT0).Seconds(), len(result.Tokens))
-		}
-		if bail && !mtpConfForce {
-			if done, perr := runPlainStretch(replacement); perr != nil {
-				return result, perr
-			} else if done {
-				break
+		if wallReengage {
+			bail := false
+			if wasProbing {
+				bail = reng.probeCycle(newDrafts, len(result.Tokens))
+			} else {
+				bail = reng.engagedCycle(newDrafts+1, time.Since(cycleT0).Seconds(), len(result.Tokens))
+			}
+			if bail && !mtpConfForce {
+				if done, perr := runPlainStretch(replacement); perr != nil {
+					return result, perr
+				} else if done {
+					break
+				}
 			}
 		}
 	}
@@ -2549,10 +2568,12 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	// OTHER round shape this default is what the log below reports, instead of silently reusing a
 	// STALE snapshot left over from a previous round.
 	mtpRowsDiagLast = mtpRowsDiagSnapshot{K: len(draftTokens), Reason: "rows-moe-seam-not-reached"}
-	// #55 routing: this greedy tier is byte-exact — per-row forward and per-row
-	// canonical head — so the emitted stream stays invariant to the wall-clock
-	// re-engagement verdicts (mtpVerifyFoldArmed's doc). LTHN_MTP_VERIFY_FOLD=1
-	// and LTHN_MTP_ROWS_HEAD=1 force the fold/rows-head tiers (the A/B levers).
+	// Routing (rearmed): the fold tier is the default verify forward here too
+	// (mtpVerifyFoldArmed's doc — determinism now comes from the generate loop
+	// pinning wall-clock re-engagement off while folding, not from byte-parity
+	// with plain decode). LTHN_MTP_VERIFY_FOLD=0 restores the byte-exact
+	// per-row tier — forward and canonical head — for parity forensics;
+	// LTHN_MTP_ROWS_HEAD=1 forces the qmm_t rows-head tier (#55 A/B lever).
 	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens, true)
 	if err != nil {
 		return nil, nil, err
@@ -2710,17 +2731,18 @@ func mtpDiagTop2BF16Suppressed(logits []byte, vocab int, suppress []int32) (int3
 }
 
 // verifyAssistantDraftHiddens forwards the draft block through the target and
-// returns the per-row hiddens. Routing is the #55 rule (mtpVerifyFoldArmed):
-// exact=true is the greedy lane's byte-exact contract — the per-row lane (qmv
-// dot-body per row, byte-identical to sequential plain decode) — because the
-// re-engagement policy composes fold and plain stretches on wall-clock
-// verdicts, and only byte-parity keeps that composition invisible in the
-// emitted stream. The sampled lane (exact=false) takes the small-K batched
-// FOLD: weights swept once per block through the qmm token-identity tier,
-// deterministic run-to-run but not byte-identical to unbatched plain decode.
-// LTHN_MTP_VERIFY_FOLD forces either side for the parity A/B.
+// returns the per-row hiddens. Routing is mtpVerifyFoldArmed's rearmed rule:
+// the small-K batched FOLD (weights swept once per block through the qmm
+// token-identity tier, deterministic run-to-run but not byte-identical to
+// unbatched plain decode) is the default for every lane; determinism on the
+// greedy lane is preserved by GenerateFromSessionEach pinning the wall-clock
+// re-engage machinery off while folding. LTHN_MTP_VERIFY_FOLD=0 restores the
+// per-row byte-exact lane (qmv dot-body per row, byte-identical to sequential
+// plain decode) everywhere — the parity-forensics anchor. Where the fold's
+// dense lane declines structurally (quant-MoE), exact=true falls through to
+// the layer-major rows driver, then the per-row loop, unchanged.
 func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32, exact bool) ([][]byte, error) {
-	if mtpVerifyFoldArmed(exact) {
+	if mtpVerifyFoldArmed() {
 		s.state.verifyFoldSmallK = true
 		defer func() { s.state.verifyFoldSmallK = false }()
 	}

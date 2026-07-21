@@ -73,15 +73,14 @@ var mtpDiagForTest = os.Getenv("LTHN_MTP_DIAG") != ""
 var mtpNoFusedForTest = os.Getenv("LTHN_MTP_NOFUSED") != ""
 
 // mtpVerifyFoldDisabled forces the per-row verify lane everywhere
-// (LTHN_MTP_VERIFY_FOLD=0), including the sampled verify that defaults to the
-// batched fold — weights swept once per block instead of once per drafted row.
+// (LTHN_MTP_VERIFY_FOLD=0) — the byte-exact forensics anchor: per-row
+// numerics are byte-identical to sequential plain decode, so this lever
+// restores the pre-rearm greedy stream for parity A/Bs.
 var mtpVerifyFoldDisabled = os.Getenv("LTHN_MTP_VERIFY_FOLD") == "0"
 
-// mtpVerifyFoldForced arms the batched fold everywhere (LTHN_MTP_VERIFY_FOLD=1),
-// including the byte-exact greedy verify that defaults to the per-row lane —
-// the #55 A/B lever. The fold is a token-identity tier: its batched numerics
-// are not byte-identical to sequential decode, and at a near-tied argmax that
-// flips a committed token, so the greedy lane never takes it by default.
+// mtpVerifyFoldForced (LTHN_MTP_VERIFY_FOLD=1) is the historic force lever
+// from the era when the greedy lane declined the fold by default; the fold is
+// the default everywhere now, so this only overrides a stray "0".
 var mtpVerifyFoldForced = os.Getenv("LTHN_MTP_VERIFY_FOLD") == "1"
 
 // mtpReengageDisabled restores the permanent low-accept bail (LTHN_MTP_REENGAGE=0):
@@ -98,18 +97,22 @@ var mtpReengageDisabled = os.Getenv("LTHN_MTP_REENGAGE") == "0"
 // not. The exact lane therefore defaults to the per-row canonical head.
 var mtpRowsHeadForced = os.Getenv("LTHN_MTP_ROWS_HEAD") == "1"
 
-// mtpVerifyFoldArmed is the #55 routing rule for the assistant verify forward:
-// the batched small-K fold (qmm token-identity tier — NOT byte-identical to
-// sequential decode; a near-tied argmax can flip a committed token) arms only
-// when the caller does not need byte-exactness (the sampled lane), or when the
-// LTHN_MTP_VERIFY_FOLD=1 A/B lever forces it. exact=true is the greedy lane's
-// byte-exact contract: never fold unless forced. Byte-exactness here is what
-// keeps the emitted stream invariant to the re-engagement policy's wall-clock
-// verdicts: the fold/plain cycle STRUCTURE is timing-dependent by design
-// (#299), so any lane whose bytes differ from plain decode makes that timing
-// observable as a flipped near-tied token downstream.
-func mtpVerifyFoldArmed(exact bool) bool {
-	return mtpVerifyFoldForced || (!exact && !mtpVerifyFoldDisabled)
+// mtpVerifyFoldArmed is the assistant verify forward's routing rule, REARMED
+// (Snider 2026-07-21): the batched small-K fold (qmm token-identity tier —
+// weights swept once per block, the E2B 206-vs-131 tok/s lane) is the default
+// verify tier for EVERY lane, greedy included. The fold's batched numerics
+// are not byte-identical to sequential decode — a near-tied argmax can pick
+// a different-but-equally-greedy token — which is why #55 originally fenced
+// it from the greedy lane: composed with the re-engagement policy's
+// WALL-CLOCK lane switching, the timing became observable as flipped tokens
+// (the q8race bistability). The rearm keeps determinism the other way round:
+// when the greedy lane folds, GenerateFromSessionEach pins the wall-clock
+// re-engage machinery OFF (one lane per stream, count-based bail only), so
+// the emitted stream is a pure function of the input again — just the fold
+// tier's stream, not the per-row tier's. LTHN_MTP_VERIFY_FOLD=0 restores the
+// per-row byte-exact lane everywhere (the forensics anchor).
+func mtpVerifyFoldArmed() bool {
+	return mtpVerifyFoldForced || !mtpVerifyFoldDisabled
 }
 
 // mtpDiagDraftCalls counts draft-block invocations for the #352 instrument (single decode goroutine).

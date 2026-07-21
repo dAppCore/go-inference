@@ -31,38 +31,36 @@ func restoreMTPFoldLevers(t *testing.T) {
 	})
 }
 
-// TestMtpVerifyFoldArmed_Good pins the default #55 routing: the byte-exact
-// greedy lane (exact=true) never takes the fold; the sampled lane keeps it.
-// The greedy contract is what keeps the emitted stream invariant to the
-// re-engagement policy's wall-clock verdicts (mtpVerifyFoldArmed's doc).
+// TestMtpVerifyFoldArmed_Good pins the REARMED default routing (Snider
+// 2026-07-21): the fold is the default verify tier for every lane, greedy
+// included — determinism now comes from GenerateFromSessionEach pinning the
+// wall-clock re-engagement machinery off while folding, not from withholding
+// the fold (mtpVerifyFoldArmed's doc).
 func TestMtpVerifyFoldArmed_Good(t *testing.T) {
 	restoreMTPFoldLevers(t)
 	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, false
-	if mtpVerifyFoldArmed(true) {
-		t.Fatal("exact greedy verify armed the batched fold — the byte-exact contract cannot hold on the token-identity tier (#55)")
-	}
-	if !mtpVerifyFoldArmed(false) {
-		t.Fatal("sampled verify did not arm the batched fold — the sampled lane's throughput tier regressed")
+	if !mtpVerifyFoldArmed() {
+		t.Fatal("default routing must arm the batched fold — the rearm (E2B 206-vs-131 lane) regressed to the per-row default")
 	}
 }
 
-// TestMtpVerifyFoldArmed_Bad pins LTHN_MTP_VERIFY_FOLD=0: the per-row lane is
-// forced everywhere, including the sampled verify.
+// TestMtpVerifyFoldArmed_Bad pins LTHN_MTP_VERIFY_FOLD=0: the byte-exact
+// per-row lane is forced everywhere — the parity-forensics anchor.
 func TestMtpVerifyFoldArmed_Bad(t *testing.T) {
 	restoreMTPFoldLevers(t)
 	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, true
-	if mtpVerifyFoldArmed(true) || mtpVerifyFoldArmed(false) {
-		t.Fatal("LTHN_MTP_VERIFY_FOLD=0 must force the per-row lane in both lanes")
+	if mtpVerifyFoldArmed() {
+		t.Fatal("LTHN_MTP_VERIFY_FOLD=0 must force the per-row lane everywhere")
 	}
 }
 
-// TestMtpVerifyFoldArmed_Ugly pins LTHN_MTP_VERIFY_FOLD=1 — the A/B lever that
-// resurrects the pre-#55 fold-everywhere behaviour, exact lane included.
+// TestMtpVerifyFoldArmed_Ugly pins LTHN_MTP_VERIFY_FOLD=1 — the historic
+// force lever; redundant now the fold is the default, but it must still win.
 func TestMtpVerifyFoldArmed_Ugly(t *testing.T) {
 	restoreMTPFoldLevers(t)
 	mtpVerifyFoldForced, mtpVerifyFoldDisabled = true, false
-	if !mtpVerifyFoldArmed(true) || !mtpVerifyFoldArmed(false) {
-		t.Fatal("LTHN_MTP_VERIFY_FOLD=1 must force the fold in both lanes (the #55 A/B lever)")
+	if !mtpVerifyFoldArmed() {
+		t.Fatal("LTHN_MTP_VERIFY_FOLD=1 must arm the fold")
 	}
 }
 

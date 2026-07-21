@@ -343,6 +343,11 @@ func assertReengageCooldownEscalationTrace(t *testing.T, trace string) {
 // bailAgain doubling the cooldown, across several real rounds in one call.
 func TestAssistantPairGenerateFromSessionEachReengageCooldownEscalatesOnRepeatedProbeFailure(t *testing.T) {
 	requireNativeRuntime(t)
+	// The wall-clock re-engagement machinery this test drives runs only on the
+	// byte-exact per-row lane since the fold rearm (the folding greedy lane
+	// pins it off for determinism) — pin that lane for the scenario.
+	restoreMTPFoldLevers(t)
+	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, true
 	const maxNew = 300
 	const draftTokens = 2
 	pair, mk := newNativeAssistantGenerateFixtureMaxLen(t, maxNew+20)
@@ -463,6 +468,10 @@ func TestAssistantPairGenerateSampledFromSessionEachReengageCooldownEscalatesOnR
 // required.
 func TestAssistantPairGenerateFromSessionEachDeepBootstrapArmsAtDepth(t *testing.T) {
 	requireNativeRuntime(t)
+	// Deep bootstrap is wall-clock re-engagement machinery — per-row lane only
+	// since the fold rearm; pin that lane for the scenario.
+	restoreMTPFoldLevers(t)
+	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, true
 	const promptLen = nativeAssistantDeepBootstrapPos
 	const maxNew = 4*nativeAssistantDeepBootstrapTokens + 12
 	const draftTokens = 2

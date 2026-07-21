@@ -87,6 +87,11 @@ func mtpRowsDriverKVSnapshot(s *ArchSession) [][2][]byte {
 // grouped-expert counter (mtpRowsMoEMaxGroupSize) must have moved during the lever-on run.
 func TestMTPRowsDriverVerifyMatchesRowMajor_Good(t *testing.T) {
 	requireNativeRuntime(t)
+	// The rearmed fold (mtpVerifyFoldArmed) would otherwise serve the verify
+	// ahead of the layer-major driver this test pins — run the comparison on
+	// the LTHN_MTP_VERIFY_FOLD=0 forensics lane, where the driver is reachable.
+	restoreMTPFoldLevers(t)
+	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, true
 	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
 	for i := range mtpRowsDriverTestNumLayers {
 		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
@@ -209,6 +214,10 @@ func TestMTPRowsDriverVerifyMatchesRowMajor_Good(t *testing.T) {
 // neither mode and pass vacuously.
 func TestMTPRowsDriverVerifyMatchesRowMajorSliding_Good(t *testing.T) {
 	requireNativeRuntime(t)
+	// Same forensics-lane pin as the global fixture: the rearmed fold serves
+	// ahead of the layer-major driver otherwise, making the compare vacuous.
+	restoreMTPFoldLevers(t)
+	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, true
 	for _, tc := range []struct {
 		name   string
 		window int
