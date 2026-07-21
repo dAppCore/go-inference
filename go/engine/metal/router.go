@@ -780,6 +780,39 @@ func moeRouterQuantDeviceTopKBuffersWithBufferInPool(x []byte, xBuf metal.MTLBuf
 	return weightBuf, scratch, ok, err
 }
 
+// encMoERouterQuantTopKRow encodes ONE row's router — RMS → score QMV → the
+// 32-lane topK select — into the caller's encoder, byte-for-byte the dispatch
+// sequence the single-row primitive commits privately. This is a SUBMISSION
+// seam only (#53: the gate's reduction is never batched — K rows are K
+// independent instances of this exact per-row sequence, whatever command
+// buffer they share); results land in the row's own scratch idx/weight
+// buffers, readable after the caller's wait.
+func encMoERouterQuantTopKRow(enc metal.MTLComputeCommandEncoderObject, scratch *routerDeviceScratch, inputBuf metal.MTLBuffer, normBuf bufView, wBuf, scalesBuf, biasesBuf bufView, scaleBuf metal.MTLBuffer, scaleOff uint, hasPerExpertScale bool, rmsPSO, qmvPSO, routerPSO metal.MTLComputePipelineState, rmsTG uint, dModel, numExperts, topK int, eps float32) {
+	sink := encSink{enc}
+	emitRMSNorm(sink, rmsPSO, inputBuf, normBuf.buf, scratch.normedBuf, normBuf.off, dModel, eps, rmsTG)
+	emitQMV(sink, qmvPSO, wBuf.buf, wBuf.off, scalesBuf.buf, scalesBuf.off, biasesBuf.buf, biasesBuf.off, scratch.normedBuf, scratch.scoresBuf, 0, dModel, numExperts)
+	if scaleBuf == nil {
+		scaleBuf = scratch.scoresBuf
+	}
+	scaleFlag := int32(0)
+	if hasPerExpertScale {
+		scaleFlag = 1
+	}
+	sink.setPSO(routerPSO)
+	sink.setBuf(scratch.scoresBuf, 0, 0)
+	sink.setBuf(scaleBuf, scaleOff, 1)
+	sink.setBuf(scratch.idxBuf, 0, 2)
+	sink.setBuf(scratch.weightBuf, 0, 3)
+	sink.setI32(int32(numExperts), 4)
+	sink.setI32(int32(topK), 5)
+	sink.setI32(scaleFlag, 6)
+	// the kernel is a single 32-lane simdgroup (lane >= 32 exits immediately)
+	sink.dispatchThreads(
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+}
+
 // moeRouterQuantDeviceTopKWithBufferPooled declines (ok=false) when normalise is false — see
 // moeRouterBF16DeviceTopKNoCopyWithBufferPooled's identical note: the GPU topK kernel cannot
 // implement softmax-over-all-then-gather-no-renormalise, so a NormaliseMoETopK=false arch (#65) must
@@ -855,34 +888,9 @@ func moeRouterQuantDeviceTopKWithBufferPooled(x []byte, xBuf metal.MTLBuffer, no
 			scaleView := bf16WeightView(perExpertScale, perExpertScaleView)
 			scaleBuf, scaleOff = scaleView.buf, scaleView.off
 		}
-		normedBuf := scratch.normedBuf
-		scoresBuf := scratch.scoresBuf
-
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		sink := encSink{enc}
-		emitRMSNorm(sink, rmsPSO, inputBuf, normBuf.buf, normedBuf, normBuf.off, dModel, eps, rmsTG)
-		emitQMV(sink, qmvPSO, wBuf.buf, wBuf.off, scalesBuf.buf, scalesBuf.off, biasesBuf.buf, biasesBuf.off, normedBuf, scoresBuf, 0, dModel, numExperts)
-		if scaleBuf == nil {
-			scaleBuf = scoresBuf
-		}
-		scaleFlag := int32(0)
-		if perExpertScale != nil {
-			scaleFlag = 1
-		}
-		sink.setPSO(routerPSO)
-		sink.setBuf(scoresBuf, 0, 0)
-		sink.setBuf(scaleBuf, scaleOff, 1)
-		sink.setBuf(scratch.idxBuf, 0, 2)
-		sink.setBuf(scratch.weightBuf, 0, 3)
-		sink.setI32(int32(numExperts), 4)
-		sink.setI32(int32(topK), 5)
-		sink.setI32(scaleFlag, 6)
-		// the kernel is a single 32-lane simdgroup (lane >= 32 exits immediately)
-		sink.dispatchThreads(
-			metal.MTLSize{Width: 32, Height: 1, Depth: 1},
-			metal.MTLSize{Width: 32, Height: 1, Depth: 1},
-		)
+		encMoERouterQuantTopKRow(enc, scratch, inputBuf, normBuf, wBuf, scalesBuf, biasesBuf, scaleBuf, scaleOff, perExpertScale != nil, rmsPSO, qmvPSO, routerPSO, rmsTG, dModel, numExperts, topK, eps)
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
 		if returnHostViews {

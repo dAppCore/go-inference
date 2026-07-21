@@ -274,25 +274,78 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 	numExperts, topK, expertDFF := w.NumExperts, w.TopK, w.ExpertDFF
 	rowBytes := dModel * bf16Size
 
-	// 1. ROUTER — one call per row, the sequential path's own single-row device primitive
-	// (router.go). Never batched (#53): the gate's reduction stays the per-row shape
-	// unconditionally, regardless of whether a batched form might incidentally match.
+	// 1. ROUTER — K independent instances of the sequential path's own single-row
+	// dispatch sequence (encMoERouterQuantTopKRow, router.go). Never batched
+	// (#53): the gate's reduction stays the per-row shape unconditionally — the
+	// K rows share ONE command buffer purely as a submission seam (the per-row
+	// private commit+wait cost K×layers GPU round-trips per verify round, the
+	// dominant moe wall once the expert stage batched).
 	idxAll := make([]int32, K*topK)
 	weightsAll := make([]byte, K*topK*bf16Size)
-	for r := range K {
-		row := hSlab[r*rowBytes : (r+1)*rowBytes]
-		idx, wts, _, scratch, rok, rerr := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(
-			row, nil, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView,
-			numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	{
+		if !routerTopKUsable(numExperts, topK) {
+			return nil, false, nil
+		}
+		rGroupSize, rBits := quantWeightGeometryForShape(w.Router, numExperts, dModel, w.RouterGroupSize, w.RouterBits)
+		if rGroupSize <= 0 || dModel%rGroupSize != 0 {
+			return nil, false, core.NewError("native.mtpRowsMoEBatched: router groupSize must divide dModel")
+		}
+		rmsPSO, rerr := pipelineFor(rmsKernelBF16(dModel))
 		if rerr != nil {
 			return nil, false, rerr
 		}
-		if !rok {
-			return nil, false, nil
+		rmsTG := rmsThreadgroup(dModel, rmsPSO)
+		qmvPSO, rerr := pipelineFor(qmvBF16KernelName(numExperts, dModel, rGroupSize, rBits))
+		if rerr != nil {
+			return nil, false, rerr
 		}
-		copy(idxAll[r*topK:], idx)
-		copy(weightsAll[r*topK*bf16Size:], wts)
-		putRouterDeviceScratch(scratch)
+		routerPSO, rerr := routerTopKPipelineK(topK)
+		if rerr != nil {
+			return nil, false, rerr
+		}
+		normBuf := bf16WeightView(w.RouterNormWScaled, w.routerNormView)
+		wBuf, scalesBuf, biasesBuf := quantWeightViews(w.Router)
+		var scaleBuf metal.MTLBuffer
+		var scaleOff uint
+		if w.PerExpertScale != nil {
+			scaleView := bf16WeightView(w.PerExpertScale, w.perExpertScaleView)
+			scaleBuf, scaleOff = scaleView.buf, scaleView.off
+		}
+		scratches := make([]*routerDeviceScratch, K)
+		defer func() {
+			for _, sc := range scratches {
+				if sc != nil {
+					putRouterDeviceScratch(sc)
+				}
+			}
+		}()
+		rcb := commandBufferFast(queue)
+		renc := computeCommandEncoderFast(rcb)
+		for r := range K {
+			scratch, serr := getRouterDeviceScratch(dModel, numExperts, topK)
+			if serr != nil {
+				endEncodingFast(renc)
+				return nil, false, serr
+			}
+			scratches[r] = scratch
+			row := hSlab[r*rowBytes : (r+1)*rowBytes]
+			inputBuf, iok := scratch.inputView(row)
+			if !iok {
+				var cerr error
+				if inputBuf, cerr = scratch.x.copyPrefixBuffer(row); cerr != nil {
+					endEncodingFast(renc)
+					return nil, false, cerr
+				}
+			}
+			encMoERouterQuantTopKRow(renc, scratch, inputBuf, normBuf, wBuf, scalesBuf, biasesBuf, scaleBuf, scaleOff, w.PerExpertScale != nil, rmsPSO, qmvPSO, routerPSO, rmsTG, dModel, numExperts, topK, eps)
+		}
+		endEncodingFast(renc)
+		commitCommandBufferFast(rcb)
+		waitUntilCompletedFast(rcb)
+		for r, scratch := range scratches {
+			copy(idxAll[r*topK:], unsafe.Slice(scratch.idxPtr, topK))
+			copy(weightsAll[r*topK*bf16Size:], unsafe.Slice(scratch.weightPtr, topK*bf16Size))
+		}
 	}
 
 	// 2. LOCAL MLP + the expert branch's pre-norm — batched across all K rows (shared weight per
@@ -398,8 +451,23 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 		groups[e] = append(groups[e], p)
 	}
 
+	// ONE gather slab + ONE command buffer for every group (#53): the per-group
+	// commit+wait paid a full GPU submit round-trip per touched expert — ~550
+	// per verify round across the block, launch-bound at ~0.4ms each (the
+	// measured moe=221ms wall against ~20ms of arithmetic). Every (row, slot)
+	// pair belongs to exactly one group, so the groups pack contiguously into
+	// pair-sized slabs; each group's dispatches read/write its own slab span
+	// (encQMVRowsGroupAt's byte offsets), the elementwise gelu runs ONCE over
+	// the whole slab, and the single wait replaces ~550. Kernels, per-group
+	// shapes, and rounding are unchanged — byte-identical rows, one submit.
 	maxGroup := 0
-	downAllHost := make([]byte, pairs*rowBytes)
+	type groupSpan struct {
+		e      int32
+		off, m int // pair-slot cursor + group size
+	}
+	spans := make([]groupSpan, 0, len(order))
+	gatherAll := make([]byte, pairs*rowBytes)
+	cursor := 0
 	for _, e := range order {
 		group := groups[e]
 		m := len(group)
@@ -407,11 +475,30 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 			maxGroup = m
 		}
 		mtpRowsMoEGroupHistBump(m)
-		gatherIn := make([]byte, m*rowBytes)
 		for i, p := range group {
 			r := p / topK
-			copy(gatherIn[i*rowBytes:(i+1)*rowBytes], expertNormHost[r*rowBytes:(r+1)*rowBytes])
+			copy(gatherAll[(cursor+i)*rowBytes:(cursor+i+1)*rowBytes], expertNormHost[r*rowBytes:(r+1)*rowBytes])
 		}
+		spans = append(spans, groupSpan{e: e, off: cursor, m: m})
+		cursor += m
+	}
+
+	inAllBuf := sharedBytes(gatherAll)
+	gateAllBuf := scratchBF16(pairs * expertDFF)
+	upAllBuf := scratchBF16(pairs * expertDFF)
+	gatedAllBuf := scratchBF16(pairs * expertDFF)
+	downSlabBuf := scratchBF16(pairs * dModel)
+	if inAllBuf == nil || gateAllBuf == nil || upAllBuf == nil || gatedAllBuf == nil || downSlabBuf == nil {
+		return nil, false, core.NewError("native.mtpRowsMoEBatched: expert-group scratch allocation failed")
+	}
+
+	gcb := commandBufferFast(queue)
+	// CONCURRENT dispatch (#53): the groups' gate/up (and later down) GEMVs are
+	// mutually independent — disjoint slab spans — so the encoder must not
+	// serialise them on the shared scratch buffers. Two explicit barriers mark
+	// the only true edges: gate+up → gelu → down.
+	genc := concurrentComputeEncoderFast(gcb)
+	for _, g := range spans {
 		var gPacked, gScales, gBiases, uPacked, uScales, uBiases bufView
 		var gGS, gBits, uGS, uBits int
 		if fusedExperts {
@@ -419,50 +506,51 @@ func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, 
 			// is the block's own start (the "2e"th expertDFF-sized slice), up is the very next
 			// expertDFF-sized slice ("2e+1"th) — moeExpertQuantOffsets' rowOff=e·rowsPerExpert
 			// formula gives exactly that when fed the DOUBLED expert index at expertDFF-row stride.
-			gPacked, gScales, gBiases = moeExpertQuantOffsets(expGateUpView, expGateUpScales, expGateUpBiases, int(e)*2, expertDFF, dModel, expGateUpGS, expGateUpBits)
-			uPacked, uScales, uBiases = moeExpertQuantOffsets(expGateUpView, expGateUpScales, expGateUpBiases, int(e)*2+1, expertDFF, dModel, expGateUpGS, expGateUpBits)
+			gPacked, gScales, gBiases = moeExpertQuantOffsets(expGateUpView, expGateUpScales, expGateUpBiases, int(g.e)*2, expertDFF, dModel, expGateUpGS, expGateUpBits)
+			uPacked, uScales, uBiases = moeExpertQuantOffsets(expGateUpView, expGateUpScales, expGateUpBiases, int(g.e)*2+1, expertDFF, dModel, expGateUpGS, expGateUpBits)
 			gGS, gBits, uGS, uBits = expGateUpGS, expGateUpBits, expGateUpGS, expGateUpBits
 		} else {
-			gPacked, gScales, gBiases = moeExpertQuantOffsets(expGateView, expGateScales, expGateBiases, int(e), expertDFF, dModel, expGateGS, expGateBits)
-			uPacked, uScales, uBiases = moeExpertQuantOffsets(expUpView, expUpScales, expUpBiases, int(e), expertDFF, dModel, expUpGS, expUpBits)
+			gPacked, gScales, gBiases = moeExpertQuantOffsets(expGateView, expGateScales, expGateBiases, int(g.e), expertDFF, dModel, expGateGS, expGateBits)
+			uPacked, uScales, uBiases = moeExpertQuantOffsets(expUpView, expUpScales, expUpBiases, int(g.e), expertDFF, dModel, expUpGS, expUpBits)
 			gGS, gBits, uGS, uBits = expGateGS, expGateBits, expUpGS, expUpBits
 		}
-		dPacked, dScales, dBiases := moeExpertQuantOffsets(expDownView, expDownScales, expDownBiases, int(e), dModel, expertDFF, expDownGS, expDownBits)
-
-		inBuf := sharedBytes(gatherIn)
-		gateBuf := scratchBF16(m * expertDFF)
-		upBuf := scratchBF16(m * expertDFF)
-		gatedBuf := scratchBF16(m * expertDFF)
-		downBuf := scratchBF16(m * dModel)
-		if inBuf == nil || gateBuf == nil || upBuf == nil || gatedBuf == nil || downBuf == nil {
-			return nil, false, core.NewError("native.mtpRowsMoEBatched: expert-group scratch allocation failed")
-		}
-
-		gcb := commandBufferFast(queue)
-		genc := computeCommandEncoderFast(gcb)
-		if hOK, herr := encQMVRowsGroupAt(genc, gPacked, gScales, gBiases, inBuf, gateBuf, 0, 0, m, expertDFF, dModel, gGS, gBits); herr != nil || !hOK {
+		inOff := uint(g.off * rowBytes)
+		ffOff := uint(g.off * expertDFF * bf16Size)
+		if hOK, herr := encQMVRowsGroupAt(genc, gPacked, gScales, gBiases, inAllBuf, gateAllBuf, inOff, ffOff, g.m, expertDFF, dModel, gGS, gBits); herr != nil || !hOK {
 			endEncodingFast(genc)
 			return nil, false, herr
 		}
-		if hOK, herr := encQMVRowsGroupAt(genc, uPacked, uScales, uBiases, inBuf, upBuf, 0, 0, m, expertDFF, dModel, uGS, uBits); herr != nil || !hOK {
+		if hOK, herr := encQMVRowsGroupAt(genc, uPacked, uScales, uBiases, inAllBuf, upAllBuf, inOff, ffOff, g.m, expertDFF, dModel, uGS, uBits); herr != nil || !hOK {
 			endEncodingFast(genc)
 			return nil, false, herr
 		}
-		if err := encGeluGateMulFused(genc, gateBuf, upBuf, gatedBuf, m*expertDFF); err != nil {
-			endEncodingFast(genc)
-			return nil, false, err
-		}
-		if hOK, herr := encQMVRowsGroupAt(genc, dPacked, dScales, dBiases, gatedBuf, downBuf, 0, 0, m, dModel, expertDFF, expDownGS, expDownBits); herr != nil || !hOK {
-			endEncodingFast(genc)
-			return nil, false, herr
-		}
+	}
+	memoryBarrierObject(genc, metal.MTLBarrierScopeBuffers)
+	if err := encGeluGateMulFused(genc, gateAllBuf, upAllBuf, gatedAllBuf, pairs*expertDFF); err != nil {
 		endEncodingFast(genc)
-		commitCommandBufferFast(gcb)
-		waitUntilCompletedFast(gcb)
+		return nil, false, err
+	}
+	memoryBarrierObject(genc, metal.MTLBarrierScopeBuffers)
+	for _, g := range spans {
+		dPacked, dScales, dBiases := moeExpertQuantOffsets(expDownView, expDownScales, expDownBiases, int(g.e), dModel, expertDFF, expDownGS, expDownBits)
+		ffOff := uint(g.off * expertDFF * bf16Size)
+		dnOff := uint(g.off * rowBytes)
+		if hOK, herr := encQMVRowsGroupAt(genc, dPacked, dScales, dBiases, gatedAllBuf, downSlabBuf, ffOff, dnOff, g.m, dModel, expertDFF, expDownGS, expDownBits); herr != nil || !hOK {
+			endEncodingFast(genc)
+			return nil, false, herr
+		}
+	}
+	endEncodingFast(genc)
+	commitCommandBufferFast(gcb)
+	waitUntilCompletedFast(gcb)
 
-		downHost := unsafe.Slice((*byte)(downBuf.Contents()), m*rowBytes)
-		for i, p := range group {
-			copy(downAllHost[p*rowBytes:(p+1)*rowBytes], downHost[i*rowBytes:(i+1)*rowBytes])
+	// scatter the group-contiguous down rows back to PAIR order for the combine
+	// (K·topK rows — host-µs, not a dispatch).
+	downAllHost := make([]byte, pairs*rowBytes)
+	downSlabHost := unsafe.Slice((*byte)(downSlabBuf.Contents()), pairs*rowBytes)
+	for _, g := range spans {
+		for i, p := range groups[g.e] {
+			copy(downAllHost[p*rowBytes:(p+1)*rowBytes], downSlabHost[(g.off+i)*rowBytes:(g.off+i+1)*rowBytes])
 		}
 	}
 	mtpRowsMoEMaxGroupSize.Store(int64(maxGroup))
