@@ -222,13 +222,14 @@ func TestServeDraft_SpeculativeServeNotice_Bad(t *testing.T) {
 }
 
 // TestServeDraft_SpeculativeServeNotice_Ugly proves a non-positive draft block
-// falls back to MTPDefaultDraftBlock in the rendered notice rather than
-// printing "block 0".
+// renders as the engine-default label rather than "block 0" — the loader owns
+// the arch-aware resolution (dense 5, quant-MoE 6), so the boot notice must
+// not pre-claim a number it cannot know.
 func TestServeDraft_SpeculativeServeNotice_Ugly(t *testing.T) {
 	det := DraftDetection{Source: DraftSourceFlag, DraftPath: "/models/drafter", Note: "flag override"}
 	notice := speculativeServeNotice(det, 0)
-	if !core.Contains(notice, core.Sprintf("block %d", MTPDefaultDraftBlock)) {
-		t.Fatalf("notice %q should fall back to the default block %d", notice, MTPDefaultDraftBlock)
+	if !core.Contains(notice, "engine-default block") || core.Contains(notice, "block 0") {
+		t.Fatalf("notice %q should defer to the engine-default label, never print block 0", notice)
 	}
 }
 

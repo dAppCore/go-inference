@@ -108,7 +108,10 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 		return nil, core.NewError("native.LoadSpeculativePair: -kv-cache turboquant declines the MTP drafter pairing (v1) — drop -draft or -kv-cache")
 	}
 	// maxLen <= 0 defers to the loader's checkpoint-window default.
-	if draftBlock <= 0 {
+	// draftBlock <= 0 defers to the arch-aware default resolved after the
+	// pair attaches (blockDefaulted below); the z-lab path keeps the shipped 5.
+	blockDefaulted := draftBlock <= 0
+	if blockDefaulted {
 		draftBlock = 5
 	}
 	// A gated-delta hybrid TARGET (Qwen 3.5/3.6) declines the MTP pairing. The drafter checkpoint
@@ -151,6 +154,15 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 	if err != nil {
 		_ = target.Close()
 		return nil, core.E("native.LoadSpeculativePair", "attach drafter", err)
+	}
+	// Arch-aware block default: a quant-MoE target's verify round carries a
+	// higher fixed cost (router + expert gathers + the K-row head all amortise
+	// per round), so a longer block pays there and only there — the 26B-A4B
+	// pair sweep read 127.4/135.6/135.9/137.4/136.7/129.6 tok/s at blocks
+	// 3..8 (knee at 6, plain 136.5), while the SAME sweep on E2B (dense-PLE)
+	// regressed 96.6 -> 88.5 at 6. An explicit -draft-block always wins.
+	if blockDefaulted && pair.TargetArch.HasMoE() {
+		draftBlock = 6
 	}
 	var dflashDrafter *DFlashDrafter
 	if pair.Method() == mtp.MTPDFlash {

@@ -27,9 +27,12 @@ import (
 	"dappco.re/go/inference/model/mtp"
 )
 
-// MTPDefaultDraftBlock is the engine-default MTP draft block (verify forward =
-// carried lead + block-1 proposals) applied when neither the --draft-block flag
-// nor a tuned profile pins one.
+// MTPDefaultDraftBlock is the dense-arch engine-default MTP draft block
+// (verify forward = carried lead + block-1 proposals) applied when neither the
+// --draft-block flag nor a tuned profile pins one. The LOADER owns the final
+// resolution and is arch-aware — engine/metal resolves quant-MoE targets to a
+// longer block (LoadSpeculativePair), so a 0 block must reach the loader
+// rather than being pre-substituted with this constant.
 const MTPDefaultDraftBlock = 5
 
 // DraftDetectOptions is the typed settings surface for reactive drafter
@@ -255,11 +258,12 @@ func speculativeServeNotice(detection DraftDetection, draftBlock int) string {
 	if !detection.Active() {
 		return ""
 	}
-	if draftBlock <= 0 {
-		draftBlock = MTPDefaultDraftBlock
+	blockLabel := "engine-default block"
+	if draftBlock > 0 {
+		blockLabel = core.Sprintf("block %d", draftBlock)
 	}
-	return core.Sprintf("MTP speculative decode ACTIVE — drafter %s (%s), block %d; greedy and sampled requests ride the verified lane, repetition-penalty/probe requests fall back to plain decode",
-		detection.DraftPath, detection.Note, draftBlock)
+	return core.Sprintf("MTP speculative decode ACTIVE — drafter %s (%s), %s; greedy and sampled requests ride the verified lane, repetition-penalty/probe requests fall back to plain decode",
+		detection.DraftPath, detection.Note, blockLabel)
 }
 
 // hubCacheAssistantFor resolves the family MTP assistant for a target served

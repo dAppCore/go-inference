@@ -188,7 +188,14 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	// token. Every miss degrades to plain autoregressive with an honest notice.
 	var tm inference.TextModel
 	if det := serving.ResolveServeDraft(cfg.ModelPath, cfg.DraftPath, true); det.Active() {
-		block := resolvedDraftBlock(cfg.DraftBlock)
+		// cfg.DraftBlock passes through RAW (0 included): the LOADER owns the
+		// default — it is arch-aware (engine/metal resolves MoE targets to a
+		// longer block than dense ones), which a pre-resolved constant here
+		// would silently override. Same shape as serve's resolver.
+		blockLabel := "engine-default block"
+		if cfg.DraftBlock > 0 {
+			blockLabel = core.Sprintf("block %d", cfg.DraftBlock)
+		}
 		switch {
 		case det.IsDFlash():
 			// A DFlash block-diffusion drafter is recognised but the engine has no
@@ -196,15 +203,15 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 			// with the shared honest notice rather than misloading it as MTP.
 			printNote(cfg.Log, "generate: %s", serving.DFlashDraftNotice(det))
 		case cfg.SpeculativeLoader == nil:
-			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (block %d would apply)", det.DraftPath, det.Note, block)
+			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (%s would apply)", det.DraftPath, det.Note, blockLabel)
 		case len(images) > 0 || len(audios) > 0 || len(videoFrames) > 0:
 			printNote(cfg.Log, "generate: drafter %s detected but multimodal input routes through a prefill the MTP loop does not carry — generating plain autoregressive", det.DraftPath)
 		default:
-			sm, serr := cfg.SpeculativeLoader(cfg.ModelPath, det.DraftPath, block, loadOpts...)
+			sm, serr := cfg.SpeculativeLoader(cfg.ModelPath, det.DraftPath, cfg.DraftBlock, loadOpts...)
 			if serr != nil {
 				printNote(cfg.Log, "generate: drafter %s detected but the speculative pair failed to load (%v) — generating plain autoregressive", det.DraftPath, serr)
 			} else {
-				printNote(cfg.Log, "generate: MTP speculative lane armed — drafter %s, block %d", det.DraftPath, block)
+				printNote(cfg.Log, "generate: MTP speculative lane armed — drafter %s, %s", det.DraftPath, blockLabel)
 				tm = sm
 			}
 		}
@@ -504,15 +511,6 @@ func cacheModesSuffix(modes []string) string {
 		return ""
 	}
 	return core.Sprintf(" (this engine supports: %s)", core.Join(", ", modes...))
-}
-
-// resolvedDraftBlock reports the block the MTP lane would run for a flag value
-// (0 = engine default).
-func resolvedDraftBlock(flagBlock int) int {
-	if flagBlock > 0 {
-		return flagBlock
-	}
-	return serving.MTPDefaultDraftBlock
 }
 
 // printMTPMetrics appends the MTP acceptance line when the generation rode the

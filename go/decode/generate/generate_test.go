@@ -11,7 +11,6 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/kv"
-	"dappco.re/go/inference/serving"
 )
 
 // capModel is a fake inference.TextModel that reports a chosen capability set,
@@ -209,22 +208,6 @@ func TestSpineModelInfo_CopiesFields_Good(t *testing.T) {
 func TestSpineModelInfo_DefaultContext_Bad(t *testing.T) {
 	if got := spineModelInfo(inference.ModelInfo{Architecture: "gemma4"}, 0); got.ContextLength != 4096 {
 		t.Fatalf("default ContextLength = %d, want 4096", got.ContextLength)
-	}
-}
-
-// TestResolvedDraftBlock_FlagWins_Good proves an explicit draft block overrides
-// the engine default.
-func TestResolvedDraftBlock_FlagWins_Good(t *testing.T) {
-	if got := resolvedDraftBlock(7); got != 7 {
-		t.Fatalf("resolvedDraftBlock(7) = %d, want 7", got)
-	}
-}
-
-// TestResolvedDraftBlock_DefaultWhenZero_Bad proves a zero flag falls back to
-// the shared MTP engine default.
-func TestResolvedDraftBlock_DefaultWhenZero_Bad(t *testing.T) {
-	if got := resolvedDraftBlock(0); got != serving.MTPDefaultDraftBlock {
-		t.Fatalf("resolvedDraftBlock(0) = %d, want %d", got, serving.MTPDefaultDraftBlock)
 	}
 }
 
