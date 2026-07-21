@@ -915,6 +915,79 @@ func (h *headEncoder) greedyBufferInPool(hiddenBuf metal.MTLBuffer, suppress []i
 	return h.greedyBufferAtInPool(hiddenBuf, 0, suppress)
 }
 
+// greedyRowsCanonicalInPool runs K independent direct-greedy chains — each row
+// the exact upload + encodeGreedyAt sequence greedyInPool performs, on its own
+// hidden and greedy scratches — in ONE command buffer with a single wait.
+// Byte-identical per row to K greedyInPool calls (same kernels, same per-row
+// scratches, serial encoder, offset-0 single-row RMS); only the submission
+// count changes: K commit+wait round-trips become one. This is the CANONICAL
+// per-row argmax tier batched by submission shape — not the qmm_t rows-head
+// tier (greedyRowsBufferInPool), whose different reduction order is why that
+// tier stays behind LTHN_MTP_ROWS_HEAD (#55). ok=false (direct greedy not
+// usable, or a bad row) leaves out untouched; the caller keeps its per-row
+// loop.
+func (h *headEncoder) greedyRowsCanonicalInPool(hiddens [][]byte, suppress []int32, out []int32) (ok bool, err error) {
+	k := len(hiddens)
+	if k == 0 || len(out) < k || !h.directGreedyUsable() {
+		return false, nil
+	}
+	hidScr := make([]*headHiddenScratch, 0, k)
+	scrs := make([]*headGreedyScratch, 0, k)
+	release := func() {
+		for _, hs := range hidScr {
+			h.putHiddenScratch(hs)
+		}
+		for _, sc := range scrs {
+			h.putGreedyScratch(sc)
+		}
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	for _, hidden := range hiddens {
+		if len(hidden) != h.dModel*bf16Size {
+			endEncodingFast(enc)
+			release()
+			return false, nil
+		}
+		hs, hb, herr := h.hiddenBuffer(hidden)
+		if herr != nil {
+			endEncodingFast(enc)
+			release()
+			return false, herr
+		}
+		if hs != nil {
+			hidScr = append(hidScr, hs)
+		}
+		sc, rowOK, gerr := h.encodeGreedyAt(enc, hb, 0, suppress)
+		if sc != nil {
+			scrs = append(scrs, sc)
+		}
+		if gerr != nil {
+			endEncodingFast(enc)
+			release()
+			return false, gerr
+		}
+		if !rowOK {
+			endEncodingFast(enc)
+			release()
+			return false, nil
+		}
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	for i, sc := range scrs {
+		token := sc.token()
+		if token < 0 || int(token) >= h.vocab {
+			release()
+			return false, core.NewError(core.Sprintf("native.headEncoder.greedyRowsCanonical: direct argmax returned invalid token %d for vocab %d (row %d)", token, h.vocab, i))
+		}
+		out[i] = token
+	}
+	release()
+	return true, nil
+}
+
 func (h *headEncoder) greedyBufferAtInPool(hiddenBuf metal.MTLBuffer, hiddenOff uint, suppress []int32) (token int32, ok bool, err error) {
 	if hiddenBuf == nil {
 		return 0, true, core.NewError("native.headEncoder.greedy: missing hidden buffer")

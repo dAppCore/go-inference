@@ -62,6 +62,15 @@ import (
 // itself, even if the primitive's own counter moved on some OTHER, unrelated call.
 var mtpRowsDriverEngaged atomic.Int64
 
+// rowsChainCommitStride is how many layers stepRowsMoEBatchedChained encodes
+// per command buffer before committing it (without a host wait) and opening
+// the next — the GPU executes the committed prefix while the CPU encodes the
+// rest. 1 (commit each layer as soon as it is encoded) measured best on the
+// 26B-A4B pair: the sweep read 135.9 / 135.3 / 133.7 / 132.5 / 130.0 tok/s
+// at strides 1/2/4/6/8 — per-commit overhead is cheaper than every ms the
+// first chunks wait to start.
+const rowsChainCommitStride = 1
+
 // mtpRowsDiagAttnWall / mtpRowsDiagMoEWall accumulate ONE verify round's layer-major wall-clock
 // split between the attention half (encRowsAttnLinear/encRowsAttnPaged) and the batched MoE half
 // (mtpRowsMoEBatched, including the per-layer output scalar) — the #53 diagnostic's per-stage
@@ -579,13 +588,14 @@ func mtpRowsMoEGatherServable(w MoEQuantLayerWeights, dModel, dFF int) bool {
 	return true
 }
 
-// stepRowsMoEBatchedChained is the ONE-SUBMISSION round driver (#53): every
-// layer's attention rows and device-routed MoE block encode back-to-back into
-// a single command buffer — attention on its own serial encoder (row r+1's
-// SDPA reads row r's KV write through in-buffer hazard order, the same
-// argument as the per-layer form), the MoE block on a fresh serial encoder —
-// and the round pays ONE commit+wait where the per-layer form paid two per
-// layer. Rows live on-device across the whole round in three rotating K-row
+// stepRowsMoEBatchedChained is the chained round driver (#53): every layer's
+// attention rows and device-routed MoE block encode back-to-back — attention
+// on its own serial encoder (row r+1's SDPA reads row r's KV write through
+// in-buffer hazard order, the same argument as the per-layer form), the MoE
+// block on a fresh serial encoder — committed in rowsChainCommitStride-layer
+// chunks so GPU execution overlaps the remaining CPU encode, with ONE host
+// wait on the final buffer (the per-layer form paid two commit+waits per
+// layer). Rows live on-device across the whole round in three rotating K-row
 // slabs; the host touches bytes exactly twice (embs in, final hiddens out).
 // ok=false means a layer's gather block is not servable and the caller keeps
 // the per-layer driver.
@@ -639,6 +649,18 @@ func (s *archDecodeState) stepRowsMoEBatchedChained(embs []byte, startPos, K int
 	foldScr := s.rowsAttnScratchSets(K)
 	cb := commandBufferFast(queue)
 	for li := range s.specs {
+		// Chunked commit: hand the encoded prefix to the GPU every
+		// rowsChainCommitStride layers so execution overlaps the remaining
+		// CPU encode (the round previously encoded everything, THEN ran).
+		// Ordering across the chunk boundary is the device timeline's:
+		// every buffer here is default hazard-tracked (no heaps, no
+		// untracked allocations in this engine) and consecutive chunks are
+		// always dependent through the rotating slabs, so commit order IS
+		// execution order. Only the final buffer is host-waited.
+		if li > 0 && li%rowsChainCommitStride == 0 {
+			commitCommandBufferFast(cb)
+			cb = commandBufferFast(queue)
+		}
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
 		slideW, rbase, rotDim := 0, s.base, s.rotaryDim
 		layerRopeFreqs := s.ropeFreqs
@@ -783,10 +805,13 @@ func (s *archDecodeState) rowsAttnScratchSets(K int) []attnScratch {
 //     barrier-free (pure page reads, disjoint outputs). Byte-exact vs the
 //     sequential order because row r's plan is built at watermark pos_r —
 //     rows r+1..K-1's pages exist but sit past every lens the plan baked.
-//   - RING (sliding) layers keep the per-row land->scan chain: a later
-//     row's landing EVICTS a position inside an earlier row's window, so
-//     land-before-read would change bytes (the deferred-ring lesson, paged
-//     form). Their projections still ride the waves.
+//   - RING (sliding) layers that can WRAP this round keep the per-row
+//     land->scan chain: a later row's landing EVICTS a position inside an
+//     earlier row's window, so land-before-read would change bytes (the
+//     deferred-ring lesson, paged form). Their projections still ride the
+//     waves. Below the wrap point (startPos+K <= maxSize) no landing can
+//     evict, and rings take the global wave shape — byte-exact by the same
+//     virgin-slot argument.
 //
 // The q8 paged cache stages K/V in the row's scratch and quantise-stores at
 // the land point; a bf16 page copies the staged row instead — either way the
@@ -803,7 +828,14 @@ func (s *archDecodeState) encRowsAttnPagedFold(cb metal.MTLCommandBufferObject, 
 			slideW = 0
 		}
 	}
-	ringMode := slideW > 0 && cache.ring
+	// A ring below its wrap point cannot evict: slot() is pos%maxSize, the
+	// identity while every position this round lands (startPos..startPos+K-1)
+	// stays under maxSize, so all K landings hit virgin slots past every lens
+	// an earlier row's plan baked — land-before-read is byte-exact by the
+	// global argument and the K scans wave barrier-free. Only a round that CAN
+	// wrap keeps the serial land->scan chain (eviction order is the byte
+	// contract there). maxSize==0 on a ring stays conservative (serial).
+	ringMode := slideW > 0 && cache.ring && startPos+K > cache.maxSize
 	kvDim := lkv * lhd
 
 	// host prologue, sequenced per row: slot -> state -> plan, so each plan

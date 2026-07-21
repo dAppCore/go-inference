@@ -2585,16 +2585,35 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 			return rows, hiddens, nil
 		}
 	}
-	for i, hidden := range hiddens {
-		token, err := s.greedyFromHiddenInPool(hidden, suppress)
-		if err != nil {
-			return nil, nil, err
+	headLabel := "rows-canon-head"
+	batched := false
+	// Batched canonical tier first: the verify rows all resolve to the same
+	// greedyInPool route (their hiddens are fresh host copies, never the
+	// retained buffer, so the direct-buffer shortcut above them never fires) —
+	// one command buffer for the K unchanged per-row chains replaces K
+	// commit+wait round-trips. canUseDirectHeadGreedy is exactly the guard
+	// under which greedyInPool would take the encodeGreedyAt route for every
+	// row; anything else keeps the per-row loop, byte-identically.
+	if s.canUseDirectHeadGreedy() {
+		ok, gerr := s.headEnc.greedyRowsCanonicalInPool(hiddens, suppress, rows)
+		if gerr != nil {
+			return nil, nil, gerr
 		}
-		rows[i] = token
+		batched = ok
+	}
+	if !batched {
+		headLabel = "perrow-head"
+		for i, hidden := range hiddens {
+			token, err := s.greedyFromHiddenInPool(hidden, suppress)
+			if err != nil {
+				return nil, nil, err
+			}
+			rows[i] = token
+		}
 	}
 	if diagVerify {
-		nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms perrow-head=%.1fms\n",
-			len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
+		nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms %s=%.1fms\n",
+			len(draftTokens), fwdMs, headLabel, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
 	}
 	mtpRowsDiagEmitRound(time.Since(headT0))
 	return rows, hiddens, nil

@@ -193,6 +193,119 @@ func TestMTPRowsDriverVerifyMatchesRowMajor_Good(t *testing.T) {
 		len(hiddensOff), len(kvOff), greedyOff, engagedAfterOn-engagedAfterOff, groupAfterOn)
 }
 
+// TestMTPRowsDriverVerifyMatchesRowMajorSliding_Good pins the fold's ring
+// two-mode contract (encRowsAttnPagedFold) on an ALL-SLIDING variant of the
+// same fixture, at both regimes of the wrap gate:
+//
+//   - "wave": window 16 — the whole verify round lands below the wrap point
+//     (startPos+K <= maxSize), rings take the global land-all-then-scan shape;
+//   - "serial": window 4 — the round crosses the wrap point, rings keep the
+//     per-row land->scan chain (eviction order is the byte contract).
+//
+// Each regime must produce bytes.Equal hiddens and identical greedy tokens
+// against the unchanged row-major per-row lane, with the same engagement
+// proof as the global-fixture test. The ring-cache probe guards the fixture:
+// a session whose sliding layers did not build ring pages would exercise
+// neither mode and pass vacuously.
+func TestMTPRowsDriverVerifyMatchesRowMajorSliding_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	for _, tc := range []struct {
+		name   string
+		window int
+	}{
+		{"wave", 16},  // prompt 3 + K 4 => startPos+K = 7 <= 16: no-wrap wave shape
+		{"serial", 4}, // 7 > 4: the round wraps, per-row land->scan chain
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
+			for i := range mtpRowsDriverTestNumLayers {
+				for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
+					quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
+				}
+			}
+			layerTypes := make([]string, mtpRowsDriverTestNumLayers)
+			for i := range layerTypes {
+				layerTypes[i] = "sliding_attention"
+			}
+			cfg := g4.Config{
+				HiddenSize: mtpRowsDriverTestDModel, NumHiddenLayers: mtpRowsDriverTestNumLayers,
+				IntermediateSize:  mtpRowsDriverTestDFF,
+				NumAttentionHeads: mtpRowsDriverTestNHeads, NumKeyValueHeads: mtpRowsDriverTestNKV,
+				HeadDim: mtpRowsDriverTestHeadDim, VocabSize: mtpRowsDriverTestVocab, RMSNormEps: 1e-6,
+				EnableMoEBlock: true, NumExperts: mtpRowsDriverTestNumExperts, TopKExperts: mtpRowsDriverTestTopK,
+				MoEIntermediateSize: mtpRowsDriverTestExpertDFF,
+				SlidingWindow:       tc.window, LayerTypes: layerTypes,
+				Quantization: quant,
+			}
+			arch, err := cfg.Arch()
+			if err != nil {
+				t.Fatalf("Arch: %v", err)
+			}
+			ts := moeQuantTensors(t, arch, quant)
+
+			probe := mtpRowsDriverNewSession(t, arch, quant, ts, nil)
+			if !mtpRowsDriverEligible(&probe.state, 4) {
+				t.Fatal("sliding fixture geometry declined mtpRowsDriverEligible")
+			}
+			ringSeen := false
+			for li := range probe.state.lb {
+				if c := probe.state.layerPagedKV(li); c != nil && c.ring {
+					ringSeen = true
+					if c.maxSize != tc.window {
+						t.Fatalf("ring cache maxSize=%d, want the sliding window %d — the wrap gate would test the wrong regime", c.maxSize, tc.window)
+					}
+				}
+			}
+			if !ringSeen {
+				t.Fatal("no sliding layer built a ring paged cache — neither ring mode would be exercised")
+			}
+
+			prompt := []int32{1, 5, 3}
+			draft := []int32{2, 6, 4, 7}
+			run := func(forced bool) (hiddens [][]byte, greedy []int32) {
+				t.Helper()
+				saved := mtpRowsMoEArmed
+				mtpRowsMoEArmed = forced
+				defer func() { mtpRowsMoEArmed = saved }()
+				sess := mtpRowsDriverNewSession(t, arch, quant, ts, prompt)
+				hs, err := sess.verifyAssistantDraftHiddens(draft, true)
+				if err != nil {
+					t.Fatalf("verifyAssistantDraftHiddens(forced=%v): %v", forced, err)
+				}
+				greedy = make([]int32, len(hs))
+				for i, h := range hs {
+					tok, gerr := sess.greedyOf(h)
+					if gerr != nil {
+						t.Fatalf("greedyOf row %d (forced=%v): %v", i, forced, gerr)
+					}
+					greedy[i] = tok
+				}
+				return hs, greedy
+			}
+
+			engagedBefore := mtpRowsDriverEngaged.Load()
+			hiddensOff, greedyOff := run(false)
+			if mtpRowsDriverEngaged.Load() != engagedBefore {
+				t.Fatal("the layer-major driver engaged with the lever OFF")
+			}
+			hiddensOn, greedyOn := run(true)
+			if mtpRowsDriverEngaged.Load() == engagedBefore {
+				t.Fatal("the layer-major driver never engaged with the lever ON — compare is vacuous")
+			}
+			for i := range hiddensOff {
+				if !bytes.Equal(hiddensOff[i], hiddensOn[i]) {
+					t.Fatalf("%s: verify hidden row %d diverged between row-major and layer-major", tc.name, i)
+				}
+			}
+			for i := range greedyOff {
+				if greedyOff[i] != greedyOn[i] {
+					t.Fatalf("%s: row %d greedy token diverged: off=%d on=%d", tc.name, i, greedyOff[i], greedyOn[i])
+				}
+			}
+		})
+	}
+}
+
 // TestMTPRowsDriverEligible_Bad pins the whole-block decline: a session that is otherwise
 // eligible but carries ONE dense (non-MoE) layer must decline entirely — this driver is
 // uniform-MoE only (gemma4 applies MoE to every layer; a mixed model is out of scope).
