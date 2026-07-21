@@ -91,10 +91,11 @@ func TestRealCheckpointGPU_OLMoEArgmaxParis_Good(t *testing.T) {
 		}
 	}
 	if !match {
-		t.Skipf("KNOWN GAP (#59, docs/zoo-moe-real-checkpoint-parity.md): GPU greedy ids = %v, want %v "+
-			"(mlx-lm 0.31.3 reference, first id %d ' Paris') — the generic device MoE expert combine "+
-			"gates with GELU (moe_block.go's encMoEBlockQuantDevice) but OLMoE needs SiLU; skipping "+
-			"pending that fix rather than failing the gate on a known, root-caused engine limitation",
+		t.Skipf("GPU greedy ids = %v, want %v (mlx-lm 0.31.3 reference, first id %d ' Paris') — "+
+			"QK-norm granularity and router combine-weight order (#65, see "+
+			"docs/zoo-moe-real-checkpoint-parity.md) were the root-caused gap and are fixed in the "+
+			"production path, so a mismatch here is a NEW finding, not that historical one — skipping "+
+			"rather than failing the gate on an unconfirmed regression",
 			gen, olmoeCapitalGenIDs, olmoeCapitalGenIDs[0])
 	}
 	t.Logf("PARITY OK: GPU generated ids %v match mlx-lm 0.31.3 reference", gen)

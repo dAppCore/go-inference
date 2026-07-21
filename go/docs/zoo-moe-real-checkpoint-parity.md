@@ -60,3 +60,22 @@ monotonic transform of the scores), but the WEIGHT computation branches on the d
 the device (GPU kernel) lane declining to the host path whenever the policy is false, since a fixed
 kernel can only implement the always-renormalise order. gemma4 and mixtral both declare
 `NormaliseMoETopK: true`, so their routing is byte-unchanged.
+
+## Loader-side hardening (follow-up)
+
+Two guards close residual gaps the #65 fix left as reasoning rather than enforcement — neither changes
+today's routing for any registered arch:
+
+- `model.Assemble`'s generic norm loader now validates a loaded q_norm/k_norm tensor's element count
+  against the two shapes `qkNormGranularity` understands (per-head / whole-vector) at LOAD time,
+  refusing with a typed error on any other length (`TestAssemble_QKNormShape_*`,
+  `go/model/assemble_test.go`) — previously the loader applied no shape check at all; only the engine's
+  later bind-time `qkNormGranularity` call caught a mismatch.
+- The ICB recorder (`decode_forward_arch_icb.go` / `decode_forward_arch_icb_quant.go`) explicitly
+  refuses a whole-vector q_norm/k_norm via `icbQKNormSupported` (`TestQknormRope_IcbQKNormSupported_*`,
+  `go/engine/metal/qknorm_rope_test.go`), rather than relying solely on the (still true) fact that no
+  registered arch's MoE-only whole-vector-QK-norm combination can reach it today.
+- The router's `normalise=false` combine-weight order gained direct unit coverage independent of the
+  real-checkpoint receipt above: `TestMoERouterNormaliseFalseNotRenormalised` and `TestMoERouter`'s
+  `normalise=false` cases, checked against `routerRef`'s own independent softmax-over-all reference
+  (`go/engine/metal/router_test.go`).
