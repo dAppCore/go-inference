@@ -481,6 +481,10 @@ func recordArchICBQuant(
 			ql := qlayers[li]
 			anwBufs[li] = residentBytes(ql.AttnNormW)
 			mnwBufs[li] = residentBytes(ql.MLPNormW)
+			// qNormBufs/kNormBufs bind PER-HEAD only (length headDim) — see recordArchICBBF16's
+			// identical note (decode_forward_arch_icb.go): the ICB recorder has no whole-vector (#65)
+			// twin, which is provably safe today because this path rejects every MoE layer above (line
+			// ~241) and OLMoE — the only registered whole-vector-QK-norm arch — is entirely MoE.
 			qNormBufs[li] = residentOrNil(ql.QNormW)
 			kNormBufs[li] = residentOrNil(ql.KNormW)
 			postAttnBufs[li] = residentOrNil(ql.PostAttnNormW)
