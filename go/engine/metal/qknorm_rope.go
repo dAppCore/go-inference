@@ -292,6 +292,26 @@ func qkNormGranularity(label string, weight []byte, heads, headDim int) (wide bo
 	}
 }
 
+// icbQKNormSupported refuses a whole-vector q_norm/k_norm at ICB record time: recordArchICBBF16 and
+// recordArchICBQuant's setQKNormRope has no whole-vector (#65) twin, only the per-head kernel every
+// other consumer's qkNormWideProjector wrap bypasses instead. OLMoE, the only registered
+// whole-vector-QK-norm arch, can never reach either recorder today (both structurally decline every
+// MoE layer, and OLMoE is entirely MoE) — but that is a fact about today's arch roster, not an
+// invariant the recorder itself enforces. This makes it one: a future DENSE whole-vector-QK-norm arch
+// refuses here, at record time, instead of silently binding a whole-vector weight through a per-head
+// bufView and truncating every token with no visible symptom. Pure length arithmetic (qkNormGranularity
+// does no GPU work), so it runs with no native runtime.
+func icbQKNormSupported(label string, weight []byte, heads, headDim int) error {
+	wide, err := qkNormGranularity(label, weight, heads, headDim)
+	if err != nil {
+		return err
+	}
+	if wide {
+		return core.NewError(core.Sprintf("native.icbQKNormSupported: whole-vector %s has no ICB record-time primitive (setQKNormRope is per-head only)", label))
+	}
+	return nil
+}
+
 // qkNormWideProjector wraps a projector so its Q/K projections apply OLMoE's whole-vector RMSNorm
 // (#65) immediately after the matmul — the SAME point in the command stream every encAttnHalf*/
 // encAttnHalfKVPaged/decode_batched_session.go call site already runs the per-head norm at, and

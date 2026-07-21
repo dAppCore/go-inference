@@ -444,6 +444,66 @@ func TestAssemble_NormOpSelections_Ugly(t *testing.T) {
 	}
 }
 
+// TestAssemble_QKNormShape_Good covers the two legal q_norm/k_norm shapes (#65 loader guard):
+// PER-HEAD (length == headDim, gemma4/mixtral's shared-per-head weight) and WHOLE-VECTOR (length ==
+// heads*headDim, OLMoE's norm-before-reshape convention) both load cleanly.
+func TestAssemble_QKNormShape_Good(t *testing.T) {
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: "BF16"}
+	}
+	arch := minimalDenseArch() // Heads=2, Layer[0].HeadDim=2, KVHeads=2: per-head=2, whole-vector=4
+	for _, tc := range []struct {
+		name string
+		n    int
+	}{
+		{"per-head", 2},
+		{"whole-vector", 4},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tensors := minimalDenseTensors("BF16")
+			tensors["layer.0.q_norm.weight"] = vec(tc.n)
+			tensors["layer.0.k_norm.weight"] = vec(tc.n)
+			m, err := Assemble(tensors, arch, normOpNames())
+			if err != nil {
+				t.Fatalf("Assemble: %v", err)
+			}
+			if len(m.Layers[0].QNorm) != tc.n*2 || len(m.Layers[0].KNorm) != tc.n*2 {
+				t.Fatalf("QNorm/KNorm lengths = %d/%d bytes, want %d bytes each", len(m.Layers[0].QNorm), len(m.Layers[0].KNorm), tc.n*2)
+			}
+		})
+	}
+}
+
+// TestAssemble_QKNormShape_Bad proves a q_norm length matching NEITHER legal shape refuses with a
+// typed error at LOAD — the #65 defect this loader guard closes: engine/metal's qkNormGranularity
+// already refused the same mismatch at bind time, but only after a checkpoint had already loaded
+// "successfully". This catches it at the source.
+func TestAssemble_QKNormShape_Bad(t *testing.T) {
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: "BF16"}
+	}
+	tensors := minimalDenseTensors("BF16")
+	tensors["layer.0.q_norm.weight"] = vec(3) // matches neither per-head (2) nor whole-vector (4)
+	if _, err := Assemble(tensors, minimalDenseArch(), normOpNames()); err == nil {
+		t.Fatal("Assemble with a mismatched q_norm length: expected an error")
+	}
+}
+
+// TestAssemble_QKNormShape_Ugly proves the check is independent per projection: a valid q_norm
+// alongside a mismatched k_norm still refuses (the guard does not stop checking after the first
+// weight it sees).
+func TestAssemble_QKNormShape_Ugly(t *testing.T) {
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: "BF16"}
+	}
+	tensors := minimalDenseTensors("BF16")
+	tensors["layer.0.q_norm.weight"] = vec(2) // per-head: legal
+	tensors["layer.0.k_norm.weight"] = vec(3) // matches neither per-head (2) nor whole-vector (4)
+	if _, err := Assemble(tensors, minimalDenseArch(), normOpNames()); err == nil {
+		t.Fatal("Assemble with a valid q_norm but mismatched k_norm: expected an error")
+	}
+}
+
 // TestAssemble_Sinks_Good proves the attention-sink load path: with WeightNames.Sinks declared,
 // the per-layer sinks tensor lands RAW on LoadedLayer.Sinks — bytes verbatim, never through the
 // NormBiasOne (1+w) fold, even when the arch folds its norms (a sink is a logit, not a norm).

@@ -116,6 +116,26 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		return x.Data
 	}
 
+	// shapeErr latches the FIRST QK-norm shape mismatch (mirrors foldErr's one-shot pattern): the loop
+	// keeps running so every layer still assembles (cheap), but Assemble refuses once it exits.
+	var shapeErr error
+	// qkNorm is norm() plus a geometry check the generic norm() closure cannot make (it serves every
+	// norm on the model, most of which have nothing to do with attention heads): a q_norm/k_norm
+	// tensor's element count must be PER-HEAD (== headDim, gemma4/mixtral's shared-per-head weight) or
+	// WHOLE-VECTOR (== heads*headDim, OLMoE's norm-before-reshape convention — engine/metal's
+	// qkNormGranularity classifies the same two shapes at bind time). Any other length disagrees with
+	// the config's declared head geometry, so this refuses at LOAD, before a downstream per-head
+	// kernel can silently read a truncated prefix of a wider weight.
+	qkNorm := func(name string, heads, headDim int) []byte {
+		b := norm(name)
+		if x, ok := t[name]; ok && shapeErr == nil {
+			if n, valid := qkNormShapeOK(x.Shape, heads, headDim); !valid {
+				shapeErr = core.NewError(core.Sprintf("model.Assemble: %s length %d matches neither per-head (%d) nor whole-vector (%d)", name, n, headDim, heads*headDim))
+			}
+		}
+		return b
+	}
+
 	m := &LoadedModel{Arch: arch, EmbedNorm: norm(names.EmbedNorm), FinalNorm: norm(names.FinalNorm)}
 	embedDim := arch.EmbeddingDim
 	if embedDim == 0 {
@@ -164,8 +184,8 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 			}
 			L.GatedDelta, L.GatedDeltaCfg = gd, cfg
 		} else {
-			L.QNorm = norm(p + names.QNorm)
-			L.KNorm = norm(p + names.KNorm)
+			L.QNorm = qkNorm(p+names.QNorm, arch.Heads, spec.HeadDim)
+			L.KNorm = qkNorm(p+names.KNorm, spec.KVHeads, spec.HeadDim)
 			if names.Sinks != "" { // attention sinks (gpt_oss): a raw [heads] logit vector, not a norm
 				L.Sinks = raw(p + names.Sinks)
 			}
@@ -212,6 +232,9 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 	if foldErr != nil {
 		return nil, foldErr
 	}
+	if shapeErr != nil {
+		return nil, shapeErr
+	}
 	if err := m.ValidateRequired(arch); err != nil {
 		return nil, err
 	}
@@ -255,4 +278,16 @@ func assembleMoE(t map[string]safetensors.Tensor, p string, arch Arch, names MoE
 		SharedDown:     lin(p+names.SharedDown, sharedFF),
 		SharedSigmoid:  lin(p+names.SharedSigmoid, d),
 	}
+}
+
+// qkNormShapeOK reports a tensor shape's total element count and whether it is one of the two
+// attention QK-norm geometries this engine's kernels understand: PER-HEAD (== headDim) or
+// WHOLE-VECTOR (== heads*headDim). Dtype-agnostic (reads Shape, not a byte length divided by an
+// assumed element width) so it is correct whatever precision the checkpoint stores the tensor in.
+func qkNormShapeOK(shape []int, heads, headDim int) (n int, ok bool) {
+	n = 1
+	for _, s := range shape {
+		n *= s
+	}
+	return n, n == headDim || n == heads*headDim
 }
