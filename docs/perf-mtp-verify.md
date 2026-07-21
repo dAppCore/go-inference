@@ -5,23 +5,29 @@ M3 Ultra 96GB, greedy decode (`--temp 0`), tg512 unless noted, E2B =
 `mlx-community/gemma-4-e2b-it-4bit` + bf16 assistant drafter. Every number is
 a live measurement from `lem-dev generate` (decode-only, prefill excluded).
 
-## The "210 lost" claim — dissolved by A/B
+## The 230 claim — REPRODUCED at 248 on today's dev
 
-The 2026-07-10 board's E2B +MTP 207-235 was measured on a HIGH-acceptance
-log-continuation prompt. Same-machine, same-checkpoint, same-command A/B today
-(default linked-list prompt, tg512):
+The reference-table ~230 (+32%) is real and lives on the original method:
+`lem.sh pair` / the counting BENCH_PROMPT ("integers from 1 to 800, single
+spaces"), fully greedy, no-think. Today's dev on that exact method:
 
-| build | pair | plain |
-|---|---:|---:|
-| dev @ 400fdcb9 (the board's own commit) | 165.1 | — |
-| dev today (post boundary-cache) | **172.3–173.4** | 171.0–174.4 |
+| lane | tok/s |
+|---|---:|
+| plain (serve, `lem.sh pair e2b`) | 174.4 |
+| **MTP (serve, same verb)** | **248.4 (+42%)** |
+| MTP (`generate` CLI, same prompt) | 243.9 |
 
-The board commit itself cannot reproduce its own 230 on a mid-acceptance
-prompt. Nothing regressed between 2026-07-10 and today — dev is *faster* than
-the board build on identical method. The pair's number is acceptance-elastic:
-counting prompt 186.5 vs plain 173.1 (+7.7%); mid-acceptance prompts sit at
-parity. The fold engages everywhere (zero `mtp-diag` declines; fwd 11.6ms @
-K=6 ≈ 2 plain steps, not the 27ms sequential shape).
+No serve-vs-CLI lane gap (248 vs 244 ≈ noise). The number is
+prompt-CLASS-elastic, not harness- or regression-shaped: integer streams
+248, line-formatted counting 186, free prose 172 (≈ plain parity). Every
+historical board is beaten like-for-like today — the 07-10 board's own
+commit measures 165 on prose where today's dev does 172; the 07-17 matrix's
+counting 219 is now 244-248. Nothing was lost in the 600 commits.
+
+The prose floor is the real frontier: acceptance drops below the verify
+cost's fixed component there, which is what the decomposition below prices.
+The fold engages everywhere (zero `mtp-diag` declines; fwd 11.6ms @ K=6 ≈ 2
+plain steps, not the 27ms sequential shape).
 
 ## Where the verify round actually goes (K=6, LTHN_MTP_DIAG + LTHN_GPU_TRACE)
 
