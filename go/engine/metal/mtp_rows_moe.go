@@ -731,6 +731,76 @@ func mtpRowsGatherLhsTables(K, topK int) (rowsBuf, iotaBuf metal.MTLBuffer) {
 // ok=false (no error) when a pipeline is unavailable — the grouped-by-expert
 // path serves as the fallback.
 func mtpRowsMoEBatchedGatherInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, K int, eps float32) ([]byte, bool, error) {
+	rowBytes := dModel * bf16Size
+	hBuf := sharedBytes(hSlab)
+	outBuf := scratchBF16(K * dModel)
+	if hBuf == nil || outBuf == nil {
+		return nil, false, core.NewError("native.mtpRowsMoEBatchedGather: slab allocation failed")
+	}
+	scratches := make([]*routerDeviceScratch, K)
+	defer func() {
+		for _, sc := range scratches {
+			if sc != nil {
+				putRouterDeviceScratch(sc)
+			}
+		}
+	}()
+	for r := range K {
+		sc, serr := getRouterDeviceScratch(dModel, w.NumExperts, w.TopK)
+		if serr != nil {
+			return nil, false, serr
+		}
+		scratches[r] = sc
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	idxDev, ok, err := mtpRowsMoEBatchedGatherEnc(enc, hBuf, outBuf, scratches, w, dModel, dFF, K, eps)
+	if err != nil || !ok {
+		endEncodingFast(enc)
+		return nil, ok, err
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	mtpRowsMoEHistFromIdx(idxDev, K*w.TopK)
+	outSlab := make([]byte, K*rowBytes)
+	copy(outSlab, unsafe.Slice((*byte)(outBuf.Contents()), K*rowBytes))
+	return outSlab, true, nil
+}
+
+// mtpRowsMoEHistFromIdx tallies the round histogram from a pair index buffer
+// AFTER the round's wait — under the device-routed lane host grouping is
+// instrumentation only, never a dependency.
+func mtpRowsMoEHistFromIdx(idxDev metal.MTLBuffer, pairs int) {
+	if idxDev == nil || pairs <= 0 {
+		return
+	}
+	idxHost := unsafe.Slice((*int32)(idxDev.Contents()), pairs)
+	counts := map[int32]int{}
+	for _, e := range idxHost {
+		counts[e]++
+	}
+	maxGroup := 0
+	for _, m := range counts {
+		if m > maxGroup {
+			maxGroup = m
+		}
+		mtpRowsMoEGroupHistBump(m)
+	}
+	if int64(maxGroup) > mtpRowsMoEMaxGroupSize.Load() {
+		mtpRowsMoEMaxGroupSize.Store(int64(maxGroup))
+	}
+}
+
+// mtpRowsMoEBatchedGatherEnc is the ENCODE-ONLY core of the device-routed MoE
+// block (#53): every dispatch lands on the caller's (serial) encoder, nothing
+// commits, nothing waits, nothing reads back — the chained round driver
+// stacks all layers' blocks into one command buffer. hBuf/outBuf are K-row
+// device slabs; scratches are K round-owned router scratch sets (serial
+// hazard ordering makes cross-layer reuse safe). Returns the pair index
+// buffer for post-wait diagnostics. ok=false (nothing encoded) on a pipeline
+// miss.
+func mtpRowsMoEBatchedGatherEnc(enc metal.MTLComputeCommandEncoderObject, hBuf, outBuf metal.MTLBuffer, scratches []*routerDeviceScratch, w MoEQuantLayerWeights, dModel, dFF, K int, eps float32) (metal.MTLBuffer, bool, error) {
 	numExperts, topK, expertDFF := w.NumExperts, w.TopK, w.ExpertDFF
 	rowBytes := dModel * bf16Size
 	pairs := K * topK
@@ -838,7 +908,6 @@ func mtpRowsMoEBatchedGatherInPool(hSlab []byte, w MoEQuantLayerWeights, dModel,
 		rScaleBuf, rScaleOff = sv.buf, sv.off
 	}
 
-	hBuf := sharedBytes(hSlab)
 	localNormBuf := scratchBF16(K * dModel)
 	expertNormBuf := scratchBF16(K * dModel)
 	localGateBuf := scratchBF16(K * dFF)
@@ -849,38 +918,20 @@ func mtpRowsMoEBatchedGatherInPool(hSlab []byte, w MoEQuantLayerWeights, dModel,
 	upAllBuf := scratchBF16(pairs * expertDFF)
 	downAllBuf := scratchBF16(pairs * dModel)
 	expertAccBuf := scratchBF16(K * dModel)
-	outBuf := scratchBF16(K * dModel)
 	// i32 pair indices ride a bf16-pool buffer of 2x the element count (the
 	// pool hands out raw bytes; 2 bf16 = 1 i32).
 	idxAllDev := scratchBF16(pairs * 2)
 	weightsAllDev := scratchBF16(pairs)
-	if hBuf == nil || localNormBuf == nil || expertNormBuf == nil || localGateBuf == nil || localUpBuf == nil ||
+	if localNormBuf == nil || expertNormBuf == nil || localGateBuf == nil || localUpBuf == nil ||
 		localGatedBuf == nil || localOutBuf == nil || gateAllBuf == nil || upAllBuf == nil || downAllBuf == nil ||
-		expertAccBuf == nil || outBuf == nil || idxAllDev == nil || weightsAllDev == nil {
+		expertAccBuf == nil || idxAllDev == nil || weightsAllDev == nil {
 		return nil, false, core.NewError("native.mtpRowsMoEBatchedGather: scratch allocation failed")
 	}
 	lhsRows, lhsIota := mtpRowsGatherLhsTables(K, topK)
 
-	scratches := make([]*routerDeviceScratch, K)
-	defer func() {
-		for _, sc := range scratches {
-			if sc != nil {
-				putRouterDeviceScratch(sc)
-			}
-		}
-	}()
-
-	cb := commandBufferFast(queue)
-	enc := computeCommandEncoderFast(cb)
 	sink := encSink{enc}
 	for r := range K {
-		scratch, serr := getRouterDeviceScratch(dModel, numExperts, topK)
-		if serr != nil {
-			endEncodingFast(enc)
-			return nil, false, serr
-		}
-		scratches[r] = scratch
-		encMoERouterQuantTopKRowTo(enc, scratch, hBuf, uint(r*rowBytes), rNormBuf, rWBuf, rScalesBuf, rBiasesBuf, rScaleBuf, rScaleOff, w.PerExpertScale != nil,
+		encMoERouterQuantTopKRowTo(enc, scratches[r], hBuf, uint(r*rowBytes), rNormBuf, rWBuf, rScalesBuf, rBiasesBuf, rScaleBuf, rScaleOff, w.PerExpertScale != nil,
 			rmsPSO, rQmvPSO, routerPSO, rmsTG, dModel, numExperts, topK, eps,
 			idxAllDev, uint(r*topK*4), weightsAllDev, uint(r*topK*bf16Size))
 	}
@@ -930,27 +981,5 @@ func mtpRowsMoEBatchedGatherInPool(hSlab []byte, w MoEQuantLayerWeights, dModel,
 	sink.setF32(eps, 7)
 	sink.setI32(int32(dModel), 8)
 	sink.dispatchThreads(metal.MTLSize{Width: combineTG * uint(K), Height: 1, Depth: 1}, metal.MTLSize{Width: combineTG, Height: 1, Depth: 1})
-	endEncodingFast(enc)
-	commitCommandBufferFast(cb)
-	waitUntilCompletedFast(cb)
-
-	// diag: the group histogram reads the pair indices AFTER the wait — host
-	// grouping is instrumentation only on this path, never a dependency.
-	idxHost := unsafe.Slice((*int32)(idxAllDev.Contents()), pairs)
-	counts := map[int32]int{}
-	for _, e := range idxHost {
-		counts[e]++
-	}
-	maxGroup := 0
-	for _, m := range counts {
-		if m > maxGroup {
-			maxGroup = m
-		}
-		mtpRowsMoEGroupHistBump(m)
-	}
-	mtpRowsMoEMaxGroupSize.Store(int64(maxGroup))
-
-	outSlab := make([]byte, K*rowBytes)
-	copy(outSlab, unsafe.Slice((*byte)(outBuf.Contents()), K*rowBytes))
-	return outSlab, true, nil
+	return idxAllDev, true, nil
 }

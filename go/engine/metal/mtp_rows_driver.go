@@ -246,6 +246,15 @@ func (s *archDecodeState) stepRowsMoEBatched(embs []byte, startPos, K int) ([]by
 	mtpRowsDiagMoEWall = 0
 	mtpRowsMoEGroupHistReset()
 
+	// one-submission round (#53): every layer chains into a single command
+	// buffer when the device-routed gather serves the whole block; the
+	// per-layer loop below is the fallback.
+	if out, chained, cerr := s.stepRowsMoEBatchedChained(embs, startPos, K); cerr != nil {
+		return nil, cerr
+	} else if chained {
+		return out, nil
+	}
+
 	curInHost := embs // layer 0 input: the K embedded rows
 	for li := range s.specs {
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
@@ -495,4 +504,211 @@ func mtpRowsDiagEmitRound(headWall time.Duration) {
 		"mtp-diag rows-moe round=%d engaged=true K=%d hist{1=%d 2=%d 3=%d 4+=%d} maxGroup=%d wall{attn=%.2fms moe=%.2fms head=%.2fms}\n",
 		mtpRowsDiagRoundsSeen, d.K, d.Hist1, d.Hist2, d.Hist3, d.Hist4Plus, d.MaxGroup,
 		float64(d.AttnWall.Microseconds())/1000, float64(d.MoEWall.Microseconds())/1000, headMs))
+}
+
+// mtpRowsMoEGatherServable mirrors mtpRowsMoEBatchedGatherEnc's pipeline and
+// geometry prologue as a pure probe — the chained round driver confirms EVERY
+// layer before encoding anything, so a mid-round decline (which would strand
+// committed KV writes) is structurally impossible rather than merely unlikely.
+func mtpRowsMoEGatherServable(w MoEQuantLayerWeights, dModel, dFF int) bool {
+	numExperts, topK, expertDFF := w.NumExperts, w.TopK, w.ExpertDFF
+	if !routerTopKUsable(numExperts, topK) {
+		return false
+	}
+	rGroupSize, rBits := quantWeightGeometryForShape(w.Router, numExperts, dModel, w.RouterGroupSize, w.RouterBits)
+	if rGroupSize <= 0 || dModel%rGroupSize != 0 {
+		return false
+	}
+	if _, err := pipelineFor(rmsKernelBF16(dModel)); err != nil {
+		return false
+	}
+	if _, err := pipelineFor(qmvBF16KernelName(numExperts, dModel, rGroupSize, rBits)); err != nil {
+		return false
+	}
+	if _, err := routerTopKPipelineK(topK); err != nil {
+		return false
+	}
+	fusedExperts := len(w.ExpGateUp.Packed) > 0
+	var expGS, expBits, gateRows int
+	if fusedExperts {
+		_, _, _, gs, bits, err := quantWeightViewsForShape("native.mtpRowsMoEGatherServable: expert gate_up", w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return false
+		}
+		expGS, expBits, gateRows = gs, bits, 2*expertDFF
+	} else {
+		_, _, _, gs, bits, err := quantWeightViewsForShape("native.mtpRowsMoEGatherServable: expert gate", w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return false
+		}
+		if _, _, _, _, _, uerr := quantWeightViewsForShape("native.mtpRowsMoEGatherServable: expert up", w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits); uerr != nil {
+			return false
+		}
+		expGS, expBits, gateRows = gs, bits, expertDFF
+	}
+	_, _, _, downGS, downBits, derr := quantWeightViewsForShape("native.mtpRowsMoEGatherServable: expert down", w.ExpDown, numExperts*dModel, expertDFF, w.ExpertGroupSize, w.ExpertBits)
+	if derr != nil {
+		return false
+	}
+	if _, ok := lthnGatherQMVPipeline(lthnGatherQMVKey{groupSize: expGS, bits: expBits, expertRows: gateRows, fast: expertDFF%8 == 0 && dModel%512 == 0, batchedX: true}); !ok {
+		return false
+	}
+	if _, ok := lthnGatherQMVPipeline(lthnGatherQMVKey{groupSize: downGS, bits: downBits, expertRows: dModel, batchedX: true, gelu: true}); !ok {
+		return false
+	}
+	if _, err := moeWeightedSumPipeline(); err != nil {
+		return false
+	}
+	combinePSO, err := moeCombineNormsPipeline()
+	if err != nil {
+		return false
+	}
+	combineTG := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+	if combineTG > combinePSO.MaxTotalThreadsPerThreadgroup() {
+		return false
+	}
+	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEGatherServable: local gate", w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits); err != nil {
+		return false
+	}
+	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEGatherServable: local up", w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits); err != nil {
+		return false
+	}
+	if _, _, _, _, _, err := quantWeightViewsForShape("native.mtpRowsMoEGatherServable: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits); err != nil {
+		return false
+	}
+	return true
+}
+
+// stepRowsMoEBatchedChained is the ONE-SUBMISSION round driver (#53): every
+// layer's attention rows and device-routed MoE block encode back-to-back into
+// a single command buffer — attention on its own serial encoder (row r+1's
+// SDPA reads row r's KV write through in-buffer hazard order, the same
+// argument as the per-layer form), the MoE block on a fresh serial encoder —
+// and the round pays ONE commit+wait where the per-layer form paid two per
+// layer. Rows live on-device across the whole round in three rotating K-row
+// slabs; the host touches bytes exactly twice (embs in, final hiddens out).
+// ok=false means a layer's gather block is not servable and the caller keeps
+// the per-layer driver.
+func (s *archDecodeState) stepRowsMoEBatchedChained(embs []byte, startPos, K int) ([]byte, bool, error) {
+	rowBytes := s.dModel * bf16Size
+	for li := range s.specs {
+		moeQ := moeQuantAt(s.moeQuant, li)
+		if moeQ == nil || !mtpRowsMoEGatherServable(*moeQ, s.dModel, s.dFF) {
+			return nil, false, nil
+		}
+	}
+	offPacked := device.NewBufferWithLengthOptions(uint(K*4), metal.MTLResourceStorageModeShared)
+	if offPacked == nil {
+		return nil, false, core.NewError("native.stepRowsMoEBatchedChained: position buffer allocation failed")
+	}
+	offSlots := unsafe.Slice((*int32)(offPacked.Contents()), K)
+	for r := range K {
+		offSlots[r] = int32(startPos + r)
+	}
+	mtpRowsDiagAttnWall = 0
+	mtpRowsDiagMoEWall = 0
+	mtpRowsMoEGroupHistReset()
+
+	slabIn := scratchBF16(K * s.dModel)
+	slabH := scratchBF16(K * s.dModel)
+	slabOut := scratchBF16(K * s.dModel)
+	if slabIn == nil || slabH == nil || slabOut == nil {
+		return nil, false, core.NewError("native.stepRowsMoEBatchedChained: slab allocation failed")
+	}
+	copy(unsafe.Slice((*byte)(slabIn.Contents()), K*rowBytes), embs)
+
+	firstMoE := moeQuantAt(s.moeQuant, 0)
+	scratches := make([]*routerDeviceScratch, K)
+	defer func() {
+		for _, sc := range scratches {
+			if sc != nil {
+				putRouterDeviceScratch(sc)
+			}
+		}
+	}()
+	for r := range K {
+		sc, serr := getRouterDeviceScratch(s.dModel, firstMoE.NumExperts, firstMoE.TopK)
+		if serr != nil {
+			return nil, false, serr
+		}
+		scratches[r] = sc
+	}
+
+	idxDevs := make([]metal.MTLBuffer, 0, len(s.specs))
+	topKs := make([]int, 0, len(s.specs))
+	cb := commandBufferFast(queue)
+	for li := range s.specs {
+		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
+		slideW, rbase, rotDim := 0, s.base, s.rotaryDim
+		layerRopeFreqs := s.ropeFreqs
+		if s.specs[li].Attention == model.SlidingAttention {
+			slideW, rbase, rotDim = s.slidingWindow, s.localBase, s.rotaryDimLocal
+		} else if s.globalRopeFreqs != nil {
+			layerRopeFreqs, rotDim = s.globalRopeFreqs, lhd
+		}
+		attnT0 := time.Now()
+		enc := computeCommandEncoderFast(cb)
+		if cache := s.layerPagedKV(li); cache != nil {
+			encConc := false
+			var perr error
+			for r := range K {
+				rOff := uint(r * rowBytes)
+				enc, encConc, perr = encAttnHalfKVPagedInputAt(enc, cb, s.gpuProf, encConc, slabIn, rOff, cache, offPacked, slabH, rOff, uint(r*4),
+					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
+					s.dModel, s.nHeads, lkv, lhd, startPos+r, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs)
+				if perr != nil {
+					endEncodingFast(enc)
+					return nil, false, perr
+				}
+			}
+		} else {
+			for r := range K {
+				rOff := uint(r * rowBytes)
+				if err := encAttnHalfKVInputAt(enc, slabIn, rOff, s.lb[li].kCache, s.lb[li].vCache, offPacked, slabH, rOff, uint(r*4),
+					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
+					s.dModel, s.nHeads, lkv, lhd, startPos+r, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
+				}
+			}
+		}
+		endEncodingFast(enc)
+		mtpRowsDiagAttnWall += time.Since(attnT0)
+
+		moeQ := moeQuantAt(s.moeQuant, li)
+		moeT0 := time.Now()
+		enc2 := computeCommandEncoderFast(cb)
+		idxDev, ok, err := mtpRowsMoEBatchedGatherEnc(enc2, slabH, slabOut, scratches, *moeQ, s.dModel, s.dFF, K, s.eps)
+		if err != nil {
+			endEncodingFast(enc2)
+			return nil, false, err
+		}
+		if !ok {
+			endEncodingFast(enc2)
+			return nil, false, core.NewError("native.stepRowsMoEBatchedChained: gather block declined after the probe passed — mtpRowsMoEGatherServable is out of sync with mtpRowsMoEBatchedGatherEnc")
+		}
+		if s.lb[li].layerScalar != nil {
+			for r := range K {
+				rOff := uint(r * rowBytes)
+				if err := encMulBF16To(enc2, slabOut, s.lb[li].layerScalar, slabOut, rOff, 0, rOff, s.dModel); err != nil {
+					endEncodingFast(enc2)
+					return nil, false, err
+				}
+			}
+		}
+		endEncodingFast(enc2)
+		mtpRowsDiagMoEWall += time.Since(moeT0)
+		idxDevs = append(idxDevs, idxDev)
+		topKs = append(topKs, moeQ.TopK)
+		slabIn, slabOut = slabOut, slabIn
+	}
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	for i, idx := range idxDevs {
+		mtpRowsMoEHistFromIdx(idx, K*topKs[i])
+	}
+	out := make([]byte, K*rowBytes)
+	copy(out, unsafe.Slice((*byte)(slabIn.Contents()), K*rowBytes))
+	mtpRowsDriverEngaged.Add(1)
+	return out, true, nil
 }

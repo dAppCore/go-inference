@@ -1022,11 +1022,22 @@ var concEncoderCarries atomic.Int64
 // enc is a plain serial encoder (hazard-tracked), exactly the pre-carry
 // contract.
 func encAttnHalfKVPaged(
+	enc metal.MTLComputeCommandEncoderObject, cb metal.MTLCommandBufferObject, prof *gpuCounterProfiler, encConc bool,
+	x metal.MTLBuffer, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, offOff uint,
+	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
+	sc attnScratch, proj projector,
+	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
+	ropeFreqs metal.MTLBuffer,
+) (metal.MTLComputeCommandEncoderObject, bool, error) {
+	return encAttnHalfKVPagedInputAt(enc, cb, prof, encConc, x, 0, cache, offBuf, h, 0, offOff, attnNormW, postAttnNorm, qNorm, kNorm, valueNorm, sc, proj, dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim, base, scale, ropeScale, eps, ropeFreqs)
+}
+
+func encAttnHalfKVPagedInputAt(
 	enc metal.MTLComputeCommandEncoderObject,
 	cb metal.MTLCommandBufferObject,
 	prof *gpuCounterProfiler,
 	encConc bool,
-	x metal.MTLBuffer, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, offOff uint,
+	x metal.MTLBuffer, xOff uint, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, hOff, offOff uint,
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
@@ -1112,7 +1123,7 @@ func encAttnHalfKVPaged(
 			encI = metal.MTLComputeCommandEncoder(enc)
 		}
 		// stage 1: the shared input norm
-		if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
+		if err := encRMSNormBF16At(encI, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
@@ -1179,7 +1190,7 @@ func encAttnHalfKVPaged(
 		}
 		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 7: residual (+ post-attention norm)
-		if err := encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps); err != nil {
+		if err := encResidualMaybeNormAt(encI, x, xOff, sc.attnOut, 0, sc.normed, h, hOff, postAttnNorm, dModel, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
@@ -1210,7 +1221,7 @@ func encAttnHalfKVPaged(
 		enc = prof.encoderFor(cb, "attn.proj")
 		encI = metal.MTLComputeCommandEncoder(enc)
 	}
-	if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
+	if err := encRMSNormBF16At(encI, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
 		return enc, false, err
 	}
 	if err := proj.project(encI, sc.normed, sc.q, 0, projQ); err != nil {
@@ -1284,7 +1295,7 @@ func encAttnHalfKVPaged(
 	if err := proj.project(encI, sc.attn, sc.attnOut, 0, projO); err != nil {
 		return enc, false, err
 	}
-	return enc, false, encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
+	return enc, false, encResidualMaybeNormAt(encI, x, xOff, sc.attnOut, 0, sc.normed, h, hOff, postAttnNorm, dModel, eps)
 }
 
 func encAttnHalfSharedPaged(
