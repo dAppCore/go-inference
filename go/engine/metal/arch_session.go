@@ -5,6 +5,7 @@
 package native
 
 import (
+	"bytes"
 	"math"
 	"os"
 	"reflect"
@@ -105,6 +106,15 @@ type ArchSession struct {
 	retainedLogits       []byte
 	retainedHiddenPinned *pinnedNoCopyBytes
 	retainedLogitsPinned *pinnedNoCopyBytes
+	// boundaryGreedy caches the boundary argmax the MTP verify head already
+	// computed, keyed by VALUE to the exact hidden bytes + suppress set it came
+	// from — content-keyed so no retained-state write path can leave it stale:
+	// a changed boundary misses on bytes.Equal and the caller re-derives from
+	// BoundaryLogits. Saves the next round's full-vocab head pass + host argmax
+	// rescan.
+	boundaryGreedy         int32
+	boundaryGreedyHidden   []byte
+	boundaryGreedySuppress []int32
 	// restoredKV marks a session whose K/V state came from RestoreState /
 	// RestoreStateBlocks rather than live decode. The batched dense prefill's
 	// paged→linear sync assumptions do not hold for restored state (the
@@ -2702,6 +2712,35 @@ func (s *ArchSession) resetRetainedHidden() {
 		return
 	}
 	s.retainedHidden = s.retainedHidden[:0]
+}
+
+// rememberBoundaryGreedy caches the boundary argmax the verify head already
+// produced, copying the exact hidden bytes + suppress set it was computed
+// under; cachedBoundaryGreedy validates both by value before serving it.
+func (s *ArchSession) rememberBoundaryGreedy(token int32, hidden []byte, suppress []int32) {
+	if s == nil || token < 0 || len(hidden) == 0 {
+		return
+	}
+	s.boundaryGreedy = token
+	s.boundaryGreedyHidden = append(s.boundaryGreedyHidden[:0], hidden...)
+	s.boundaryGreedySuppress = append(s.boundaryGreedySuppress[:0], suppress...)
+}
+
+// cachedBoundaryGreedy returns the cached boundary argmax when the live
+// boundary hidden and suppress set match the cached copies byte-for-byte;
+// ok=false otherwise (caller derives it from BoundaryLogits).
+func (s *ArchSession) cachedBoundaryGreedy(hidden []byte, suppress []int32) (int32, bool) {
+	if s == nil || len(s.boundaryGreedyHidden) == 0 ||
+		!bytes.Equal(s.boundaryGreedyHidden, hidden) ||
+		len(s.boundaryGreedySuppress) != len(suppress) {
+		return 0, false
+	}
+	for i, v := range suppress {
+		if s.boundaryGreedySuppress[i] != v {
+			return 0, false
+		}
+	}
+	return s.boundaryGreedy, true
 }
 
 func (s *ArchSession) rememberRetainedLogits(logits []byte) {

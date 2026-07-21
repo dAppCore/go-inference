@@ -1511,16 +1511,27 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 	if copyOutputs {
 		boundaryHidden = append([]byte(nil), target.retainedHidden...)
 	}
-	boundaryLogits, err := target.BoundaryLogits()
-	if err != nil {
-		return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary logits", err)
+	// The previous round's K-row verify head already produced this boundary's
+	// argmax (content-keyed cache); a hit skips the full-vocab head pass + host
+	// rescan. copyOutputs callers need the logits bytes regardless.
+	var boundaryLogits []byte
+	first, haveFirst := int32(0), false
+	if !copyOutputs {
+		first, haveFirst = target.cachedBoundaryGreedy(target.retainedHidden, suppress)
 	}
-	if copyOutputs {
-		boundaryLogits = append([]byte(nil), boundaryLogits...)
-	}
-	first, err := greedyBF16Suppressed(boundaryLogits, target.arch.Vocab, suppress)
-	if err != nil {
-		return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary token", err)
+	if !haveFirst {
+		var err error
+		boundaryLogits, err = target.BoundaryLogits()
+		if err != nil {
+			return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary logits", err)
+		}
+		if copyOutputs {
+			boundaryLogits = append([]byte(nil), boundaryLogits...)
+		}
+		first, err = greedyBF16Suppressed(boundaryLogits, target.arch.Vocab, suppress)
+		if err != nil {
+			return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary token", err)
+		}
 	}
 
 	posBefore := target.pos
@@ -1551,6 +1562,7 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 			target.rememberRetainedLogits(boundaryLogits)
 			result.Logits = append([]byte(nil), boundaryLogits...)
 		}
+		target.rememberBoundaryGreedy(first, target.retainedHidden, suppress)
 		return result, nil
 	}
 	rows, hiddens, err := target.verifyAssistantDraftRows(draftTokens, suppress)
@@ -1602,10 +1614,13 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 		}
 		target.rememberAssistantAcceptedIDs(posBefore, result.AcceptedTokens)
 		target.rememberRetainedHidden(boundaryHidden)
-		target.rememberRetainedLogits(boundaryLogits)
+		if len(boundaryLogits) != 0 {
+			target.rememberRetainedLogits(boundaryLogits)
+		}
 		if copyOutputs {
 			result.Logits = append([]byte(nil), boundaryLogits...)
 		}
+		target.rememberBoundaryGreedy(first, target.retainedHidden, suppress)
 		return result, nil
 	}
 
@@ -1630,17 +1645,23 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 	if len(hidden) != target.arch.Hidden*bf16Size {
 		return AssistantVerifyResult{}, core.NewError("native.assistant verify accepted hidden has wrong size")
 	}
-	logits, err := target.headLogitsScratch(hidden, false)
-	if err != nil {
-		return AssistantVerifyResult{}, core.E("native.assistant verify", "accepted boundary logits", err)
-	}
 	if copyOutputs {
+		logits, err := target.headLogitsScratch(hidden, false)
+		if err != nil {
+			return AssistantVerifyResult{}, core.E("native.assistant verify", "accepted boundary logits", err)
+		}
 		result.Hidden = append([]byte(nil), hidden...)
 		result.Logits = append([]byte(nil), logits...)
+		target.rememberRetainedHidden(hidden)
+		target.rememberRetainedLogits(logits)
+	} else {
+		// The greedy loop's lane: rows[accepted-1] IS this boundary's argmax, so
+		// the full-vocab head pass is deferred — BoundaryLogits recomputes from
+		// the retained hidden if a later consumer wants the logits bytes.
+		target.rememberRetainedHidden(hidden)
 	}
-	target.rememberRetainedHidden(hidden)
-	target.rememberRetainedLogits(logits)
 	target.rememberAssistantAcceptedIDs(posBefore, result.AcceptedTokens)
+	target.rememberBoundaryGreedy(rows[accepted-1], target.retainedHidden, suppress)
 	return result, nil
 }
 
