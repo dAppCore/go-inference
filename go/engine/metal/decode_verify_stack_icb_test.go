@@ -104,6 +104,9 @@ func TestVerifyStackICBRecordsReplaysAndMatchesLive(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
+	prevDisabled := verifyStackICBDisabled
+	verifyStackICBDisabled = false // the lane is opt-in until its replay race is fixed; parity still gates the mechanism
+	t.Cleanup(func() { verifyStackICBDisabled = prevDisabled })
 	blocks := [][]int32{
 		{1, 5, 3, 2, 7},    // K=5 pos 0  — pre-wrap (direct) phase: records
 		{4, 9, 6, 8, 2},    // K=5 pos 5  — staged phase: re-records (phase flip)
@@ -173,6 +176,9 @@ func TestVerifyStackICBRecordsReplaysAndMatchesLive(t *testing.T) {
 // with the lane force-disabled the fold neither records nor replays, and the
 // hiddens are the live fold's own.
 func TestVerifyStackICBKillSwitchKeepsLiveFold(t *testing.T) {
+	prevDisabled := verifyStackICBDisabled
+	verifyStackICBDisabled = false
+	t.Cleanup(func() { verifyStackICBDisabled = prevDisabled })
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}

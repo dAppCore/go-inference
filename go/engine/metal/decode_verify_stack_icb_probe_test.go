@@ -21,6 +21,9 @@ func TestRealE2BVerifyStackFwdProbe(t *testing.T) {
 	if os.Getenv("LTHN_VERIFY_STACK_PROBE") == "" {
 		t.Skip("probe instrument — set LTHN_VERIFY_STACK_PROBE=1 to run")
 	}
+	prevDisabled := verifyStackICBDisabled
+	verifyStackICBDisabled = false
+	t.Cleanup(func() { verifyStackICBDisabled = prevDisabled })
 	requireNativeRuntime(t)
 	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-e2b-it-4bit")
 

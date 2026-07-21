@@ -75,8 +75,14 @@ import (
 // sinks, SiLU folds, runtime-dim SDPA and the deep 2-pass phase all decline.
 // The banked per-layer tail lane keeps priority when armed (LTHN_VERIFY_ICB=1).
 
-// verifyStackICBDisabled: the lane ships ON; LTHN_VERIFY_STACK_ICB=0 is the
-// kill-switch (the reproducibility anchor for live-fold A/Bs).
+// verifyStackICBDisabled: the lane is OPT-IN (LTHN_VERIFY_STACK_ICB=1) until
+// its intermittent replay divergence is fixed — the real-checkpoint parity run
+// (TestRealE2BVerifyStackICBTokensMatchLive) fails nondeterministically
+// (~1 in 3, always the same signature: token 56 picks 2480 where live picks
+// 496), which is a race shape — a recorded-interior read unfenced against a
+// prior write, or a per-pass rebind applied while a replay is in flight — not
+// a numeric drift. Byte-identity to the live fold is the lane's contract; it
+// flips default-on when that parity run holds under -count=10.
 //
 // RECEIPT (e2b 4-bit + bf16 assistant, K=6 blocks, same prompt): the interior
 // records as ~656 commands and replays with ONE execute; traced GPU per verify
@@ -86,10 +92,9 @@ import (
 // tokens). The verify fold is NOT encode-bound at this shape: the wall is
 // intrinsic batched-op time + the serial dependency chain + ~2ms of host
 // wrapper (embeds, PLE slab build) outside the fold, so removing the
-// per-segment encode moves little. The lane stays ON for the GPU-time cut and
-// the freed host encode; the next levers are op-count reduction (fusion)
-// inside the interior, not execute granularity.
-var verifyStackICBDisabled = os.Getenv("LTHN_VERIFY_STACK_ICB") == "0"
+// per-segment encode moves little. The payoff levers are op-count reduction
+// (fusion) inside the recorded interior, not execute granularity.
+var verifyStackICBDisabled = os.Getenv("LTHN_VERIFY_STACK_ICB") != "1"
 
 // verifyStackICBDisabledForTest forces the live fold encodes — the A/B lever
 // for the replay parity tests. Production never sets it.
