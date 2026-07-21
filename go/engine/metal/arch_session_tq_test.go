@@ -59,7 +59,13 @@ func TestArchQuantSessionTurboQuant_Good(t *testing.T) {
 	const maxLen = 32
 	prompt := []int32{1, 5, 3, 7}
 
+	// the residency receipt below compares against a genuinely BF16 twin —
+	// pin q8 off for it (#70 armed headDim 128, so the default twin would be
+	// int8 and "under half the bf16 bytes" would silently mean "under half
+	// the q8 bytes").
+	kvQ8ICBOffForTest = true
 	native, err := newArchQuantSessionShardsWithHeadConfig(g, arch, maxLen, nil, nil, archSessionConfig{})
+	kvQ8ICBOffForTest = false
 	if err != nil {
 		t.Fatalf("native session: %v", err)
 	}
