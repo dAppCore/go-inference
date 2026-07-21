@@ -309,6 +309,71 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 	return m.stream(ctx, m.encode(renderChatTemplate(m.chatTemplate(), messages, cfg.EnableThinking)), cfg)
 }
 
+// OpenRetainedSession opens ONE session for [TextModel.ChatRetained] to reuse
+// across several independent turns, returned as an opaque handle (any) so a
+// caller outside this package (generate's warm-then-timed driver) need not
+// import engine.Session. Close it with CloseRetainedSession once every turn
+// is done. Every Chat call opens (and, on return, closes) its OWN session —
+// fresh-session-per-call is the right default for the general contract — but
+// a caller that knows it is about to drive several UNRELATED turns in
+// sequence (a kernel-warm pass, then the timed run) pays for that session's
+// --context-sized decode-state build ONCE across the whole sequence instead
+// of once per turn, by reusing the retained session ChatRetained resets on
+// each call rather than opening a fresh one.
+func (m *TextModel) OpenRetainedSession() (any, error) {
+	return m.openSession()
+}
+
+// CloseRetainedSession releases a session OpenRetainedSession opened.
+func (m *TextModel) CloseRetainedSession(rs any) error {
+	sess, ok := rs.(Session)
+	if !ok || sess == nil {
+		return core.NewError("engine.TextModel.CloseRetainedSession: not a retained session")
+	}
+	return sess.Close()
+}
+
+// ChatRetained streams messages' completion over rs (from
+// OpenRetainedSession), replacing any state already on it — [TextModel.Chat]'s
+// text-only render + prefill + decode body (identical encode/template/stop-
+// token/metrics/error handling), run against a caller-retained session
+// instead of the fresh-session-per-call default. sess.PrefillTokens documents
+// "replacing any prior state", so this call's decode is the same as a fresh
+// session's would be; only the buffer allocation is shared across calls, not
+// any KV content. Images/audio/video are declined — the multimodal prefill
+// path (chatMultimodal) is not wired to a retained session, so such a turn
+// must go through Chat instead.
+func (m *TextModel) ChatRetained(ctx context.Context, rs any, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	cfg := inference.ApplyGenerateOpts(opts)
+	if messagesHaveImages(messages) || messagesHaveAudios(messages) || messagesHaveVideos(messages) {
+		return func(yield func(inference.Token) bool) {
+			m.setErr(core.NewError("engine.TextModel.ChatRetained: multimodal turns are not supported on a retained session"))
+		}
+	}
+	sess, ok := rs.(Session)
+	if !ok || sess == nil {
+		return func(yield func(inference.Token) bool) {
+			m.setErr(core.NewError("engine.TextModel.ChatRetained: invalid retained session"))
+		}
+	}
+	ids := m.encode(renderChatTemplate(m.chatTemplate(), messages, cfg.EnableThinking))
+	return func(yield func(inference.Token) bool) {
+		start := time.Now()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if len(ids) == 0 {
+			m.setErr(core.NewError("engine.TextModel.ChatRetained: empty prompt after tokenisation"))
+			return
+		}
+		if err := sess.PrefillTokens(ids); err != nil {
+			m.setErr(err)
+			return
+		}
+		m.decodeFromPrefilled(ctx, sess, len(ids), cfg, start, yield)
+	}
+}
+
 // FormatChatPrompt renders a fresh multi-turn prompt with the model's turn
 // template — byte-identical to the serve path's framing (Chat above encodes the
 // same formatChatTurns output). The durable -state loop calls this to open a

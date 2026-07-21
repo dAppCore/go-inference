@@ -16,6 +16,7 @@ package generate
 import (
 	"context"
 	"io"
+	"iter"
 	"time"
 
 	core "dappco.re/go"
@@ -24,6 +25,27 @@ import (
 	"dappco.re/go/inference/serving"
 	"dappco.re/go/inference/serving/provider/openai"
 )
+
+// retainedChatModel is the optional capability (engine.TextModel) that lets
+// runBasicGenerate share ONE arch decode-state build across its kernel-warm
+// turn and its timed turn, instead of paying for a fresh --context-sized
+// build on every Chat call — see the "chat drives one Chat-equivalent turn"
+// comment in runBasicGenerate for why that matters. Declared locally (rather
+// than importing dappco.re/go/inference/engine) so generate stays engine-
+// neutral: any backend can opt in by implementing these three methods, and a
+// backend that does not (the MTP speculative wrapper today) is unaffected —
+// runBasicGenerate falls back to tm.Chat unchanged.
+type retainedChatModel interface {
+	// OpenRetainedSession opens ONE session for ChatRetained calls to share,
+	// returned as an opaque handle.
+	OpenRetainedSession() (any, error)
+	// ChatRetained streams one turn's completion over rs, replacing any state
+	// already on it (rs's PrefillTokens contract) — the same output a fresh
+	// Chat call would produce, without opening a new session for it.
+	ChatRetained(ctx context.Context, rs any, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token]
+	// CloseRetainedSession releases a session OpenRetainedSession opened.
+	CloseRetainedSession(rs any) error
+}
 
 // Config is the declarative generate request mirroring lthn-mlx's generate flag
 // surface. RunGenerate turns it into a load + generate run (or, when StateName
@@ -242,12 +264,40 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		return opts
 	}
 
+	// chat drives one Chat-equivalent turn. warmMsgs below and msgs (the timed
+	// run) are two SEPARATE, unrelated turns — never a shared prefix (see the
+	// standing "Chat calls on this path never reuse KV across runs" contract
+	// above) — but tm.Chat's default cost is a FRESH arch decode-state build
+	// per call, each sized to the full --context: two calls transiently hold
+	// two such builds (the first is only Go-unreferenced, not synchronously
+	// freed, when the second's build starts), measured ~34.9GB peak RSS at
+	// --context 32768 in both q8 and turboquant KV modes. When tm implements
+	// retainedChatModel (the plain metal path) and this run carries no
+	// multimodal input, both turns instead share ONE retained session — opened
+	// once here, closed on return — so the sequence pays for one build, not
+	// two. ChatRetained's PrefillTokens replaces the prior turn's state on
+	// every call, the same fresh-start guarantee a new session gives, so
+	// output is unaffected; a model without the capability (or a multimodal
+	// turn, which ChatRetained does not carry) keeps today's two-build Chat
+	// path unchanged.
+	chat := tm.Chat
+	if len(images) == 0 && len(audios) == 0 && len(videoFrames) == 0 {
+		if rcm, ok := tm.(retainedChatModel); ok {
+			if rs, rerr := rcm.OpenRetainedSession(); rerr == nil {
+				defer func() { _ = rcm.CloseRetainedSession(rs) }()
+				chat = func(ctx context.Context, m []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+					return rcm.ChatRetained(ctx, rs, m, opts...)
+				}
+			}
+		}
+	}
+
 	// run generates up to limit tokens, timing prefill (start → first token)
 	// separately from decode (first → last) so the reported rate is steady-state.
 	run := func(m []inference.Message, limit int, collect *[]byte) (n int, prefill, decode time.Duration) {
 		start := time.Now()
 		var first time.Time
-		for tok := range tm.Chat(ctx, m, genOpts(limit)...) {
+		for tok := range chat(ctx, m, genOpts(limit)...) {
 			if n == 0 {
 				first = time.Now()
 				prefill = first.Sub(start)
