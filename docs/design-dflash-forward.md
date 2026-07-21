@@ -489,3 +489,55 @@ suspected — the two are per-row mathematically equivalent operations
 combines rows, over the identical row set either way) — but that equivalence
 has not been checked against a live accept-rate number from the reference
 implementation itself, because none exists to compare against.
+
+## 7d. The residual accept-rate gap bisected to numeric regime, not structure (evidence, 2026-07-21)
+
+**The missing comparator now exists.** §7c ended honestly open on whether
+~1.0 accepted/round was this pairing's inherent quality or an unreached
+fault. The reference implementation's own accept-rate, measured for the
+first time (the checkpoint's `spec_generate` run verbatim on torch/MPS —
+scratchpad `dflash_ref_survey.py`, its method source re-exec'd with only the
+return widened to expose `acceptance_lengths`; same 8 prompts, 48 greedy
+tokens, no early stop): **rounds=115, accept-rate 17.10%, 3.565
+tokens/round** vs our survey's 7.8% / 2.087 (re-run same day). The pairing
+is healthy; the gap was real. Per-prompt, the gap concentrates on
+deterministic sequences (counting: reference 9.33 tokens/round vs ours
+1.82) while repetition/code nearly match (fox 6.00 vs 5.78, fib 3.71 vs
+3.43).
+
+**The hunt, stage by stage (instruments committed:
+`assistant_dflash_zlab_round1_test.go`, `assistant_dflash_zlab_xfeed_test.go`;
+torch dumps via scratchpad `dflash_dump_ctx.py`):**
+
+- Round-1 proposal diff (identical frames, anchors match 7/8): fib matches
+  the reference 9 positions deep — the forward is fundamentally right —
+  while prose prompts mismatch at slot 0.
+- Torch-exact context features fed to OUR forward change almost nothing vs
+  our live capture (colours: byte-identical proposal lists) — capture
+  fidelity is NOT the gap, closing §7b's last suspicion about
+  `ExtractAuxHiddensAllRaw`.
+- Stage isolation on torch-exact inputs: fused context (fc+hidden_norm)
+  within 0.3%; layer-0 attention on torch's own normed input within 0.6%;
+  full per-layer bisect within 0.7–2.5% at every position through all 5
+  layers; the target embedding row byte-exact (2560/2560 elements equal).
+  No structural fault exists in the engine forward. (A first bisect run
+  showed 55–112% divergence at position 0 — that was THIS harness's own
+  bug, the embedID shared-scratch aliasing the survey test's comment warns
+  about, pin-fixed in both instruments; the corrected numbers are the ones
+  above.)
+
+**Mechanism.** The drafter's proposal argmaxes are knife-edge: the SAME
+forward flips fib's match depth 9 → 1 between two context inputs that
+differ by ±0.25%. The checkpoint's tie-breaks were shaped by torch-bf16
+arithmetic (training and reference inference share it); our forward —
+f32/f64 host + steel f32, MORE precise but differently rounded — lands on
+the other side of enough ties to halve the accept-rate, worst where the
+reference locks onto a deterministic pattern and we fall off it.
+
+**Consequence.** `DFlashEngineProbe` stays `false`. The one honest fix
+direction is a torch-bf16-equivalent numeric mode for the drafter forward
+(bf16 rounding after each op, torch reduction orders) — a
+fidelity-to-reference lane, not a correctness fix; the engine forward is
+already correct by every structural measure above. Whether that lane is
+worth building for a non-gemma4 side drafter is a prioritisation call, not
+an engineering unknown.
