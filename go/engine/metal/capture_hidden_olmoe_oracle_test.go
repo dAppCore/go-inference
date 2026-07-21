@@ -56,20 +56,16 @@ import (
 // topK kernel) lane declining to the host path whenever the policy is false, since a fixed kernel can
 // only implement the always-renormalise order.
 //
-// Both fixes are proven at three independent resolutions: the production ArchSession's greedy
+// The fixes are proven at four independent resolutions: the production ArchSession's greedy
 // generation matches the reference exactly (real_checkpoint_olmoe_gpu_test.go), every layer's
 // post-block hidden sum tracks the oracle within band
 // (TestForwardCaptureHiddensOLMoEAllLayersVsRealOracle, both the ICB-default and ICB-disabled
-// routes), and the embedding table output matches within band
-// (TestForwardCaptureHiddensOLMoEEmbedVsRealOracle).
-// TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle, which isolates the attention half from
-// the MLP/MoE half via capturedAttnHiddens/capturedMLPResHiddens, is the one exception: its own
-// oracleOLMoEAttnSumAbs/oracleOLMoEMLPSumAbs reference table does not self-consistently match what
-// those variables capture (per their own doc, "x + Wo·attn" and "attn_res + FFN" — residual-inclusive
-// values, confirmed by cross-checking capturedMLPResHiddens against the independently-validated
-// per-layer oracle above, which it matches almost to the ulp; the bisection's OWN attn/mlp constants
-// do not track either that or the embedding-table baseline the same way). That mismatch predates
-// this fix and sits in the bisection oracle's own extraction, not in the engine.
+// routes), the embedding table output matches within band
+// (TestForwardCaptureHiddensOLMoEEmbedVsRealOracle), and the attention half is isolated from the
+// MoE half within band (TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle — the attn
+// table holds the residual-inclusive x + Wo·attn the capture records; the mlp table equals the
+// per-layer post-block values, so that side doubles as the capture-instrument identity check:
+// capturedMLPResHiddens must track perLayerOut).
 //
 // Oracle: mlx_lm 0.31.3 (mlx 0.32.0), mlx-community/OLMoE-1B-7B-0125-Instruct-4bit (the identical
 // checkpoint the receipt loads), olmoeCapitalPromptIDs fed directly as input_ids (no tokenizer
@@ -112,46 +108,47 @@ var oracleOLMoELayerSumAbs = map[int]float64{
 	15: 1127.736328125,
 }
 
-// oracleOLMoEAttnSumAbs / oracleOLMoEMLPSumAbs are the SAME extraction's attention-half output
-// (x + Wo·attn, before the residual's OWN further MoE addition) and MLP(MoE)-half output sumAbs per
-// layer — the bisection oracle for capturedAttnHiddens/capturedMLPResHiddens
-// (decode_forward_arch.go), which only the PLAIN (icbDisabledForTest) route populates.
+// oracleOLMoEAttnSumAbs / oracleOLMoEMLPSumAbs are the SAME extraction's residual-inclusive halves,
+// matching what the capture variables record (decode_forward_arch.go, PLAIN icbDisabledForTest
+// route only): attn = x + Wo·attn (before the MoE half runs), mlp = attn_res + FFN — the post-block
+// value, so the mlp side equals oracleOLMoELayerSumAbs by construction and doubles as the
+// capture-instrument identity check (capturedMLPResHiddens must track perLayerOut).
 var oracleOLMoEAttnSumAbs = map[int]float64{
-	0:  22.748016357421875,
-	1:  24.893409729003906,
-	2:  24.21977424621582,
-	3:  19.2108154296875,
-	4:  26.713010787963867,
-	5:  25.206958770751953,
-	6:  30.023195266723633,
-	7:  30.97852897644043,
-	8:  39.57813262939453,
-	9:  40.534080505371094,
-	10: 52.92363357543945,
-	11: 90.70167541503906,
-	12: 79.96588897705078,
-	13: 99.60480499267578,
-	14: 116.74137115478516,
-	15: 341.2564697265625,
+	0:  37.326515197754,
+	1:  46.775234222412,
+	2:  69.36083984375,
+	3:  162.5450592041,
+	4:  192.50723266602,
+	5:  205.56518554688,
+	6:  216.02139282227,
+	7:  231.05601501465,
+	8:  258.71295166016,
+	9:  296.12786865234,
+	10: 357.08334350586,
+	11: 439.67974853516,
+	12: 505.46264648438,
+	13: 667.45446777344,
+	14: 811.87286376953,
+	15: 954.82830810547,
 }
 
 var oracleOLMoEMLPSumAbs = map[int]float64{
-	0:  32.500335693359375,
-	1:  41.83156967163086,
-	2:  119.26433563232422,
-	3:  63.34184265136719,
-	4:  38.29867172241211,
-	5:  35.06106948852539,
-	6:  51.84075927734375,
-	7:  60.25086212158203,
-	8:  87.62808227539062,
-	9:  108.88630676269531,
-	10: 148.382080078125,
-	11: 138.21327209472656,
-	12: 277.4395751953125,
-	13: 303.6336975097656,
-	14: 402.1033630371094,
-	15: 486.07220458984375,
+	0:  46.016334533691,
+	1:  65.639953613281,
+	2:  160.38638305664,
+	3:  188.89402770996,
+	4:  201.52200317383,
+	5:  212.26454162598,
+	6:  227.75173950195,
+	7:  252.71520996094,
+	8:  288.26733398438,
+	9:  343.22454833984,
+	10: 416.69546508789,
+	11: 483.67901611328,
+	12: 635.70971679688,
+	13: 778.60729980469,
+	14: 931.81604003906,
+	15: 1127.736328125,
 }
 
 // oracleOLMoEPerLayerBandFrac is the per-layer relative-error band a healthy layer should sit
@@ -325,10 +322,6 @@ func TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle(t *testing.T) {
 		attnRel := (attnGot - attnWant) / attnWant
 		mlpRel := (mlpGot - mlpWant) / mlpWant
 		t.Logf("%4d  %14.2f  %14.2f  %+8.2f%%  |  %14.2f  %14.2f  %+8.2f%%", l, attnGot, attnWant, attnRel*100, mlpGot, mlpWant, mlpRel*100)
-		// see this file's header: oracleOLMoEAttnSumAbs/oracleOLMoEMLPSumAbs's own values do not
-		// self-consistently match what capturedAttnHiddens/capturedMLPResHiddens are documented (and
-		// independently confirmed) to capture — a pre-existing mismatch in this bisection's own oracle
-		// extraction, not the per-layer defects the rest of this file's tests gate.
 		if attnRel < -oracleOLMoEPerLayerBandFrac || attnRel > oracleOLMoEPerLayerBandFrac {
 			t.Errorf("layer %d attention half outside the %.0f%% band (rel=%+.2f%%)", l, oracleOLMoEPerLayerBandFrac*100, attnRel*100)
 		}
