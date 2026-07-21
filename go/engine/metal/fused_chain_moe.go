@@ -166,10 +166,16 @@ func chainQMVBF16To(t *chainTarget, w QuantWeight, xBF, dstBF metal.MTLBuffer, o
 	return nil
 }
 
-// chainSiLUGateMulBF16 is encSiLUGateMulBF16 in target form: out = silu(gate)·up = gate·σ(gate)·up,
-// the SwiGLU gate (llama/mistral/qwen), composed from the bf16 sigmoid + two muls. out must NOT alias
-// gate (σ(gate) overwrites out first). n contiguous bf16 elements.
+// chainSiLUGateMulBF16 is encSiLUGateMulBF16 in target form: out = silu(gate)·up — the fused
+// fp32-internal kernel when the custom library carries it (matching the live encoder's bytes),
+// else the composed bf16 sigmoid + two muls. out must NOT alias gate (the composed fallback's
+// σ(gate) overwrites out first). n contiguous bf16 elements.
 func chainSiLUGateMulBF16(t *chainTarget, gate, up, out metal.MTLBuffer, n int) error {
+	if pso, err := t.customPSO(func() (metal.MTLComputePipelineState, error) { return siluPipeline() }, "lthn_silu_gate_mul_bf16"); err == nil {
+		emitBinary(t.cmd(), pso, gate, 0, up, 0, out, 0, n)
+		t.barrier()
+		return nil
+	}
 	psoSig, err := t.pso("v_Sigmoidbfloat16bfloat16")
 	if err != nil {
 		return err

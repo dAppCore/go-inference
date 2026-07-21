@@ -462,6 +462,30 @@ func geluGateMulComposedInto(out, gate, up []byte, n int, directOutput bool) err
 	return encErr
 }
 
+// SiLUGateMulBF16 computes silu(gate)·up in bf16 — the SwiGLU gate in the decode
+// dtype, through the same encoder choke point the decode uses (fused fp32-internal
+// kernel when loaded, composed bf16 chain otherwise) so host references stay
+// byte-identical to the device path.
+func SiLUGateMulBF16(gate, up []byte) ([]byte, error) {
+	if len(up) != len(gate) {
+		return nil, core.NewError("native.SiLUGateMulBF16: gate/up length mismatch")
+	}
+	if len(gate)%bf16Size != 0 {
+		return nil, core.NewError("native.SiLUGateMulBF16: byte length must be a multiple of 2")
+	}
+	if err := ensureInit(); err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(gate))
+	if len(gate) == 0 {
+		return out, nil
+	}
+	if err := siluGateMulFusedInto(out, gate, up, len(gate)/bf16Size, false); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GeluGateMulBF16 computes gelu(gate)·up in bf16 — gemma's MLP gate in the decode
 // dtype. Uses the fused kernel (fp32-internal, one dispatch) when the custom kernels
 // metallib is loaded, else the composed bf16 primitive chain. Parity in parity_test.go.

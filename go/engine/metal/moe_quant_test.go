@@ -143,7 +143,7 @@ func TestMoEExpertsQuantSiLU(t *testing.T) {
 		ee := int(e)
 		ge := must(QMVBF16(x, gate.Packed[ee*gp:(ee+1)*gp], gate.Scales[ee*gsz:(ee+1)*gsz], gate.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
 		ue := must(QMVBF16(x, up.Packed[ee*gp:(ee+1)*gp], up.Scales[ee*gsz:(ee+1)*gsz], up.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
-		gg := must(MulBF16(must(SiLUBF16(ge)), ue)) // silu(gate)·up — the SwiGLU gate
+		gg := must(SiLUGateMulBF16(ge, ue)) // silu(gate)·up — the SwiGLU gate, same choke point as the device path
 		de := must(QMVBF16(gg, down.Packed[ee*dp:(ee+1)*dp], down.Scales[ee*dsz:(ee+1)*dsz], down.Biases[ee*dsz:(ee+1)*dsz], dModel, dFF, gs, bits))
 		scaled := must(MulBF16(de, scalarFillBF16(weights[i*bf16Size:(i+1)*bf16Size], dModel)))
 		if i == 0 {

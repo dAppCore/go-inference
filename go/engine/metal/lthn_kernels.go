@@ -288,6 +288,44 @@ func geluGateMulFusedInto(out, gate, up []byte, n int, directOutput bool) error 
 	return encErr
 }
 
+func siluGateMulFusedInto(out, gate, up []byte, n int, directOutput bool) error {
+	var encErr error
+	withAutoreleasePool(func() {
+		ioScratch, err := getBinaryByteScratch(n * bf16Size)
+		if err != nil {
+			encErr = err
+			return
+		}
+		defer putBinaryByteScratch(ioScratch)
+		gBuf, uBuf, oBuf, err := ioScratch.buffers(gate, up)
+		if err != nil {
+			encErr = err
+			return
+		}
+		directOut := false
+		if directOutput {
+			tmp, ok := ioScratch.outputView(out)
+			if ok {
+				oBuf = tmp
+				directOut = true
+			}
+		}
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		if encErr = encSiLUGateMulBF16(enc, gBuf, uBuf, oBuf, n); encErr != nil {
+			endEncodingFast(enc)
+			return
+		}
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+		if !directOut {
+			copy(out, ioScratch.out.bytes[:n*bf16Size])
+		}
+	})
+	return encErr
+}
+
 var (
 	bf16MulScalarPSOOnce sync.Once
 	bf16MulScalarPSO     metal.MTLComputePipelineState
