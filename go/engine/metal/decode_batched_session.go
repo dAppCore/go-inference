@@ -997,10 +997,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if !(K > batchedDenseICBMaxRows || s.verifyFoldSmallK) || K <= 1 || !gpuHasGeluKernel() {
 				// #53/#54: small batches used to decline WHOLESALE here — the per-row
 				// interleave (below, foldAttn=false) wrote bf16 rows straight into the
-				// int8 caches, so the byte-exact MTP verify (which never arms
-				// verifyFoldSmallK — mtpVerifyFoldArmed(exact=true) is always false
-				// unless LTHN_MTP_VERIFY_FOLD=1 forces it, #55) paid K sequential
-				// stepID rounds instead of one command buffer. The interleave now
+				// int8 caches, so a per-row MTP verify (LTHN_MTP_VERIFY_FOLD=0, the
+				// forensics lane — both verify tiers fold by default) paid K
+				// sequential stepID rounds instead of one command buffer. The
+				// interleave now
 				// lands q8 rows itself (encAttnHalfKVQ8InputAt / the sharer twin
 				// encAttnHalfSharedKVQ8At, below) with encKVQ8StoreRows at rows=1 —
 				// the SAME store math the fold's own K-row landing calls — and reads

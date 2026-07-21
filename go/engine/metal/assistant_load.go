@@ -2540,11 +2540,9 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	// OTHER round shape this default is what the log below reports, instead of silently reusing a
 	// STALE snapshot left over from a previous round.
 	mtpRowsDiagLast = mtpRowsDiagSnapshot{K: len(draftTokens), Reason: "rows-moe-seam-not-reached"}
-	// The greedy verify is the byte-exact lane (#55): the block forward runs
-	// per-row (exact=true — the fold's batched numerics can flip a near-tied
-	// argmax) and the rows head defaults to the per-row canonical qmv tier the
-	// plain decode pick uses. LTHN_MTP_ROWS_HEAD=1 re-arms the K-row fused
-	// qmm_t head for the A/B.
+	// Both verify tiers take the batched fold by default; LTHN_MTP_VERIFY_FOLD=0
+	// forces the per-row forensics lane and LTHN_MTP_ROWS_HEAD=0 the per-row
+	// head (the parity-vs-unbatched-plain A/B levers).
 	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens, true)
 	if err != nil {
 		return nil, nil, err
@@ -2683,22 +2681,14 @@ func mtpDiagTop2BF16Suppressed(logits []byte, vocab int, suppress []int32) (int3
 }
 
 // verifyAssistantDraftHiddens forwards the draft block through the target and
-// returns the per-row hiddens. exact selects the numeric tier (#55):
-//
-//   - exact=true — the byte-exact greedy lane. The block runs the PER-ROW
-//     lane (qmv dot-body per row — byte-identical to the sequential plain
-//     decode step, weights re-read per row), so committed hiddens and KV rows
-//     are the same bytes plain decode would produce and the greedy
-//     pair-vs-plain equality holds by construction.
-//   - exact=false — the sampled lane. The verify takes the small-K batched
-//     FOLD: weights swept once per block through the qmm token-identity tier
-//     (the same boundary the prompt-scale qmm trades at). The fold's batched
-//     numerics are NOT byte-identical to sequential decode — at a near-tied
-//     argmax that flips a committed token, which is why the exact lane never
-//     folds — but the sampled contract is distributional, not byte.
-//
-// LTHN_MTP_VERIFY_FOLD=0 forces the per-row lane everywhere;
-// LTHN_MTP_VERIFY_FOLD=1 forces the fold everywhere (the #55 A/B lever).
+// returns the per-row hiddens. Both tiers take the small-K batched FOLD by
+// default: weights swept once per block through the qmm token-identity tier —
+// deterministic run-to-run, the model's own arithmetic in batched order. The
+// fold is not byte-identical to the UNBATCHED plain decode; that parity is a
+// forensics A/B, not a product contract — LTHN_MTP_VERIFY_FOLD=0 forces the
+// per-row lane (qmv dot-body per row, byte-identical to sequential plain
+// decode) for it. exact survives for the =0 lane's call sites (the per-row
+// rows-MoE driver arms only there).
 func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32, exact bool) ([][]byte, error) {
 	if mtpVerifyFoldArmed(exact) {
 		s.state.verifyFoldSmallK = true
