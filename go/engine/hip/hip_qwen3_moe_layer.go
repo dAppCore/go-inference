@@ -133,6 +133,12 @@ func hipQwen3MoEApplyQKNormRoPE(ctx context.Context, driver nativeHIPDriver, val
 		Count:          headDim,
 		Epsilon:        eps,
 		WeightEncoding: hipRMSNormWeightEncodingF32,
+		// qwen3 rotates the split-half convention (rotate_half: pairs (i, i+headDim/2)),
+		// the SAME convention gemma4's own QK-norm+RoPE config sets
+		// (hipGemma4Q4RoPENormConfig) — without this flag the kernel's other branch
+		// pairs adjacent elements (i, i+1) instead (GPT-J-style), a coherent-but-wrong
+		// rotation for this family.
+		Flags: hipRMSNormLaunchFlagRoPENeoX,
 	}
 	out, err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, buf, normCfg, heads, position, ropeTheta, 0, 0, 1)
 	if err != nil {

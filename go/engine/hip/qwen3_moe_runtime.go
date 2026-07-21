@@ -15,11 +15,26 @@ import (
 
 // loadHIPQwen3MoETextModel routes the qwen3_moe sparse-expert family through its own
 // native ROCm forward pass (hip_qwen3_moe_*.go) — the first SiLU-gated MoE family
-// engine/hip serves natively; every other MoE arch remains a named decline
-// (rocmRetiredComposedArchDecline). Wired exactly the way loadHIPMamba2TextModel wires
-// Mamba2: a self-contained model.TokenModel bridged into the shared engine.Session
-// surface via hipComposedTextModel, tried ahead of loadHIPComposedTextModel's decline
-// check in the load chain (native.go).
+// engine/hip serves natively. Wired exactly the way loadHIPMamba2TextModel wires Mamba2: a
+// self-contained model.TokenModel bridged into the shared engine.Session surface via
+// hipComposedTextModel, tried ahead of loadHIPComposedTextModel's decline check in the
+// load chain (native.go).
+//
+// qwen3_moe STAYS in rocmRetiredComposedArchDecline (composed_runtime.go) despite this
+// loader existing and being proven correct — real hardware (gfx1101), the real
+// loadModelWithROCmConfigMode entry point, a real on-disk checkpoint directory and
+// tokenizer, greedy generation end to end (TestROCmBackend_LoadsQwen3MoEBeforeNativeRuntime_Good).
+// The blocker is NOT correctness: it is that loadHIPQwen3MoEWeights uploads every tensor
+// as a permanently device-resident F32 buffer with no lazy/streamed expert residency —
+// exactly the gap gemma4's hipGemma4ExpertCache exists to close for a checkpoint whose
+// experts don't fit in VRAM. A real Qwen3-MoE checkpoint (30B-A3B class: ~128 experts per
+// layer across dozens of layers) would attempt to upload tens of GB of F32 expert weights
+// regardless of how many experts a given decode actually selects — an OOM or multi-minute
+// load, not a clean failure, on exactly the 16GB-class hardware
+// isROCmMoEArchitecture's memory-plan note already warns needs "MoE lazy expert
+// residency". Removing the decline is safe once EITHER a real checkpoint has loaded and
+// generated correctly, or the expert residency model changes from "everything resident"
+// to something bounded — whichever lands first.
 func loadHIPQwen3MoETextModel(path string, cfg inference.LoadConfig) (inference.TextModel, bool, error) {
 	stat := core.Stat(path)
 	if !stat.OK {
