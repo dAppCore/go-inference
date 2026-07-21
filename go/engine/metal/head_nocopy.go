@@ -979,8 +979,12 @@ func (h *headEncoder) greedyRowsCanonicalInPool(hiddens [][]byte, suppress []int
 	for i, sc := range scrs {
 		token := sc.token()
 		if token < 0 || int(token) >= h.vocab {
+			hn, hf := bf16NaNScanBytes(hiddens[i])
+			nn, ni, nmin, nmax, _ := bf16BufStats(sc.normed, 0, h.dModel)
 			release()
-			return false, core.NewError(core.Sprintf("native.headEncoder.greedyRowsCanonical: direct argmax returned invalid token %d for vocab %d (row %d)", token, h.vocab, i))
+			return false, core.NewError(core.Sprintf(
+				"native.headEncoder.greedyRowsCanonical: direct argmax returned invalid token %d for vocab %d (row %d; hidden NaN=%d first=%d; normed NaN=%d Inf=%d min=%.3f max=%.3f)",
+				token, h.vocab, i, hn, hf, nn, ni, nmin, nmax))
 		}
 		out[i] = token
 	}

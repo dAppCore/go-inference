@@ -33,6 +33,15 @@ func TestQMMTAt31BDims(t *testing.T) {
 		{"e2b-ctrl-2048", 27, 2048, 2048},
 		{"31b-kv-5376", 27, 4096, 5376},
 		{"31b-q-5376", 27, 8192, 5376},
+		// e4b plain-4bit (hidden 2560, dFF 10240) at the MTP verify width K=5 —
+		// the all-NaN fold repro's projection set: the qat conversion's 8-bit
+		// MLP overrides masked these 4-bit shapes until the plain conversion
+		// hit them live.
+		{"e4b-gate-10240x2560", 5, 10240, 2560},
+		{"e4b-down-2560x10240", 5, 2560, 10240},
+		{"e4b-q-2048x2560", 5, 2048, 2560},
+		{"e4b-kv-512x2560", 5, 512, 2560},
+		{"e4b-o-2560x2048", 5, 2560, 2048},
 	}
 	rng := uint32(0x9e3779b9)
 	next := func() uint32 { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng }
