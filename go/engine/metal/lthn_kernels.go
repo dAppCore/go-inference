@@ -27,7 +27,28 @@ var (
 	geluPSOOnce sync.Once
 	geluPSO     metal.MTLComputePipelineState
 	geluPSOErr  error
+
+	siluPSOOnce sync.Once
+	siluPSO     metal.MTLComputePipelineState
+	siluPSOErr  error
 )
+
+// siluPipeline builds (once) the fused silu(gate)·up pipeline from the custom kernels library.
+func siluPipeline() (metal.MTLComputePipelineState, error) {
+	siluPSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			siluPSOErr = core.NewError("native.siluPipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_silu_gate_mul_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			siluPSOErr = core.NewError("native.siluPipeline: kernel lthn_silu_gate_mul_bf16 not found")
+			return
+		}
+		siluPSO, siluPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return siluPSO, siluPSOErr
+}
 
 // geluPipeline builds (once) the fused gelu pipeline from the custom kernels library.
 func geluPipeline() (metal.MTLComputePipelineState, error) {
@@ -189,10 +210,16 @@ func encGeluGateMulFused(enc metal.MTLComputeCommandEncoder, gate, up, out metal
 	return encGeluGateMulFusedTo(enc, gate, up, out, 0, 0, 0, n)
 }
 
-// encSiLUGateMulBF16 encodes silu(gate)·up = gate·sigmoid(gate)·up — the SwiGLU gate (llama/mistral/
-// qwen), composed from the bf16 sigmoid + two in-place muls (there is no fused SiLU kernel). gate/up
-// are read; out receives the result (may alias gate for a contiguous slab). n contiguous bf16 elements.
+// encSiLUGateMulBF16 encodes silu(gate)·up — the SwiGLU gate (llama/mistral/qwen/olmoe). The fused
+// fp32-internal kernel when the custom library carries it (one dispatch, one bf16 rounding — the
+// composed chain's three roundings seeded #67's per-layer drift), else the composed bf16
+// sigmoid + two in-place muls. gate/up are read; out receives the result (may alias gate for a
+// contiguous slab). n contiguous bf16 elements.
 func encSiLUGateMulBF16(enc metal.MTLComputeCommandEncoder, gate, up, out metal.MTLBuffer, n int) error {
+	if pso, err := siluPipeline(); err == nil {
+		emitBinary(encSink{enc}, pso, gate, 0, up, 0, out, 0, n)
+		return nil
+	}
 	if err := encSigmoidBF16(enc, gate, out, n); err != nil { // out = σ(gate)
 		return err
 	}

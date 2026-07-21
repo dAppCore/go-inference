@@ -421,17 +421,11 @@ func encMLPHalfBF16At(
 	if err := proj.project(enc, sc.mlpNormed, sc.up, 0, projUp); err != nil {
 		return err
 	}
-	// SwiGLU (llama/mistral/qwen): silu(gate)·up = gate·sigmoid(gate)·up — composed from the bf16
-	// sigmoid + two element-wise muls (in-place, like the QK-norm rows), matching mlx's swiglu.
-	// gemma keeps the GELU gate below (byte-identical: usesSiLU is false there).
+	// SwiGLU (llama/mistral/qwen): silu(gate)·up — the fused fp32-internal kernel when loaded,
+	// composed bf16 chain otherwise (encSiLUGateMulBF16 picks). gemma keeps the GELU gate below
+	// (byte-identical: usesSiLU is false there).
 	if proj.usesSiLU() {
-		if err := encSigmoidBF16(enc, sc.gate, sc.gated, dFF); err != nil { // gated = σ(gate)
-			return err
-		}
-		if err := encMulBF16(enc, sc.gate, sc.gated, sc.gated, dFF); err != nil { // gated = gate·σ(gate) = silu(gate)
-			return err
-		}
-		if err := encMulBF16(enc, sc.gated, sc.up, sc.gated, dFF); err != nil { // gated = silu(gate)·up
+		if err := encSiLUGateMulBF16(enc, sc.gate, sc.up, sc.gated, dFF); err != nil {
 			return err
 		}
 	} else if gpuHasGeluKernel() {
