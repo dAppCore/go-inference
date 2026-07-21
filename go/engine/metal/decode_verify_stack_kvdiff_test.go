@@ -14,21 +14,21 @@ import (
 	"dappco.re/go/inference/internal/enginegate"
 )
 
-// TestRealE2BVerifyStackKVDiff is the engine-bistability reproducer: generate
-// N tokens twice and diff tokens + recorded-ICB cache bytes row by row.
-// LTHN_KVDIFF_BOTH_LIVE=1 runs BOTH arms with the stack lane force-disabled —
-// the arms still flip a near-tied token (~1 in 2 at 60 tokens, both
-// directions, KV bytes clean) which is the proof the nondeterminism lives in
-// the live MTP re-engagement path, not the replay. LTHN_KVDIFF_MAXNEW sizes
-// the run (40 = stable, 60 = spans the flip).
+// TestRealE2BVerifyStackKVDiff is the run-to-run determinism guard: generate
+// N tokens twice and diff tokens + recorded-ICB cache bytes row by row. The
+// greedy MTP loop composes verify and plain stretches on wall-clock
+// re-engagement verdicts, so two runs may take DIFFERENT cycle structures —
+// the emitted stream and the cache bytes must be invariant to that, which
+// holds only while every greedy lane is byte-identical to sequential plain
+// decode (the #55 routing, mtpVerifyFoldArmed). LTHN_KVDIFF_BOTH_LIVE=1
+// force-disables the stack lane in both arms (the engine-only shape);
+// LTHN_KVDIFF_MAXNEW sizes the run — the default spans the re-engagement
+// boundary where a non-parity lane flips a near-tied token.
 func TestRealE2BVerifyStackKVDiff(t *testing.T) {
-	if os.Getenv("LTHN_VERIFY_STACK_ICB") != "1" {
-		t.Skip("set LTHN_VERIFY_STACK_ICB=1 (race-hunt instrument)")
-	}
 	requireNativeRuntime(t)
 	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-e2b-it-4bit")
 	assistantDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-E2B-it-assistant-bf16")
-	maxNew := 40
+	maxNew := 60
 	if v := os.Getenv("LTHN_KVDIFF_MAXNEW"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			maxNew = n

@@ -5,7 +5,6 @@
 package native
 
 import (
-	"os"
 	"testing"
 
 	"dappco.re/go/inference/internal/enginegate"
@@ -18,10 +17,16 @@ import (
 // and the engagement counter must prove the lane actually replayed — an
 // unengaged parity proves nothing.
 func TestRealE2BVerifyStackICBTokensMatchLive(t *testing.T) {
-	if os.Getenv("LTHN_VERIFY_STACK_ICB") != "1" {
-		t.Skip("the ENGINE's re-engagement bistability flips a near-tied token with the lane disabled in both arms (see verifyStackICBDisabled + TestRealE2BVerifyStackKVDiff) — set LTHN_VERIFY_STACK_ICB=1 to run; flips always-on when the engine flake is fixed and this holds under -count=10")
-	}
 	requireNativeRuntime(t)
+	// The lane records the batched verify FOLD, which the greedy tier's #55
+	// byte-exact contract routes away from by default — force the fold so the
+	// recorder engages on this greedy oracle, and disable the wall-clock
+	// re-engagement policy so both arms take a token-deterministic cycle
+	// structure: the lane's claim under test is replay == live fold, and a
+	// timing-divergent reference would test the policy instead.
+	savedFold, savedReng := mtpVerifyFoldForced, mtpReengageDisabled
+	mtpVerifyFoldForced, mtpReengageDisabled = true, true
+	t.Cleanup(func() { mtpVerifyFoldForced, mtpReengageDisabled = savedFold, savedReng })
 	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-e2b-it-4bit")
 	assistantDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-E2B-it-assistant-bf16")
 

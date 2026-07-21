@@ -75,29 +75,17 @@ import (
 // sinks, SiLU folds, runtime-dim SDPA and the deep 2-pass phase all decline.
 // The banked per-layer tail lane keeps priority when armed (LTHN_VERIFY_ICB=1).
 
-// verifyStackICBDisabled: the lane is OPT-IN (LTHN_VERIFY_STACK_ICB=1) until
-// the ENGINE's own re-engagement bistability is fixed — the real-checkpoint
-// parity run (TestRealE2BVerifyStackICBTokensMatchLive) flips a near-tied
-// token (~1 in 2, 2480 vs 496) with the lane force-disabled in BOTH arms
-// (TestRealE2BVerifyStackKVDiff LTHN_KVDIFF_BOTH_LIVE=1: 4/10, both
-// directions), KV cache bytes byte-identical, heavy host-side logging
-// suppressing it — a timing-sensitive nondeterminism in the LIVE MTP path
-// around the plain-stretch boundary (LTHN_MTP_REENGAGE=0 → 10/10 stable),
-// not a replay defect. The lane's replay is byte-faithful; the parity gate
-// cannot hold against a bistable reference, so the lane waits opt-in until
-// the engine flake is root-caused and the gate holds under -count=10.
-//
-// RECEIPT (e2b 4-bit + bf16 assistant, K=6 blocks, same prompt): the interior
-// records as ~656 commands and replays with ONE execute; traced GPU per verify
-// pass 9.4ms live → 8.3ms replay (stack.replay segment 7.6ms), verify-forward
-// wall 10.4-11.2ms live → 10.0-10.9ms replay (~-0.4ms) after the sibling
-// fence relaxations, decode tok/s unchanged (171-173 both lanes at 512
-// tokens). The verify fold is NOT encode-bound at this shape: the wall is
-// intrinsic batched-op time + the serial dependency chain + ~2ms of host
-// wrapper (embeds, PLE slab build) outside the fold, so removing the
-// per-segment encode moves little. The payoff levers are op-count reduction
-// (fusion) inside the recorded interior, not execute granularity.
-var verifyStackICBDisabled = os.Getenv("LTHN_VERIFY_STACK_ICB") != "1"
+// verifyStackICBDisabled: LTHN_VERIFY_STACK_ICB=0 is the kill switch (the
+// reproducibility anchor for live-fold A/Bs); the lane is otherwise on. It
+// records the batched verify FOLD, so it engages exactly where the fold runs:
+// the sampled verify tier by default, and the greedy tier only under the
+// LTHN_MTP_VERIFY_FOLD=1 A/B — the greedy tier's #55 byte-exact contract
+// (mtpVerifyFoldArmed) routes it per-row, which the recorder does not cover.
+// The replay is byte-faithful to the live fold; the wall at this shape is
+// intrinsic batched-op time + the serial dependency chain, so the payoff
+// levers are op-count reduction (fusion) inside the recorded interior, not
+// execute granularity.
+var verifyStackICBDisabled = os.Getenv("LTHN_VERIFY_STACK_ICB") == "0"
 
 // verifyStackICBDisabledForTest forces the live fold encodes — the A/B lever
 // for the replay parity tests. Production never sets it.
