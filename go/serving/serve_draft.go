@@ -10,7 +10,9 @@
 //  1. an explicit --draft path always wins (and --draft="" disables);
 //  2. an assistant/ subdirectory carrying a safetensors model — the
 //     MTPLX/Google pair layout (a bundle root's target/ + assistant/, or an
-//     assistant/ dropped inside the model directory);
+//     assistant/ dropped inside the model directory) — or, for a target served
+//     straight from an HF hub cache snapshot, the family's own cached
+//     assistant repo (models--*--gemma-4-<size>-it-assistant*, bf16 first);
 //  3. an MTP/ subdirectory or sibling mtp-*.gguf — the unsloth GGUF convention.
 //
 // Detection is path-shape only — no weights are opened. Whether the found
@@ -46,6 +48,7 @@ const (
 	DraftSourceFlag             DraftDetectionSource = "flag"             // explicit --draft path
 	DraftSourceAssistantDir     DraftDetectionSource = "assistant-dir"    // <model>/assistant/
 	DraftSourceSiblingAssistant DraftDetectionSource = "assistant-pair"   // <bundle>/target + <bundle>/assistant
+	DraftSourceCacheAssistant   DraftDetectionSource = "assistant-cache"  // hub cache models--*-assistant* repo
 	DraftSourceMTPDir           DraftDetectionSource = "mtp-dir"          // <model>/MTP/*.gguf
 	DraftSourceMTPSibling       DraftDetectionSource = "mtp-sibling-gguf" // <model>/mtp-*.gguf
 )
@@ -110,6 +113,13 @@ func DetectGemma4DraftPath(modelPath, explicit string, opts DraftDetectOptions) 
 		if sibling := core.PathJoin(core.PathDir(modelPath), "assistant"); isSafetensorsModelDir(sibling) {
 			return DraftDetection{Source: DraftSourceSiblingAssistant, DraftPath: sibling, Note: "auto-detected the target/ + assistant/ pair bundle"}
 		}
+	}
+	// Rung 2c — the HF hub cache: community snapshots carry no assistant/
+	// beside the weights — the family drafter is a SEPARATE cached repo
+	// (models--*--gemma-4-<size>-it-assistant*). Path-shape + config reads
+	// only; bf16 preferred (quant drafters dequantise to bf16 at load).
+	if cached := hubCacheAssistantFor(modelPath); cached != "" {
+		return DraftDetection{Source: DraftSourceCacheAssistant, DraftPath: cached, Note: "auto-detected the family assistant in the model cache"}
 	}
 	// Rung 3a — MTP/ subdirectory carrying a single GGUF (unsloth layout).
 	if mtpDir := core.PathJoin(modelPath, "MTP"); core.Stat(mtpDir).OK {
@@ -250,6 +260,88 @@ func speculativeServeNotice(detection DraftDetection, draftBlock int) string {
 	}
 	return core.Sprintf("MTP speculative decode ACTIVE — drafter %s (%s), block %d; greedy and sampled requests ride the verified lane, repetition-penalty/probe requests fall back to plain decode",
 		detection.DraftPath, detection.Note, draftBlock)
+}
+
+// hubCacheAssistantFor resolves the family MTP assistant for a target served
+// from an HF hub cache snapshot (…/hub/models--ORG--NAME/snapshots/HASH). The
+// match key is the size segment between "gemma-4-" and "-it" of the target's
+// repo dirname ("e2b", "26b-a4b", …), case-insensitive; bf16 assistant repos
+// win over quant ones; the repo resolves through refs/main, falling back to
+// the lexically-last snapshot that carries a gemma4 config + weights.
+// Non-cache paths and assistant targets return "".
+func hubCacheAssistantFor(modelPath string) string {
+	snapshots := core.PathDir(core.CleanPath(modelPath, "/"))
+	if core.PathBase(snapshots) != "snapshots" {
+		return ""
+	}
+	repo := core.PathDir(snapshots)
+	repoName := core.Lower(core.PathBase(repo))
+	if !core.HasPrefix(repoName, "models--") || core.Contains(repoName, "assistant") {
+		return ""
+	}
+	size := gemma4SizeSegment(repoName)
+	if size == "" {
+		return ""
+	}
+	want := "gemma-4-" + size + "-it-assistant"
+	var quant []string
+	for _, dir := range core.PathGlob(core.JoinPath(core.PathDir(repo), "models--*")) {
+		base := core.Lower(core.PathBase(dir))
+		if dir == repo || !core.Contains(base, want) {
+			continue
+		}
+		if core.Contains(base, "bf16") {
+			if snap := hubSnapshotDir(dir); snap != "" {
+				return snap
+			}
+			continue
+		}
+		quant = append(quant, dir)
+	}
+	for _, dir := range quant {
+		if snap := hubSnapshotDir(dir); snap != "" {
+			return snap
+		}
+	}
+	return ""
+}
+
+// gemma4SizeSegment cuts the size segment of a lowered hub repo dirname
+// between "gemma-4-" and "-it" ("…gemma-4-26b-a4b-it-4bit" → "26b-a4b");
+// "" when the name has no such shape.
+func gemma4SizeSegment(lowerName string) string {
+	const fam = "gemma-4-"
+	i := core.Index(lowerName, fam)
+	if i < 0 {
+		return ""
+	}
+	rest := lowerName[i+len(fam):]
+	j := core.Index(rest, "-it")
+	if j <= 0 {
+		return ""
+	}
+	return rest[:j]
+}
+
+// hubSnapshotDir resolves a hub repo dir to a loadable gemma4 snapshot:
+// refs/main's hash when it points at one, else the lexically-last snapshot
+// carrying a gemma4 config + weights (PathGlob returns sorted matches).
+func hubSnapshotDir(repo string) string {
+	snaps := core.PathJoin(repo, "snapshots")
+	if ref := core.ReadFile(core.PathJoin(repo, "refs", "main")); ref.OK {
+		if hash := core.Trim(string(ref.Bytes())); hash != "" {
+			if dir := core.PathJoin(snaps, hash); isSafetensorsModelDir(dir) && isGemma4FamilyConfig(dir) {
+				return dir
+			}
+		}
+	}
+	dirs := core.PathGlob(core.JoinPath(snaps, "*"))
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if isSafetensorsModelDir(dirs[i]) && isGemma4FamilyConfig(dirs[i]) {
+			return dirs[i]
+		}
+	}
+	return ""
 }
 
 // isGemma4FamilyConfig reports whether modelPath/config.json declares a Gemma 4

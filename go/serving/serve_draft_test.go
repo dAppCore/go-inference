@@ -80,6 +80,79 @@ func TestDetectGemma4DraftPath_AssistantDir_Ugly(t *testing.T) {
 	}
 }
 
+// writeHubRepo lays out an HF hub cache repo (models--ORG--NAME with a
+// snapshots/HASH gemma4 pack and an optional refs/main pointer) and returns
+// the snapshot dir.
+func writeHubRepo(t *testing.T, hub, name, hash string, withRef bool) string {
+	t.Helper()
+	repo := core.PathJoin(hub, name)
+	snap := core.PathJoin(repo, "snapshots", hash)
+	if r := core.MkdirAll(snap, 0o755); !r.OK {
+		t.Fatalf("mkdir snapshot: %v", r.Value)
+	}
+	writeGemma4Pack(t, snap)
+	if withRef {
+		if r := core.MkdirAll(core.PathJoin(repo, "refs"), 0o755); !r.OK {
+			t.Fatalf("mkdir refs: %v", r.Value)
+		}
+		if r := core.WriteFile(core.PathJoin(repo, "refs", "main"), []byte(hash+"\n"), 0o644); !r.OK {
+			t.Fatalf("write refs/main: %v", r.Value)
+		}
+	}
+	return snap
+}
+
+// TestDetectGemma4DraftPath_CacheAssistant_Good proves a target served from an
+// HF hub cache snapshot resolves the family's cached assistant repo — the bf16
+// variant winning over a quant sibling, through refs/main, case-insensitively.
+func TestDetectGemma4DraftPath_CacheAssistant_Good(t *testing.T) {
+	hub := t.TempDir()
+	target := writeHubRepo(t, hub, "models--mlx-community--gemma-4-e2b-it-4bit", "aaa", false)
+	writeHubRepo(t, hub, "models--mlx-community--gemma-4-E2B-it-assistant-qat-4bit", "ccc", true)
+	bf16 := writeHubRepo(t, hub, "models--mlx-community--gemma-4-E2B-it-assistant-bf16", "bbb", true)
+	det := DetectGemma4DraftPath(target+"/", "", DraftDetectOptions{}) // trailing slash = the live serve shape
+	if det.Source != DraftSourceCacheAssistant || det.DraftPath != bf16 {
+		t.Fatalf("hub cache assistant (bf16 preferred) should be detected: %+v", det)
+	}
+	if !det.Active() {
+		t.Fatal("detected cache assistant should be Active")
+	}
+}
+
+// TestDetectGemma4DraftPath_CacheAssistant_Bad proves the cache rung stands
+// down when no assistant repo shares the target's size segment — a different
+// family size must never pair.
+func TestDetectGemma4DraftPath_CacheAssistant_Bad(t *testing.T) {
+	hub := t.TempDir()
+	target := writeHubRepo(t, hub, "models--mlx-community--gemma-4-e2b-it-4bit", "aaa", false)
+	writeHubRepo(t, hub, "models--mlx-community--gemma-4-E4B-it-assistant-bf16", "bbb", true)
+	det := DetectGemma4DraftPath(target, "", DraftDetectOptions{})
+	if det.Source != DraftSourceNone || det.DraftPath != "" {
+		t.Fatalf("a different-size assistant must not pair: %+v", det)
+	}
+}
+
+// TestDetectGemma4DraftPath_CacheAssistant_Ugly proves a stale refs/main falls
+// back to the lexically-last loadable snapshot, and an assistant repo with no
+// loadable snapshot at all is skipped for the next candidate.
+func TestDetectGemma4DraftPath_CacheAssistant_Ugly(t *testing.T) {
+	hub := t.TempDir()
+	target := writeHubRepo(t, hub, "models--mlx-community--gemma-4-26b-a4b-it-4bit", "aaa", false)
+	// bf16 repo: refs/main points at a missing hash; its real snapshot must win.
+	bf16 := writeHubRepo(t, hub, "models--mlx-community--gemma-4-26B-A4B-it-assistant-bf16", "real", false)
+	repo := core.PathDir(core.PathDir(bf16))
+	if r := core.MkdirAll(core.PathJoin(repo, "refs"), 0o755); !r.OK {
+		t.Fatalf("mkdir refs: %v", r.Value)
+	}
+	if r := core.WriteFile(core.PathJoin(repo, "refs", "main"), []byte("gone\n"), 0o644); !r.OK {
+		t.Fatalf("write refs/main: %v", r.Value)
+	}
+	det := DetectGemma4DraftPath(target, "", DraftDetectOptions{})
+	if det.Source != DraftSourceCacheAssistant || det.DraftPath != bf16 {
+		t.Fatalf("stale refs/main should fall back to the loadable snapshot: %+v", det)
+	}
+}
+
 // TestResolveServeDraft_AutoDetects_Good proves the "auto" flag value routes
 // into the reactive ladder (an explicit path still forces the drafter).
 func TestResolveServeDraft_AutoDetects_Good(t *testing.T) {
