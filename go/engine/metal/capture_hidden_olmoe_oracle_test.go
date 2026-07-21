@@ -5,7 +5,6 @@
 package native
 
 import (
-	"os"
 	"math"
 	"sort"
 	"testing"
@@ -17,93 +16,60 @@ import (
 
 // capture_hidden_olmoe_oracle_test.go is the (#65) per-layer oracle instrument for the OLMoE
 // real-checkpoint parity gap named in real_checkpoint_olmoe_gpu_test.go /
-// docs/zoo-moe-real-checkpoint-parity.md: mlx-community/OLMoE-1B-7B-0125-Instruct-4bit through the
-// production ArchSession still emits wrong greedy ids after the MoE expert-combine activation fix
-// landed (moe_block.go's UsesSiLU/#63 — confirmed engaged, not the residual defect). This file
-// captures ForwardCaptureHiddens' per-layer post-block hidden sums at the receipt's own fixed prompt
-// (olmoeCapitalPromptIDs, real_checkpoint_olmoe_gpu_test.go) and compares them against an independent
-// mlx-lm extraction of the identical checkpoint at the identical ids — the same "which layer first
-// disagrees" discriminator capture_hidden_qwen3_oracle_test.go established.
+// docs/zoo-moe-real-checkpoint-parity.md. It captures ForwardCaptureHiddens' per-layer post-block
+// hidden sums at the receipt's own fixed prompt (olmoeCapitalPromptIDs, real_checkpoint_olmoe_gpu_test.go)
+// and compares them against an independent mlx-lm extraction of the identical checkpoint at the
+// identical ids — the same "which layer first disagrees" discriminator
+// capture_hidden_qwen3_oracle_test.go established.
 //
-// FINDING: layer 0 already diverges (post-block +41%; the bisection,
-// TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle via capturedAttnHiddens/
-// capturedMLPResHiddens, splits it +63% attention / +100% MLP-MoE at layer 0, both growing with
-// depth — by layer 5 attention alone is +1102%). Two INDEPENDENT, compounding static defects fully
-// explain this shape, both confirmed by reading the reference implementation and the engine source
-// side by side, not guessed from the numbers alone:
+// Two independent, compounding defects fully explained the divergence this instrument originally
+// found (layer 0 post-block +41%, growing with depth), both confirmed by reading the reference
+// implementation and the engine source side by side:
 //
-// DEFECT 1 (attention, layer 0 onward): OLMoE's q_norm/k_norm (self_attn.{q,k}_norm.weight,
-// confirmed present in the real checkpoint's safetensors index) are shape [2048] =
+// QK-NORM GRANULARITY: OLMoE's q_norm/k_norm (self_attn.{q,k}_norm.weight) are shape [2048] =
 // [n_heads*head_dim] (hidden_size, NOT head_dim=128) — mlx_lm's own reference
 // (site-packages/mlx_lm/models/olmoe.py, Attention): `self.q_norm = nn.RMSNorm(n_heads*head_dim,
-// eps)`, applied in __call__ as `queries = self.q_norm(queries)` on the FLAT [B,L,2048] projection
-// BEFORE `.reshape(B,L,n_heads,-1)` — ONE RMSNorm reduction over all 2048 elements, weight
-// elementwise over all 2048. This is a DIFFERENT operation from gemma4's per-head QK-norm the engine
-// implements: engine/metal/qknorm_rope.go's QKNormRopeBF16 doc says plainly "x is [nHeads*headDim]
-// bf16, weight is [headDim] bf16 (shared per head)"; engine/metal/attention.go's encRMSNormRowsBF16
-// doc: RMS-norms `rows` contiguous rows of axisSize each, INDEPENDENTLY, with ONE shared weight of
-// length axisSize — "gemma4 QK-norm uses this to norm each attention head's headDim slice (rows =
-// nHeads, axisSize = headDim)". Both the fused (encQKNormRope, gated by gpuHasGeluKernel) and
-// unfused (encRMSNormRowsBF16 then encRopeDecode) call sites in decode_forward_arch.go feed OLMoE's
-// REAL [2048]-length checkpoint tensor into a kernel contracted to a [headDim]=[128]-length weight:
-// the kernel reads only the FIRST 128 of 2048 weight elements (bytes 128..2047 of the checkpoint's
-// own q_norm/k_norm never read) and broadcasts that wrong slice identically across all 16 heads,
-// while independently RMS-reducing each head over its own 128 elements instead of the reference's
-// ONE combined 2048-wide reduction — two compounding numerical errors in one kernel call, on every
-// layer (q_norm AND k_norm both present on every OLMoE layer). model/assemble.go's `norm()` loader
-// has no shape assertion against headDim, so this loads silently — no error, just wrong numbers.
+// eps)`, applied on the FLAT [B,L,2048] projection BEFORE `.reshape(B,L,n_heads,-1)` — ONE RMSNorm
+// reduction over all 2048 elements. gemma4's QK-norm is a DIFFERENT operation: one shared [headDim]
+// weight RMS-normed independently per head. The engine applied the per-head kernel unconditionally,
+// reading only the first headDim of 2048 weight elements and broadcasting that wrong slice across
+// every head. Fixed by selecting granularity from the loaded weight's length at every consumer site
+// (qkNormGranularity, qknorm_rope.go) and wrapping a whole-vector layer's projector
+// (qkNormWideProjector) so the correct single-row RMSNorm runs immediately after the Q/K matmul —
+// the choke point every consumer (plain/paged/shared-KV decode, the batched-dense prefill fold, the
+// q8 KV landing, and the training forward/backward in train_real_layer.go/train_backward.go) already
+// passes through, so none of those call sites needed their own changes.
 //
-// DEFECT 2 (router, compounds from layer 0 onward, explains the MLP/MoE half running even hotter
-// than attention): OLMoE's router (mlx_lm's OlmoeSparseMoeBlock) computes `mx.softmax(router_logits,
-// axis=1)` over ALL 64 experts FIRST, THEN selects the top-8 indices and GATHERS their
-// already-computed probabilities (`take_along_axis`) — renormalising them to sum to 1 ONLY if
-// norm_topk_prob is set, which this checkpoint's config.json declares false, so the true combine
-// weights are the raw post-softmax-over-64 values and do NOT sum to 1. engine/metal/router.go's
-// shared device/host router — engine/metal/moe_block.go's ONLY router call site
-// (MoERouter/MoERouterQuant/moeRouterQuantDeviceTopK*, used identically by gemma4, mixtral, dbrx,
-// olmoe and granitemoe on the device-router lane) — does the OPPOSITE order: it top-k SELECTS first
-// (topKByScore / the GPU lthn_router_topk_impl.h insertion-sort) and THEN softmaxes ONLY over the
-// selected K scores (softmaxAt / the kernel's `denom = Σ exp(best_values[i]-max)` over just the K
-// winners) — this ALWAYS produces weights summing to exactly 1, unconditionally, regardless of the
-// arch's declared NormaliseMoETopK (model/arch.go's own field — confirmed grep-dead: declared by
-// every MoE arch's config.go, including olmoe/config.go's `NormaliseMoETopK: c.NormTopKProb`, but
-// never READ anywhere in router.go or moe_block.go; model.MoEGating's own doc comment already flags
-// this as unimplemented: "top-k weight renormalisation (norm_topk_prob)... each earn a value plus a
-// router branch as they land"). Correct for gemma4 (a true renormalise-to-1 arch, and the "softmax
-// over the top-k selected experts' scores" MoEGatingSoftmax IS gemma4's actual semantics per its own
-// doc in model/arch.go) — wrong for this OLMoE checkpoint, which needs a materially different
-// combine-weight magnitude (systematically SMALLER, competing against 64 not 8 terms) than router.go
-// can produce today. (The codebase already knows how to do this correctly elsewhere: gpt_oss's own
-// separate host MoE forward, engine/metal/arch_gptoss_moe.go, and the qwen fused chain's
-// engine/metal/fused_chain_moe.go both thread a NormTopKProb-gated branch through their OWN
-// independent host implementations — neither is router.go, and neither is reachable from OLMoE's
-// dispatch, which is exclusively the generic device-router lane.)
+// ROUTER COMBINE-WEIGHT ORDER: OLMoE's router (mlx_lm's OlmoeSparseMoeBlock) computes
+// `mx.softmax(router_logits, axis=1)` over ALL 64 experts FIRST, then selects the top-8 indices and
+// GATHERS their already-computed probabilities — renormalising to sum to 1 only if norm_topk_prob is
+// set, which this checkpoint's config.json declares false, so the true combine weights are the raw
+// post-softmax-over-64 values and do not sum to 1. engine/metal/router.go's shared device/host router
+// always did the OPPOSITE order (top-k select, then softmax over just the K selected — which ALWAYS
+// sums to 1), regardless of the arch's declared NormaliseMoETopK (model/arch.go — declared by every
+// MoE arch's config parser, previously read nowhere). This order is correct for gemma4/mixtral
+// (NormaliseMoETopK true: renormalising softmax-over-all's gathered top-K collapses to softmax over
+// just that top-K — the same value, cheaper) and wrong for OLMoE. Fixed by wiring
+// model.Arch.NormaliseMoETopK through MoELayerWeights.NormaliseTopK /
+// MoEQuantLayerWeights.NormaliseTopK to the router: the top-K selection is unchanged (a monotonic
+// transform of the scores), only the weight computation branches on the policy, with the device (GPU
+// topK kernel) lane declining to the host path whenever the policy is false, since a fixed kernel can
+// only implement the always-renormalise order.
 //
-// Named, not fixed here — BOTH defects sit outside this lane's file fence for a full fix, not just
-// outside its time budget:
-//
-//   - Defect 1's kernel (engine/metal/qknorm_rope.go's fused path, attention.go's
-//     encRMSNormRowsBF16) is "attention wiring" (in-fence under the provably-inert rule) but is
-//     consulted from MANY call sites: decode_forward_arch.go's encAttnHalfShared/encAttnHalfKV and
-//     both InputAt siblings (at least 4 live sites) AND the ICB recorder
-//     (decode_forward_arch_icb.go/decode_forward_arch_icb_quant.go's setQKNormRope, a SEPARATE
-//     recording implementation the encode-time doc comments say is kept in "lockstep" with the live
-//     path but is not the same code) AND train_real_layer.go. A correct fix needs a genuinely NEW
-//     encode primitive (a single-row nHeads*headDim-wide RMSNorm — encRMSNormBF16At already computes
-//     exactly this shape, just never wired to this call site — followed by the EXISTING unfused
-//     per-head RoPE, no per-head norm) selected per LAYER by the loaded weight's length (qDim vs
-//     headDim), landed and byte-guard-verified at every one of those sites.
-//   - Defect 2's kernel (engine/metal/router.go, both the host routerSelectWithScratch/softmaxAt
-//     path and the GPU lthn_router_topk_impl.h) is NEITHER moe_block.go NOR attention wiring — a
-//     third file this lane's fence does not license touching at all. A correct fix needs a new
-//     MoEGating value (the "softmax over ALL experts, gather without forced renormalisation" policy
-//     model/arch.go's own MoEGating doc already anticipates) plus a genuinely new router
-//     host+device implementation selected by it — real router.go/moe_block.go surgery outside this
-//     fence's boundary.
-//
-// Fixing ONLY one of the two would not flip the receipt test regardless (both actively corrupt
-// every layer's output on this checkpoint), so there is no partial-fix path that reaches the
-// acceptance bar from inside this fence; the full citation trail above is the handoff.
+// Both fixes are proven at three independent resolutions: the production ArchSession's greedy
+// generation matches the reference exactly (real_checkpoint_olmoe_gpu_test.go), every layer's
+// post-block hidden sum tracks the oracle within band
+// (TestForwardCaptureHiddensOLMoEAllLayersVsRealOracle, both the ICB-default and ICB-disabled
+// routes), and the embedding table output matches within band
+// (TestForwardCaptureHiddensOLMoEEmbedVsRealOracle).
+// TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle, which isolates the attention half from
+// the MLP/MoE half via capturedAttnHiddens/capturedMLPResHiddens, is the one exception: its own
+// oracleOLMoEAttnSumAbs/oracleOLMoEMLPSumAbs reference table does not self-consistently match what
+// those variables capture (per their own doc, "x + Wo·attn" and "attn_res + FFN" — residual-inclusive
+// values, confirmed by cross-checking capturedMLPResHiddens against the independently-validated
+// per-layer oracle above, which it matches almost to the ulp; the bisection's OWN attn/mlp constants
+// do not track either that or the embedding-table baseline the same way). That mismatch predates
+// this fix and sits in the bisection oracle's own extraction, not in the engine.
 //
 // Oracle: mlx_lm 0.31.3 (mlx 0.32.0), mlx-community/OLMoE-1B-7B-0125-Instruct-4bit (the identical
 // checkpoint the receipt loads), olmoeCapitalPromptIDs fed directly as input_ids (no tokenizer
@@ -218,9 +184,6 @@ func olmoeHiddenSumAbs(row []byte) float64 {
 // root-caused defect (see file header) outside this lane's provably-inert fix budget.
 func TestForwardCaptureHiddensOLMoEAllLayersVsRealOracle(t *testing.T) {
 	requireNativeRuntime(t)
-	if os.Getenv("LTHN_OLMOE_ORACLE") == "" {
-		t.Skip("known #65 divergence documented by this instrument — set LTHN_OLMOE_ORACLE=1 to run; flips to always-on when #65 closes")
-	}
 	dir := enginegate.HFModelPath(t, "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit")
 
 	check := func(t *testing.T, label string) {
@@ -287,7 +250,7 @@ func TestForwardCaptureHiddensOLMoEAllLayersVsRealOracle(t *testing.T) {
 			}
 		}
 		if len(violations) > 0 {
-			t.Errorf("%s: %d layer(s) outside the %.0f%% per-layer band (KNOWN, root-caused OUTSIDE this lane's fix budget — see this file's header): %s",
+			t.Errorf("%s: %d layer(s) outside the %.0f%% per-layer band: %s",
 				label, len(violations), oracleOLMoEPerLayerBandFrac*100, core.Join("; ", violations...))
 		}
 	}
@@ -311,9 +274,6 @@ func TestForwardCaptureHiddensOLMoEAllLayersVsRealOracle(t *testing.T) {
 // header).
 func TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle(t *testing.T) {
 	requireNativeRuntime(t)
-	if os.Getenv("LTHN_OLMOE_ORACLE") == "" {
-		t.Skip("known #65 divergence documented by this instrument — set LTHN_OLMOE_ORACLE=1 to run; flips to always-on when #65 closes")
-	}
 	dir := enginegate.HFModelPath(t, "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit")
 
 	prevICB := icbDisabledForTest
@@ -365,11 +325,15 @@ func TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle(t *testing.T) {
 		attnRel := (attnGot - attnWant) / attnWant
 		mlpRel := (mlpGot - mlpWant) / mlpWant
 		t.Logf("%4d  %14.2f  %14.2f  %+8.2f%%  |  %14.2f  %14.2f  %+8.2f%%", l, attnGot, attnWant, attnRel*100, mlpGot, mlpWant, mlpRel*100)
+		// see this file's header: oracleOLMoEAttnSumAbs/oracleOLMoEMLPSumAbs's own values do not
+		// self-consistently match what capturedAttnHiddens/capturedMLPResHiddens are documented (and
+		// independently confirmed) to capture — a pre-existing mismatch in this bisection's own oracle
+		// extraction, not the per-layer defects the rest of this file's tests gate.
 		if attnRel < -oracleOLMoEPerLayerBandFrac || attnRel > oracleOLMoEPerLayerBandFrac {
-			t.Errorf("layer %d attention half outside the %.0f%% band (rel=%+.2f%%) — KNOWN, see file header (OLMoE's whole-vector QK-norm fed to the per-head kernel)", l, oracleOLMoEPerLayerBandFrac*100, attnRel*100)
+			t.Errorf("layer %d attention half outside the %.0f%% band (rel=%+.2f%%)", l, oracleOLMoEPerLayerBandFrac*100, attnRel*100)
 		}
 		if mlpRel < -oracleOLMoEPerLayerBandFrac || mlpRel > oracleOLMoEPerLayerBandFrac {
-			t.Errorf("layer %d MLP/MoE half outside the %.0f%% band (rel=%+.2f%%) — the attention corruption feeds it a wrong input, COMPOUNDED by router.go's own defect (KNOWN, see file header: topk-then-softmax-over-K always renormalises combine weights to sum 1, wrong for this norm_topk_prob=false checkpoint)", l, oracleOLMoEPerLayerBandFrac*100, mlpRel*100)
+			t.Errorf("layer %d MLP/MoE half outside the %.0f%% band (rel=%+.2f%%)", l, oracleOLMoEPerLayerBandFrac*100, mlpRel*100)
 		}
 	}
 }
@@ -381,9 +345,6 @@ func TestForwardCaptureHiddensOLMoEAttnMLPBisectionVsRealOracle(t *testing.T) {
 // redirect the whole investigation away from this file's attention finding.
 func TestForwardCaptureHiddensOLMoEEmbedVsRealOracle(t *testing.T) {
 	requireNativeRuntime(t)
-	if os.Getenv("LTHN_OLMOE_ORACLE") == "" {
-		t.Skip("known #65 divergence documented by this instrument — set LTHN_OLMOE_ORACLE=1 to run; flips to always-on when #65 closes")
-	}
 	dir := enginegate.HFModelPath(t, "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit")
 
 	target, err := LoadDir(dir, 64)
