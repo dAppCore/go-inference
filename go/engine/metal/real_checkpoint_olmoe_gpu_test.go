@@ -30,22 +30,11 @@ import (
 // unmodified LoadDir moe_zoo_generate_test.go's TestFactoryLoadMixtralQuant_Generate_Good exercises
 // synthetically — so a quantised real checkpoint is the correct, in-scope choice to prove parity with.
 //
-// RESULT: parity FAILS from the first generated token, and root-causes cleanly (see
-// docs/zoo-moe-real-checkpoint-parity.md for the full writeup + citations). engine/metal's generic
-// device MoE expert combine (encMoEBlockQuantDevice, moe_block.go, reached from
-// decode_forward_arch.go's per-layer MoE dispatch whenever a layer's weights carry no qwen SharedGate
-// marker and no gpt_oss ClampedSwiGLU marker — exactly mixtral/dbrx/olmoe/granitemoe's shape)
-// unconditionally gates the expert MLP with GELU (encGeluGateMul / geluPSO — moe.go, lthn_kernels.go):
-// correct for gemma4 (the one MoE arch proven end-to-end on a real checkpoint before this receipt,
-// and genuinely GELU-gated), wrong for OLMoE, whose HF config declares hidden_act "silu"/SwiGLU. The
-// per-arch activation selector that DOES exist (arch.Activation -> ffnUsesSiLU, projector.go) is wired
-// to the dense-FFN and ICB-recorded decode paths only (arch_session.go, load_shared.go) — it is never
-// consulted by the MoE-expert branch. A second, upstream gap compounds it: olmoe/config.go (like
-// mixtral's and dbrx's) never parses hidden_act into model.Arch.Activation at all, so even a MoE-aware
-// consumer of that field would see "" for OLMoE, not "silu" (granitemoe's config.go DOES forward it
-// correctly — Activation: c.HiddenActivation — but moe_block.go ignores the field regardless, so it
-// makes no difference today). This is a genuine engine finding, not a test bug — per this lane's file
-// fence, the fix belongs to a follow-up lane, not here.
+// RESULT: parity PASSES — the production ArchSession reproduces mlx-lm's greedy continuation exactly,
+// from the first generated token. See docs/zoo-moe-real-checkpoint-parity.md for the two mechanisms
+// this receipt gates (QK-norm granularity selection by loaded weight length; router combine-weight
+// order driven by model.Arch.NormaliseMoETopK) and capture_hidden_olmoe_oracle_test.go for the
+// per-layer corroboration.
 //
 // olmoeCapitalPromptIDs are mlx-lm's OWN tokenizer ids for "The capital of France is" — the OLMo/GPT-
 // NeoX-style BPE tokenizer this checkpoint ships (add_bos_token=false in tokenizer_config.json, so no
@@ -64,26 +53,20 @@ var olmoeCapitalPromptIDs = []int32{510, 5347, 273, 6181, 310}
 // first token 7785 (" Paris").
 var olmoeCapitalGenIDs = []int32{7785, 15, 187, 187, 510, 6100, 39798, 310}
 
-// olmoeCapitalGPUGenIDsObserved is what the production ArchSession actually generated from the SAME
-// prompt/session (LoadDir -> PrefillTokens -> GenerateFromCache, MLX_METALLIB_PATH set, this
-// checkpoint cached): decodes to "iformengynaoin- RedFlash" —
-// garbage from token 0, not "coherent but wrong" (the qwen fused-chain lane's documented failure
-// mode for a bad activation binding) — consistent with 16 MoE layers each compounding the wrong
-// gate/up nonlinearity. Recorded here so a future re-run's actual numbers are diffable against this
-// receipt's history even after the test starts skipping structurally the same way.
+// olmoeCapitalGPUGenIDsObserved is what the production ArchSession generated from the SAME
+// prompt/session before the QK-norm-granularity and router-combine-weight-order fixes (#65) landed:
+// decodes to "iformengynaoin- RedFlash" — garbage from token 0, consistent with 16 MoE layers each
+// compounding both defects. Kept for the historical diff against olmoeCapitalGenIDs, which the
+// production path now matches exactly.
 var olmoeCapitalGPUGenIDsObserved = []int32{4960, 1205, 90, 2072, 31511, 14, 4410, 45327}
 
 // TestRealCheckpointGPU_OLMoEArgmaxParis_Good runs mlx-community/OLMoE-1B-7B-0125-Instruct-4bit
 // through the production ArchSession — the full GPU decode path serve uses, factory-loaded like every
 // other registered arch (LoadDir -> model.Load -> the olmoe ArchSpec's quant route) — on the fixed
 // prompt ids and checks the greedy 8-token continuation against mlx-lm's own answer, first token 7785
-// (" Paris"). It currently CANNOT pass: see the package doc comment above for the root-caused reason
-// (engine/metal's generic device MoE expert combine hardcodes GELU; OLMoE needs SiLU) and
-// docs/zoo-moe-real-checkpoint-parity.md for the full writeup. Skips — rather than fails — once the
-// checkpoint is confirmed present and the mismatch is confirmed, so this stays an honest, informative
-// receipt instead of a permanently red gate; it will start passing outright, with no code change
-// needed here, the day the MoE expert combine's activation gap closes. Skips outright (the usual way)
-// when the checkpoint is not in the local HF cache, so CI stays green off this machine either way.
+// (" Paris"). See the package doc comment above and docs/zoo-moe-real-checkpoint-parity.md for what
+// this gates. Skips outright (the usual way) when the checkpoint is not in the local HF cache, so CI
+// stays green off this machine either way.
 func TestRealCheckpointGPU_OLMoEArgmaxParis_Good(t *testing.T) {
 	dir := enginegate.HFModelPath(t, "mlx-community/OLMoE-1B-7B-0125-Instruct-4bit")
 	sess, err := LoadDir(dir, 64)

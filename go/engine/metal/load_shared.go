@@ -138,6 +138,8 @@ func moeToQuant(e *model.LoadedMoE, arch model.Arch) *MoEQuantLayerWeights {
 		// its bf16 sibling's UsesSiLU (engine/metal/moe_block.go) — ffnUsesSiLU(arch.Activation).
 		// gemma4 never sets Activation, so this stays false (GELU) for every existing gemma4 load.
 		UsesSiLU: ffnUsesSiLU(arch.Activation),
+		// #65: gemma4 always declares NormaliseMoETopK true, so this is byte-unchanged for it.
+		NormaliseTopK: arch.NormaliseMoETopK,
 	}
 	if e.ExpGate != nil {
 		q.ExpertGroupSize, q.ExpertBits = e.ExpGate.GroupSize, e.ExpGate.Bits

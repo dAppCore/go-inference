@@ -324,6 +324,41 @@ func softmaxAtInto(scores []float32, idx []int32, w []float32) []float32 {
 	return w
 }
 
+// softmaxAllThenGatherInto computes softmax over ALL of scores (every expert, not just the selected
+// idx), then gathers the probabilities at idx, in idx order, WITHOUT renormalising the gathered
+// subset to sum to one — OLMoE's router order (#65): softmax over every routed expert BEFORE the
+// top-k gather, no renormalisation of the gathered weights (norm_topk_prob=false), so the combine
+// weights returned do NOT sum to 1. This is NOT the same computation as softmaxAtInto: renormalising
+// softmax-over-all's gathered subset to sum to one is mathematically IDENTICAL to softmaxing over
+// just that subset (the max-subtraction and normalisation constant cancel), so softmaxAtInto already
+// computes that value — cheaper — for a NormaliseMoETopK=true arch; this function is only for the
+// false case, where the two orders diverge. Mutates scores in place (turns logits into un-normalised
+// then normalised probabilities) — callers must be done reading raw scores before calling this
+// (routerSelectWithScratch's topKByScoreInto has already selected idx from them).
+func softmaxAllThenGatherInto(scores []float32, idx []int32, w []float32) []float32 {
+	maxS := float32(math.Inf(-1))
+	for _, s := range scores {
+		if s > maxS {
+			maxS = s
+		}
+	}
+	var sum float32
+	for i, s := range scores {
+		e := float32(math.Exp(float64(s - maxS)))
+		scores[i] = e
+		sum += e
+	}
+	if cap(w) < len(idx) {
+		w = make([]float32, len(idx))
+	} else {
+		w = w[:len(idx)]
+	}
+	for i, e := range idx {
+		w[i] = scores[e] / sum
+	}
+	return w
+}
+
 // MoERouter runs the gemma4 MoE router: it RMS-norms x with the pre-scaled router
 // norm weight, projects to per-expert scores, selects the topK highest-scoring
 // experts and softmaxes their scores — optionally multiplying each by its per-expert
@@ -344,7 +379,14 @@ func softmaxAtInto(scores []float32, idx []int32, w []float32) []float32 {
 // independent of the order idx is returned in (softmax is over the selected scores;
 // the downstream combine is a commutative weighted sum). The parity gate therefore
 // compares expert→weight maps, not positional sequences.
-func MoERouter(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32) ([]int32, []byte, error) {
+//
+// normalise is the arch's declared NormaliseMoETopK (#65, MoELayerWeights.NormaliseTopK): true keeps
+// this function's shipping shape (top-k select, softmax over just the K selected scores — the
+// mathematically identical, cheaper form of softmax-over-all + renormalise-the-gathered-K; see
+// softmaxAllThenGatherInto's doc); false selects the SAME top-k but weighs them by softmax over ALL
+// numExperts, gathered WITHOUT renormalising (OLMoE's shape). gemma4 always passes true, so its path
+// through this function is byte-unchanged.
+func MoERouter(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, normalise bool) ([]int32, []byte, error) {
 	if err := ensureInit(); err != nil {
 		return nil, nil, err
 	}
@@ -364,7 +406,7 @@ func MoERouter(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK,
 		return nil, nil, core.NewError("native.MoERouter: topK must be in 1..numExperts")
 	}
 
-	if idx, weights, ok, err := moeRouterBF16DeviceTopK(x, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps); ok || err != nil {
+	if idx, weights, ok, err := moeRouterBF16DeviceTopK(x, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, normalise); ok || err != nil {
 		return idx, weights, err
 	}
 
@@ -373,10 +415,10 @@ func MoERouter(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK,
 		return nil, nil, err
 	}
 	defer putRouterHostScratch(scratch)
-	return moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, scratch)
+	return moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, scratch, normalise)
 }
 
-func moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, scratch *routerHostScratch) ([]int32, []byte, error) {
+func moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, scratch *routerHostScratch, normalise bool) ([]int32, []byte, error) {
 	if scratch == nil || scratch.normed == nil || scratch.scores == nil {
 		return nil, nil, core.NewError("native.moeRouterBF16HostSelectWithScratch: scratch is required")
 	}
@@ -394,12 +436,12 @@ func moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, perExpertScale 
 	if err != nil {
 		return nil, nil, err
 	}
-	idx, weights := routerSelectWithScratch(scoresB, perExpertScale, numExperts, topK, scratch)
+	idx, weights := routerSelectWithScratch(scoresB, perExpertScale, numExperts, topK, scratch, normalise)
 	return idx, weights, nil
 }
 
-func moeRouterBF16DeviceTopK(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32) ([]int32, []byte, bool, error) {
-	idxView, weightView, _, scratch, ok, err := moeRouterBF16DeviceTopKNoCopy(x, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps)
+func moeRouterBF16DeviceTopK(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, normalise bool) ([]int32, []byte, bool, error) {
+	idxView, weightView, _, scratch, ok, err := moeRouterBF16DeviceTopKNoCopy(x, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, normalise)
 	if !ok || err != nil {
 		return nil, nil, ok, err
 	}
@@ -408,20 +450,25 @@ func moeRouterBF16DeviceTopK(x, normWScaled, routerW, perExpertScale []byte, num
 	return idx, weights, true, nil
 }
 
-func moeRouterBF16DeviceTopKNoCopy(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	return moeRouterBF16DeviceTopKNoCopyWithBuffer(x, nil, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps)
+func moeRouterBF16DeviceTopKNoCopy(x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, normalise bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	return moeRouterBF16DeviceTopKNoCopyWithBuffer(x, nil, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, normalise)
 }
 
-func moeRouterBF16DeviceTopKNoCopyWithBuffer(x []byte, xBuf metal.MTLBuffer, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	return moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, true)
+func moeRouterBF16DeviceTopKNoCopyWithBuffer(x []byte, xBuf metal.MTLBuffer, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, normalise bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	return moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, normalise, true)
 }
 
-func moeRouterBF16DeviceTopKNoCopyWithBufferInPool(x []byte, xBuf metal.MTLBuffer, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	return moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, false)
+func moeRouterBF16DeviceTopKNoCopyWithBufferInPool(x []byte, xBuf metal.MTLBuffer, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, normalise bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	return moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, routerW, perExpertScale, numExperts, topK, dModel, eps, normalise, false)
 }
 
-func moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x []byte, xBuf metal.MTLBuffer, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, useAutoreleasePool bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	if !routerTopKUsable(numExperts, topK) {
+// moeRouterBF16DeviceTopKNoCopyWithBufferPooled declines (ok=false) when normalise is false: the GPU
+// topK kernel (lthn_router_topk_impl.h) always renormalises the gathered K to sum to one — the ONLY
+// order a fixed kernel can implement without a metallib rebuild — so a NormaliseMoETopK=false arch
+// (#65, OLMoE) must fall through to the host path (moeRouterBF16HostSelectWithScratch), which
+// computes the correct softmax-over-all-then-gather-no-renormalise order.
+func moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x []byte, xBuf metal.MTLBuffer, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, normalise, useAutoreleasePool bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	if !routerTopKUsable(numExperts, topK) || !normalise {
 		return nil, nil, nil, nil, false, nil
 	}
 	if len(x) != dModel*bf16Size {
@@ -554,11 +601,16 @@ func matVecBF16ResidentInto(out []byte, mat, vec []byte, outDim, inDim int) ([]b
 // routerSelect performs the host top-k + softmax (+ optional per-expert scale) over the raw
 // per-expert scores (numExperts bf16) — the routing decision shared by MoERouter and
 // MoERouterQuant (they differ only in how the scores are projected: bf16 gemv vs 4-bit qmv).
-func routerSelect(scoresB, perExpertScale []byte, numExperts, topK int) ([]int32, []byte) {
-	return routerSelectWithScratch(scoresB, perExpertScale, numExperts, topK, nil)
+//
+// normalise selects the combine-weight policy (#65, model.Arch.NormaliseMoETopK): true softmaxes
+// over just the selected top-K scores (sums to 1 — mixtral/gemma4's shape, and the mathematically
+// identical, cheaper form of softmax-over-all + renormalise); false softmaxes over ALL numExperts and
+// gathers the top-K WITHOUT renormalising (OLMoE's shape — see softmaxAllThenGatherInto).
+func routerSelect(scoresB, perExpertScale []byte, numExperts, topK int, normalise bool) ([]int32, []byte) {
+	return routerSelectWithScratch(scoresB, perExpertScale, numExperts, topK, nil, normalise)
 }
 
-func routerSelectWithScratch(scoresB, perExpertScale []byte, numExperts, topK int, scratch *routerQuantHostScratch) ([]int32, []byte) {
+func routerSelectWithScratch(scoresB, perExpertScale []byte, numExperts, topK int, scratch *routerQuantHostScratch, normalise bool) ([]int32, []byte) {
 	var scores []float32
 	if scratch != nil {
 		if cap(scratch.selectScores) < numExperts {
@@ -581,11 +633,21 @@ func routerSelectWithScratch(scoresB, perExpertScale []byte, numExperts, topK in
 		idx = topKByScore(scores, topK)
 	}
 	var w []float32
-	if scratch != nil {
-		scratch.selectSoftmax = softmaxAtInto(scores, idx, scratch.selectSoftmax)
-		w = scratch.selectSoftmax
+	if normalise {
+		if scratch != nil {
+			scratch.selectSoftmax = softmaxAtInto(scores, idx, scratch.selectSoftmax)
+			w = scratch.selectSoftmax
+		} else {
+			w = softmaxAt(scores, idx)
+		}
 	} else {
-		w = softmaxAt(scores, idx)
+		// #65: softmax over ALL experts, gather the selected K WITHOUT renormalising.
+		if scratch != nil {
+			scratch.selectSoftmax = softmaxAllThenGatherInto(scores, idx, scratch.selectSoftmax)
+			w = scratch.selectSoftmax
+		} else {
+			w = softmaxAllThenGatherInto(scores, idx, nil)
+		}
 	}
 	if perExpertScale != nil {
 		for i, e := range idx {
@@ -616,11 +678,13 @@ func routerSelectWithScratch(scoresB, perExpertScale []byte, numExperts, topK in
 // 26B-A4B's router.proj is affine-quantised). RMS-norm, resident QMV score
 // projection, top-k, softmax, and optional scale use the same device router
 // top-k path as MoERouter when the copied kernel supports the shape.
-func MoERouterQuant(x, normWScaled []byte, routerProj QuantWeight, perExpertScale []byte, numExperts, topK, dModel, groupSize, bits int, eps float32) ([]int32, []byte, error) {
-	return moeRouterQuantWithViews(x, normWScaled, bufView{}, routerProj, perExpertScale, bufView{}, numExperts, topK, dModel, groupSize, bits, eps)
+//
+// normalise is MoERouter's combine-weight policy (#65, model.Arch.NormaliseMoETopK) — see its doc.
+func MoERouterQuant(x, normWScaled []byte, routerProj QuantWeight, perExpertScale []byte, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise bool) ([]int32, []byte, error) {
+	return moeRouterQuantWithViews(x, normWScaled, bufView{}, routerProj, perExpertScale, bufView{}, numExperts, topK, dModel, groupSize, bits, eps, normalise)
 }
 
-func moeRouterQuantWithViews(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) ([]int32, []byte, error) {
+func moeRouterQuantWithViews(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise bool) ([]int32, []byte, error) {
 	if err := ensureInit(); err != nil {
 		return nil, nil, err
 	}
@@ -645,7 +709,7 @@ func moeRouterQuantWithViews(x, normWScaled []byte, normView bufView, routerProj
 		return nil, nil, core.NewError("native.MoERouterQuant: routerProj size mismatch vs numExperts×dModel")
 	}
 
-	if idx, weights, ok, err := moeRouterQuantDeviceTopK(x, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps); ok || err != nil {
+	if idx, weights, ok, err := moeRouterQuantDeviceTopK(x, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, normalise); ok || err != nil {
 		return idx, weights, err
 	}
 
@@ -654,10 +718,10 @@ func moeRouterQuantWithViews(x, normWScaled []byte, normView bufView, routerProj
 		return nil, nil, err
 	}
 	defer putRouterQuantHostScratch(scratch)
-	return moeRouterQuantHostSelectWithScratch(x, normWScaled, normView, routerProj, perExpertScale, numExperts, topK, dModel, groupSize, bits, eps, scratch)
+	return moeRouterQuantHostSelectWithScratch(x, normWScaled, normView, routerProj, perExpertScale, numExperts, topK, dModel, groupSize, bits, eps, scratch, normalise)
 }
 
-func moeRouterQuantHostSelectWithScratch(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, numExperts, topK, dModel, groupSize, bits int, eps float32, scratch *routerQuantHostScratch) ([]int32, []byte, error) {
+func moeRouterQuantHostSelectWithScratch(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, numExperts, topK, dModel, groupSize, bits int, eps float32, scratch *routerQuantHostScratch, normalise bool) ([]int32, []byte, error) {
 	if scratch == nil || scratch.normed == nil || scratch.scores == nil {
 		return nil, nil, core.NewError("native.moeRouterQuantHostSelectWithScratch: scratch is required")
 	}
@@ -675,12 +739,12 @@ func moeRouterQuantHostSelectWithScratch(x, normWScaled []byte, normView bufView
 	if err != nil {
 		return nil, nil, err
 	}
-	idx, weights := routerSelectWithScratch(scoresB, perExpertScale, numExperts, topK, scratch)
+	idx, weights := routerSelectWithScratch(scoresB, perExpertScale, numExperts, topK, scratch, normalise)
 	return idx, weights, nil
 }
 
-func moeRouterQuantDeviceTopK(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) ([]int32, []byte, bool, error) {
-	idxView, weightView, _, scratch, ok, err := moeRouterQuantDeviceTopKNoCopy(x, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps)
+func moeRouterQuantDeviceTopK(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise bool) ([]int32, []byte, bool, error) {
+	idxView, weightView, _, scratch, ok, err := moeRouterQuantDeviceTopKNoCopy(x, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, normalise)
 	if !ok || err != nil {
 		return nil, nil, ok, err
 	}
@@ -689,29 +753,39 @@ func moeRouterQuantDeviceTopK(x, normWScaled []byte, normView bufView, routerPro
 	return idx, weights, true, nil
 }
 
-func moeRouterQuantDeviceTopKNoCopy(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	return moeRouterQuantDeviceTopKNoCopyWithBuffer(x, nil, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps)
+func moeRouterQuantDeviceTopKNoCopy(x, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	return moeRouterQuantDeviceTopKNoCopyWithBuffer(x, nil, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, normalise)
 }
 
-func moeRouterQuantDeviceTopKNoCopyWithBuffer(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	return moeRouterQuantDeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, true)
+func moeRouterQuantDeviceTopKNoCopyWithBuffer(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	return moeRouterQuantDeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, normalise, true)
 }
 
+// moeRouterQuantDeviceTopKNoCopyWithBufferInPool's signature is FROZEN (called directly by
+// mtp_rows_moe.go's MTP verify lane): it cannot take a normalise parameter. It hardcodes true — the
+// GPU topK kernel's only order (always renormalise the gathered K) — so the MTP verify path (which
+// predates #65 and has never routed a NormaliseMoETopK=false arch) is byte-unchanged. A future MTP
+// caller for such an arch needs its own entry point; this one must keep returning exactly what it
+// always has.
 func moeRouterQuantDeviceTopKNoCopyWithBufferInPool(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	return moeRouterQuantDeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, false)
+	return moeRouterQuantDeviceTopKNoCopyWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, true, false)
 }
 
-func moeRouterQuantDeviceTopKNoCopyWithBufferPooled(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, useAutoreleasePool bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	return moeRouterQuantDeviceTopKWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, useAutoreleasePool, true)
+func moeRouterQuantDeviceTopKNoCopyWithBufferPooled(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise, useAutoreleasePool bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	return moeRouterQuantDeviceTopKWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, normalise, useAutoreleasePool, true)
 }
 
-func moeRouterQuantDeviceTopKBuffersWithBufferInPool(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) (metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	_, _, weightBuf, scratch, ok, err := moeRouterQuantDeviceTopKWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, false, false)
+func moeRouterQuantDeviceTopKBuffersWithBufferInPool(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise bool) (metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	_, _, weightBuf, scratch, ok, err := moeRouterQuantDeviceTopKWithBufferPooled(x, xBuf, normWScaled, normView, routerProj, perExpertScale, perExpertScaleView, numExperts, topK, dModel, groupSize, bits, eps, normalise, false, false)
 	return weightBuf, scratch, ok, err
 }
 
-func moeRouterQuantDeviceTopKWithBufferPooled(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, useAutoreleasePool bool, returnHostViews bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
-	if !routerTopKUsable(numExperts, topK) {
+// moeRouterQuantDeviceTopKWithBufferPooled declines (ok=false) when normalise is false — see
+// moeRouterBF16DeviceTopKNoCopyWithBufferPooled's identical note: the GPU topK kernel cannot
+// implement softmax-over-all-then-gather-no-renormalise, so a NormaliseMoETopK=false arch (#65) must
+// fall through to the host path (moeRouterQuantHostSelectWithScratch).
+func moeRouterQuantDeviceTopKWithBufferPooled(x []byte, xBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32, normalise, useAutoreleasePool, returnHostViews bool) ([]int32, []byte, metal.MTLBuffer, *routerDeviceScratch, bool, error) {
+	if !routerTopKUsable(numExperts, topK) || !normalise {
 		return nil, nil, nil, nil, false, nil
 	}
 	// x may be nil when xBuf carries the hidden (the decode loop's no-wait handoff — the

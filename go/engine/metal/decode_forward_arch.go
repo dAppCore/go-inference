@@ -179,7 +179,8 @@ func encAttnHalfSharedInputAt(
 type archLayerBufs struct {
 	anw, mnw                 bufView
 	postAttnNorm, postFFNorm bufView         // gemma4 post-attn/post-FF norms (nil buf = skip)
-	qNorm, kNorm             bufView         // gemma4 per-head QK-norm (nil buf = skip)
+	qNorm, kNorm             bufView         // gemma4-style PER-HEAD QK-norm (nil buf = skip OR a whole-vector norm, see qNormWide/kNormWide — the loader binds one or the other, never both)
+	qNormWide, kNormWide     bool            // #65: the loaded q_norm/k_norm weight is whole-vector (heads*headDim), already folded into proj's qkNormWideProjector wrap — set for bookkeeping/icbEligible only, no consumer branches on it directly
 	sinks                    bufView         // gpt_oss attention sinks (bf16 [nHeads] logits; nil buf = plain softmax)
 	layerScalar              metal.MTLBuffer // gemma4 per-layer output scalar, broadcast to dModel (synthesised, nil = skip)
 	kCache, vCache           metal.MTLBuffer
@@ -2396,7 +2397,7 @@ func decodeForwardArchInto(
 	setup := getArchBF16LayerBufScratch(nLayers)
 	defer putArchBF16LayerBufScratch(setup)
 	withAutoreleasePool(func() {
-		lb, moeWeights, berr := buildBF16ArchLayerBufsIntoScratch(setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil)
+		lb, moeWeights, berr := buildBF16ArchLayerBufsIntoScratch(setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil, eps)
 		if berr != nil {
 			err = berr
 			return
@@ -2427,26 +2428,37 @@ func decodeForwardArchInto(
 // is uploaded into a fresh owned buffer at offset 0 — byte-identical, just a heap+GPU copy. A
 // non-nil sb errors if a weight is not a view into its mapping (a programming error). MUST be
 // called inside a withAutoreleasePool.
-func buildBF16ArchLayerBufs(layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+// epsArgOr defaults a variadic trailing eps to 0 when the caller omits it — the QK-norm-granularity
+// wrap (#65) is the only consumer, and it never reads eps unless a WIDE (whole-vector) q_norm/k_norm
+// is actually present, which no pre-#65 caller's fixtures carry — so every existing call site (this
+// package's ~20 test callers included) stays source-compatible with no eps of its own to give.
+func epsArgOr(eps []float32) float32 {
+	if len(eps) > 0 {
+		return eps[0]
+	}
+	return 0
+}
+
+func buildBF16ArchLayerBufs(layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoELayerWeights, error) {
 	nLayers := len(layers)
 	lb := make([]archLayerBufs, nLayers)
 	moeWeights := make([]*MoELayerWeights, nLayers)
-	return buildBF16ArchLayerBufsInto(lb, moeWeights, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+	return buildBF16ArchLayerBufsInto(lb, moeWeights, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildBF16ArchLayerBufsInto(lb []archLayerBufs, moeWeights []*MoELayerWeights, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
-	return buildBF16ArchLayerBufsInternal(lb, moeWeights, nil, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+func buildBF16ArchLayerBufsInto(lb []archLayerBufs, moeWeights []*MoELayerWeights, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, eps float32, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+	return buildBF16ArchLayerBufsInternal(lb, moeWeights, nil, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, eps, sb)
 }
 
-func buildBF16ArchLayerBufsIntoScratch(setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+func buildBF16ArchLayerBufsIntoScratch(setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoELayerWeights, error) {
 	if setup == nil {
-		return buildBF16ArchLayerBufs(layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+		return buildBF16ArchLayerBufs(layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb, eps...)
 	}
 	setup.reset(len(layers))
-	return buildBF16ArchLayerBufsInternal(setup.lb, setup.moeWeights, setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+	return buildBF16ArchLayerBufsInternal(setup.lb, setup.moeWeights, setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWeights, setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWeights, setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, eps float32, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
 	nLayers := len(layers)
 	if cap(lb) < nLayers {
 		lb = make([]archLayerBufs, nLayers)
@@ -2505,8 +2517,25 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		lb[li].anw = normView(w.AttnNormW)
 		lb[li].postAttnNorm = normView(w.PostAttnNormW)
 		lb[li].postFFNorm = normView(w.PostFFNormW)
-		lb[li].qNorm = normView(w.QNormW)
-		lb[li].kNorm = normView(w.KNormW)
+		// #65: a q_norm/k_norm weight is either PER-HEAD (length lhd, the gemma4/mixtral shape —
+		// lb[li].qNorm/kNorm bind it directly, unchanged) or WHOLE-VECTOR (length nHeads*lhd /
+		// lkv*lhd, OLMoE's shape — left the zero bufView here and bound into a qkNormWideProjector
+		// wrap below instead, so every per-head consumer's existing nil-buf skip fires correctly).
+		qWide, qgErr := qkNormGranularity("q_norm", w.QNormW, nHeads, lhd)
+		if qgErr != nil && ferr == nil {
+			ferr = qgErr
+		}
+		kWide, kgErr := qkNormGranularity("k_norm", w.KNormW, lkv, lhd)
+		if kgErr != nil && ferr == nil {
+			ferr = kgErr
+		}
+		lb[li].qNormWide, lb[li].kNormWide = qWide, kWide
+		if !qWide {
+			lb[li].qNorm = normView(w.QNormW)
+		}
+		if !kWide {
+			lb[li].kNorm = normView(w.KNormW)
+		}
 		lb[li].sinks = normView(w.Sinks)                            // gpt_oss attention sinks (zero bufView otherwise)
 		lb[li].layerScalar = layerScalarBuf(w.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
@@ -2548,7 +2577,18 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		} else {
 			moeWeights[li] = layers[li].MoE
 		}
-		lb[li].proj = p
+		if qWide || kWide {
+			wrap := qkNormWideProjector{projector: p, nHeads: nHeads, nKVHeads: lkv, headDim: lhd, eps: eps}
+			if qWide {
+				wrap.qNorm = normView(w.QNormW)
+			}
+			if kWide {
+				wrap.kNorm = normView(w.KNormW)
+			}
+			lb[li].proj = wrap
+		} else {
+			lb[li].proj = p
+		}
 	}
 	return lb, moeWeights, ferr
 }

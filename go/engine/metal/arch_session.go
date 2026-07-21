@@ -691,7 +691,7 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 	var sess *ArchSession
 	var buildErr error
 	withAutoreleasePool(func() {
-		lb, moeWeights, berr := buildBF16ArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb)
+		lb, moeWeights, berr := buildBF16ArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb, arch.Eps)
 		if berr != nil {
 			buildErr = berr
 			return
@@ -978,7 +978,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		// hypothesis = the packed uint32 weights bound at non-4-aligned offsets (Metal can't do a
 		// misaligned uint32 read); bufFor now copies only those (mustBufFor4), aligned stay zero-copy.
 		// If the smoke is coherent this reclaims the 4-bit 2× resident; if not, revert to nil.
-		lb, moeQuant, berr := buildQuantArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb)
+		lb, moeQuant, berr := buildQuantArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb, arch.Eps)
 		if berr != nil {
 			buildErr = berr
 			return

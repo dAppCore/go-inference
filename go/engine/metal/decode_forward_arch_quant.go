@@ -147,7 +147,7 @@ func decodeForwardArchQuantInto(
 	withAutoreleasePool(func() {
 		setup := getArchQuantLayerBufScratch(nLayers)
 		defer putArchQuantLayerBufScratch(setup)
-		lb, moeQuant, berr := buildQuantArchLayerBufsIntoScratch(setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil)
+		lb, moeQuant, berr := buildQuantArchLayerBufsIntoScratch(setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil, eps)
 		if berr != nil {
 			err = berr
 			return
@@ -265,19 +265,19 @@ func validateMoEQuantLayerWeights(fn string, w *MoEQuantLayerWeights, dModel, dF
 // NewArchQuantSession. sb is the zero-copy weight source (see buildBF16ArchLayerBufs): non-nil
 // binds every weight (norms + the quant triples) as no-copy shard views; nil uploads owned copies.
 // MUST be called inside a withAutoreleasePool.
-func buildQuantArchLayerBufs(qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
-	return buildQuantArchLayerBufsInternal(make([]archLayerBufs, len(qlayers)), make([]*MoEQuantLayerWeights, len(qlayers)), nil, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+func buildQuantArchLayerBufs(qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
+	return buildQuantArchLayerBufsInternal(make([]archLayerBufs, len(qlayers)), make([]*MoEQuantLayerWeights, len(qlayers)), nil, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildQuantArchLayerBufsIntoScratch(setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
+func buildQuantArchLayerBufsIntoScratch(setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
 	if setup == nil || !setup.fits(len(qlayers)) {
-		return buildQuantArchLayerBufs(qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+		return buildQuantArchLayerBufs(qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb, eps...)
 	}
 	setup.reset(len(qlayers))
-	return buildQuantArchLayerBufsInternal(setup.lb, setup.moe, setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+	return buildQuantArchLayerBufsInternal(setup.lb, setup.moe, setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLayerWeights, setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
+func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLayerWeights, setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, eps float32, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
 	var ferr error
 	view := func(b []byte) bufView {
 		if sb != nil {
@@ -357,8 +357,23 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		lb[li].anw = normView(ql.AttnNormW)
 		lb[li].postAttnNorm = normView(ql.PostAttnNormW)
 		lb[li].postFFNorm = normView(ql.PostFFNormW)
-		lb[li].qNorm = normView(ql.QNormW)
-		lb[li].kNorm = normView(ql.KNormW)
+		// #65: see buildBF16ArchLayerBufsInternal's identical granularity split — a whole-vector
+		// q_norm/k_norm is left the zero bufView here and bound into a qkNormWideProjector wrap below.
+		qWide, qgErr := qkNormGranularity("q_norm", ql.QNormW, nHeads, lhd)
+		if qgErr != nil && ferr == nil {
+			ferr = qgErr
+		}
+		kWide, kgErr := qkNormGranularity("k_norm", ql.KNormW, lkv, lhd)
+		if kgErr != nil && ferr == nil {
+			ferr = kgErr
+		}
+		lb[li].qNormWide, lb[li].kNormWide = qWide, kWide
+		if !qWide {
+			lb[li].qNorm = normView(ql.QNormW)
+		}
+		if !kWide {
+			lb[li].kNorm = normView(ql.KNormW)
+		}
 		lb[li].sinks = normView(ql.Sinks)                            // gpt_oss attention sinks (zero bufView otherwise)
 		lb[li].layerScalar = layerScalarBuf(ql.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
@@ -413,7 +428,18 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 			lb[li].mnw = normView(ql.MLPNormW)
 			proj.gate, proj.up, proj.down = mkW(ql.Gate), mkW(ql.Up), mkW(ql.Down)
 		}
-		lb[li].proj = proj
+		if qWide || kWide {
+			wrap := qkNormWideProjector{projector: proj, nHeads: nHeads, nKVHeads: lkv, headDim: lhd, eps: eps}
+			if qWide {
+				wrap.qNorm = normView(ql.QNormW)
+			}
+			if kWide {
+				wrap.kNorm = normView(ql.KNormW)
+			}
+			lb[li].proj = wrap
+		} else {
+			lb[li].proj = proj
+		}
 	}
 	return lb, moeQuant, ferr
 }

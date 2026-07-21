@@ -45,7 +45,7 @@ func TestMoERouterTopKKernelMatchesHostSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("routerTopKBF16: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 	if len(gotIdx) != len(wantIdx) || len(gotWeights) != len(wantWeights) {
 		t.Fatalf("routerTopKBF16 returned %d idx/%d weight bytes, want %d/%d", len(gotIdx), len(gotWeights), len(wantIdx), len(wantWeights))
 	}
@@ -94,13 +94,13 @@ func TestMoERouterDeviceTopKAllocationBudget(t *testing.T) {
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	for i := range 2 {
-		if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5); err != nil {
+		if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, true); err != nil {
 			t.Fatalf("MoERouter warm %d: %v", i, err)
 		}
 	}
 
 	allocs := testing.AllocsPerRun(50, func() {
-		idx, weights, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5)
+		idx, weights, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, true)
 		if err != nil {
 			t.Fatalf("MoERouter: %v", err)
 		}
@@ -122,13 +122,13 @@ func TestMoERouterQuantDeviceTopKAllocationBudget(t *testing.T) {
 	routerW := quantWeightFixture(t, numExperts, dModel, groupSize, bits, 43)
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	for i := range 2 {
-		if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5); err != nil {
+		if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, true); err != nil {
 			t.Fatalf("MoERouterQuant warm %d: %v", i, err)
 		}
 	}
 
 	allocs := testing.AllocsPerRun(50, func() {
-		idx, weights, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5)
+		idx, weights, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, true)
 		if err != nil {
 			t.Fatalf("MoERouterQuant: %v", err)
 		}
@@ -326,7 +326,7 @@ func TestMoERouter(t *testing.T) {
 	// each weight to bf16; the reference is the ideal f64 value).
 	const tol = float32(0.02)
 	check := func(name string, topK int, scale []byte, wantSum bool) {
-		idx, weights, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps)
+		idx, weights, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, true)
 		if err != nil {
 			t.Fatalf("%s: MoERouter: %v", name, err)
 		}
@@ -369,7 +369,7 @@ func TestMoERouterCachesProjectionWeight(t *testing.T) {
 	normWScaled := toBF16Bytes(syntheticFloat32(dModel, 17))
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 
-	if _, _, err := MoERouter(x, normWScaled, routerW, nil, numExperts, topK, dModel, eps); err != nil {
+	if _, _, err := MoERouter(x, normWScaled, routerW, nil, numExperts, topK, dModel, eps, true); err != nil {
 		t.Fatalf("MoERouter: %v", err)
 	}
 
@@ -397,7 +397,7 @@ func TestMoERouterDeviceTopKCachesNormAndScale(t *testing.T) {
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 
-	if _, _, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps); err != nil {
+	if _, _, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, true); err != nil {
 		t.Fatalf("MoERouter: %v", err)
 	}
 
@@ -430,7 +430,7 @@ func TestMoERouterHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("matVecBF16Resident reference: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 
 	scratch, err := newRouterHostScratch(dModel, numExperts)
 	if err != nil {
@@ -443,7 +443,7 @@ func TestMoERouterHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) {
 	var weightPtr unsafe.Pointer
 
 	for i := range 2 {
-		gotIdx, gotWeights, err := moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, scratch)
+		gotIdx, gotWeights, err := moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, scratch, true)
 		if err != nil {
 			t.Fatalf("moeRouterBF16HostSelectWithScratch %d: %v", i, err)
 		}
@@ -518,7 +518,7 @@ func TestMoERouterQuantCachesProjectionWeight(t *testing.T) {
 	normWScaled := toBF16Bytes(syntheticFloat32(dModel, 17))
 	routerW := quantWeightFixture(t, numExperts, dModel, groupSize, bits, 43)
 
-	if _, _, err := MoERouterQuant(x, normWScaled, routerW, nil, numExperts, topK, dModel, groupSize, bits, eps); err != nil {
+	if _, _, err := MoERouterQuant(x, normWScaled, routerW, nil, numExperts, topK, dModel, groupSize, bits, eps, true); err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}
 
@@ -545,7 +545,7 @@ func TestMoERouterQuantHonoursWeightGeometry(t *testing.T) {
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	routerW := quantWeightFixture(t, numExperts, dModel, routerGroupSize, bits, 43)
 
-	gotIdx, gotWeights, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, fallbackGroupSize, bits, eps)
+	gotIdx, gotWeights, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, fallbackGroupSize, bits, eps, true)
 	if err != nil {
 		t.Fatalf("MoERouterQuant with per-weight geometry: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestMoERouterQuantHonoursWeightGeometry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QMVBF16 reference: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 	if len(gotIdx) != len(wantIdx) || len(gotWeights) != len(wantWeights) {
 		t.Fatalf("MoERouterQuant lengths = %d/%d, want %d/%d", len(gotIdx), len(gotWeights), len(wantIdx), len(wantWeights))
 	}
@@ -588,7 +588,7 @@ func TestMoERouterQuantHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) 
 	if err != nil {
 		t.Fatalf("qmvBF16Resident reference: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 
 	scratch, err := newRouterQuantHostScratch(dModel, numExperts)
 	if err != nil {
@@ -601,7 +601,7 @@ func TestMoERouterQuantHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) 
 	var weightPtr unsafe.Pointer
 
 	for i := range 2 {
-		gotIdx, gotWeights, err := moeRouterQuantHostSelectWithScratch(x, normWScaled, bufView{}, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps, scratch)
+		gotIdx, gotWeights, err := moeRouterQuantHostSelectWithScratch(x, normWScaled, bufView{}, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps, scratch, true)
 		if err != nil {
 			t.Fatalf("moeRouterQuantHostSelectWithScratch %d: %v", i, err)
 		}
@@ -646,7 +646,7 @@ func TestMoERouterQuantDeviceTopKCachesNormAndScale(t *testing.T) {
 	routerW := quantWeightFixture(t, numExperts, dModel, groupSize, bits, 43)
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 
-	if _, _, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps); err != nil {
+	if _, _, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps, true); err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}
 

@@ -1493,7 +1493,7 @@ func TestMoEBlockQuantDeviceRouterBuffersChainWithoutHostViews(t *testing.T) {
 	h := toBF16Bytes(syntheticFloat32(dModel, 37))
 	w := quantMoELayerWeightsGuard(t, numExperts, topK, dModel, dFF, expertDFF, groupSize, bits)
 
-	idx, weights, err := moeRouterQuantWithViews(h, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	idx, weights, err := moeRouterQuantWithViews(h, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, true)
 	if err != nil {
 		t.Fatalf("moeRouterQuantWithViews: %v", err)
 	}
@@ -1502,7 +1502,7 @@ func TestMoEBlockQuantDeviceRouterBuffersChainWithoutHostViews(t *testing.T) {
 		t.Fatalf("moeBlockQuantAfterRouter host route: %v", err)
 	}
 
-	weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, nil, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, nil, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, true)
 	if err != nil {
 		t.Fatalf("moeRouterQuantDeviceTopKBuffersWithBufferInPool: %v", err)
 	}
@@ -1592,7 +1592,7 @@ func TestMoERouterQuant(t *testing.T) {
 	norm := toBF16Bytes(mk(dModel, 9))
 	scale := toBF16Bytes(mk(numExperts, 5))
 
-	idx, weights, err := MoERouterQuant(x, norm, proj, scale, numExperts, topK, dModel, gs, bits, eps)
+	idx, weights, err := MoERouterQuant(x, norm, proj, scale, numExperts, topK, dModel, gs, bits, eps, true)
 	if err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}
@@ -1609,7 +1609,7 @@ func TestMoERouterQuant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QMVBF16: %v", err)
 	}
-	wantIdx, wantW := routerSelect(scoresB, scale, numExperts, topK)
+	wantIdx, wantW := routerSelect(scoresB, scale, numExperts, topK, true)
 	if !bytes.Equal(weights, wantW) {
 		t.Fatal("MoERouterQuant weights != manual routerSelect")
 	}
@@ -1689,6 +1689,7 @@ func TestMoEBlockQuant(t *testing.T) {
 		LocalGate: qw(dFF, dModel, 3), LocalUp: qw(dFF, dModel, 31), LocalDown: qw(dModel, dFF, 37),
 		RouterNormWScaled: nrm(41), Router: qw(numExperts, dModel, 43), PerExpertScale: toBF16Bytes(mk(numExperts, 47)),
 		ExpGate: batched(expertDFF, dModel, 53), ExpUp: batched(expertDFF, dModel, 101), ExpDown: batched(dModel, expertDFF, 149),
+		NormaliseTopK: true, // gemma4-shaped; see quantMoELayerWeightsGuard's identical note
 	}
 	h := toBF16Bytes(mk(dModel, 5))
 
@@ -1704,7 +1705,7 @@ func TestMoEBlockQuant(t *testing.T) {
 		}
 		return b
 	}
-	idx, weights, err := MoERouterQuant(h, w.RouterNormWScaled, w.Router, w.PerExpertScale, numExperts, topK, dModel, gs, bits, eps)
+	idx, weights, err := MoERouterQuant(h, w.RouterNormWScaled, w.Router, w.PerExpertScale, numExperts, topK, dModel, gs, bits, eps, true)
 	if err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}

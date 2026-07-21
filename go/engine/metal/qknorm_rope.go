@@ -268,6 +268,118 @@ func qkNormRopeBF16Pooled(out []byte, x []byte, xBuf, outputBuf metal.MTLBuffer,
 	return out, nil
 }
 
+// qkNormGranularity classifies a loaded q_norm/k_norm weight's length against the two shapes this
+// engine understands (#65): PER-HEAD (length == headDim, RMS-normed independently per head with one
+// shared weight — gemma4/mixtral's convention, encRMSNormRowsBF16/encQKNormRope's fused twin) or
+// WHOLE-VECTOR (length == heads*headDim, ONE RMS reduction over the full concatenated projection
+// before the head split — OLMoE's convention: mlx_lm's olmoe.py Attention applies
+// `nn.RMSNorm(n_heads*head_dim)` to the flat projection before `.reshape(..., n_heads, -1)`, the
+// shape encRMSNormBF16At already computes). An absent weight (zero length) reports neither error nor
+// either granularity — the caller's existing nil-buf "skip" path already handles it. Any other length
+// is a load error: silently truncating or broadcasting a mismatched norm weight would corrupt every
+// token with no visible symptom.
+func qkNormGranularity(label string, weight []byte, heads, headDim int) (wide bool, err error) {
+	n := len(weight) / bf16Size
+	switch n {
+	case 0:
+		return false, nil
+	case headDim:
+		return false, nil
+	case heads * headDim:
+		return true, nil
+	default:
+		return false, core.NewError(core.Sprintf("native.qkNormGranularity: %s length %d matches neither per-head (%d) nor whole-vector (%d)", label, n, headDim, heads*headDim))
+	}
+}
+
+// qkNormWideProjector wraps a projector so its Q/K projections apply OLMoE's whole-vector RMSNorm
+// (#65) immediately after the matmul — the SAME point in the command stream every encAttnHalf*/
+// encAttnHalfKVPaged/decode_batched_session.go call site already runs the per-head norm at, and
+// immediately before the RoPE every one of them applies unconditionally afterward. This lets a
+// wide-QK-norm layer ride every existing consumer (plain/paged/shared KV, the batched-dense prefill
+// fold, the q8 KV landing) with NO changes to any of them: the wrapped projector still satisfies
+// the plain `projector` interface, and the loader leaves archLayerBufs.qNorm/kNorm the ZERO bufView
+// for whichever of Q/K is wide, so every consumer's existing `if qNorm.buf != nil` per-head branch —
+// including the batched-dense/q8 lane's own copies of it — naturally skips (this wrapper already did
+// the norm). Row-batched paths (projectRows/projectRowsByteTier) are NOT wide-norm-aware: rowsCapable/
+// rowsByteTier/foldProfitable report false whenever a wrap is armed, so a wide-normed layer's batched-
+// row fold always declines to the per-row project() path above, which IS wide-norm-aware. This trades
+// the fold's throughput for correctness on a wide-QK-norm arch; gemma4/mixtral never wrap a projector
+// this way, so they are untouched.
+type qkNormWideProjector struct {
+	projector
+	qNorm, kNorm     bufView // whole-vector weights (heads*headDim / kvHeads*headDim long); nil buf ⇒ that projection's granularity is per-head (or absent) and the ORDINARY archLayerBufs.qNorm/kNorm path handles it instead
+	nHeads, nKVHeads int
+	headDim          int
+	eps              float32
+}
+
+func (p qkNormWideProjector) project(enc metal.MTLComputeCommandEncoder, vec, out metal.MTLBuffer, outOff uint, idx projIndex) error {
+	if err := p.projector.project(enc, vec, out, outOff, idx); err != nil {
+		return err
+	}
+	switch idx {
+	case projQ:
+		if p.qNorm.buf == nil {
+			return nil
+		}
+		return encRMSNormBF16At(enc, out, p.qNorm.buf, out, outOff, p.qNorm.off, outOff, p.nHeads*p.headDim, p.eps)
+	case projK:
+		if p.kNorm.buf == nil {
+			return nil
+		}
+		return encRMSNormBF16At(enc, out, p.kNorm.buf, out, outOff, p.kNorm.off, outOff, p.nKVHeads*p.headDim, p.eps)
+	}
+	return nil
+}
+
+// wideArmed reports whether either projection carries a whole-vector norm — the batched-row methods
+// below decline (ok=false / false) uniformly whenever it does, since none of them encode the wide
+// RMSNorm; project() above is the only wide-norm-aware path.
+func (p qkNormWideProjector) wideArmed() bool { return p.qNorm.buf != nil || p.kNorm.buf != nil }
+
+func (p qkNormWideProjector) projectRows(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, idx projIndex) (bool, error) {
+	if p.wideArmed() {
+		return false, nil
+	}
+	return p.projector.projectRows(enc, in, out, inOff, outOff, rows, idx)
+}
+
+func (p qkNormWideProjector) projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, idx projIndex) (bool, error) {
+	if p.wideArmed() {
+		return false, nil
+	}
+	return p.projector.projectRowsByteTier(enc, in, out, inOff, outOff, rows, idx)
+}
+
+func (p qkNormWideProjector) rowsCapable() bool {
+	if p.wideArmed() {
+		return false
+	}
+	return p.projector.rowsCapable()
+}
+
+func (p qkNormWideProjector) rowsByteTier(rows int) bool {
+	if p.wideArmed() {
+		return false
+	}
+	return p.projector.rowsByteTier(rows)
+}
+
+func (p qkNormWideProjector) foldProfitable() bool {
+	if p.wideArmed() {
+		return false
+	}
+	return p.projector.foldProfitable()
+}
+
+// withSiLU preserves the wrap: the inner projector's activation flips, the wide-norm binding carries
+// over unchanged.
+func (p qkNormWideProjector) withSiLU(v bool) projector {
+	p.projector = p.projector.withSiLU(v)
+	return p
+}
+
 // encQKNormRope encodes the fused per-head QK-norm + RoPE (out = RoPE(RMSNorm(x, w))) into enc — the
 // re-encode sibling of the ICB's setQKNormRope, using the SAME kernel so the two paths stay byte-equal
 // under the lockstep fusion. base is RAW theta (log2'd here, matching encRoPEBF16To); periods non-nil ⇒

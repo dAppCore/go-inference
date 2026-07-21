@@ -503,6 +503,10 @@ func moeLayerWeightsFixture(numExperts, topK, dModel, dFF, expertDFF, salt int) 
 		ExpGateW:          toBF16Bytes(syntheticFloat32(numExperts*expertDFF*dModel, salt+11)),
 		ExpUpW:            toBF16Bytes(syntheticFloat32(numExperts*expertDFF*dModel, salt+12)),
 		ExpDownW:          toBF16Bytes(syntheticFloat32(numExperts*dModel*expertDFF, salt+13)),
+		// gemma4-shaped (every sandwich norm populated): gemma4 always declares NormaliseMoETopK true
+		// (#65) — set it here so this fixture's callers keep engaging the device router path,
+		// byte-identical to before the field existed. See quantMoELayerWeightsGuard's identical note.
+		NormaliseTopK: true,
 	}
 }
 

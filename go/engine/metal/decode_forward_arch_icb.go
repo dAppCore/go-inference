@@ -2678,6 +2678,13 @@ func decodeForwardArchICBInto(
 			w := layers[li]
 			anwBufs[li] = residentBytes(w.AttnNormW)
 			mnwBufs[li] = residentBytes(w.MLPNormW)
+			// qNormBufs/kNormBufs bind PER-HEAD only (length headDim) — the ICB recorder's setQKNormRope
+			// has no whole-vector (#65) twin. This is provably safe today: ICB structurally declines
+			// every MoE layer (icbEligible/"MoE layers are not supported" above), and OLMoE — the only
+			// registered arch whose q_norm/k_norm is whole-vector — is entirely MoE, so it can never
+			// reach this recorder. A future DENSE whole-vector-QK-norm arch would need a new record-time
+			// primitive here (mirroring buildBF16ArchLayerBufsInternal's qkNormWideProjector wrap) before
+			// it could be made ICB-eligible.
 			qNormBufs[li] = residentOrNil(w.QNormW)
 			kNormBufs[li] = residentOrNil(w.KNormW)
 			postAttnBufs[li] = residentOrNil(w.PostAttnNormW)

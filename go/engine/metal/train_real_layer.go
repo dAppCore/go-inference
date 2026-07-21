@@ -54,9 +54,9 @@ type RealTrainLayerF32 struct {
 	// nil = plain residual (LayerSpec.PostAttnNorm false).
 	PostAttnNormW []float32
 	MLPNormW      []float32 // [DModel] pre-feed-forward RMSNorm
-	WGate []float32 // [DFF, DModel]
-	WUp   []float32 // [DFF, DModel]
-	WDown []float32 // [DModel, DFF]
+	WGate         []float32 // [DFF, DModel]
+	WUp           []float32 // [DFF, DModel]
+	WDown         []float32 // [DModel, DFF]
 	// PostFFNormW is the gemma4 post-feed-forward sandwich norm ([DModel]) on the MLP branch
 	// output (Wdown·…) before its residual add. nil = plain residual (LayerSpec.PostFFNorm false).
 	PostFFNormW []float32
@@ -154,8 +154,15 @@ func (L *RealTrainLayerF32) validate() error {
 	if L.RopePairHalf <= 0 || L.RopePairHalf > L.HeadDim/2 || len(L.RopeInvFreq) > L.RopePairHalf {
 		return core.NewError("native.RealTrainLayerF32: RopePairHalf must be in (0, HeadDim/2] with len(RopeInvFreq) ≤ RopePairHalf")
 	}
-	if (len(L.QNormW) != 0 && len(L.QNormW) != L.HeadDim) || (len(L.KNormW) != 0 && len(L.KNormW) != L.HeadDim) {
-		return core.NewError("native.RealTrainLayerF32: QNormW/KNormW must be [HeadDim] when set (per-head, shared across heads)")
+	// #65: QNormW/KNormW are either PER-HEAD (length HeadDim, gemma4's shape — a shared weight
+	// RMS-norming each head's slice independently) or WHOLE-VECTOR (length Heads·HeadDim /
+	// KVHeads·HeadDim, OLMoE's shape — ONE reduction over the full concatenated projection before
+	// the head split; see qkNormGranularity's identical bf16 split, qknorm_rope.go). Any other
+	// length is a load error rather than a silent truncation/broadcast.
+	qOK := len(L.QNormW) == 0 || len(L.QNormW) == L.HeadDim || len(L.QNormW) == L.Heads*L.HeadDim
+	kOK := len(L.KNormW) == 0 || len(L.KNormW) == L.HeadDim || len(L.KNormW) == L.KVHeads*L.HeadDim
+	if !qOK || !kOK {
+		return core.NewError("native.RealTrainLayerF32: QNormW/KNormW must be [HeadDim] (per-head) or [heads·HeadDim] (whole-vector, #65) when set")
 	}
 	if (len(L.PostAttnNormW) != 0 && len(L.PostAttnNormW) != L.DModel) || (len(L.PostFFNormW) != 0 && len(L.PostFFNormW) != L.DModel) {
 		return core.NewError("native.RealTrainLayerF32: PostAttnNormW/PostFFNormW must be [DModel] when set")
@@ -393,25 +400,25 @@ func hostSDPAProbsF32(q, k []float32, L *RealTrainLayerF32) []float32 {
 // shared by RealLayerForwardF32 (which returns only the output) and the backward (which walks it
 // in reverse).
 type realLayerTape struct {
-	normed         []float32 // [T,DModel] pre-attn rms output
-	q0, k0         []float32 // raw projections [T,qDim] / [T,kvDim]
-	qn, kn         []float32 // post-QK-norm, pre-rope (alias q0/k0 when the layer has no QK-norm)
-	v0             []float32 // raw value rows (own projection, or the k0 copy on a K==V layer)
-	qr, kr, v      []float32 // rope'd q/k and the post-value-norm v (v aliases v0 when unnormed)
-	probs          [][]float32 // per query head [T,T]
-	o              []float32 // attention output [T,qDim]
-	attnBranch     []float32 // the branch added to the residual (post post-attn-norm when present)
-	attnBranchPre  []float32 // the branch BEFORE a post-attn norm (the norm backward needs its input)
-	h1             []float32 // [T,DModel] residual after attention
-	mlpNormed      []float32
-	gate, up       []float32
-	gated          []float32
-	mlpBranch      []float32 // the branch added to the residual (post post-ff-norm when present)
-	mlpBranchPre   []float32
-	h2             []float32 // [T,DModel] residual after the MLP half (the PLE gate's input)
-	pleGate        []float32 // [T,PLIDim] the PLE gate pre-activations (nil without the tower)
-	pleProj        []float32 // [T,DModel] the PLE projection output, pre-post-norm
-	out            []float32 // [T,DModel] layer output
+	normed        []float32   // [T,DModel] pre-attn rms output
+	q0, k0        []float32   // raw projections [T,qDim] / [T,kvDim]
+	qn, kn        []float32   // post-QK-norm, pre-rope (alias q0/k0 when the layer has no QK-norm)
+	v0            []float32   // raw value rows (own projection, or the k0 copy on a K==V layer)
+	qr, kr, v     []float32   // rope'd q/k and the post-value-norm v (v aliases v0 when unnormed)
+	probs         [][]float32 // per query head [T,T]
+	o             []float32   // attention output [T,qDim]
+	attnBranch    []float32   // the branch added to the residual (post post-attn-norm when present)
+	attnBranchPre []float32   // the branch BEFORE a post-attn norm (the norm backward needs its input)
+	h1            []float32   // [T,DModel] residual after attention
+	mlpNormed     []float32
+	gate, up      []float32
+	gated         []float32
+	mlpBranch     []float32 // the branch added to the residual (post post-ff-norm when present)
+	mlpBranchPre  []float32
+	h2            []float32 // [T,DModel] residual after the MLP half (the PLE gate's input)
+	pleGate       []float32 // [T,PLIDim] the PLE gate pre-activations (nil without the tower)
+	pleProj       []float32 // [T,DModel] the PLE projection output, pre-post-norm
+	out           []float32 // [T,DModel] layer output
 }
 
 // realLayerForwardTape runs the layer forward with the (possibly LoRA-substituted) weights and
@@ -451,12 +458,21 @@ func realLayerForwardTape(h []float32, L *RealTrainLayerF32, wQ, wK, wV, wO, wGa
 	}
 	tp.qn, tp.kn = tp.q0, tp.k0
 	if len(L.QNormW) > 0 {
-		// per-head RMSNorm with the shared [HeadDim] weight: the head-major layout makes every
-		// head's d-vector a contiguous row, so this is the plain rms over T·Heads rows of width d.
-		tp.qn = rmsNormForwardF32(tp.q0, L.QNormW, T*L.Heads, d, L.Eps)
+		if qkNormWideF32(L.QNormW, L.Heads, d) {
+			// #65: whole-vector — ONE reduction over the full Heads·d row, T rows.
+			tp.qn = rmsNormForwardF32(tp.q0, L.QNormW, T, L.Heads*d, L.Eps)
+		} else {
+			// per-head RMSNorm with the shared [HeadDim] weight: the head-major layout makes every
+			// head's d-vector a contiguous row, so this is the plain rms over T·Heads rows of width d.
+			tp.qn = rmsNormForwardF32(tp.q0, L.QNormW, T*L.Heads, d, L.Eps)
+		}
 	}
 	if len(L.KNormW) > 0 {
-		tp.kn = rmsNormForwardF32(tp.k0, L.KNormW, T*L.KVHeads, d, L.Eps)
+		if qkNormWideF32(L.KNormW, L.KVHeads, d) {
+			tp.kn = rmsNormForwardF32(tp.k0, L.KNormW, T, L.KVHeads*d, L.Eps)
+		} else {
+			tp.kn = rmsNormForwardF32(tp.k0, L.KNormW, T*L.KVHeads, d, L.Eps)
+		}
 	}
 	tp.qr = make([]float32, T*qDim)
 	tp.kr = make([]float32, T*kvDim)
@@ -682,13 +698,21 @@ func realLayerBackwardInject(dout, h []float32, L *RealTrainLayerF32, tp *realLa
 		copy(dK0[i*kvDim:(i+1)*kvDim], realRopeBackwardF32(dKr[i*kvDim:(i+1)*kvDim], i, L.KVHeads, d, L.RopePairHalf, L.RopeInvFreq, L.RopeScale))
 	}
 	if len(L.QNormW) > 0 {
-		dQ0, _, err = QKNormBackwardF32(dQ0, tp.q0, L.QNormW, T, L.Heads, d, L.Eps)
+		if qkNormWideF32(L.QNormW, L.Heads, d) {
+			dQ0, _, err = RMSNormBackwardF32(dQ0, tp.q0, L.QNormW, T, L.Heads*d, L.Eps)
+		} else {
+			dQ0, _, err = QKNormBackwardF32(dQ0, tp.q0, L.QNormW, T, L.Heads, d, L.Eps)
+		}
 		if err != nil {
 			return nil, err
 		}
 	}
 	if len(L.KNormW) > 0 {
-		dK0, _, err = QKNormBackwardF32(dK0, tp.k0, L.KNormW, T, L.KVHeads, d, L.Eps)
+		if qkNormWideF32(L.KNormW, L.KVHeads, d) {
+			dK0, _, err = RMSNormBackwardF32(dK0, tp.k0, L.KNormW, T, L.KVHeads*d, L.Eps)
+		} else {
+			dK0, _, err = QKNormBackwardF32(dK0, tp.k0, L.KNormW, T, L.KVHeads, d, L.Eps)
+		}
 		if err != nil {
 			return nil, err
 		}
