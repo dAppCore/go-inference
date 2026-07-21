@@ -85,8 +85,13 @@ func (d *zLabDFlashDrafter) MaskTokenID() int32 { return int32(d.model.Cfg.Block
 // "context length is the number of target TOKENS fused in" — the
 // numAux-as-context-length conflation assistant_dflash.go's speculators
 // forward made, §1's falsified-forward table) — as ONE f32 array [ctxLen,
-// numAux*hidden] (ExtractAuxHiddensAllRaw's shape), plus the TARGET's own
-// bf16 embedding of the anchor (last committed) token.
+// numAux*hidden] (ExtractAuxHiddensAllRaw's shape) covering EVERY position of
+// context INCLUDING the anchor (context's own last element) as its final row,
+// plus the TARGET's own bf16 embedding of that same anchor token. ProposeBlock
+// trims the anchor's row back off before the forward — see its own comment —
+// so a source implementation should keep supplying the full, untrimmed
+// per-position capture (ExtractAuxHiddensAllRaw's native shape); it must not
+// pre-trim.
 type zLabDFlashSource func(context []int) (targetHiddenRaw []float32, ctxLen int, anchorEmbedding []byte, ok bool)
 
 // zLabDFlashProposer adapts a zLabDFlashDrafter + a zLabDFlashSource + the
@@ -121,6 +126,28 @@ func (p *zLabDFlashProposer) ProposeBlock(context []int) []int {
 	if len(anchorEmbedding) != hidden*bf16Size || len(p.maskEmbed) != hidden*bf16Size {
 		return nil
 	}
+	// The checkpoint's own spec_generate (modeling_dflash.py) never fuses the
+	// anchor's own hidden state into target_hidden: extract_context_feature
+	// only ever runs over already-verified positions strictly BEFORE the
+	// anchor (target_hidden = extract_context_feature(output.hidden_states,
+	// ...)[:, :acceptance_length+1, :] — a span that ends at the anchor's
+	// predecessor; the prefill-time seed is extract_context_feature over just
+	// the num_input_tokens prompt positions, likewise stopping short of the
+	// first-sampled anchor). The anchor enters the forward SOLELY through the
+	// block's own position-0 noise embedding below, at RoPE position ctxLen —
+	// apply_rotary_pos_emb's q-tail-slice (cos[..., -q_len:, :]) confirms the
+	// block starts exactly at the anchor's absolute index, one past the last
+	// TRUE context row. p.source (zLabDFlashSource) supplies hidden states for
+	// EVERY position of context, INCLUDING the anchor as targetHiddenRaw's
+	// final row — trim that phantom row and the ctxLen count that came with
+	// it here, once, so every source implementation stays a plain full-prefix
+	// capture and only this seam carries the anchor-exclusion rule.
+	numAux := p.drafter.model.Cfg.NumAux()
+	if ctxLen <= 0 || numAux <= 0 || len(targetHiddenRaw) != ctxLen*numAux*hidden {
+		return nil
+	}
+	ctxLen--
+	targetHiddenRaw = targetHiddenRaw[:ctxLen*numAux*hidden]
 	blockLen := p.drafter.BlockSize()
 	// noiseEmbedding: position 0 is the real anchor (the target's own
 	// embedding of the last committed/verified token); every other position
