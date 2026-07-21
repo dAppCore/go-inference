@@ -79,18 +79,28 @@ count, not arithmetic.
 (`LTHN_KV_Q8*` opt out). The old "TQ vs native zero RSS delta" confusion was
 this: the native baseline was never bf16.
 
-E2B @ ctx 32K (35 layers: 12 sliding-native + 3 global + 20 shared):
+E2B @ ctx 32K (35 layers: 12 sliding-native + 3 global + 20 shared),
+QUIET-BOX numbers (see the methodology note below):
 
-| mode | decode tok/s | plan (global layers) | peak RSS |
-|---|---:|---|---:|
-| q8 (default) | 174.7 | 102MiB | 5862MiB |
-| bf16-forced | 84.2 | 198MiB | 5851MiB |
-| turboquant | 134.8 | 42MiB | 5854MiB |
+| mode | shallow decode | deep 18.5K decode | plan (global layers) |
+|---|---:|---:|---|
+| q8 (default) | 174–180 | 149.7 | 102MiB |
+| bf16-forced | 176 | 149 | 198MiB |
+| turboquant | 134.7 | ~111 | 42MiB |
 
-bf16-forced falls off the optimised q8-ICB lane entirely (−52% at ZERO cache
-depth — a lane artefact, not bandwidth; not a usable quality A/B path).
-TQ: −23% decode for −60MiB plan. At 18.5K-deep decode: q8 122.6 vs TQ 110.8
-(−10%), RSS −36MiB.
+bf16 ≈ q8 at BOTH depths on E2B — only 3 of 35 layers differ and sliding
+dominates, so the format of the global caches barely shows here; q8's case is
+the halved global footprint plus a margin that grows with global-layer count
+(31B carries 10). TQ pays its own read path (~105 GB/s effective, issue-bound)
+at every depth.
+
+METHODOLOGY: an earlier version of this table carried bf16-shallow 84.2 and
+q8-deep 122.6 — both cells were measured while a worktree lane ran
+real-checkpoint GPU test batches on the same box, and neither reproduces on a
+quiet box at the same HEAD. Matrix cells taken during lane activity are void;
+quiet-box re-certification is required before a number becomes a decision
+input. (The contaminated 84 briefly justified "TQ as the fastest no-q8
+fallback" — retracted below.)
 
 31B @ ctx 32K, 18.5K-deep decode (60 layers: 50 sliding + 10 global):
 
@@ -115,17 +125,16 @@ compression is the more meaningful shift (~204→42MiB on the globals, ≈5×, v
 effective vs bf16's 246, issue-bound), independent of what it replaced.
 
 The ladder:
-- **default = q8** — fastest decode AND half the bf16 footprint; ~1%-class
-  fidelity cost. (Carries the open re-engagement bistability — the two-plane
-  row/scale store race — which is a defect to fix IN q8, not a reason to
-  change the default.)
-- **`--kv-cache turboquant` = the no-q8 configuration of record** — 134.7 vs
-  the bf16-force env's 84.2: TQ keeps the optimised ICB lane where forcing
-  bf16 falls off it. Also the capacity mode once its deep-prefill allocation
-  defect is fixed.
-- **`LTHN_KV_Q8*=0` = dev instrument only** — the unoptimised bf16 lane
-  exists for A/Bs and forensics, is not a product surface, and no CLI flag
-  offers it.
+- **default = q8** — fastest overall, half the bf16 global footprint,
+  ~1%-class fidelity cost; the deep margin grows with global-layer count.
+  (Carries the open re-engagement bistability — the two-plane row/scale store
+  race — a defect to fix IN q8, not a reason to change the default.)
+- **`--kv-cache turboquant` = the capacity mode only** — pending its
+  deep-prefill allocation defect; it is NOT a speed fallback (the earlier
+  claim rested on the contaminated 84).
+- **`LTHN_KV_Q8*=0` = dev instrument only** — q8-parity speed on E2B's shape
+  and the determinism A/B of choice while the q8 race is open, but a dev tag,
+  not a product surface; no CLI flag offers it.
 
 ## Reproduce
 
