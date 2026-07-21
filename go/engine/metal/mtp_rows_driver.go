@@ -636,6 +636,7 @@ func (s *archDecodeState) stepRowsMoEBatchedChained(embs []byte, startPos, K int
 
 	idxDevs := make([]metal.MTLBuffer, 0, len(s.specs))
 	topKs := make([]int, 0, len(s.specs))
+	foldScr := s.rowsAttnScratchSets(K)
 	cb := commandBufferFast(queue)
 	for li := range s.specs {
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
@@ -647,6 +648,39 @@ func (s *archDecodeState) stepRowsMoEBatchedChained(embs []byte, startPos, K int
 			layerRopeFreqs, rotDim = s.globalRopeFreqs, lhd
 		}
 		attnT0 := time.Now()
+		if cache := s.layerPagedKV(li); cache != nil && s.gpuProf == nil && !attnConcurrentDisabled && gpuHasGeluKernel() && s.lb[li].qNorm.buf != nil { // BISECT arm 2
+			if err := s.encRowsAttnPagedFold(cb, cache, slabIn, offPacked, li, K, rowBytes, startPos, lhd, lkv, slideW, rotDim, rbase, layerRopeFreqs, slabH, foldScr); err != nil {
+				return nil, false, err
+			}
+			mtpRowsDiagAttnWall += time.Since(attnT0)
+			moeQ := moeQuantAt(s.moeQuant, li)
+			moeT0 := time.Now()
+			enc2 := computeCommandEncoderFast(cb)
+			idxDev, ok, err := mtpRowsMoEBatchedGatherEnc(enc2, slabH, slabOut, scratches, *moeQ, s.dModel, s.dFF, K, s.eps)
+			if err != nil {
+				endEncodingFast(enc2)
+				return nil, false, err
+			}
+			if !ok {
+				endEncodingFast(enc2)
+				return nil, false, core.NewError("native.stepRowsMoEBatchedChained: gather block declined after the probe passed — mtpRowsMoEGatherServable is out of sync with mtpRowsMoEBatchedGatherEnc")
+			}
+			if s.lb[li].layerScalar != nil {
+				for r := range K {
+					rOff := uint(r * rowBytes)
+					if err := encMulBF16To(enc2, slabOut, s.lb[li].layerScalar, slabOut, rOff, 0, rOff, s.dModel); err != nil {
+						endEncodingFast(enc2)
+						return nil, false, err
+					}
+				}
+			}
+			endEncodingFast(enc2)
+			mtpRowsDiagMoEWall += time.Since(moeT0)
+			idxDevs = append(idxDevs, idxDev)
+			topKs = append(topKs, moeQ.TopK)
+			slabIn, slabOut = slabOut, slabIn
+			continue
+		}
 		enc := computeCommandEncoderFast(cb)
 		if cache := s.layerPagedKV(li); cache != nil {
 			encConc := false
@@ -711,4 +745,229 @@ func (s *archDecodeState) stepRowsMoEBatchedChained(embs []byte, startPos, K int
 	copy(out, unsafe.Slice((*byte)(slabIn.Contents()), K*rowBytes))
 	mtpRowsDriverEngaged.Add(1)
 	return out, true, nil
+}
+
+// rowsAttnScratchSet is the chained round's per-row attention scratch — K
+// disjoint sets let the K rows' projection/rope/output stages overlap on a
+// concurrent encoder (the single shared s.asc is exactly what forced row
+// order on every stage, dependent or not). Sized once per round at the
+// largest layer geometry and reused across layers: encoder boundaries on one
+// command buffer are full barriers, so layer L+1's writes never race layer
+// L's reads.
+func (s *archDecodeState) rowsAttnScratchSets(K int) []attnScratch {
+	maxQ, maxKV := 0, 0
+	for li := range s.specs {
+		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
+		if q := s.nHeads * lhd; q > maxQ {
+			maxQ = q
+		}
+		if kv := lkv * lhd; kv > maxKV {
+			maxKV = kv
+		}
+	}
+	sets := make([]attnScratch, K)
+	for r := range K {
+		sets[r] = newAttnScratch(s.dModel, maxQ, maxKV, s.nHeads, 0)
+	}
+	return sets
+}
+
+// encRowsAttnPagedFold encodes layer li's K attention rows as STAGE WAVES on
+// one concurrent encoder (#53): every row's RMS, q/k/v projections, ropes,
+// value norm, output projection and residual overlap freely across rows
+// (disjoint per-row scratch, read-only weights), with explicit barriers at
+// the true stage edges — the monolith's own concurrent-pass structure,
+// widened from one row to K. The landing + SDPA stage is two-mode:
+//
+//   - GLOBAL layers land ALL K rows' pages first, then run the K SDPAs
+//     barrier-free (pure page reads, disjoint outputs). Byte-exact vs the
+//     sequential order because row r's plan is built at watermark pos_r —
+//     rows r+1..K-1's pages exist but sit past every lens the plan baked.
+//   - RING (sliding) layers keep the per-row land->scan chain: a later
+//     row's landing EVICTS a position inside an earlier row's window, so
+//     land-before-read would change bytes (the deferred-ring lesson, paged
+//     form). Their projections still ride the waves.
+//
+// The q8 paged cache stages K/V in the row's scratch and quantise-stores at
+// the land point; a bf16 page copies the staged row instead — either way the
+// LANDING time is the fold's to schedule, never the projection's.
+func (s *archDecodeState) encRowsAttnPagedFold(cb metal.MTLCommandBufferObject, cache *devicePagedKVCache, slabIn metal.MTLBuffer, offPacked metal.MTLBuffer, li, K, rowBytes, startPos, lhd, lkv, slideW, rotDim int, rbase float32, layerRopeFreqs metal.MTLBuffer, slabH metal.MTLBuffer, scr []attnScratch) error {
+	if slideW > 0 {
+		if cache == nil {
+			return core.NewError("native.encRowsAttnPagedFold: sliding window requires ring pages")
+		}
+		if !cache.ring {
+			if cache.maxSize > slideW {
+				return core.NewError("native.encRowsAttnPagedFold: sliding window requires ring pages")
+			}
+			slideW = 0
+		}
+	}
+	ringMode := slideW > 0 && cache.ring
+	kvDim := lkv * lhd
+
+	// host prologue, sequenced per row: slot -> state -> plan, so each plan
+	// bakes lens at ITS row's watermark (the causal bound; pageLens is a host
+	// slice consumed at build time).
+	type rowCtx struct {
+		kPage, vPage           metal.MTLBuffer
+		rowOff                 uint
+		kScalePage, vScalePage metal.MTLBuffer
+		scaleOff               uint
+		plan                   sdpaPagedDecodePlan
+	}
+	rows := make([]rowCtx, K)
+	for r := range K {
+		kPage, vPage, rowOff, err := cache.slot(startPos + r)
+		if err != nil {
+			return err
+		}
+		keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, err := cache.state()
+		if err != nil {
+			return err
+		}
+		// state() refills SHARED per-cache scratch slices and the plan BORROWS
+		// them — every later slot()/state() in this prologue would mutate what
+		// an earlier row's plan reads at emit time (row 0 attending rows 1..K-1:
+		// the causality break the parity gate caught). Each row's plan gets its
+		// own copies; the monolith never needed them only because it emits each
+		// plan before the next state().
+		keyPages = append([]metal.MTLBuffer(nil), keyPages...)
+		valuePages = append([]metal.MTLBuffer(nil), valuePages...)
+		pageLens = append([]int(nil), pageLens...)
+		kHead = append([]int(nil), kHead...)
+		kSeq = append([]int(nil), kSeq...)
+		vHead = append([]int(nil), vHead...)
+		vSeq = append([]int(nil), vSeq...)
+		pagedScratch, err := cache.attentionScratch(s.nHeads)
+		if err != nil {
+			return err
+		}
+		plan, err := buildSDPAPagedDecodePlan(scr[r].q, keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, scr[r].attn, pagedScratch, s.nHeads, lkv, lhd, s.scale)
+		if err != nil {
+			return err
+		}
+		rc := rowCtx{kPage: kPage, vPage: vPage, rowOff: rowOff, plan: plan}
+		if cache.quantQ8 {
+			kSc, vSc := cache.scaleState()
+			if err := rc.plan.attachQ8(kSc, vSc); err != nil {
+				return err
+			}
+			rc.kScalePage, rc.vScalePage, rc.scaleOff = cache.scaleSlot(startPos + r)
+			if rc.kScalePage == nil || rc.vScalePage == nil {
+				return core.NewError("native.encRowsAttnPagedFold: q8 cache missing scale pages")
+			}
+		}
+		rows[r] = rc
+	}
+
+	enc := concurrentComputeEncoderFast(cb)
+	encI := metal.MTLComputeCommandEncoder(enc)
+	fail := func(err error) error {
+		endEncodingFast(enc)
+		return err
+	}
+	// W1: the shared input norms
+	for r := range K {
+		if err := encRMSNormBF16At(encI, slabIn, s.lb[li].anw.buf, scr[r].normed, uint(r*rowBytes), s.lb[li].anw.off, 0, s.dModel, s.eps); err != nil {
+			return fail(err)
+		}
+	}
+	memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+	// W2: q ∥ k ∥ v projections, all rows — K/V into the row's staging (the
+	// landing schedule belongs to the fold)
+	vIdx := projV
+	if !s.lb[li].proj.hasV() {
+		vIdx = projK
+	}
+	for r := range K {
+		if err := s.lb[li].proj.project(encI, scr[r].normed, scr[r].q, 0, projQ); err != nil {
+			return fail(err)
+		}
+		if err := s.lb[li].proj.project(encI, scr[r].normed, scr[r].kProj, 0, projK); err != nil {
+			return fail(err)
+		}
+		if err := s.lb[li].proj.project(encI, scr[r].normed, scr[r].vProj, 0, vIdx); err != nil {
+			return fail(err)
+		}
+	}
+	memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+	// W3: q rope ∥ k rope ∥ v norm, all rows
+	for r := range K {
+		if err := encQKNormRopeAt(encI, scr[r].q, s.lb[li].qNorm.buf, scr[r].q, 0, s.lb[li].qNorm.off, 0, offPacked, uint(r*4), layerRopeFreqs, s.nHeads, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
+			return fail(err)
+		}
+		if s.lb[li].kNorm.buf != nil {
+			if err := encQKNormRopeAt(encI, scr[r].kProj, s.lb[li].kNorm.buf, scr[r].kProj, 0, s.lb[li].kNorm.off, 0, offPacked, uint(r*4), layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
+				return fail(err)
+			}
+		} else {
+			if err := encRopeDecodeAt(encI, scr[r].kProj, scr[r].kProj, 0, 0, offPacked, uint(r*4), layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale); err != nil {
+				return fail(err)
+			}
+		}
+		if s.valueNormOnes != nil {
+			if err := encRMSNormRowsBF16(encI, scr[r].vProj, s.valueNormOnes, scr[r].vProj, 0, 0, 0, lkv, lhd, s.eps); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+	land := func(r int) error {
+		if cache.quantQ8 {
+			if err := encKVQ8Store(encI, scr[r].kProj, rows[r].kPage, rows[r].rowOff, rows[r].kScalePage, rows[r].scaleOff, kvDim); err != nil {
+				return err
+			}
+			return encKVQ8Store(encI, scr[r].vProj, rows[r].vPage, rows[r].rowOff, rows[r].vScalePage, rows[r].scaleOff, kvDim)
+		}
+		if err := encCopyBF16Contig(encI, scr[r].kProj, rows[r].kPage, 0, rows[r].rowOff, kvDim); err != nil {
+			return err
+		}
+		return encCopyBF16Contig(encI, scr[r].vProj, rows[r].vPage, 0, rows[r].rowOff, kvDim)
+	}
+	if ringMode {
+		// per-row land -> scan: eviction order IS the byte contract on a ring
+		for r := range K {
+			if err := land(r); err != nil {
+				return fail(err)
+			}
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			rows[r].plan.emitP1s(encI)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			rows[r].plan.emitP2(encI)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+		}
+	} else {
+		// W4: land ALL rows, W5/W6: every row's SDPA passes — barrier-free
+		// across rows within each wave
+		for r := range K {
+			if err := land(r); err != nil {
+				return fail(err)
+			}
+		}
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+		for r := range K {
+			rows[r].plan.emitP1s(encI)
+		}
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+		for r := range K {
+			rows[r].plan.emitP2(encI)
+		}
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+	}
+	// W7: output projections
+	for r := range K {
+		if err := s.lb[li].proj.project(encI, scr[r].attn, scr[r].attnOut, 0, projO); err != nil {
+			return fail(err)
+		}
+	}
+	memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+	// W8: residual + post-attention norm into the H slab
+	for r := range K {
+		if err := encResidualMaybeNormAt(encI, slabIn, uint(r*rowBytes), scr[r].attnOut, 0, scr[r].normed, slabH, uint(r*rowBytes), s.lb[li].postAttnNorm, s.dModel, s.eps); err != nil {
+			return fail(err)
+		}
+	}
+	endEncodingFast(enc)
+	return nil
 }
