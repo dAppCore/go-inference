@@ -33,6 +33,12 @@ type Config struct {
 	VocabSize         int     `json:"vocab_size"`
 	RMSNormEps        float32 `json:"rms_norm_eps"`
 	RopeTheta         float32 `json:"rope_theta"`
+	// HiddenActivation is the FFN gate ("silu" on every real Qwen3 checkpoint),
+	// forwarded verbatim into Arch.Activation (mirroring olmoe/granitemoe). Left
+	// undeclared it read as "" and the engine kept the gemma GELU gate on all
+	// layers — a few-percent-per-layer drift that detonated in the layer-35
+	// massive-activation cancellation (#67).
+	HiddenActivation string `json:"hidden_act"`
 
 	TextConfig   *Config            `json:"text_config"`
 	Quantization *model.QuantConfig `json:"quantization"`
@@ -128,6 +134,7 @@ func (c *Config) Arch() (model.Arch, error) {
 		// sqrt(hidden) fallback multiplied every embed ~50.6x on Qwen3-4B, corrupting the
 		// whole forward (#66 — this file was the sole EmbedScale omission tree-wide).
 		EmbedScale: 1,
+		Activation: c.HiddenActivation,
 		Layer:      layers,
 	}, nil
 }
