@@ -1,0 +1,112 @@
+# MTP verify economics + KV-mode matrix — receipts
+
+Campaign: #53 (MTP pair speed) and #48 (KV cache modes), dev @ `41cc8c12`.
+M3 Ultra 96GB, greedy decode (`--temp 0`), tg512 unless noted, E2B =
+`mlx-community/gemma-4-e2b-it-4bit` + bf16 assistant drafter. Every number is
+a live measurement from `lem-dev generate` (decode-only, prefill excluded).
+
+## The "210 lost" claim — dissolved by A/B
+
+The 2026-07-10 board's E2B +MTP 207-235 was measured on a HIGH-acceptance
+log-continuation prompt. Same-machine, same-checkpoint, same-command A/B today
+(default linked-list prompt, tg512):
+
+| build | pair | plain |
+|---|---:|---:|
+| dev @ 400fdcb9 (the board's own commit) | 165.1 | — |
+| dev today (post boundary-cache) | **172.3–173.4** | 171.0–174.4 |
+
+The board commit itself cannot reproduce its own 230 on a mid-acceptance
+prompt. Nothing regressed between 2026-07-10 and today — dev is *faster* than
+the board build on identical method. The pair's number is acceptance-elastic:
+counting prompt 186.5 vs plain 173.1 (+7.7%); mid-acceptance prompts sit at
+parity. The fold engages everywhere (zero `mtp-diag` declines; fwd 11.6ms @
+K=6 ≈ 2 plain steps, not the 27ms sequential shape).
+
+## Where the verify round actually goes (K=6, LTHN_MTP_DIAG + LTHN_GPU_TRACE)
+
+Steady round ≈ draft 4.8ms + verify 18.8ms for ~4-5 committed tokens:
+
+| stage | ms | note |
+|---|---:|---|
+| fold forward (GPU) | 9.4 | 352 encoder segments across 35 layers — launch-bound |
+| fold forward (host gap) | ~2.2 | encode + submit of those segments |
+| rows-head (K-row fused) | 1.6–2.3 | |
+| boundary head + host argmax rescan | ~2.3 | **eliminated** (below) |
+| truncate/commit/host misc | ~1.5 | |
+
+GPU stage split of the 9.4ms: MLP gate/up/down 4.2ms (vs ~0.9ms weight-read
+floor), resid+epilogue 1.9ms (PLE chain, already #372-fused 5→3 dispatches),
+attention ~3.0ms. The fold pays a ~8ms FIXED cost (fwd 9.4ms at K=2!) — at
+real acceptance the fixed cost caps the win regardless of prompt.
+
+## Shipped: content-keyed boundary-greedy cache (`41cc8c12`)
+
+The K-row verify head already computes the boundary's argmax
+(`rows[accepted-1]`); the next round re-derived it with a full-vocab
+`headLogitsScratch` + 262k-entry host bf16 scan. Now cached keyed by VALUE
+(exact hidden bytes + suppress set, `bytes.Equal` at use — no retained-state
+write path can leave it stale; `BoundaryLogits` lazily recomputes if a
+non-greedy consumer wants the bytes).
+
+Receipt: verify 21.6→18.2ms, 20.2→17.9ms per round; pair 169.7→172.3–173.4
+(3-run band); output byte-identical to pre-patch on the same command.
+
+## Refuted on E2B: wide-M qmv rows (`LTHN_QMV_ROWS_WIDE=1`)
+
+165.0/165.1 vs 172.3–173.4 baseline = −4%. Already live-refuted on the 26B
+pair (#53, `0027e76a`); now refuted at the small end too. Stays banked
+opt-in.
+
+## The priced next step (unchanged, now re-evidenced)
+
+`decode_verify_icb.go`'s receipt: per-layer tail ICB replay is break-even —
+the win is recording the WHOLE layer stack (one `executeCommands` per verify
+pass, ~3µs/op chained-decode economics, pos/N rebinds), blocked on the
+staged-sliding landing's per-pass slot offsets. Today's 352-segment trace is
+the same conclusion from the other side: the fold's remaining cost is launch
+count, not arithmetic.
+
+## #48 — KV-mode matrix (q8 IS the baseline)
+
+`--kv-cache native` means q8-by-default on global-attention owners
+(`LTHN_KV_Q8*` opt out). The old "TQ vs native zero RSS delta" confusion was
+this: the native baseline was never bf16.
+
+E2B @ ctx 32K (35 layers: 12 sliding-native + 3 global + 20 shared):
+
+| mode | decode tok/s | plan (global layers) | peak RSS |
+|---|---:|---|---:|
+| q8 (default) | 174.7 | 102MiB | 5862MiB |
+| bf16-forced | 84.2 | 198MiB | 5851MiB |
+| turboquant | 134.8 | 42MiB | 5854MiB |
+
+bf16-forced falls off the optimised q8-ICB lane entirely (−52% at ZERO cache
+depth — a lane artefact, not bandwidth; not a usable quality A/B path).
+TQ: −23% decode for −60MiB plan. At 18.5K-deep decode: q8 122.6 vs TQ 110.8
+(−10%), RSS −36MiB.
+
+31B @ ctx 32K, 18.5K-deep decode (60 layers: 50 sliding + 10 global):
+
+| mode | decode tok/s | plan | peak RSS |
+|---|---:|---|---:|
+| q8 | 19.4 | q8 10×(1360MiB) + sliding 800MiB | 19,277MiB |
+| turboquant | 15.4 | tq 10×(570MiB) + sliding 800MiB | **34,922MiB** |
+
+**Defect: TQ's deep-prefill path allocates ~15.6GB above the q8 lane** —
+~20× its own 790MiB cache saving — while decoding 21% slower. Until that
+allocation is found and fixed, TQ loses on BOTH axes at exactly the depth it
+was built for. q8 stays the default; #48 parks with these receipts.
+
+## Reproduce
+
+```sh
+ML=$REPO/build/dist/lib/mlx.metallib
+MLX_METALLIB_PATH=$ML lem-dev generate --temp 0 --max-tokens 512 \
+  --draft <assistant-snapshot> <e2b-4bit-snapshot>        # pair
+LTHN_MTP_DIAG=1 …                                         # round timings
+LTHN_GPU_TRACE=1 …                                        # fold stage split
+MLX_METALLIB_PATH=$ML /usr/bin/time -l lem-dev generate --temp 0 \
+  --max-tokens 512 --context 32768 --kv-cache turboquant \
+  --prompt-file deep.txt <snapshot>                       # KV matrix leg
+```
