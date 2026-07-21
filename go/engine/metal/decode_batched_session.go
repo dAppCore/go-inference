@@ -1375,7 +1375,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	// failed recording re-arms only when the key changes.
 	var vsReplay *verifyStackICB
 	if stackLane && foldDFFMax > 0 && hSlab != nil {
-		vsKey := s.verifyStackKeyFor(K, basePos, inRows[0], outRows[0], offBuf[0], hSlab, mlpNormSlab, gateSlab, upSlab, gatedSlab, downSlab, attnNormSlab, qSlab, attnSlab, attnOutSlab, kStage, vStage)
+		vsKey := s.verifyStackKeyFor(K, basePos, inRows, outRows, offBuf, inRows[0], outRows[0], offBuf[0], hSlab, mlpNormSlab, gateSlab, upSlab, gatedSlab, downSlab, attnNormSlab, qSlab, attnSlab, attnOutSlab, kStage, vStage)
 		if vs := s.verifyStack[K]; vs != nil {
 			if vs.key == vsKey {
 				vsReplay = vs
@@ -1445,6 +1445,47 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// after the interior: both row sets on the input slab (the
 			// in-place degeneration from layer 2 on).
 			enc = trace.checkpoint(enc, "stack.replay")
+			if mtpDiagForTest && icbK != nil {
+				seen := map[uintptr]bool{}
+				for _, r := range vsReplay.resident {
+					seen[uintptr(r.GetID())] = true
+				}
+				check := func(name string, mli int, b metal.MTLBuffer) {
+					if b != nil && !seen[uintptr(b.GetID())] {
+						nativeTraceLog(core.Sprintf("verify-stack UNDECLARED %s layer=%d buf=%x\n", name, mli, uintptr(b.GetID())))
+					}
+				}
+				for mli := 1; mli < len(s.specs)-1; mli++ {
+					check("kCache", mli, icbK[mli])
+					check("vCache", mli, icbV[mli])
+					if q := s.icb.kvQ8; q != nil {
+						if mli < len(q.kScales) {
+							check("kScale", mli, q.kScales[mli])
+						}
+						if mli < len(q.vScales) {
+							check("vScale", mli, q.vScales[mli])
+						}
+					}
+				}
+				check("kStage", -1, kStage)
+				check("vStage", -1, vStage)
+				check("hSlab", -1, hSlab)
+				check("qSlab", -1, qSlab)
+				check("attnSlab", -1, attnSlab)
+				check("attnOutSlab", -1, attnOutSlab)
+				check("mlpNormSlab", -1, mlpNormSlab)
+				check("gateSlab", -1, gateSlab)
+				check("upSlab", -1, upSlab)
+				check("gatedSlab", -1, gatedSlab)
+				check("downSlab", -1, downSlab)
+				check("attnNormSlab", -1, attnNormSlab)
+				for ri := 0; ri < K; ri++ {
+					check("offBuf", ri, offBuf[ri])
+					check("inRows", ri, inRows[ri])
+					check("outRows", ri, outRows[ri])
+				}
+				nativeTraceLog("verify-stack resident sweep done\n")
+			}
 			vsReplay.executeInto(enc, basePos, pleSlabBuf)
 			readRows, outRows = inRows, inRows
 			readOff = rowOff
@@ -2342,6 +2383,23 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		}
 	}
 	hostSpan("reloadKV", reloadStart, K)
+	if verifyStackRowHashArmed && icbK != nil && s.verifyFoldSmallK {
+		for _, mli := range []int{4, 9} {
+			if mli < len(icbK) && icbK[mli] != nil {
+				rb := s.icb.rowBytes[mli]
+				kb := unsafe.Slice((*byte)(icbK[mli].Contents()), 31*rb)
+				vb := unsafe.Slice((*byte)(icbV[mli].Contents()), 31*rb)
+				var hk, hv uint64
+				for _, x := range kb[26*rb : 31*rb] {
+					hk = hk*131 + uint64(x)
+				}
+				for _, x := range vb[26*rb : 31*rb] {
+					hv = hv*131 + uint64(x)
+				}
+				nativeTraceLog(core.Sprintf("rowhash L%d basePos=%d k=%x v=%x\n", mli, basePos, hk, hv))
+			}
+		}
+	}
 
 	if readResult {
 		if readLastOnly {

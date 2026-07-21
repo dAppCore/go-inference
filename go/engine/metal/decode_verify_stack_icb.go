@@ -76,13 +76,16 @@ import (
 // The banked per-layer tail lane keeps priority when armed (LTHN_VERIFY_ICB=1).
 
 // verifyStackICBDisabled: the lane is OPT-IN (LTHN_VERIFY_STACK_ICB=1) until
-// its intermittent replay divergence is fixed — the real-checkpoint parity run
-// (TestRealE2BVerifyStackICBTokensMatchLive) fails nondeterministically
-// (~1 in 3, always the same signature: token 56 picks 2480 where live picks
-// 496), which is a race shape — a recorded-interior read unfenced against a
-// prior write, or a per-pass rebind applied while a replay is in flight — not
-// a numeric drift. Byte-identity to the live fold is the lane's contract; it
-// flips default-on when that parity run holds under -count=10.
+// the ENGINE's own re-engagement bistability is fixed — the real-checkpoint
+// parity run (TestRealE2BVerifyStackICBTokensMatchLive) flips a near-tied
+// token (~1 in 2, 2480 vs 496) with the lane force-disabled in BOTH arms
+// (TestRealE2BVerifyStackKVDiff LTHN_KVDIFF_BOTH_LIVE=1: 4/10, both
+// directions), KV cache bytes byte-identical, heavy host-side logging
+// suppressing it — a timing-sensitive nondeterminism in the LIVE MTP path
+// around the plain-stretch boundary (LTHN_MTP_REENGAGE=0 → 10/10 stable),
+// not a replay defect. The lane's replay is byte-faithful; the parity gate
+// cannot hold against a bistable reference, so the lane waits opt-in until
+// the engine flake is root-caused and the gate holds under -count=10.
 //
 // RECEIPT (e2b 4-bit + bf16 assistant, K=6 blocks, same prompt): the interior
 // records as ~656 commands and replays with ONE execute; traced GPU per verify
@@ -114,6 +117,11 @@ type verifyStackKey struct {
 	staged, multiQ        bool
 	inPacked, outPacked   uintptr
 	offPacked             uintptr
+	// rowsDigest folds EVERY per-row buffer identity (inRows, outRows, offBuf
+	// across all K rows, in order) into the key: the recording bakes each
+	// row's binds, and a probe-K resize can churn rows 1..K-1 while row 0
+	// survives — a single-row key then replays against stale row buffers.
+	rowsDigest uintptr
 	hSlab, mlpNormSlab    uintptr
 	gateSlab, upSlab      uintptr
 	gatedSlab, downSlab   uintptr
@@ -313,11 +321,18 @@ func (r *verifyStackRecorder) fail() {
 // overlapNext records the next command WITHOUT a barrier — for an independent
 // sibling of a producer whose first consumer already barriered it (K/V
 // projections after Q, up after gate — the arch recorder's proven set).
+// LTHN_VERIFY_STACK_ALLBARRIERS=1 defeats every relaxation (the race-hunt
+// instrument: full-barrier recordings isolate whether a claimed-disjoint
+// sibling pair actually collides).
 func (r *verifyStackRecorder) overlapNext() {
-	if r != nil {
+	if r != nil && !verifyStackAllBarriers {
 		r.overlap = true
 	}
 }
+
+var verifyStackAllBarriers = os.Getenv("LTHN_VERIFY_STACK_ALLBARRIERS") == "1"
+
+var verifyStackRowHashArmed = os.Getenv("LTHN_VERIFY_STACK_ROWHASH") == "1"
 
 func (r *verifyStackRecorder) addResident(b metal.MTLBuffer) {
 	if b == nil {
@@ -1004,8 +1019,18 @@ func (s *archDecodeState) verifyStackLaneShape(K int, icbSession bool) bool {
 
 // verifyStackKeyFor derives this pass's validity key: the slab world plus the
 // basePos-dependent shape phase (staged sliding landing, multi-query globals).
-func (s *archDecodeState) verifyStackKeyFor(K, basePos int, inPacked, outPacked, offPacked, hSlab, mlpNormSlab, gateSlab, upSlab, gatedSlab, downSlab, attnNormSlab, qSlab, attnSlab, attnOutSlab, kStage, vStage metal.MTLBuffer) verifyStackKey {
+func (s *archDecodeState) verifyStackKeyFor(K, basePos int, inRows, outRows, offRows []metal.MTLBuffer, inPacked, outPacked, offPacked, hSlab, mlpNormSlab, gateSlab, upSlab, gatedSlab, downSlab, attnNormSlab, qSlab, attnSlab, attnOutSlab, kStage, vStage metal.MTLBuffer) verifyStackKey {
+	digest := uintptr(2166136261)
+	fold := func(rows []metal.MTLBuffer) {
+		for i := 0; i < K && i < len(rows); i++ {
+			digest = (digest ^ bufID(rows[i])) * 16777619
+		}
+	}
+	fold(inRows)
+	fold(outRows)
+	fold(offRows)
 	return verifyStackKey{
+		rowsDigest: digest,
 		k: K, dModel: s.dModel, layers: len(s.specs),
 		staged:   s.slidingWindow > 0 && basePos+K > s.slidingWindow,
 		multiQ:   basePos+K < sdpa2PassMinKV,

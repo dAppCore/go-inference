@@ -19,7 +19,7 @@ import (
 // unengaged parity proves nothing.
 func TestRealE2BVerifyStackICBTokensMatchLive(t *testing.T) {
 	if os.Getenv("LTHN_VERIFY_STACK_ICB") != "1" {
-		t.Skip("known intermittent replay divergence (~1 in 3, token 56: 2480 vs live 496 — a race shape, see verifyStackICBDisabled) — set LTHN_VERIFY_STACK_ICB=1 to run; flips always-on when the parity holds under -count=10")
+		t.Skip("the ENGINE's re-engagement bistability flips a near-tied token with the lane disabled in both arms (see verifyStackICBDisabled + TestRealE2BVerifyStackKVDiff) — set LTHN_VERIFY_STACK_ICB=1 to run; flips always-on when the engine flake is fixed and this holds under -count=10")
 	}
 	requireNativeRuntime(t)
 	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-e2b-it-4bit")
