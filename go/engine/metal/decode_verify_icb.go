@@ -54,9 +54,10 @@ import (
 // executeCommands (~33/pass) + the recorded all-prior barrier drains
 // (~13/layer) cost what the recorded ops save — the chained decode lane's
 // ~3µs/op economics come from ONE execute per ~700-op token, not one per
-// 14-op layer tail. The winning shape is recording the WHOLE layer stack
-// (attention + tail, one execute per verify pass, pos/N rebinds) — blocked on
-// the staged-sliding landing's per-pass slot offsets, priced separately.
+// 14-op layer tail. The whole-layer-stack shape (attention + tail, one
+// execute per verify pass, pos/N rebinds — the staged-sliding slot offsets
+// resolved by per-pass command rebinds) is BUILT as the default-on lane in
+// decode_verify_stack_icb.go; its own receipt lives there.
 var verifyTailICBDisabled = os.Getenv("LTHN_VERIFY_ICB") != "1"
 
 // verifyTailICBDisabledForTest forces the live tail encodes — the A/B lever for
