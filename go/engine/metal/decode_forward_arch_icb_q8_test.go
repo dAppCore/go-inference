@@ -9,9 +9,11 @@ import (
 	"math"
 	"os"
 	"testing"
+	"unsafe"
 
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"github.com/tmc/apple/metal"
 )
 
 // newKVQ8ICBFixture builds a GLOBAL-attention quant session at a q8-qualifying
@@ -1076,4 +1078,319 @@ func TestKVQ8ICBVerifyInterleaveDeepByteExact(t *testing.T) {
 		}
 	}
 	t.Logf("deep q8 interleave verify byte-identical to sequential over %d rows at basePos=%d", len(draft), len(warm))
+}
+
+// newKVQ8SlidingICBFixtureLen is newKVQ8ICBFixtureLen with the first two
+// layers as SLIDING owners over an 8-row window (#69): the bounded ring
+// allocation, the slot-wrapped q8 store rebinds, and the window-capped q8
+// SDPA reads all engage, alongside one global q8 layer as the control.
+func newKVQ8SlidingICBFixtureLen(t testing.TB, maxLen int) *ArchSession {
+	return newKVQ8SlidingICBFixtureWin(t, maxLen, 8)
+}
+
+func newKVQ8SlidingICBFixtureWin(t testing.TB, maxLen, window int) *ArchSession {
+	t.Helper()
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 256, 256, 64
+	const numLayers, gs, bits = 5, 64, 4
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		SlidingWindow: window,
+		// E2B's shape in miniature: sliding owners, a global owner, and TRAILING
+		// sharers of BOTH attention classes — the sliding sharer reads a q8
+		// sliding owner's ring through KVShareFrom.
+		LayerTypes:        []string{"sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "full_attention"},
+		NumKVSharedLayers: 2,
+		Quantization:      &model.QuantConfig{GroupSize: gs, Bits: bits},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	lm, err := model.Assemble(quantGemma4Tensors(t, arch, gs, bits), arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	sess, err := NewArchQuantSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchQuantSession: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	return sess
+}
+
+// q8CachePlanes snapshots layer li's raw int8 code rows + f32 scale rows —
+// the byte-level oracle for the "batched landing writes the same bytes as the
+// sequential per-token store" contract on the ring.
+func q8CachePlanes(t testing.TB, sess *ArchSession, li int) (kCodes, vCodes, kScales, vScales []byte) {
+	t.Helper()
+	icb := sess.state.icb
+	if icb == nil || !icb.kvQ8.on(li) {
+		t.Fatalf("layer %d is not a q8 layer", li)
+	}
+	kvd := icb.rowBytes[li] / bf16Size
+	rows := icb.cacheRows[li]
+	snap := func(buf metal.MTLBuffer, n int) []byte {
+		return append([]byte(nil), unsafe.Slice((*byte)(buf.Contents()), n)...)
+	}
+	return snap(icb.kCaches[li], rows*kvd), snap(icb.vCaches[li], rows*kvd),
+		snap(icb.kvQ8.kScales[li], rows*(kvd/kvQ8GroupSize)*4), snap(icb.kvQ8.vScales[li], rows*(kvd/kvQ8GroupSize)*4)
+}
+
+// TestKVQ8SlidingRing_BatchedMatchesSequential pins the #69 evicting-chunk
+// contract: a batched prefill that wraps the 8-row ring several times must
+// leave the SAME code + scale bytes the sequential per-token stores leave,
+// and its per-row hiddens must track the sequential session.
+func TestKVQ8SlidingRing_BatchedMatchesSequential(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	batchedSess := newKVQ8SlidingICBFixtureLen(t, 64)
+	seqSess := newKVQ8SlidingICBFixtureLen(t, 64)
+	icb := batchedSess.state.icb
+	if icb == nil || !icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+	if !icb.kvQ8.on(0) || icb.cacheRows[0] != 8 {
+		t.Fatalf("layer 0 must be a q8 SLIDING owner on the 8-row ring (on=%v rows=%d)", icb.kvQ8.on(0), icb.cacheRows[0])
+	}
+	ids := make([]int32, 40) // 5x the window: the ring wraps repeatedly
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % 60)
+	}
+	embs := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := batchedSess.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		embs[i] = append([]byte(nil), emb...)
+	}
+	var out [][]byte
+	var ok bool
+	var err error
+	withAutoreleasePool(func() {
+		out, ok, err = batchedSess.state.stepTokensBatchedDense(embs, 0)
+	})
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDense: %v", err)
+	}
+	if !ok {
+		t.Fatal("prompt-scale batch must ENGAGE the fold on a sliding q8 session (#69)")
+	}
+	worstAll := 0.0
+	for i, id := range ids {
+		hs, serr := seqSess.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(out[i][j], out[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("row %d: batched sliding-q8 prefill diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
+		}
+	}
+	t.Logf("batched sliding-q8 prefill tracked sequential over %d rows: worst |Δ| = %.5g", len(ids), worstAll)
+	// the fold is a token-identity tier (rows-batched projections accumulate in
+	// a different fp order than per-token qmv), so the resting ring is compared
+	// at quantisation grade — dequantised values within the codec's own step of
+	// the sequential ring — not byte equality. A wrong slot, a bf16-stride
+	// offset, or a stale row diverges by whole activations, far past this.
+	kvd := icb.rowBytes[0] / bf16Size
+	dequant := func(codes, scales []byte) []float64 {
+		out := make([]float64, len(codes))
+		for i, c := range codes {
+			sc := math.Float32frombits(uint32(scales[(i/kvQ8GroupSize)*4]) | uint32(scales[(i/kvQ8GroupSize)*4+1])<<8 |
+				uint32(scales[(i/kvQ8GroupSize)*4+2])<<16 | uint32(scales[(i/kvQ8GroupSize)*4+3])<<24)
+			out[i] = float64(int8(c)) * float64(sc)
+		}
+		return out
+	}
+	for li := 0; li < 2; li++ {
+		bk, bv, bks, bvs := q8CachePlanes(t, batchedSess, li)
+		sk, sv, sks, svs := q8CachePlanes(t, seqSess, li)
+		for plane, pair := range map[string][2][]float64{
+			"K": {dequant(bk, bks), dequant(sk, sks)},
+			"V": {dequant(bv, bvs), dequant(sv, svs)},
+		} {
+			worst, scale := 0.0, 0.0
+			for i := range pair[0] {
+				if d := math.Abs(pair[0][i] - pair[1][i]); d > worst {
+					worst = d
+				}
+				if m := math.Abs(pair[1][i]); m > scale {
+					scale = m
+				}
+			}
+			if worst > 0.05*math.Max(scale, 1) {
+				t.Fatalf("layer %d %s ring diverges structurally: worst |Δ|=%g (scale %g, kvd=%d)", li, plane, worst, scale, kvd)
+			}
+		}
+	}
+}
+
+// TestKVQ8SlidingRing_ChainedWrapTracksBF16 drives the CHAINED per-token lane
+// past the ring wrap: the q8 session's hiddens must stay within quantisation
+// distance of the bf16 session at every position, before and after eviction
+// begins — a wrong slot, a bf16-stride scale offset, or a stale ring row
+// produces garbage far outside the bound.
+func TestKVQ8SlidingRing_ChainedWrapTracksBF16(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBOffForTest = true
+	ref := newKVQ8SlidingICBFixtureLen(t, 64)
+	kvQ8ICBOffForTest = false
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	q8 := newKVQ8SlidingICBFixtureLen(t, 64)
+	if q8.state.icb == nil || !q8.state.icb.kvQ8.on(0) || q8.state.icb.cacheRows[0] != 8 {
+		t.Fatal("q8 session must arm the sliding ring")
+	}
+	worstAll := 0.0
+	for i := 0; i < 30; i++ { // window 8: eviction from step 9 on
+		id := int32((i*5 + 2) % 60)
+		hq, err := q8.stepID(id)
+		if err != nil {
+			t.Fatalf("q8 stepID(%d): %v", i, err)
+		}
+		hr, err := ref.stepID(id)
+		if err != nil {
+			t.Fatalf("ref stepID(%d): %v", i, err)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hr); j += 2 {
+			a := float64(bf16ToF32(hq[j], hq[j+1]))
+			b := float64(bf16ToF32(hr[j], hr[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("step %d (pos past wrap=%v): chained sliding-q8 diverges structurally: worst |Δ|=%g (scale %g)", i, i >= 8, worst, hscale)
+		}
+	}
+	t.Logf("chained sliding-q8 tracked bf16 over 30 steps (22 past wrap): worst |Δ| = %.5g", worstAll)
+}
+
+// TestKVQ8SlidingRing_ChunkedPrefillMatchesSequential replays the live
+// prefill's chunk sequence in miniature (#69): chunk 1 fills the ring
+// EXACTLY (no eviction — the bulk landing + multiQ q8 lane), chunk 2 is a
+// small evicting tail (the deferred-ring lane priming a FULL ring from the
+// chunk-1 codes). The E2B deep-prompt failure lived exactly at this seam.
+func TestKVQ8SlidingRing_ChunkedPrefillMatchesSequential(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	const win = 24
+	batchedSess := newKVQ8SlidingICBFixtureWin(t, 96, win)
+	seqSess := newKVQ8SlidingICBFixtureWin(t, 96, win)
+	icb := batchedSess.state.icb
+	if icb == nil || !icb.kvQ8.on(0) || icb.cacheRows[0] != win {
+		t.Fatal("fixture must arm the q8 sliding ring at the test window")
+	}
+	ids := make([]int32, win+40) // chunk 1 = win rows (fills the ring), chunk 2 = 40 evicting rows (>= steelGEMMMinRows: the deferred-ring lane)
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % 60)
+	}
+	embFor := func(sess *ArchSession, id int32) []byte {
+		emb, err := sess.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		return append([]byte(nil), emb...)
+	}
+	runChunk := func(from, to int) [][]byte {
+		embs := make([][]byte, 0, to-from)
+		for _, id := range ids[from:to] {
+			embs = append(embs, embFor(batchedSess, id))
+		}
+		var out [][]byte
+		var ok bool
+		var err error
+		withAutoreleasePool(func() {
+			out, ok, err = batchedSess.state.stepTokensBatchedDense(embs, from)
+		})
+		if err != nil {
+			t.Fatalf("stepTokensBatchedDense(%d..%d): %v", from, to, err)
+		}
+		if !ok {
+			t.Fatalf("chunk %d..%d must ENGAGE the fold", from, to)
+		}
+		rows := make([][]byte, len(out))
+		for i := range out {
+			rows[i] = append([]byte(nil), out[i]...)
+		}
+		return rows
+	}
+	chunk1 := runChunk(0, win)
+	chunk2 := runChunk(win, len(ids))
+	batched := append(chunk1, chunk2...)
+	// a SMALL evicting chunk (below the deferred lane's row floor) must DECLINE
+	// the fold cleanly — never serve it through a hazardous shape.
+	smallEmb := embFor(batchedSess, ids[0])
+	var declinedOK bool
+	var declineErr error
+	withAutoreleasePool(func() {
+		_, declinedOK, declineErr = batchedSess.state.stepTokensBatchedDense([][]byte{smallEmb, smallEmb, smallEmb, smallEmb,
+			smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb,
+			smallEmb, smallEmb, smallEmb, smallEmb, smallEmb}, len(ids))
+	})
+	if declineErr != nil {
+		t.Fatalf("small evicting chunk must decline, not error: %v", declineErr)
+	}
+	if declinedOK {
+		t.Fatal("small evicting q8 sliding chunk must DECLINE the fold (no servable landing shape)")
+	}
+	worstAll := 0.0
+	for i, id := range ids {
+		hs, serr := seqSess.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(batched[i][j], batched[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("row %d (chunk %d): chunked sliding-q8 prefill diverges structurally: worst |Δ|=%g (scale %g)", i, map[bool]int{true: 1, false: 2}[i < win], worst, hscale)
+		}
+	}
+	t.Logf("chunked sliding-q8 prefill tracked sequential over %d rows (2 chunks): worst |Δ| = %.5g", len(ids), worstAll)
 }
