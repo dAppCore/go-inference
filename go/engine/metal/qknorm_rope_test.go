@@ -10,6 +10,8 @@ import (
 	"os"
 	"testing"
 	"unsafe"
+
+	core "dappco.re/go"
 )
 
 func qkNormRopePeriods(rotaryDim int, log2Theta float32) []float32 {
@@ -362,5 +364,87 @@ func TestQknormRope_QKNormRopeBF16_Good(t *testing.T) {
 		if cos < 0.999 {
 			t.Fatalf("%s: fused qk-norm+rope cosine=%.7f < 0.999 — rotation math wrong, not just bf16 rounding", c.name, cos)
 		}
+	}
+}
+
+// TestQknormRope_QkNormGranularity_Good covers the two legal QK-norm shapes (#65) and the
+// absent-weight case — none of which are errors. Pure length arithmetic (qkNormGranularity does no
+// GPU work), so this runs without a native runtime.
+func TestQknormRope_QkNormGranularity_Good(t *testing.T) {
+	const heads, headDim = 8, 64
+	t.Run("absent", func(t *testing.T) {
+		wide, err := qkNormGranularity("q_norm", nil, heads, headDim)
+		if err != nil || wide {
+			t.Fatalf("qkNormGranularity(nil) = wide=%v err=%v, want wide=false err=nil", wide, err)
+		}
+	})
+	t.Run("per-head", func(t *testing.T) {
+		w := make([]byte, headDim*bf16Size)
+		wide, err := qkNormGranularity("q_norm", w, heads, headDim)
+		if err != nil || wide {
+			t.Fatalf("qkNormGranularity(per-head) = wide=%v err=%v, want wide=false err=nil", wide, err)
+		}
+	})
+	t.Run("whole-vector", func(t *testing.T) {
+		w := make([]byte, heads*headDim*bf16Size)
+		wide, err := qkNormGranularity("k_norm", w, heads, headDim)
+		if err != nil || !wide {
+			t.Fatalf("qkNormGranularity(whole-vector) = wide=%v err=%v, want wide=true err=nil", wide, err)
+		}
+	})
+}
+
+// TestQknormRope_QkNormGranularity_Bad proves a length matching NEITHER legal shape refuses with a
+// typed error (the #65 defect: silently truncating/broadcasting a mismatched norm weight corrupts
+// every token with no visible symptom) rather than guessing a granularity.
+func TestQknormRope_QkNormGranularity_Bad(t *testing.T) {
+	const heads, headDim = 8, 64
+	w := make([]byte, (headDim+1)*bf16Size) // matches neither headDim nor heads*headDim
+	wide, err := qkNormGranularity("q_norm", w, heads, headDim)
+	if err == nil {
+		t.Fatalf("qkNormGranularity(mismatched length) = wide=%v err=nil, want a typed error", wide)
+	}
+	if wide {
+		t.Fatal("qkNormGranularity must report wide=false alongside the error")
+	}
+}
+
+// TestQknormRope_IcbQKNormSupported_Good covers the two shapes the ICB recorder's setQKNormRope CAN
+// encode (per-head, absent) — no error, mirroring qkNormGranularity's own Good cases.
+func TestQknormRope_IcbQKNormSupported_Good(t *testing.T) {
+	const heads, headDim = 8, 64
+	if err := icbQKNormSupported("q_norm", nil, heads, headDim); err != nil {
+		t.Fatalf("icbQKNormSupported(absent) = %v, want nil", err)
+	}
+	w := make([]byte, headDim*bf16Size)
+	if err := icbQKNormSupported("k_norm", w, heads, headDim); err != nil {
+		t.Fatalf("icbQKNormSupported(per-head) = %v, want nil", err)
+	}
+}
+
+// TestQknormRope_IcbQKNormSupported_Bad proves a whole-vector weight refuses at ICB record time
+// instead of silently binding through the per-head-only setQKNormRope (see icbQKNormSupported's doc:
+// no registered arch can reach this today — OLMoE, the only whole-vector arch, is entirely MoE, and
+// ICB structurally declines MoE — so this is the enforced guard against a future dense arch, not a
+// currently-observable regression).
+func TestQknormRope_IcbQKNormSupported_Bad(t *testing.T) {
+	const heads, headDim = 8, 64
+	w := make([]byte, heads*headDim*bf16Size) // whole-vector — legal for qkNormGranularity, NOT for ICB
+	err := icbQKNormSupported("q_norm", w, heads, headDim)
+	if err == nil {
+		t.Fatal("icbQKNormSupported(whole-vector) = nil, want a typed refusal")
+	}
+}
+
+// TestQknormRope_IcbQKNormSupported_Ugly proves a genuinely malformed length surfaces
+// qkNormGranularity's OWN error verbatim (icbQKNormSupported does not mask it behind its own
+// whole-vector message).
+func TestQknormRope_IcbQKNormSupported_Ugly(t *testing.T) {
+	const heads, headDim = 8, 64
+	w := make([]byte, (headDim+1)*bf16Size)
+	got := icbQKNormSupported("q_norm", w, heads, headDim)
+	want := core.NewError(core.Sprintf("native.qkNormGranularity: %s length %d matches neither per-head (%d) nor whole-vector (%d)", "q_norm", headDim+1, headDim, heads*headDim))
+	if got == nil || got.Error() != want.Error() {
+		t.Fatalf("icbQKNormSupported(malformed) = %v, want qkNormGranularity's own error %v", got, want)
 	}
 }
