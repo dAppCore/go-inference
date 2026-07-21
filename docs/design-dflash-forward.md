@@ -204,12 +204,12 @@ v1 forward's single-call-per-block shape. Arming proceeds.**
    `headLogitsScratch`, never a reduced head.**
 3. ~~Reconfirm the `spec_generate` round policy against the reference (§5's
    named gap) before arming.~~ **Done — see §7a.**
-4. **NOT flipped — see §7b.** The receipt landed (real paired generate,
-   determinism + losslessness both proven against z-lab/Qwen3-4B-DFlash-b16 +
-   Qwen/Qwen3-4B) but the accept-rate is 0.00: root-caused to a pre-existing
-   bug in `ForwardCaptureHiddens`'s intermediate-layer capture, outside this
-   lane's fence. `DFlashEngineProbe` stays `false` until that's fixed and
-   re-measured.
+4. **Still not flipped — re-measured, see §7c.** §7b's 0.00 receipt pre-dated
+   the target hidden-capture fix that item named as the blocker. That fix has
+   since landed; re-measuring against it (§7c) surfaced and fixed one further,
+   genuinely in-lane bug (an anchor-token phantom context row), but the
+   resulting accept-rate — real and non-zero now, unlike §7b — is still well
+   under a healthy bar. `DFlashEngineProbe` stays `false`.
 5. Perf follow-ups: resident bf16 weights + fused device chain; skip re-fusing
    unchanged context rows across rounds. (Now a shared item with §7b's fix —
    both point at the same incremental-capture direction.)
@@ -385,3 +385,107 @@ prompt tokens `[785, 6722, 315, 9625, 374]` — "The capital of France is" —
 target_layer_ids `[1, 9, 17, 25, 33]`, expected sums logged above), fix, then
 re-run `TestSpeculativeModel_DFlashZLab_RealPairedGenerate` and flip the
 probe once accept-rate is meaningfully above 0.
+
+## 7c. Accept-rate re-measured post-capture-fix; a second, in-lane bug found and fixed
+
+The follow-up §7b named (`ForwardCaptureHiddens`'s intermediate-layer capture)
+has since landed: every one of the 5 aux layers `[1, 9, 17, 25, 33]` — and
+every OTHER decoder layer, 0 through 35, not just those spot-checked — now
+sits within ±0.25% of an independent transformers/torch oracle
+(`capture_hidden_qwen3_oracle_test.go`'s `TestForwardCaptureHiddensQwen3
+AllLayersVsRealOracle`, both the ICB-replay and plain capture routes), and a
+plain greedy decode of "The capital of France is" now completes correctly
+(" Paris"). §7b's own named re-measurement step is due.
+
+**Re-measurement.** `TestSpeculativeModel_DFlashZLab_RealPairedGenerate`
+(the single-prompt, 12-token receipt) now reads a non-zero accept-rate for
+the first time — a real change from §7b's 0.00, and direct evidence the
+capture fix was the blocker that test named. A single 12-token sample is too
+small to read as a stable number, so a second, purpose-built instrument
+(`TestSpeculativeModel_DFlashZLab_AcceptRateSurvey`,
+`assistant_dflash_zlab_acceptrate_test.go`) drives the same real pair over
+several hundred draft/verify rounds across a mixed prompt set (prose
+continuation, narrative, code, arithmetic, a repetitive pangram) and reports
+the accepted-per-round distribution alongside the aggregate.
+
+**Bisection before accepting that number.** Two remaining candidate fault
+classes were checked and both come back clean, ruling them out as
+explanations for a still-low accept-rate:
+
+1. **Target hidden fidelity at the drafter's own tap layers** — already
+   covered by the all-layer re-measurement above; ±0.25% at every one of the
+   5 `target_layer_ids`, not a coarse spot-check.
+2. **The drafter's own forward maths** — `TestDFlashZLabForward_RealCheckpoint`
+   (`dflash_zlab_test.go`) still holds the engine forward within its 0.02
+   relative band against `decode/dflash.ZLabForward`'s independently
+   cross-validated oracle fixture, computed from the same real checkpoint's
+   weights. Untouched by anything in this pass.
+
+**A third, genuinely in-lane bug, found by reading the checkpoint's own
+`spec_generate`/`modeling_dflash.py` line by line rather than re-deriving its
+position convention from description.** Its decode loop tracks one absolute
+position index per already-committed token (`start`, advanced by
+`acceptance_length + 1` each round) and fuses ONLY already-verified hidden
+states strictly BEFORE that index into `target_hidden`
+(`extract_context_feature(...)[:, :acceptance_length+1, :]` — a span that
+ends at the anchor's predecessor; the prefill-time seed is the same
+convention over just the prompt positions). The anchor token — the most
+recently committed one — enters the forward SOLELY through the block's own
+position-0 noise embedding, re-embedded fresh; `apply_rotary_pos_emb`'s
+query-tail slice (`cos[..., -q_len:, :]`) confirms that embedding's RoPE
+position is the anchor's own absolute index, i.e. one past the LAST true
+context row, never overlapping it.
+
+The landed live glue (`zLabDFlashProposer.source`, wired in
+`speculativeModel.generateDFlashZLab`) instead extracts hidden states for
+EVERY position of the running sequence via `ExtractAuxHiddensAllRaw`,
+including the anchor as `targetHiddenRaw`'s own final row, and passed the
+resulting full count straight through as `ctxLen`. Two compounding
+consequences: a phantom context row representing the anchor's mid-stack
+hidden state that the checkpoint's own convention never produces, and —
+because `DFlashZLabForward` ROPEs the block starting exactly at `ctxLen`
+(`dflash_zlab.go`'s own documented convention, itself correct) — the block
+seeded one absolute position further along than the checkpoint places it.
+
+**Fix** (`zLabDFlashProposer.ProposeBlock`, `assistant_dflash_zlab.go`):
+trim that final context row — and decrement the `ctxLen` count that came with
+it — once, at the seam, before the forward call. `ExtractAuxHiddensAllRaw`
+and every `zLabDFlashSource` implementation keep their existing "every
+position of the running sequence" contract unchanged; only this call site
+now knows the anchor's row is not part of the checkpoint's own notion of
+context. `DFlashZLabForward`'s own RoPE maths is untouched — it was already
+correct given a properly-sized `ctxLen`.
+
+**Receipt** (`TestSpeculativeModel_DFlashZLab_AcceptRateSurvey`, the same 8
+prompts, temperature 0, 48 tokens each, before vs after, real
+z-lab/Qwen3-4B-DFlash-b16 + real Qwen/Qwen3-4B, losslessness holding both
+ways — every emitted token byte-identical either side of this change):
+
+| | rounds | proposed | accepted | mean accepted/round | accept-rate | tokens/round |
+|---|---|---|---|---|---|---|
+| before this fix | 204 | 3,060 | 190 | 0.931 | 6.21% | 1.882 |
+| after this fix | 196 | 2,940 | 197 | 1.005 | 6.70% | 1.959 |
+
+Fewer verify rounds needed for the same 384 output tokens either way the
+comparison is read; the fix wins the aggregate and 5 of the 8 individual
+prompts (most clearly on the more deterministic ones — code completion,
+counting — where per-token noise is lowest and a real signal is easiest to
+see through it).
+
+**Honest conclusion.** The fix is real and kept — grounded in the
+checkpoint's own reference code, not a guess, and it measurably helps. But
+mean accepted tokens per round (~1.0) remains well under a healthy bar
+(≥2 of a block) even after it: `DFlashEngineProbe` stays `false`. Both
+remaining candidate fault classes this pass could check — target hidden
+fidelity at every layer, and the drafter's own forward maths against its
+real-checkpoint oracle — are independently clean, so the residual gap is not
+attributable to either. What is left open, named honestly rather than
+guessed at: whether this specific 4B drafter/target pairing simply has low
+inherent quality on open-ended continuation, or some other factor this pass's
+fence did not reach. The v1 forward's full-context-replay-every-round posture
+(vs the checkpoint's own persistent incremental cache) is NOT itself
+suspected — the two are per-row mathematically equivalent operations
+(`fc`/`hidden_norm`/projections are row-independent; only the softmax
+combines rows, over the identical row set either way) — but that equivalence
+has not been checked against a live accept-rate number from the reference
+implementation itself, because none exists to compare against.
