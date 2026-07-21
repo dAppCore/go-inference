@@ -37,6 +37,9 @@ func buildMoEWeights(numExperts, topK, dModel, dFF, expertDFF, salt int) *MoELay
 		PerExpertScale: toBF16Bytes(scale),
 		ExpGateW:       gen(numExperts*expertDFF*dModel, salt+11), ExpUpW: gen(numExperts*expertDFF*dModel, salt+12),
 		ExpDownW: gen(numExperts*dModel*expertDFF, salt+13),
+		// gemma4-shaped: gemma4 always declares NormaliseMoETopK true (#65) — see
+		// quantMoELayerWeightsGuard's identical note (coverage_guard_test.go).
+		NormaliseTopK: true,
 	}
 }
 
@@ -55,7 +58,7 @@ func moeBlockRef(t *testing.T, h []byte, w MoELayerWeights, dModel, dFF int, eps
 		}
 		return b
 	}
-	idx, weights, err := MoERouter(h, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps)
+	idx, weights, err := MoERouter(h, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps, true)
 	if err != nil {
 		t.Fatalf("moeBlockRef router: %v", err)
 	}
@@ -130,6 +133,7 @@ func TestMoEBlock(t *testing.T) {
 		ExpGateW:          toBF16Bytes(mk(numExperts*expertDFF*dModel, 53)),
 		ExpUpW:            toBF16Bytes(mk(numExperts*expertDFF*dModel, 71)),
 		ExpDownW:          toBF16Bytes(mk(numExperts*dModel*expertDFF, 47)),
+		NormaliseTopK:     true, // gemma4-shaped; matches moeBlockRef's own hardcoded MoERouter(..., true) call
 	}
 
 	got, err := MoEBlockBF16(h, w, dModel, dFF, eps)
@@ -683,7 +687,7 @@ func TestMoEBlockBF16CachesLocalDenseWeightsWithExperts(t *testing.T) {
 	const numExperts, topK, dModel, dFF, expertDFF = 4, 2, 64, 128, 96
 	h := toBF16Bytes(syntheticFloat32(dModel, 29))
 	w := moeLayerWeightsFixture(numExperts, topK, dModel, dFF, expertDFF, 3)
-	idx, _, err := MoERouter(h, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, 1e-5)
+	idx, _, err := MoERouter(h, w.RouterNormWScaled, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, 1e-5, true)
 	if err != nil {
 		t.Fatalf("MoERouter: %v", err)
 	}

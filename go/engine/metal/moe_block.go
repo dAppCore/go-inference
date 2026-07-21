@@ -87,6 +87,16 @@ type MoELayerWeights struct {
 	// moeBlockBF16AfterRouterWithBufferPooled's emitGelu closure and its shared-expert branch, the two
 	// places this flag is consulted. gemma4 never sets Arch.Activation, so this is always false for it.
 	UsesSiLU bool
+
+	// NormaliseTopK is the arch's declared router policy (model.Arch.NormaliseMoETopK, #65): true —
+	// softmax over ALL experts then renormalise the gathered top-K to sum to one (mathematically the
+	// SAME value as softmax over just the selected K, MoERouter's shipping shape — mixtral/granitemoe/
+	// gpt-oss/qwenmoe with norm_topk_prob=true); false — softmax over ALL experts then gather the
+	// top-K WITHOUT renormalising (OLMoE's norm_topk_prob=false shape; the combine weights do not sum
+	// to 1). Set from arch.NormaliseMoETopK at load (moeLoadedToBF16), the same DECLARES discipline as
+	// UsesSiLU/arch.Activation. gemma4 always sets it true, so this is byte-unchanged for every
+	// existing gemma4 load.
+	NormaliseTopK bool
 }
 
 // routerNormWeight is the norm weight MoERouter applies internally before the router's score
@@ -151,6 +161,8 @@ func moeLoadedToBF16(e *model.LoadedMoE, arch model.Arch) *MoELayerWeights {
 		// already resolve theirs (projector.go's ffnUsesSiLU). gemma4 never sets Activation, so this
 		// stays false (GELU) for every existing gemma4 load — zero behaviour change.
 		UsesSiLU: ffnUsesSiLU(arch.Activation),
+		// #65: gemma4 always declares NormaliseMoETopK true, so this is byte-unchanged for it.
+		NormaliseTopK: arch.NormaliseMoETopK,
 	}
 }
 
@@ -1400,7 +1412,7 @@ func moeBlockBF16WithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuffe
 	numExperts, topK := w.NumExperts, w.TopK
 	routerNormW := w.routerNormWeight() // zoo layers (no RouterNormWScaled) fall back to PreFFNormW
 
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps); ok || err != nil {
+	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps, w.NormaliseTopK); ok || err != nil {
 		if err != nil {
 			return err
 		}
@@ -1408,7 +1420,7 @@ func moeBlockBF16WithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuffe
 		putRouterDeviceScratch(routerScratch)
 		return err
 	}
-	idx, weights, err := MoERouter(h, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps)
+	idx, weights, err := MoERouter(h, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps, w.NormaliseTopK)
 	if err != nil {
 		return err
 	}
@@ -1440,7 +1452,7 @@ func moeBlockBF16WithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffer
 	// router decision on the raw residual (the router applies its own norm) — or, for a zoo layer
 	// with no router-own norm, on routerNormWeight()'s PreFFNormW fallback (see MoELayerWeights doc).
 	routerNormW := w.routerNormWeight()
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps); ok || err != nil {
+	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterBF16DeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps, w.NormaliseTopK); ok || err != nil {
 		if err != nil {
 			return nil, err
 		}
@@ -1453,7 +1465,7 @@ func moeBlockBF16WithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffer
 		putRouterDeviceScratch(routerScratch)
 		return blockOut, err
 	}
-	idx, weights, err := MoERouter(h, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps)
+	idx, weights, err := MoERouter(h, routerNormW, w.RouterW, w.PerExpertScale, numExperts, topK, dModel, eps, w.NormaliseTopK)
 	if err != nil {
 		return nil, err
 	}
@@ -1529,6 +1541,12 @@ type MoEQuantLayerWeights struct {
 	// already SiLU-correct) before either combine sees it — so this field is moot but still correctly
 	// resolved for one.
 	UsesSiLU bool
+
+	// NormaliseTopK is MoELayerWeights.NormaliseTopK's quant twin — the arch's declared router policy
+	// (model.Arch.NormaliseMoETopK, #65), set from arch.NormaliseMoETopK at load (moeToQuant,
+	// load_shared.go). gemma4 always declares it true, so this is byte-unchanged for every existing
+	// gemma4 load.
+	NormaliseTopK bool
 }
 
 // routerNorm is MoELayerWeights.routerNormWeight() for the quant struct: the norm weight (bytes
@@ -3382,7 +3400,7 @@ func moeBlockQuantWithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuff
 	routerNormW, routerNormView := w.routerNorm() // zoo layers (no RouterNormWScaled) fall back to PreFFNormW
 
 	if quantMoEDeviceRouterBuffersUsable(w, dModel) {
-		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, w.NormaliseTopK)
 		if ok || err != nil {
 			if err != nil {
 				return err
@@ -3396,20 +3414,26 @@ func moeBlockQuantWithBufferOutputInPool(h []byte, hBuf, outputBuf metal.MTLBuff
 			return err
 		}
 	}
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
-		if err != nil {
+	// moeRouterQuantDeviceTopKNoCopyWithBufferInPool's signature is FROZEN (see its own doc,
+	// router.go) — it always assumes normalise=true (the GPU kernel's only order), so a
+	// NormaliseMoETopK=false arch (#65) must skip this tier entirely rather than call it, falling
+	// straight to the host-capable moeRouterQuantWithViews below.
+	if w.NormaliseTopK {
+		if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
+			if err != nil {
+				return err
+			}
+			var idxBuf metal.MTLBuffer
+			if routerScratch != nil {
+				idxBuf = routerScratch.idxBuf
+			}
+			idxView, weightView := quantMoEHostRouterViewsForDeviceBuffers(idx, weights, idxBuf, weightBuf, w, dModel)
+			err = moeBlockQuantAfterRouterWithDeviceIndexBufferOutputInPool(h, hBuf, outputBuf, idxView, idxBuf, weightView, weightBuf, w, dModel, dFF, eps, ownedScratch)
+			putRouterDeviceScratch(routerScratch)
 			return err
 		}
-		var idxBuf metal.MTLBuffer
-		if routerScratch != nil {
-			idxBuf = routerScratch.idxBuf
-		}
-		idxView, weightView := quantMoEHostRouterViewsForDeviceBuffers(idx, weights, idxBuf, weightBuf, w, dModel)
-		err = moeBlockQuantAfterRouterWithDeviceIndexBufferOutputInPool(h, hBuf, outputBuf, idxView, idxBuf, weightView, weightBuf, w, dModel, dFF, eps, ownedScratch)
-		putRouterDeviceScratch(routerScratch)
-		return err
 	}
-	idx, weights, err := moeRouterQuantWithViews(h, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	idx, weights, err := moeRouterQuantWithViews(h, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, w.NormaliseTopK)
 	if err != nil {
 		return err
 	}
@@ -3440,7 +3464,7 @@ func moeBlockQuantWithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffe
 
 	routerNormW, routerNormView := w.routerNorm() // zoo layers (no RouterNormWScaled) fall back to PreFFNormW
 	if quantMoEDeviceRouterBuffersUsable(w, dModel) {
-		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+		weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, w.NormaliseTopK)
 		if ok || err != nil {
 			if err != nil {
 				return nil, err
@@ -3454,20 +3478,24 @@ func moeBlockQuantWithBufferPooledInto(out []byte, h []byte, hBuf metal.MTLBuffe
 			return blockOut, err
 		}
 	}
-	if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
-		if err != nil {
-			return nil, err
+	// see moeBlockQuantWithBufferOutputInPool's identical note: this tier's function has a FROZEN
+	// signature that always assumes normalise=true, so skip it entirely when the arch wants false.
+	if w.NormaliseTopK {
+		if idx, weights, weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKNoCopyWithBufferInPool(h, hBuf, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); ok || err != nil {
+			if err != nil {
+				return nil, err
+			}
+			var idxBuf metal.MTLBuffer
+			if routerScratch != nil {
+				idxBuf = routerScratch.idxBuf
+			}
+			idxView, weightView := quantMoEHostRouterViewsForDeviceBuffers(idx, weights, idxBuf, weightBuf, w, dModel)
+			blockOut, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, hBuf, out, nil, idxView, idxBuf, weightView, weightBuf, w, dModel, dFF, eps, false, useCallerOut, nil)
+			putRouterDeviceScratch(routerScratch)
+			return blockOut, err
 		}
-		var idxBuf metal.MTLBuffer
-		if routerScratch != nil {
-			idxBuf = routerScratch.idxBuf
-		}
-		idxView, weightView := quantMoEHostRouterViewsForDeviceBuffers(idx, weights, idxBuf, weightBuf, w, dModel)
-		blockOut, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, hBuf, out, nil, idxView, idxBuf, weightView, weightBuf, w, dModel, dFF, eps, false, useCallerOut, nil)
-		putRouterDeviceScratch(routerScratch)
-		return blockOut, err
 	}
-	idx, weights, err := moeRouterQuantWithViews(h, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	idx, weights, err := moeRouterQuantWithViews(h, routerNormW, routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, w.NormaliseTopK)
 	if err != nil {
 		return nil, err
 	}
@@ -3484,8 +3512,15 @@ func quantMoEHostRouterViewsForDeviceBuffers(idx []int32, weights []byte, idxBuf
 	return nil, nil
 }
 
+// quantMoEDeviceRouterBuffersUsable is the keystone predicate every device-router lane gates on
+// (decode_forward_arch.go's sharedEncodeEligible/fully-encoded-lane/break-out-flow checks,
+// moe_batch.go, and this file's own tiers): a false here forces the SAFE host-capable router path
+// everywhere, uniformly. !w.NormaliseTopK (#65) declines it because the GPU topK kernel can only
+// implement the always-renormalise order (see moeRouterQuantDeviceTopKWithBufferPooled's doc) —
+// OLMoE's norm_topk_prob=false checkpoint needs the host's softmax-over-all-then-gather-no-renorm
+// instead.
 func quantMoEDeviceRouterBuffersUsable(w MoEQuantLayerWeights, dModel int) bool {
-	if w.TopK <= 0 || w.NumExperts <= 0 || w.ExpertDFF <= 0 {
+	if w.TopK <= 0 || w.NumExperts <= 0 || w.ExpertDFF <= 0 || !w.NormaliseTopK {
 		return false
 	}
 	if _, err := bf16MulScalarPipeline(); err != nil {

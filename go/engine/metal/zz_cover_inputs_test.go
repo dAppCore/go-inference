@@ -213,7 +213,7 @@ func TestCoverBlockDimensionValidators(t *testing.T) {
 
 	qRouter := quantWeightFixture(t, 4, dModel, gs, bits, 13)
 	perExpertScale := toBF16Bytes([]float32{1, 0.75, 0.5, 0.25})
-	if _, _, err := MoERouterQuant(shortX, normB, qRouter, perExpertScale, 4, 2, dModel, gs, bits, eps); err == nil {
+	if _, _, err := MoERouterQuant(shortX, normB, qRouter, perExpertScale, 4, 2, dModel, gs, bits, eps, true); err == nil {
 		t.Fatal("MoERouterQuant: expected x size error")
 	}
 }

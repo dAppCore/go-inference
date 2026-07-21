@@ -30,13 +30,13 @@ func BenchmarkMoERouterTop2Of8(b *testing.B) {
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	b.SetBytes(int64(len(x) + len(normW) + len(routerW)))
-	if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5); err != nil {
+	if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, true); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5); err != nil {
+		if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, true); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -60,7 +60,7 @@ func BenchmarkMoERouterHostSelectTop2Of8(b *testing.B) {
 		if err != nil {
 			return err
 		}
-		_, _ = routerSelect(scoresB, scale, numExperts, topK)
+		_, _ = routerSelect(scoresB, scale, numExperts, topK, true)
 		return nil
 	}
 	if err := run(); err != nil {
@@ -90,7 +90,7 @@ func BenchmarkMoERouterHostSelectScratchTop2Of8(b *testing.B) {
 	defer scratch.Close()
 	b.SetBytes(int64(len(x) + len(normW) + len(routerW)))
 	run := func() error {
-		_, _, err := moeRouterBF16HostSelectWithScratch(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, scratch)
+		_, _, err := moeRouterBF16HostSelectWithScratch(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, scratch, true)
 		return err
 	}
 	if err := run(); err != nil {
@@ -132,7 +132,7 @@ func BenchmarkMoERouterHostScratchPoolAlternatingShapes(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, _, err := moeRouterBF16HostSelectWithScratch(f.x, f.normW, f.routerW, f.scale, f.numExperts, f.topK, f.dModel, 1e-5, scratch); err != nil {
+		if _, _, err := moeRouterBF16HostSelectWithScratch(f.x, f.normW, f.routerW, f.scale, f.numExperts, f.topK, f.dModel, 1e-5, scratch, true); err != nil {
 			putRouterHostScratch(scratch)
 			b.Fatal(err)
 		}
@@ -147,7 +147,7 @@ func BenchmarkMoERouterHostScratchPoolAlternatingShapes(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
-		if _, _, err := moeRouterBF16HostSelectWithScratch(f.x, f.normW, f.routerW, f.scale, f.numExperts, f.topK, f.dModel, 1e-5, scratch); err != nil {
+		if _, _, err := moeRouterBF16HostSelectWithScratch(f.x, f.normW, f.routerW, f.scale, f.numExperts, f.topK, f.dModel, 1e-5, scratch, true); err != nil {
 			putRouterHostScratch(scratch)
 			b.Fatal(err)
 		}
@@ -163,13 +163,13 @@ func BenchmarkMoERouterTop2Of4096(b *testing.B) {
 	normW := toBF16Bytes(syntheticFloat32(dModel, 17))
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 	b.SetBytes(int64(len(x) + len(normW) + len(routerW)))
-	if _, _, err := MoERouter(x, normW, routerW, nil, numExperts, topK, dModel, 1e-5); err != nil {
+	if _, _, err := MoERouter(x, normW, routerW, nil, numExperts, topK, dModel, 1e-5, true); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, _, err := MoERouter(x, normW, routerW, nil, numExperts, topK, dModel, 1e-5); err != nil {
+		if _, _, err := MoERouter(x, normW, routerW, nil, numExperts, topK, dModel, 1e-5, true); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -192,7 +192,7 @@ func BenchmarkMoERouterHostSelectTop2Of4096(b *testing.B) {
 		if err != nil {
 			return err
 		}
-		_, _ = routerSelect(scoresB, nil, numExperts, topK)
+		_, _ = routerSelect(scoresB, nil, numExperts, topK, true)
 		return nil
 	}
 	if err := run(); err != nil {
@@ -216,13 +216,13 @@ func BenchmarkMoERouterQuantTop2Of8(b *testing.B) {
 	routerW := quantWeightFixture(b, numExperts, dModel, groupSize, bits, 43)
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	b.SetBytes(int64(len(x) + len(normW) + len(routerW.Packed) + len(routerW.Scales) + len(routerW.Biases)))
-	if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5); err != nil {
+	if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, true); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5); err != nil {
+		if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, true); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -246,7 +246,7 @@ func BenchmarkMoERouterQuantHostSelectTop2Of8(b *testing.B) {
 		if err != nil {
 			return err
 		}
-		_, _ = routerSelect(scoresB, scale, numExperts, topK)
+		_, _ = routerSelect(scoresB, scale, numExperts, topK, true)
 		return nil
 	}
 	if err := run(); err != nil {
@@ -276,7 +276,7 @@ func BenchmarkMoERouterQuantHostSelectScratchTop2Of8(b *testing.B) {
 	defer scratch.Close()
 	b.SetBytes(int64(len(x) + len(normW) + len(routerW.Packed) + len(routerW.Scales) + len(routerW.Biases)))
 	run := func() error {
-		_, _, err := moeRouterQuantHostSelectWithScratch(x, normW, bufView{}, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, scratch)
+		_, _, err := moeRouterQuantHostSelectWithScratch(x, normW, bufView{}, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, scratch, true)
 		return err
 	}
 	if err := run(); err != nil {
