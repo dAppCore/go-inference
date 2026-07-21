@@ -5,6 +5,7 @@
 package native
 
 import (
+	"os"
 	"time"
 	"unsafe"
 
@@ -1406,6 +1407,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 				s.verifyStackTried[K] = vsKey
 				s.verifyStackRec = newVerifyStackRecorder(len(s.specs), K, vsKey, pleSlabBuf)
+				if s.verifyStackRec != nil && os.Getenv("LTHN_VERIFY_STACK_DEBUG") != "" {
+					nativeTraceLog(core.Sprintf("verify-stack record arm: k=%d basePos=%d\n", K, basePos))
+				}
 			}
 		}
 	}
