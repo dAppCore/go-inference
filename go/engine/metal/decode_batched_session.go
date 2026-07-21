@@ -796,21 +796,22 @@ func encSDPADecodeQ8ForcedBlocksAt(enc metal.MTLComputeCommandEncoder, sc attnSc
 // straight into the cache, norm+rope/value-norm run there exactly as the bf16
 // path runs them on the cache row in place, then ONE encKVQ8StoreRows
 // (rows=1) quantises the staged row into the int8 cache + f32 group scale at
-// this row's own offset — the SAME store math (lthn_kv_q8_store_rows_bf16)
+// this row's own ring slot — the SAME store math (lthn_kv_q8_store_rows_bf16)
 // the K-row fold's landing already calls, just at N=1. The SDPA read is
 // encSDPADecodeQ8At — the SAME q8 kernel pair the fold's own per-row corner
-// already calls (line ~1434) — so a q8-owner interleave row is byte-identical
-// to sequential stepID: every OTHER op (Q projection/rope, O projection,
+// already calls — so a q8-owner interleave row is byte-identical to
+// sequential stepID: every OTHER op (Q projection/rope, O projection,
 // residual) is the UNCHANGED proj.project/encQKNormRopeAt/encResidualMaybeNormAt
-// single-row call encAttnHalfKVInputAt itself makes. q8 only arms on GLOBAL
-// owner layers (TestKVQ8ICBDecodeTracksBF16 pins this), so there is no ring
-// slot / sliding-window arithmetic to carry here.
+// single-row call encAttnHalfKVInputAt itself makes. ringRows is the owner's
+// ALLOCATED capacity (#69): a bounded sliding ring slot-wraps the store and
+// window-caps the read; a linear cache (ringRows == maxLen) passes both
+// through untouched, exactly as prepareStepRebind's own modulo does.
 func encAttnHalfKVQ8InputAt(
 	enc metal.MTLComputeCommandEncoder,
 	x metal.MTLBuffer, xOff uint, kCacheBuf, vCacheBuf, kScales, vScales metal.MTLBuffer, offBuf, h metal.MTLBuffer, hOff, offOff uint,
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
-	dModel, nHeads, nKVHeads, headDim, pos, rotaryDim, q8Blocks int, base, scale, ropeScale, eps float32,
+	dModel, nHeads, nKVHeads, headDim, pos, ringRows, rotaryDim, q8Blocks int, base, scale, ropeScale, eps float32,
 	ropeFreqs metal.MTLBuffer,
 ) error {
 	if sc.kProj == nil || sc.vProj == nil {
@@ -872,9 +873,18 @@ func encAttnHalfKVQ8InputAt(
 		}
 	}
 	// the quantise-store hop: rows=1, the fold's own K-row store at N=1 — same
-	// kernel, same per-group scale formula, only the row count differs.
-	rowOff := uint(pos * kvDim)
-	scaleOff := uint(pos * (kvDim / kvQ8GroupSize) * 4)
+	// kernel, same per-group scale formula, only the row count differs. The
+	// slot wraps into the owner's allocated capacity (#69) — a bounded sliding
+	// ring evicts, a linear cache is untouched (pos < ringRows always).
+	slot, n := pos, pos+1
+	if ringRows > 0 {
+		slot = pos % ringRows
+		if n > ringRows {
+			n = ringRows
+		}
+	}
+	rowOff := uint(slot * kvDim)
+	scaleOff := uint(slot * (kvDim / kvQ8GroupSize) * 4)
 	if err := encKVQ8StoreRows(enc, sc.kProj, kCacheBuf, rowOff, kScales, scaleOff, 1, kvDim); err != nil {
 		return err
 	}
@@ -882,7 +892,7 @@ func encAttnHalfKVQ8InputAt(
 		return err
 	}
 	if err := encSDPADecodeQ8ForcedBlocksAt(enc, sc, sc.q, 0, kCacheBuf, vCacheBuf, kScales, vScales, sc.attn, 0,
-		nHeads, nKVHeads, headDim, pos+1, q8Blocks,
+		nHeads, nKVHeads, headDim, n, q8Blocks,
 		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale); err != nil {
 		return err
 	}
@@ -905,7 +915,7 @@ func encAttnHalfSharedKVQ8At(
 	x metal.MTLBuffer, xOff uint, attendK, attendV, kScales, vScales, offBuf, h metal.MTLBuffer, hOff, offOff uint,
 	attnNormW, postAttnNorm, qNorm bufView,
 	sc attnScratch, proj projector,
-	dModel, nHeads, nKVHeads, headDim, pos, rotaryDim, q8Blocks int, base, scale, ropeScale, eps float32,
+	dModel, nHeads, nKVHeads, headDim, pos, ringRows, rotaryDim, q8Blocks int, base, scale, ropeScale, eps float32,
 	ropeFreqs metal.MTLBuffer,
 ) error {
 	kvDim := nKVHeads * headDim
@@ -929,8 +939,14 @@ func encAttnHalfSharedKVQ8At(
 			return err
 		}
 	}
+	n := pos + 1
+	if ringRows > 0 && n > ringRows {
+		// bounded sliding ring (#69): the whole physical buffer IS the live
+		// window once full — cap the scan, exactly as the bf16 twin's slideW.
+		n = ringRows
+	}
 	if err := encSDPADecodeQ8ForcedBlocksAt(enc, sc, sc.q, 0, attendK, attendV, kScales, vScales, sc.attn, 0,
-		nHeads, nKVHeads, headDim, pos+1, q8Blocks,
+		nHeads, nKVHeads, headDim, n, q8Blocks,
 		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale); err != nil {
 		return err
 	}
@@ -1414,6 +1430,29 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	if foldDFFMax > 0 && K >= steelGEMMMinRows && !stagedRingDisabledForTest && s.rowAttnCaps == nil {
 		stagedDeferred = make([]bool, len(s.specs))
 	}
+	// #69: an EVICTING q8 sliding chunk is only servable on the deferred-ring
+	// lane (pre-batch window primed from codes, staged rows landed in bulk
+	// after every reader) — any other fold shape would land the ring during
+	// the owner's layer pass and a sharer would read post-eviction state for
+	// early rows. When that lane can't run (small chunk, missing kernels),
+	// decline the WHOLE fold pre-encoder: the per-row interleave below is
+	// ring-aware and byte-identical to sequential.
+	if s.icb != nil && s.icb.hasKVQ8() {
+		for li := range s.specs {
+			if !s.specs[li].OwnsCache() || !s.icb.kvQ8.on(li) {
+				continue
+			}
+			rows := s.icb.cacheRows[li]
+			if rows <= 0 || rows >= s.maxLen || basePos+K <= rows {
+				continue // linear cache, or a non-evicting chunk on the ring
+			}
+			if stagedDeferred == nil || batchedRopeDisabledForTest || !gpuHasQKNormRopeRows() ||
+				!gpuHasSDPAMultiQRing(headDimOf(s.specs[li], s.headDim)) || !gpuHasCopyKernel() ||
+				!gpuHasKVQ8DequantRows() || !gpuHasKVQ8StoreRows() {
+				return nil, false, nil
+			}
+		}
+	}
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
 	trace := newBatchedGPUTrace(cb, "prologue") // LTHN_GPU_TRACE: per-stage GPU attribution
@@ -1614,13 +1653,26 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			}
 			kvQ8Layer := s.icb != nil && s.icb.kvQ8.on(li)
 			kvTQLayer := s.icb != nil && s.icb.kvTQ.on(li)
+			// q8 sliding owner (#69): the attends are already ring-correct — the
+			// per-row q8 SDPA takes the window-capped n and the multiQ q8 kernel
+			// only engages below the wrap — and a no-eviction chunk's linear
+			// store offsets ARE the ring slots (basePos+K <= window), so the
+			// global bulk landing serves it verbatim. Only an evicting chunk
+			// differs: the per-row loop quantise-stores each roped stage row at
+			// its own slot, the same slot math the bf16 staged landing walks.
+			// #69: an evicting q8 sliding chunk is guaranteed deferred-ring here —
+			// the pre-encoder gate above declined the fold for any shape the
+			// deferred lane can't serve.
+			kvQ8Sliding := kvQ8Layer && slideW > 0
 			if ownsCache {
 				kDst, vDst, dstOff := layerK, layerV, uint(basePos*kvDim*bf16Size)
-				if kvQ8Layer {
-					// q8 global owner (#367): project into the shared stage slabs,
-					// rope/norm there, then ONE rows-store quantises the K rows
-					// into the int8 cache + scale rows — the batch attends its own
+				if kvQ8Layer && !(kvQ8Sliding && deferredRing) {
+					// q8 owner (#367, #69): project into the shared stage slabs,
+					// rope/norm there, then rows-stores quantise the K rows into
+					// the int8 cache + scale rows — the batch attends its own
 					// rows post-round-trip, exactly as the sequential replay does.
+					// (A deferred-ring sliding q8 chunk projects into the layer
+					// stage below instead — its landing runs after every reader.)
 					kDst, vDst, dstOff = kStage, vStage, 0
 				} else if kvTQLayer {
 					// TQ global owner (#48): project into the shared stage slabs,
@@ -1700,17 +1752,20 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// directly, so a q8 owner needs NO mirrors and NO dequant dispatches on
 			// that route — the ensure below runs only for the composition/bf16-flash
 			// fallbacks.
-			flashQ8 := ownerQ8 && flashPromptEnabled && flashQ8Enabled &&
+			flashQ8 := ownerQ8 && slideW == 0 && flashPromptEnabled && flashQ8Enabled &&
 				!flashQ8OffForTest && flashQ8Usable(lhd, basePos+K)
 			// q8 staging (#375): the per-chunk prefix dequant lands in the shared
 			// ping-pong staging pair instead of a per-layer full-cacheRows mirror
 			// plane — same dequant kernel, same flash/GEMM consumers, ~one plane
 			// pair of memory instead of one per global owner (the 31B@256K
 			// ingest-peak cut). LTHN_Q8_STAGE=0 restores the mirror planes.
-			q8Stage := ownerQ8 && !flashQ8 && q8StageEnabled && !q8StageOffForTest &&
+			q8Stage := ownerQ8 && slideW == 0 && !flashQ8 && q8StageEnabled && !q8StageOffForTest &&
 				gpuHasKVQ8DequantRows()
 			var q8GEMMK, q8GEMMV metal.MTLBuffer
-			if ownerQ8 && !flashQ8 && !q8Stage && gpuHasKVQ8DequantRows() {
+			if ownerQ8 && slideW == 0 && !flashQ8 && !q8Stage && gpuHasKVQ8DequantRows() {
+				// global owners only: the GEMM prefix below never serves a sliding
+				// layer (useGEMMSDPA requires slideW == 0), so a sliding q8 owner
+				// must not pay these window-sized mirror allocations.
 				q8GEMMK, q8GEMMV, _ = s.icb.ensureQ8Mirrors(ownIdx)
 			}
 			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMKnee() &&
@@ -1729,11 +1784,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				if rec := s.verifyStackRec; rec.active() {
 					rec.recQKNormRopeRows(qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.ropeScale, s.eps)
 				}
-				if ownsCache && kvQ8Layer {
-					// q8 global owner (#367): rope/norm the STAGED rows in place, then
+				if ownsCache && kvQ8Layer && (!kvQ8Sliding || !staged) {
+					// q8 owner (#367, #69): rope/norm the STAGED rows in place, then
 					// ONE rows-store each quantises them into the int8 cache rows +
 					// scale rows at basePos — the same bytes the sequential replay's
-					// per-token store lands, chunk-wide.
+					// per-token store lands, chunk-wide. A non-evicting sliding chunk
+					// lands here too: below the wrap, linear rows ARE the ring slots.
+					// (An evicting sliding chunk skips to the per-row slot stores.)
 					if err = encQKNormRopeRows(enc, kStage, s.lb[li].kNorm.buf, kStage, 0, s.lb[li].kNorm.off, 0, kvDim, kvDim, offBuf[0], layerRopeFreqs, K, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
@@ -1891,30 +1948,60 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				if ownsCache && (staged || !batchedRope) {
 					kvRow := uint(slot * kvDim * bf16Size)
 					kSrc, vSrc, srcOff := layerK, layerV, kvRow
-					if staged {
+					if staged || kvQ8Sliding {
 						kSrc, vSrc, srcOff = kStage, vStage, uint(i*kvDim*bf16Size)
 					}
-					if err = encQKNormRopeAt(enc, kSrc, s.lb[li].kNorm.buf, layerK, srcOff, s.lb[li].kNorm.off, kvRow, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
-						endEncodingFast(enc)
-						return nil, false, err
-					}
-					if rec := s.verifyStackRec; rec.active() {
-						// the staged landing writes each row's ring slot — a
-						// per-pass per-row rebind (slot = (basePos+row) % window).
-						rec.recQKNormRopeAt(kSrc, s.lb[li].kNorm.buf, layerK, srcOff, s.lb[li].kNorm.off, kvRow, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps)
-						rec.markRebindLast(layerK, kvRow, vsRebindSlideSlot, kvDim*bf16Size, i, slideW)
-					}
-					if s.valueNormOnes != nil {
-						if err = encRMSNormRowsBF16(enc, vSrc, s.valueNormOnes, layerV, srcOff, 0, kvRow, lkv, lhd, s.eps); err != nil {
+					if kvQ8Sliding {
+						// evicting sliding chunk (#69): rope/norm row i IN the stage,
+						// then one rows=1 store each quantises it into its ring slot —
+						// the same slot walk the bf16 staged landing writes, applied to
+						// the code row AND the scale row. Outside the recorded shape.
+						if rec := s.verifyStackRec; rec.active() {
+							rec.fail()
+						}
+						if err = encQKNormRopeAt(enc, kSrc, s.lb[li].kNorm.buf, kSrc, srcOff, s.lb[li].kNorm.off, srcOff, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
+						if s.valueNormOnes != nil {
+							if err = encRMSNormRowsBF16(enc, vSrc, s.valueNormOnes, vSrc, srcOff, 0, srcOff, lkv, lhd, s.eps); err != nil {
+								endEncodingFast(enc)
+								return nil, false, err
+							}
+						}
+						slotRowOff := uint(slot * kvDim)
+						slotScaleOff := uint(slot * (kvDim / kvQ8GroupSize) * 4)
+						if err = encKVQ8StoreRowsAt(enc, kSrc, srcOff, layerK, slotRowOff, s.icb.kvQ8.kScales[li], slotScaleOff, 1, kvDim); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
+						if err = encKVQ8StoreRowsAt(enc, vSrc, srcOff, layerV, slotRowOff, s.icb.kvQ8.vScales[li], slotScaleOff, 1, kvDim); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
+					} else {
+						if err = encQKNormRopeAt(enc, kSrc, s.lb[li].kNorm.buf, layerK, srcOff, s.lb[li].kNorm.off, kvRow, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
 							endEncodingFast(enc)
 							return nil, false, err
 						}
 						if rec := s.verifyStackRec; rec.active() {
-							// rides the row's K-rope fence: disjoint staging
-							// reads, disjoint K/V slot writes.
-							rec.overlapNext()
-							rec.recRMSRows(vSrc, s.valueNormOnes, layerV, srcOff, 0, kvRow, lkv, lhd, s.eps)
-							rec.markRebindLast(layerV, kvRow, vsRebindSlideSlot, kvDim*bf16Size, i, slideW)
+							// the staged landing writes each row's ring slot — a
+							// per-pass per-row rebind (slot = (basePos+row) % window).
+							rec.recQKNormRopeAt(kSrc, s.lb[li].kNorm.buf, layerK, srcOff, s.lb[li].kNorm.off, kvRow, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps)
+							rec.markRebindLast(layerK, kvRow, vsRebindSlideSlot, kvDim*bf16Size, i, slideW)
+						}
+						if s.valueNormOnes != nil {
+							if err = encRMSNormRowsBF16(enc, vSrc, s.valueNormOnes, layerV, srcOff, 0, kvRow, lkv, lhd, s.eps); err != nil {
+								endEncodingFast(enc)
+								return nil, false, err
+							}
+							if rec := s.verifyStackRec; rec.active() {
+								// rides the row's K-rope fence: disjoint staging
+								// reads, disjoint K/V slot writes.
+								rec.overlapNext()
+								rec.recRMSRows(vSrc, s.valueNormOnes, layerV, srcOff, 0, kvRow, lkv, lhd, s.eps)
+								rec.markRebindLast(layerV, kvRow, vsRebindSlideSlot, kvDim*bf16Size, i, slideW)
+							}
 						}
 					}
 				}
@@ -1953,6 +2040,29 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if deferredRing {
 				kSt, vSt := s.denseBatch.layerStage(ownIdx, len(s.specs), K, foldKVDimMax)
 				ringLive := min(basePos, slideW)
+				if s.icb != nil && s.icb.kvQ8.on(ownIdx) {
+					// q8 owner (#69): the two-segment ring SDPA reads bf16, so the
+					// pre-batch window dequantises into the owner's window-sized
+					// mirrors ONCE per chunk (at the owner's own pass — sharers
+					// reuse the primed pair), and every ring reader takes the
+					// mirrors in place of the code planes.
+					mk, mv, merr := s.icb.ensureQ8Mirrors(ownIdx)
+					if merr != nil {
+						endEncodingFast(enc)
+						return nil, false, merr
+					}
+					if ownsCache && ringLive > 0 {
+						if err = encKVQ8DequantRows(enc, ownerK, s.icb.kvQ8.kScales[ownIdx], mk, ringLive, kvDim); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
+						if err = encKVQ8DequantRows(enc, ownerV, s.icb.kvQ8.vScales[ownIdx], mv, ringLive, kvDim); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
+					}
+					ownerK, ownerV = mk, mv
+				}
 				if flashPromptEnabled && flashWinEnabled && !flashWinOffForTest && K >= flashWinMinRows && flashWinUsable(lhd) {
 					// window flash (#375 phase 4): the query tile streams its own
 					// ≤ W+BQ key span once, shared by 32 queries — the multiQ ring
@@ -2131,7 +2241,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					if err = encAttnHalfKVQ8InputAt(enc, readRows[i], readOff[i], layerK, layerV,
 						s.icb.kvQ8.kScales[li], s.icb.kvQ8.vScales[li], offBuf[i], hTarget, hOff, offOff[i],
 						s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
-						s.dModel, s.nHeads, lkv, lhd, basePos+i, rotDim, q8Blocks, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+						s.dModel, s.nHeads, lkv, lhd, basePos+i, s.icb.cacheRows[li], rotDim, q8Blocks, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
 					}
@@ -2153,7 +2263,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					if err = encAttnHalfSharedKVQ8At(enc, readRows[i], readOff[i], kC, vC,
 						s.icb.kvQ8.kScales[q8Own], s.icb.kvQ8.vScales[q8Own], offBuf[i], hTarget, hOff, offOff[i],
 						s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj,
-						s.dModel, s.nHeads, lkv, lhd, basePos+i, rotDim, q8Blocks, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+						s.dModel, s.nHeads, lkv, lhd, basePos+i, s.icb.cacheRows[q8Own], rotDim, q8Blocks, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
 					}
@@ -2341,6 +2451,31 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		landRows := K - r0
 		slotBase := (basePos + r0) % p.slideW
 		run1 := min(p.slideW-slotBase, landRows)
+		if s.icb != nil && s.icb.kvQ8.on(p.li) {
+			// q8 ring (#69): the same two spans, quantise-stored into the int8
+			// ring + scale planes instead of copied — the landed codes are the
+			// rows-store's, exactly what the sequential per-token store lands.
+			scaleRow := (p.kvDim / kvQ8GroupSize) * 4
+			if err = encKVQ8StoreRowsAt(enc, kSt, uint(r0*p.kvDim*bf16Size), landK, uint(slotBase*p.kvDim), s.icb.kvQ8.kScales[p.li], uint(slotBase*scaleRow), run1, p.kvDim); err != nil {
+				endEncodingFast(enc)
+				return nil, false, err
+			}
+			if err = encKVQ8StoreRowsAt(enc, vSt, uint(r0*p.kvDim*bf16Size), landV, uint(slotBase*p.kvDim), s.icb.kvQ8.vScales[p.li], uint(slotBase*scaleRow), run1, p.kvDim); err != nil {
+				endEncodingFast(enc)
+				return nil, false, err
+			}
+			if landRows > run1 {
+				if err = encKVQ8StoreRowsAt(enc, kSt, uint((r0+run1)*p.kvDim*bf16Size), landK, 0, s.icb.kvQ8.kScales[p.li], 0, landRows-run1, p.kvDim); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
+				}
+				if err = encKVQ8StoreRowsAt(enc, vSt, uint((r0+run1)*p.kvDim*bf16Size), landV, 0, s.icb.kvQ8.vScales[p.li], 0, landRows-run1, p.kvDim); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
+				}
+			}
+			continue
+		}
 		if err = encCopyBF16Contig(enc, kSt, landK, uint(r0*p.kvDim*bf16Size), uint(slotBase*p.kvDim*bf16Size), run1*p.kvDim); err != nil {
 			endEncodingFast(enc)
 			return nil, false, err

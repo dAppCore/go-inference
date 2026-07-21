@@ -853,6 +853,21 @@ func (r *archICBReplay) prepareStepRebind(pos int) {
 			if rows := r.cacheRows[own]; rows > 0 && rows <= r.slidingWindow {
 				ownStart = 0
 			}
+			if r.kvQ8.on(own) {
+				// q8 owner (#69): code rows are int8 — kvd bytes/row, HALF the bf16
+				// stride (using rowBytes here would land mid-row) — and the scale
+				// planes ride binds 11/12 (emitSDPAVectorQ8's ABI), offset in
+				// f32-per-64-group rows. A bounded ring keeps ownStart 0, so these
+				// four binds only move for an owner still on the linear buffer.
+				kvd := r.rowBytes[own] / bf16Size
+				codeOff := uint(ownStart * kvd)
+				scOff := uint(ownStart * (kvd / kvQ8GroupSize) * 4)
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.sdpaIdx[li]), r.kCaches[own], codeOff, 1)
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.sdpaIdx[li]), r.vCaches[own], codeOff, 2)
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.sdpaIdx[li]), r.kvQ8.kScales[own], scOff, 11)
+				setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.sdpaIdx[li]), r.kvQ8.vScales[own], scOff, 12)
+				continue
+			}
 			slideOff := uint(ownStart * r.rowBytes[own]) // read the owner's cache at its row stride
 			setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.sdpaIdx[li]), r.kCaches[own], slideOff, 1)
 			setICBKernelBufferAtCommandIndexFast(r.icb, uint(r.sdpaIdx[li]), r.vCaches[own], slideOff, 2)
