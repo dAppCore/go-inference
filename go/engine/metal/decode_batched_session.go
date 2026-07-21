@@ -574,6 +574,14 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 				rec.recordRMSRows(projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps)
 				rec.recordAdd(outBuf, outBase, normSlab, 0, outBuf, outBase, rows*s.dModel)
 			}
+			if rec := s.verifyStackRec; rec.active() {
+				rec.recGemvBatched(residentBytes(pl.gate.Packed), 0, outBuf, outBase, gateSlab, 0, s.pliDim, s.dModel, rows)
+				rec.recGeluGateMul(gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim)
+				rec.markPLESlabLast(pleSlabBuf, pliBase)
+				rec.recGemvBatched(residentBytes(pl.proj.Packed), 0, multSlab, 0, projSlab, 0, s.dModel, s.pliDim, rows)
+				rec.recRMSRows(projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps)
+				rec.recAdd(outBuf, outBase, normSlab, 0, outBuf, outBase, rows*s.dModel)
+			}
 		} else {
 			gateGroupSize, gateBits, err := validatePerLayerInputGateQuantWeight("gate", pl.gate, s.pliDim, s.dModel, pl.groupSize, pl.bits)
 			if err != nil {
@@ -616,6 +624,12 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 						rec.recordQMMT(projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits)
 						rec.recordRMSNormResidualRows(projSlab, residentBytes(pl.postNorm), outBuf, outBuf, 0, 0, outBase, outBase, rows, s.dModel, s.eps)
 					}
+					if rec := s.verifyStackRec; rec.active() {
+						rec.recPLEGateGeluRows(gatePacked, gateScales, gateBiases, outBuf, outBase, pleSlabBuf, pliBase, multSlab, 0, rows, s.dModel, s.pliDim, gateGroupSize, gateBits)
+						rec.markPLESlabLast(pleSlabBuf, pliBase)
+						rec.recQMMT(projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits)
+						rec.recRMSNormResidualRows(projSlab, residentBytes(pl.postNorm), outBuf, outBuf, 0, 0, outBase, outBase, rows, s.dModel, s.eps)
+					}
 					fusedChain = true
 				}
 			}
@@ -642,6 +656,14 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 					rec.recordRMSRows(projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps)
 					rec.recordAdd(outBuf, outBase, normSlab, 0, outBuf, outBase, rows*s.dModel)
 				}
+				if rec := s.verifyStackRec; rec.active() {
+					rec.recQMMT(gatePacked.buf, gateScales.buf, gateBiases.buf, outBuf, gateSlab, gatePacked.off, gateScales.off, gateBiases.off, outBase, 0, rows, s.pliDim, s.dModel, gateGroupSize, gateBits)
+					rec.recGeluGateMul(gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim)
+					rec.markPLESlabLast(pleSlabBuf, pliBase)
+					rec.recQMMT(projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits)
+					rec.recRMSRows(projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps)
+					rec.recAdd(outBuf, outBase, normSlab, 0, outBuf, outBase, rows*s.dModel)
+				}
 			}
 		}
 	}
@@ -651,6 +673,9 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 		}
 		if rec := s.verifyTailRec; rec.recording(li) {
 			rec.recordMulRows(outBuf, s.lb[li].layerScalar, outBuf, outBase, 0, outBase, rows, s.dModel)
+		}
+		if rec := s.verifyStackRec; rec.active() {
+			rec.recMulRows(outBuf, s.lb[li].layerScalar, outBuf, outBase, 0, outBase, rows, s.dModel)
 		}
 	}
 	return nil
@@ -1191,6 +1216,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		directOutputOff       []uint
 		usingDirectOutputRows bool
 	)
+	// whole-stack verify ICB (decode_verify_stack_icb.go): interior layers
+	// replay as one recorded range between the live edge layers; the pass's
+	// I/O paths are untouched (the edges stay live).
+	stackLane := s.verifyStackLaneShape(K, icbK != nil)
 	// K-wide working rows (ping-ponged across layers) + per-row position buffers, retained on the state.
 	inRows, outRows, offBuf, offPtr, offOff, rowOff := s.denseBatch.rows(K, s.dModel)
 	readRows, readOff := inRows, rowOff
@@ -1339,6 +1368,43 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			}
 		}()
 	}
+	// whole-stack verify ICB: replay the recorded interior [1, nLayers-2] as
+	// ONE executeCommands between the live edge layers, or arm a recording to
+	// mirror this pass's interior encodes. A key mismatch (slab reallocation,
+	// shape-phase flip) drops the stale recording and re-records once; a
+	// failed recording re-arms only when the key changes.
+	var vsReplay *verifyStackICB
+	if stackLane && foldDFFMax > 0 && hSlab != nil {
+		vsKey := s.verifyStackKeyFor(K, basePos, inRows[0], outRows[0], offBuf[0], hSlab, mlpNormSlab, gateSlab, upSlab, gatedSlab, downSlab, attnNormSlab, qSlab, attnSlab, attnOutSlab, kStage, vStage)
+		if vs := s.verifyStack[K]; vs != nil {
+			if vs.key == vsKey {
+				vsReplay = vs
+			} else {
+				delete(s.verifyStack, K)
+			}
+		}
+		if vsReplay == nil {
+			if tk, tried := s.verifyStackTried[K]; !tried || tk != vsKey {
+				if s.verifyStackTried == nil {
+					s.verifyStackTried = map[int]verifyStackKey{}
+				}
+				s.verifyStackTried[K] = vsKey
+				s.verifyStackRec = newVerifyStackRecorder(len(s.specs), K, vsKey, pleSlabBuf)
+			}
+		}
+	}
+	if s.verifyStackRec != nil {
+		defer func() {
+			rec := s.verifyStackRec
+			s.verifyStackRec = nil
+			if vs := rec.finish(); vs != nil {
+				if s.verifyStack == nil {
+					s.verifyStack = map[int]*verifyStackICB{}
+				}
+				s.verifyStack[K] = vs
+			}
+		}()
+	}
 	// deferred-landing bookkeeping (the big-K staged sliding tail): which owners deferred their
 	// ring landing (their sharers then ride the owner's stage), and the landings to encode after
 	// every layer has read the pre-batch ring state.
@@ -1370,6 +1436,21 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		q8Blocks = s.archQ8ICBBlocks()
 	}
 	for li := 0; li < layerEnd; li++ {
+		s.verifyStackRec.setLayer(li)
+		if vsReplay != nil && li == 1 {
+			// whole-stack interior replay: layers [1, nLayers-2] run as ONE
+			// recorded range on the live encoder (hazard-ordered against the
+			// live layer-0 encodes before and the live last layer after). The
+			// ping-pong then stands where the live swap sequence leaves it
+			// after the interior: both row sets on the input slab (the
+			// in-place degeneration from layer 2 on).
+			enc = trace.checkpoint(enc, "stack.replay")
+			vsReplay.executeInto(enc, basePos, pleSlabBuf)
+			readRows, outRows = inRows, inRows
+			readOff = rowOff
+			li = layerEnd - 2
+			continue
+		}
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
 		slideW, rbase, rotDim := 0, s.base, s.rotaryDim
 		layerRopeFreqs := s.ropeFreqs
@@ -1425,6 +1506,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		// (o-proj/resid AND the foldMLP section) are skipped for it. GPU-trace
 		// note: the replayed tail's span lands in the attn.o+resid bucket.
 		tailReplayed := false
+		if rec := s.verifyStackRec; rec.active() && !foldAttn {
+			rec.fail() // the per-row interleave shape is outside the whole-stack recording
+		}
 		if foldAttn {
 			enc = trace.checkpoint(enc, "attn.norm+qkv")
 			anw := s.lb[li].anw
@@ -1434,7 +1518,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					endEncodingFast(enc)
 					return nil, false, err
 				}
+				if rec := s.verifyStackRec; rec.active() {
+					rec.layerEntry()
+					rec.recRMSRows(readRows[0], anw.buf, attnNormSlab, readOff[0], anw.off, 0, K, s.dModel, s.eps)
+				}
 			} else {
+				if rec := s.verifyStackRec; rec.active() {
+					rec.fail() // non-contiguous inputs are outside the recorded shape
+				}
 				// per-row rms into the norm slab (layer inputs may be non-contiguous direct views)
 				for i := range K {
 					if err = encRMSNormRowsBF16(enc, readRows[i], anw.buf, attnNormSlab, readOff[i], anw.off, uint(i*rowBytes), 1, s.dModel, s.eps); err != nil {
@@ -1446,6 +1537,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if err = projectRowsRequired(proj, enc, attnNormSlab, qSlab, 0, 0, K, projQ); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
+			}
+			if rec := s.verifyStackRec; rec.active() {
+				rec.recProjectRows(proj, attnNormSlab, qSlab, 0, 0, K, projQ)
 			}
 			ownIdx := li
 			if !ownsCache {
@@ -1511,6 +1605,25 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					endEncodingFast(enc)
 					return nil, false, err
 				}
+				if rec := s.verifyStackRec; rec.active() {
+					if kvTQLayer || deferredRing {
+						rec.fail() // TQ landings and the deferred ring are outside the recorded shape
+					} else {
+						// a direct landing writes the cache at the batch base — a
+						// per-pass rebind; staged/q8 landings write fixed staging.
+						directLand := !kvQ8Layer && !staged
+						rec.overlapNext()
+						rec.recProjectRows(proj, attnNormSlab, kDst, 0, dstOff, K, projK)
+						if directLand {
+							rec.markRebindLast(kDst, dstOff, vsRebindGlobalRow, kvDim*bf16Size, 0, 0)
+						}
+						rec.overlapNext()
+						rec.recProjectRows(proj, attnNormSlab, vDst, 0, dstOff, K, vIdx)
+						if directLand {
+							rec.markRebindLast(vDst, dstOff, vsRebindGlobalRow, kvDim*bf16Size, 0, 0)
+						}
+					}
+				}
 			}
 			enc = trace.checkpoint(enc, "attn.rope+vnorm")
 			// multi-query SDPA: all K rows' attention in ONE dispatch (grid Y carries the rows,
@@ -1564,10 +1677,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				!sdpaPromptGEMMDisabledForTest &&
 				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM() &&
 				(!ownerQ8 || q8Stage || q8GEMMK != nil || flashQ8)
+			if rec := s.verifyStackRec; rec.active() && !batchedRope {
+				rec.fail() // per-row rope dispatches are outside the recorded shape
+			}
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.ropeScale, s.eps); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
+				}
+				if rec := s.verifyStackRec; rec.active() {
+					rec.recQKNormRopeRows(qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.ropeScale, s.eps)
 				}
 				if ownsCache && kvQ8Layer {
 					// q8 global owner (#367): rope/norm the STAGED rows in place, then
@@ -1593,6 +1712,25 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					if err = encKVQ8StoreRows(enc, vStage, layerV, q8RowOff, s.icb.kvQ8.vScales[li], q8ScaleOff, K, kvDim); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
+					}
+					if rec := s.verifyStackRec; rec.active() {
+						// staged rope/norm bind fixed staging; the two quantise
+						// stores carry the batch-base cache + scale rows (rebinds).
+						// The rope/norm pair rides the Q-rope fence (independent
+						// staging halves), and the V store rides the K store's.
+						rec.overlapNext()
+						rec.recQKNormRopeRows(kStage, s.lb[li].kNorm.buf, kStage, 0, s.lb[li].kNorm.off, 0, kvDim, kvDim, offBuf[0], layerRopeFreqs, K, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps)
+						if s.valueNormOnes != nil {
+							rec.overlapNext()
+							rec.recRMSRows(vStage, s.valueNormOnes, vStage, 0, 0, 0, K*lkv, lhd, s.eps)
+						}
+						rec.recKVQ8StoreRows(kStage, layerK, q8RowOff, s.icb.kvQ8.kScales[li], q8ScaleOff, K, kvDim)
+						rec.markRebindLast(layerK, q8RowOff, vsRebindGlobalRow, kvDim, 0, 0)
+						rec.markRebindLast(s.icb.kvQ8.kScales[li], q8ScaleOff, vsRebindGlobalRow, (kvDim/kvQ8GroupSize)*4, 0, 0)
+						rec.overlapNext()
+						rec.recKVQ8StoreRows(vStage, layerV, q8RowOff, s.icb.kvQ8.vScales[li], q8ScaleOff, K, kvDim)
+						rec.markRebindLast(layerV, q8RowOff, vsRebindGlobalRow, kvDim, 0, 0)
+						rec.markRebindLast(s.icb.kvQ8.vScales[li], q8ScaleOff, vsRebindGlobalRow, (kvDim/kvQ8GroupSize)*4, 0, 0)
 					}
 				} else if ownsCache && kvTQLayer {
 					// TQ global owner (#48): rope/norm the STAGED rows in place, then
@@ -1635,10 +1773,24 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 						endEncodingFast(enc)
 						return nil, false, err
 					}
+					if rec := s.verifyStackRec; rec.active() {
+						// in-place rope over the freshly projected cache rows:
+						// both the input and output bind at the batch base
+						// (rebinds). Rides the Q-rope fence — the projections
+						// are flushed and the K rows are disjoint from qSlab.
+						rec.overlapNext()
+						rec.recQKNormRopeRows(layerK, s.lb[li].kNorm.buf, layerK, kvBase, s.lb[li].kNorm.off, kvBase, kvDim, kvDim, offBuf[0], layerRopeFreqs, K, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps)
+						rec.markRebindLast(layerK, kvBase, vsRebindGlobalRow, kvDim*bf16Size, 0, 0)
+					}
 					if s.valueNormOnes != nil {
 						if err = encRMSNormRowsBF16(enc, layerV, s.valueNormOnes, layerV, kvBase, 0, kvBase, K*lkv, lhd, s.eps); err != nil {
 							endEncodingFast(enc)
 							return nil, false, err
+						}
+						if rec := s.verifyStackRec; rec.active() {
+							rec.overlapNext()
+							rec.recRMSRows(layerV, s.valueNormOnes, layerV, kvBase, 0, kvBase, K*lkv, lhd, s.eps)
+							rec.markRebindLast(layerV, kvBase, vsRebindGlobalRow, kvDim*bf16Size, 0, 0)
 						}
 					}
 				}
@@ -1705,10 +1857,23 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 						endEncodingFast(enc)
 						return nil, false, err
 					}
+					if rec := s.verifyStackRec; rec.active() {
+						// the staged landing writes each row's ring slot — a
+						// per-pass per-row rebind (slot = (basePos+row) % window).
+						rec.recQKNormRopeAt(kSrc, s.lb[li].kNorm.buf, layerK, srcOff, s.lb[li].kNorm.off, kvRow, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.ropeScale, s.eps)
+						rec.markRebindLast(layerK, kvRow, vsRebindSlideSlot, kvDim*bf16Size, i, slideW)
+					}
 					if s.valueNormOnes != nil {
 						if err = encRMSNormRowsBF16(enc, vSrc, s.valueNormOnes, layerV, srcOff, 0, kvRow, lkv, lhd, s.eps); err != nil {
 							endEncodingFast(enc)
 							return nil, false, err
+						}
+						if rec := s.verifyStackRec; rec.active() {
+							// rides the row's K-rope fence: disjoint staging
+							// reads, disjoint K/V slot writes.
+							rec.overlapNext()
+							rec.recRMSRows(vSrc, s.valueNormOnes, layerV, srcOff, 0, kvRow, lkv, lhd, s.eps)
+							rec.markRebindLast(layerV, kvRow, vsRebindSlideSlot, kvDim*bf16Size, i, slideW)
 						}
 					}
 				}
@@ -1724,11 +1889,25 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 						endEncodingFast(enc)
 						return nil, false, err
 					}
-				} else if err = encSDPADecodeAt(enc, s.asc, qSlab, qRow, ownerK, ownerV, attnSlab, qRow, s.nHeads, lkv, lhd, n,
-					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale, 0); err != nil {
-					endEncodingFast(enc)
-					return nil, false, err
+					if rec := s.verifyStackRec; rec.active() {
+						rec.fail() // per-row q8 SDPA (the deep phase) is outside the recorded shape
+					}
+				} else {
+					if err = encSDPADecodeAt(enc, s.asc, qSlab, qRow, ownerK, ownerV, attnSlab, qRow, s.nHeads, lkv, lhd, n,
+						int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale, 0); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+					if rec := s.verifyStackRec; rec.active() {
+						// the live length binds a per-pass buffer; recSDPARow
+						// declines any row that could cross the 2-pass knee.
+						rec.recSDPARow(lhd, qSlab, qRow, ownerK, ownerV, attnSlab, qRow, i, slideW, s.nHeads, lkv,
+							int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale)
+					}
 				}
+			}
+			if rec := s.verifyStackRec; rec.active() && (deferredRing || useGEMMSDPA) {
+				rec.fail() // prompt-scale SDPA routes are outside the recorded shape
 			}
 			if deferredRing {
 				kSt, vSt := s.denseBatch.layerStage(ownIdx, len(s.specs), K, foldKVDimMax)
@@ -1814,10 +1993,21 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 						endEncodingFast(enc)
 						return nil, false, err
 					}
-				} else if err = encSDPAMultiQCausal(enc, qSlab, ownerK, ownerV, attnSlab, s.nHeads, lkv, lhd, K, basePos+K,
-					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
-					endEncodingFast(enc)
-					return nil, false, err
+					if rec := s.verifyStackRec; rec.active() {
+						rec.recSDPAMultiQQ8(lhd, qSlab, ownerK, ownerV, attnSlab,
+							s.icb.kvQ8.kScales[ownIdx], s.icb.kvQ8.vScales[ownIdx], s.nHeads, lkv, K,
+							int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale)
+					}
+				} else {
+					if err = encSDPAMultiQCausal(enc, qSlab, ownerK, ownerV, attnSlab, s.nHeads, lkv, lhd, K, basePos+K,
+						int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+					if rec := s.verifyStackRec; rec.active() {
+						rec.recSDPAMultiQ(lhd, qSlab, ownerK, ownerV, attnSlab, s.nHeads, lkv, K,
+							int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale)
+					}
 				}
 			}
 			enc = trace.checkpoint(enc, "attn.o+resid")
@@ -1841,6 +2031,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 						rec.recordProjectRows(proj, attnSlab, attnOutSlab, 0, 0, K, projO)
 					}
 				}
+				if rec := s.verifyStackRec; rec.active() {
+					rec.recProjectRows(proj, attnSlab, attnOutSlab, 0, 0, K, projO)
+				}
 				if batchedRows && xContig {
 					// h = x + postAttnNorm(Wo·attn) for all K rows — attnNormSlab is free as scratch
 					if err = encResidualRowsMaybeNorm(enc, readRows[0], readOff[0], attnOutSlab, 0, attnNormSlab, hSlab, 0, s.lb[li].postAttnNorm, K, s.dModel, s.eps); err != nil {
@@ -1850,7 +2043,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					if rec := s.verifyTailRec; rec.recording(li) {
 						rec.recordResidualRowsMaybeNorm(readRows[0], readOff[0], attnOutSlab, 0, attnNormSlab, hSlab, 0, s.lb[li].postAttnNorm, K, s.dModel, s.eps)
 					}
+					if rec := s.verifyStackRec; rec.active() {
+						rec.recResidualRowsMaybeNorm(readRows[0], readOff[0], attnOutSlab, 0, attnNormSlab, hSlab, 0, s.lb[li].postAttnNorm, K, s.dModel, s.eps)
+					}
 				} else {
+					if rec := s.verifyStackRec; rec.active() {
+						rec.fail() // per-row residuals are outside the recorded shape
+					}
 					for i := range K {
 						// h row i = x row i + postAttnNorm(Wo·attn row i) — attnNormSlab is free as scratch
 						if err = encResidualMaybeNormAt(enc, readRows[i], readOff[i], attnOutSlab, uint(i*rowBytes), attnNormSlab, hSlab, uint(i*rowBytes), s.lb[li].postAttnNorm, s.dModel, s.eps); err != nil {
@@ -2021,6 +2220,18 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				rec.recordGeluGateMul(gateSlab, upSlab, gatedSlab, 0, 0, 0, K*lff)
 				rec.recordProjectRows(proj, gatedSlab, downSlab, 0, 0, K, projDown)
 			}
+			if rec := s.verifyStackRec; rec.active() {
+				if proj.usesSiLU() {
+					rec.fail() // the SiLU fold is outside the recorded shape
+				} else {
+					rec.recRMSRows(hSlab, mnw.buf, mlpNormSlab, 0, mnw.off, 0, K, s.dModel, s.eps)
+					rec.recProjectRows(proj, mlpNormSlab, gateSlab, 0, 0, K, projGate)
+					rec.overlapNext() // up reads mlpNormSlab (gate barriered it) — sibling overlap
+					rec.recProjectRows(proj, mlpNormSlab, upSlab, 0, 0, K, projUp)
+					rec.recGeluGateMul(gateSlab, upSlab, gatedSlab, 0, 0, 0, K*lff)
+					rec.recProjectRows(proj, gatedSlab, downSlab, 0, 0, K, projDown)
+				}
+			}
 			enc = trace.checkpoint(enc, "resid+epilogue")
 			outContig := li != len(s.specs)-1 || (!directLastOut && !usingDirectOutputRows)
 			if batchedRows && outContig {
@@ -2034,6 +2245,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				if rec := s.verifyTailRec; rec.recording(li) {
 					rec.recordResidualRowsMaybeNorm(hSlab, 0, downSlab, 0, mlpNormSlab, outRows[0], rowOff[0], s.lb[li].postFFNorm, K, s.dModel, s.eps)
 				}
+				if rec := s.verifyStackRec; rec.active() {
+					rec.recResidualRowsMaybeNorm(hSlab, 0, downSlab, 0, mlpNormSlab, outRows[0], rowOff[0], s.lb[li].postFFNorm, K, s.dModel, s.eps)
+				}
 				if err = s.encBatchedEpilogueRows(enc, pleSlabBuf, li, K, outRows[0], rowOff[0], gateSlab, gatedSlab, downSlab, mlpNormSlab); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
@@ -2042,6 +2256,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					rec.endLayer(li)
 				}
 			} else {
+				if rec := s.verifyStackRec; rec.active() {
+					rec.fail() // per-row epilogues are outside the recorded shape
+				}
 				for i := range K {
 					outBuf, outOff := outRows[i], rowOff[i]
 					if directLastOut && li == len(s.specs)-1 && i == K-1 {

@@ -298,6 +298,14 @@ type archDecodeState struct {
 	verifyTail      map[int]*verifyTailICB
 	verifyTailRec   *verifyTailRecorder
 	verifyTailTried map[int]bool
+	// verifyStack holds the recorded WHOLE-layer-stack verify ICBs
+	// (decode_verify_stack_icb.go), keyed by the batch width K like verifyTail.
+	// verifyStackRec is live only during a recording pass; verifyStackTried
+	// remembers the key a width last attempted so a failed recording re-arms
+	// only when the buffer world or shape phase changes.
+	verifyStack      map[int]*verifyStackICB
+	verifyStackRec   *verifyStackRecorder
+	verifyStackTried map[int]verifyStackKey
 	// rowAttnCaps, when non-nil, overrides each batch row's visible attention
 	// length (absolute kv rows) — the bidirectional image-span prefill
 	// (gemma4_unified): span rows see through to their span end. Legal only on
