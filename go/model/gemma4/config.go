@@ -231,6 +231,7 @@ func (c Config) Arch() (model.Arch, error) {
 		TopK:                topK,
 		ExpertFF:            expertFF,
 		MoEGating:           moeGating,
+		NormaliseMoETopK:    c.EnableMoEBlock, // gemma4 softmaxes the SELECTED top-k logits ≡ the renormalise order (#65 made the engine honour this field)
 		FuseExpertGateUp:    c.EnableMoEBlock, // gemma4 opts its MoE experts into the fused gate+up path
 		Eps:                 eps,
 		AttnScale:           1,                                         // gemma4: the per-head QK-norm does the scaling, so SDPA scale is 1.0 (metal's gemma4AttentionScale), NOT 1/√headDim
