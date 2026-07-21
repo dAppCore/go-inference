@@ -43,15 +43,18 @@ func TestLayerCacheKindString_Good(t *testing.T) {
 }
 
 // TestCachePlanDense_Good gates fixture (a): a plain dense (non-MoE)
-// all-global session, no -kv-cache request. Every layer must classify
-// native on the recorded-ICB lane, with byte totals matching the session's
-// OWN resident buffers exactly (not a separately re-derived formula) — head
-// dim 128 never qualifies for the ICB q8 default (kvQ8ICBOn requires 256/512),
-// so this fixture is q8-default-proof.
+// all-global session, no -kv-cache request, q8 pinned OFF — every layer must
+// classify native on the recorded-ICB lane, with byte totals matching the
+// session's OWN resident buffers exactly (not a separately re-derived
+// formula). The pin is explicit (#70 armed headDim 128, so no geometry is
+// q8-default-proof any more): this test's claim is the NATIVE classification
+// path, not the q8 gate.
 func TestCachePlanDense_Good(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
+	kvQ8ICBOffForTest = true
+	t.Cleanup(func() { kvQ8ICBOffForTest = false })
 	g, arch := tqTestQuantModel(t)
 	const maxLen = 32
 	sess, err := newArchQuantSessionShardsWithHeadConfig(g, arch, maxLen, nil, nil, archSessionConfig{})

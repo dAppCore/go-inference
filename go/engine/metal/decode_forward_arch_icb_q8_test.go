@@ -1089,8 +1089,12 @@ func newKVQ8SlidingICBFixtureLen(t testing.TB, maxLen int) *ArchSession {
 }
 
 func newKVQ8SlidingICBFixtureWin(t testing.TB, maxLen, window int) *ArchSession {
+	return newKVQ8SlidingICBFixtureGeom(t, maxLen, window, 256)
+}
+
+func newKVQ8SlidingICBFixtureGeom(t testing.TB, maxLen, window, headDim int) *ArchSession {
 	t.Helper()
-	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 256, 256, 64
+	const dModel, nHeads, nKV, dFF, vocab = 128, 2, 1, 256, 64
 	const numLayers, gs, bits = 5, 64, 4
 	cfg := g4.Config{
 		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
@@ -1393,4 +1397,108 @@ func TestKVQ8SlidingRing_ChunkedPrefillMatchesSequential(t *testing.T) {
 		}
 	}
 	t.Logf("chunked sliding-q8 prefill tracked sequential over %d rows (2 chunks): worst |Δ| = %.5g", len(ids), worstAll)
+}
+
+// TestKVQ8HeadDim128_TracksBF16 pins the #70 gate widening: a headDim-128
+// arch (the Qwen3/OLMoE-class geometry the 256/512 whitelist silently
+// excluded) arms q8 on EVERY owner — global and sliding — and both decode
+// lanes track the bf16 anchor. The 128 SDPA instantiations are new; a
+// missing kernel is a hard session-open error, not a silent bf16 fallback.
+func TestKVQ8HeadDim128_TracksBF16(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBOffForTest = true
+	ref := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	kvQ8ICBOffForTest = false
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	q8 := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	icb := q8.state.icb
+	if icb == nil || !icb.hasKVQ8() {
+		t.Fatal("hd-128 fixture did not arm q8")
+	}
+	for li := 0; li < 3; li++ { // two sliding owners + the global owner
+		if !icb.kvQ8.on(li) {
+			t.Fatalf("layer %d (headDim 128) must arm q8 after #70", li)
+		}
+	}
+	worstAll := 0.0
+	for i := 0; i < 40; i++ { // past the 24-row wrap from step 25
+		id := int32((i*5 + 2) % 60)
+		hq, err := q8.stepID(id)
+		if err != nil {
+			t.Fatalf("q8 stepID(%d): %v", i, err)
+		}
+		hr, err := ref.stepID(id)
+		if err != nil {
+			t.Fatalf("ref stepID(%d): %v", i, err)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hr); j += 2 {
+			a := float64(bf16ToF32(hq[j], hq[j+1]))
+			b := float64(bf16ToF32(hr[j], hr[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("step %d: hd-128 q8 diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
+		}
+	}
+	t.Logf("hd-128 q8 tracked bf16 over 40 chained steps: worst |Δ| = %.5g", worstAll)
+
+	// batched prefill on a fresh pair — the fold + deferred-ring lanes at 128.
+	batched := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	seq := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	ids := make([]int32, 40)
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % 60)
+	}
+	embs := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := batched.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		embs[i] = append([]byte(nil), emb...)
+	}
+	var out [][]byte
+	var ok bool
+	var err error
+	withAutoreleasePool(func() {
+		out, ok, err = batched.state.stepTokensBatchedDense(embs, 0)
+	})
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDense: %v", err)
+	}
+	if !ok {
+		t.Fatal("the fold must ENGAGE on the hd-128 q8 session")
+	}
+	for i, id := range ids {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(out[i][j], out[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("row %d: hd-128 batched q8 prefill diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
+		}
+	}
 }
