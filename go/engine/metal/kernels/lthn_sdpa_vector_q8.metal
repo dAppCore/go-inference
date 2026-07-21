@@ -18,9 +18,9 @@ typedef bfloat bf16;
 // accumulator stations (fp32 online softmax, fast::exp), same simd_sum
 // points — the ONLY change is each lane's K/V element loads dequantise
 // int8·scale in fp32. A lane's qk_per_thread (=D/32) elements sit inside one
-// 64-element scale group for every D%512==0 / D=256 instantiation
-// (per-lane group = simd_lid·per/64), so each row costs a lane exactly ONE
-// scale load — the lthn_sdpa_paged q8 pattern. The decode form is fixed: no
+// 64-element scale group for every instantiated D (128/256/512 — per-lane
+// group = simd_lid·per/64, and D/32 ≤ 64 holds throughout), so each row
+// costs a lane exactly ONE scale load — the lthn_sdpa_paged q8 pattern. The decode form is fixed: no
 // masks, no sinks, not causal, queries not transposed (the recorded arch ICB
 // binds none of those), batch 1.
 //
@@ -272,6 +272,7 @@ template <int D>
       const constant float&, const device float*, const device float*,   \
       uint3, uint3, uint3, uint3, uint);
 
+instantiate_lthn_sdpa_vector_q8(128)
 instantiate_lthn_sdpa_vector_q8(256)
 instantiate_lthn_sdpa_vector_q8(512)
 
@@ -465,5 +466,6 @@ struct KVQ8StoreRowsDims {
       const constant float&, const device float*, const device float*,   \
       uint3, uint3, uint, uint);
 
+instantiate_lthn_sdpa_multiq_q8(128)
 instantiate_lthn_sdpa_multiq_q8(256)
 instantiate_lthn_sdpa_multiq_q8(512)

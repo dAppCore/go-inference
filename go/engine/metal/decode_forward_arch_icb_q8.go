@@ -48,6 +48,10 @@ var (
 	kvQ8ICBEnabled    = os.Getenv("LTHN_KV_Q8_ICB") != "0"
 	kvQ8ICBForTest    bool
 	kvQ8ICBOffForTest bool
+
+	// q8DeclineLogged de-duplicates the geometry-decline trace lines — one
+	// line per distinct reason per process, not one per layer per session.
+	q8DeclineLogged = map[string]bool{}
 )
 
 func kvQ8ICBOn() bool { return (kvQ8ICBEnabled || kvQ8ICBForTest) && !kvQ8ICBOffForTest }
@@ -147,13 +151,27 @@ func allocArchICBCaches(specs []model.LayerSpec, nKVHeads, headDim, maxLen, slid
 			// smaller allocation and ring-writes pos%cacheRows.
 			cacheLen = slidingWindow
 		}
-		if kvQ8ICBOn() && kvd%kvQ8GroupSize == 0 && (lhd == 256 || lhd == 512) {
+		if kvQ8ICBOn() && kvd%kvQ8GroupSize == 0 && (lhd == 128 || lhd == 256 || lhd == 512) {
 			kCaches[li] = device.NewBufferWithLengthOptions(uint(cacheLen*kvd), metal.MTLResourceStorageModeShared)
 			vCaches[li] = device.NewBufferWithLengthOptions(uint(cacheLen*kvd), metal.MTLResourceStorageModeShared)
 			q8.kScales[li] = device.NewBufferWithLengthOptions(uint(cacheLen*(kvd/kvQ8GroupSize)*4), metal.MTLResourceStorageModeShared)
 			q8.vScales[li] = device.NewBufferWithLengthOptions(uint(cacheLen*(kvd/kvQ8GroupSize)*4), metal.MTLResourceStorageModeShared)
 			q8.enabled[li] = true
 			continue
+		}
+		if kvQ8ICBOn() {
+			// a q8-armed session leaving an owner bf16 is a GEOMETRY decline —
+			// name it once per reason so the plan line's native count is never
+			// a silent narrowing (#70; the cache-plan line shows the outcome,
+			// this names the cause).
+			reason := core.Sprintf("headDim %d has no q8 SDPA instantiation (128/256/512)", lhd)
+			if kvd%kvQ8GroupSize != 0 {
+				reason = core.Sprintf("kvDim %d not a whole %d-group", kvd, kvQ8GroupSize)
+			}
+			if !q8DeclineLogged[reason] {
+				q8DeclineLogged[reason] = true
+				nativeTraceLog(core.Sprintf("native: kv-q8 decline: layer %d stays bf16 — %s\n", li, reason))
+			}
 		}
 		cacheBytes := uint(cacheLen * kvd * bf16Size)
 		kCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
