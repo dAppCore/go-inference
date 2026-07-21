@@ -104,6 +104,29 @@ TQ: −23% decode for −60MiB plan. At 18.5K-deep decode: q8 122.6 vs TQ 110.8
 allocation is found and fixed, TQ loses on BOTH axes at exactly the depth it
 was built for. q8 stays the default; #48 parks with these receipts.
 
+## KV-mode ladder (the decided defaults)
+
+The bf16-base TQ cells (E2B, same method): shallow 134.7 / deep 112.1 —
+byte-identical numbers and cache plan to the q8-base TQ cells, because
+`--kv-cache turboquant` already replaces q8 on the global layers and the
+sliding owners are native bf16 in every mode. Against a bf16 baseline TQ's
+compression is the more meaningful shift (~204→42MiB on the globals, ≈5×, vs
+≈2.4× against q8) — but its decode cost is its own read path (the ~105 GB/s
+effective vs bf16's 246, issue-bound), independent of what it replaced.
+
+The ladder:
+- **default = q8** — fastest decode AND half the bf16 footprint; ~1%-class
+  fidelity cost. (Carries the open re-engagement bistability — the two-plane
+  row/scale store race — which is a defect to fix IN q8, not a reason to
+  change the default.)
+- **`--kv-cache turboquant` = the no-q8 configuration of record** — 134.7 vs
+  the bf16-force env's 84.2: TQ keeps the optimised ICB lane where forcing
+  bf16 falls off it. Also the capacity mode once its deep-prefill allocation
+  defect is fixed.
+- **`LTHN_KV_Q8*=0` = dev instrument only** — the unoptimised bf16 lane
+  exists for A/Bs and forensics, is not a product surface, and no CLI flag
+  offers it.
+
 ## Reproduce
 
 ```sh
