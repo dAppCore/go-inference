@@ -109,10 +109,15 @@ fallback" — retracted below.)
 | q8 | 19.4 | q8 10×(1360MiB) + sliding 800MiB | 19,277MiB |
 | turboquant | 15.4 | tq 10×(570MiB) + sliding 800MiB | **34,922MiB** |
 
-**Defect: TQ's deep-prefill path allocates ~15.6GB above the q8 lane** —
-~20× its own 790MiB cache saving — while decoding 21% slower. Until that
-allocation is found and fixed, TQ loses on BOTH axes at exactly the depth it
-was built for. q8 stays the default; #48 parks with these receipts.
+**RETRACTED (re-measured): the "~15.6GB TQ-only allocation" did not
+reproduce** — the peak-RSS column above did not survive re-measurement: at
+the same depth BOTH modes peak ~34.9GiB. The allocation is mode-independent,
+owned by the generate CLI building two full-`--context` decode states per
+invocation (the first never reclaimed) — a driver-layer defect, not a TQ
+path. The engine-side TQ prefill scratch now capacity-plans to the actual
+prefill depth instead of full `--context`. TQ's honest remaining loss is
+decode speed (its own read path); q8 stays the default. #48 parks with
+these receipts.
 
 ## KV-mode ladder (the decided defaults)
 
@@ -127,14 +132,21 @@ effective vs bf16's 246, issue-bound), independent of what it replaced.
 The ladder:
 - **default = q8** — fastest overall, half the bf16 global footprint,
   ~1%-class fidelity cost; the deep margin grows with global-layer count.
-  (Carries the open re-engagement bistability — the two-plane row/scale store
-  race — a defect to fix IN q8, not a reason to change the default.)
-- **`--kv-cache turboquant` = the capacity mode only** — pending its
-  deep-prefill allocation defect; it is NOT a speed fallback (the earlier
-  claim rested on the contaminated 84).
+  (The re-engagement bistability is CLOSED, and its root cause was never a
+  q8 store race — all-q8-off still flipped. The batched verify fold's
+  global-layer rows are not byte-identical to plain decode, and the
+  wall-clock re-engage policy could flip a near-tie between the two lanes on
+  timing noise. Fixed by restoring the #55 byte-exact contract: the
+  greedy/exact tier never takes the fold, so every greedy lane is
+  byte-identical to sequential plain decode; costs ~10% of the fold-era
+  pair speed on E2B, sampled tier unchanged.)
+- **`--kv-cache turboquant` = the capacity mode only** — its deep-prefill
+  allocation defect was re-attributed to the mode-independent generate
+  driver (above); its decode cost is its own read path, so it is NOT a
+  speed fallback (the earlier claim rested on the contaminated 84).
 - **`LTHN_KV_Q8*=0` = dev instrument only** — q8-parity speed on E2B's shape
-  and the determinism A/B of choice while the q8 race is open, but a dev tag,
-  not a product surface; no CLI flag offers it.
+  and the determinism A/B of choice during the bistability hunt (now
+  closed), but a dev tag, not a product surface; no CLI flag offers it.
 
 ## Reproduce
 
