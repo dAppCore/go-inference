@@ -5,6 +5,7 @@
 package native
 
 import (
+	"encoding/binary"
 	"math"
 	"sort"
 	"testing"
@@ -84,113 +85,25 @@ import (
 // is the DOMINANT term, not the whole story — a smaller residual gap survives
 // that fix alone, left for that fix's own lane to close and re-measure.
 //
-// #67 UPDATE: the EmbedScale fix above landed (d946853a) and this
-// file's own 5-sample band (target_layer_ids [1,9,17,25,33], spaced 8 apart) already passes on
-// it (grand -11.2%, inside the ±15% band, tightened below to ±13% now that this is precisely
-// characterised and confirmed deterministic run-to-run). But #67's brief named a real, separate
-// symptom the 5 samples cannot see: ordinary greedy decode on this checkpoint is STILL wrong.
-// TestForwardCaptureHiddensQwen3AllLayersVsRealOracle below extends the capture to EVERY
-// decoder layer (0..35) and finds why: layer 35 — the FINAL decoder layer, not one of DFlash's 5
-// sampled indices — diverges by +454%/+456% (icb-default/icb-disabled), an order of magnitude
-// past every other layer's worst case (±20%, ordinary cross-implementation bf16 noise). The
-// oracle SHRINKS every token's magnitude at this one layer (raw sumAbs ~54,707-61,843 at layer
-// 34 down to ~20,411 at layer 35 — a real trained cancellation of the massive-activation
-// dimensions carried since layer 6's onset); the engine GROWS instead, for every token, not one
-// position (ruling out an earlier "attention sink at token 0" hypothesis this lane also checked
-// and rejected — token 0 dominates the ABSOLUTE excess but every token overshoots). Independently
-// checked and ruled out: (1) not a premature-final-norm artefact — model.norm applied to the
-// oracle's OWN raw layer-35 output barely moves its magnitude (~4,660→~4,920), nothing like the
-// engine's ~58,654 for the same token; (2) not ICB-specific — icb-disabled (the plain
-// captureLayerHiddens route) reproduces the same fault to 2 decimal places of relative error,
-// so both routes share whatever computes this wrong, not either route's own capture bookkeeping;
-// (3) not a qwen3.go config-derivation bug — every Config.Arch() field (rope theta, attention
-// scale, QK-norm eps/placement, head_dim, layer classification) was individually checked against
-// the real checkpoint's config.json and HF's modeling_qwen3.py/configuration_qwen3.py and found
-// correct AND uniform across layers, and Qwen3Config has no schema capacity to declare a
-// per-layer override for a non-hybrid checkpoint in the first place (layer_types is the only
-// per-layer knob, and it resolves to "full_attention" for all 36 layers on this checkpoint,
-// confirmed both from config.json's use_sliding_window:false and from Qwen3Config.__post_init__'s
-// own derivation). The fault is deterministic (byte-identical per-token values across repeat
-// runs — not stale/uninitialised memory) and lands squarely in the shared per-layer attention/MLP
-// encode path (decode_forward_arch.go / decode_forward_arch_icb.go) both ICB and non-ICB routes
-// call into — outside this lane's fence (model/arch/Qwen/qwen3/ only). Named here, not fixed:
-// TestForwardCaptureHiddensQwen3AllLayersVsRealOracle's per-layer band gate fails loudly on
-// layer 35 alone until that seam's owner closes it, at which point the whole depth should
-// collapse toward the ±20%-or-better band every OTHER layer already sits in.
+// #67 RESOLVED — two mechanisms, both receipted by the instruments below:
 //
-// #67 UPDATE 2: dispatched to fix the layer-35 divergence inside
-// decode_forward_arch.go / decode_forward_arch_icb.go specifically (the "shared per-layer
-// attention/MLP encode path" the paragraph above names). Traced BOTH routes' last-layer handling
-// line-by-line looking for an `li == lastLayer` (explicit or implicit) branch that substitutes
-// something other than the plain post-block residual into the buffer this file's capture reads —
-// found NONE, and the specific candidate mechanism this lane was pointed at is refuted:
+//  1. model/arch/Qwen/qwen3/qwen3.go never declared Arch.Activation, so ffnUsesSiLU("")
+//     kept the gemma GELU gate on all 36 layers of a checkpoint whose config declares
+//     hidden_act "silu". GELU tracks SiLU closely enough to stay coherent while drifting
+//     percent-level per MLP pass; the drift compounded through the residual stream
+//     (the ±20% mid-stack wobble the per-layer table used to show) and was amplified by
+//     layer 35's trained near-exact cancellation of the massive-activation channels.
+//     Fixed by forwarding hidden_act into Arch.Activation (the same declaration-gap class
+//     as this file's own EmbedScale finding, #66) plus the fused fp32-internal
+//     silu(gate)·up kernel (lthn_silu_gate_mul_bf16 — one rounding vs the composed
+//     chain's three). Post-fix: every layer 0..35 sits inside ±0.3% of the oracle.
 //
-//  1. Control flow is IDENTICAL for the last layer and every other layer in both fence files.
-//     decode_forward_arch.go's stepTokenEncode per-layer loop (li := startLayer..len(s.specs), the
-//     loop opening at ~1796) has no `li == len(s.specs)-1` (or equivalent) conditional anywhere —
-//     confirmed by exhaustive grep, not just reading — and the captureLayerHiddens append at 2134
-//     copies `out`, the SAME buffer encMLPHalfBF16 (or the MoE/gated branches) just wrote via the
-//     SAME residual-add call, for every li. decode_forward_arch_icb.go's recordArchICB has exactly
-//     four `li == nLayers-1` conditionals (2285, 2294, 2327, 2334) — all four only set
-//     finalOutIdx/finalOutBind, bookkeeping that lets a LATER caller redirect where the last
-//     layer's residual-add op ADDITIONALLY writes (bindStepOutput / stepBodyIntoBuffer, for a
-//     caller wanting the result in its own buffer). They never change what gets computed — the
-//     recorded op (setRMSResidual when a post-FF norm exists, else plain setBin(addPSO, hBuf, down,
-//     outBuf, dModel), both gated on lay.hasPF which is false for qwen3 — no sandwich norms) is
-//     issued identically for every layer. stepBodyCapture (724-760) explicitly UNDOES any such
-//     redirect before capturing (737: `r.bindStepOutput(r.ping[r.nLayers%2])`, restoring the
-//     recorded ping target) and reads `r.ping[(li+1)%2]` (753) for every li including 35 — the
-//     plain ping-pong slot, no substitution.
-//  2. The specific mechanism this lane was pointed at — ArchSession.boundaryNormedHiddenInto
-//     (arch_session.go:1602) folding the final-norm gain out of s.retainedHidden ("a unit-RMS
-//     head-input WITHOUT the final-norm gain… the head consumes it gain-folded") — does not reach
-//     this capture at all. ForwardCaptureHiddens (train_session.go) never reads or writes
-//     s.retainedHidden; it reads capturedLayerHiddens (plain route) or stepBodyCapture's own
-//     perLayer return (ICB route), both traced above straight to the raw per-layer buffer. The two
-//     mechanisms share only their underlying stepToken/stepBody call, never a buffer. Even taken
-//     hypothetically, the direction is wrong: an unfolded unit-RMS vector has sumAbs ≈
-//     dModel·E[|N(0,1)|] ≈ 2560×0.8 ≈ 2000 — the hypothesis predicts the capture would be
-//     ABNORMALLY SMALL, but the fault is the opposite (58,654 vs the oracle's 4,659 for token 0 —
-//     12.6× too LARGE).
-//  3. Empirical bisection (capturedAttnHiddens/capturedMLPResHiddens, the existing post-attn/
-//     post-MLP split at 1913/2043): layer 35's post-attention magnitude (7,199–13,917 across the 5
-//     tokens) sits in the SAME order as layer 34's (8,057–12,139, a layer inside the ±20% band) —
-//     attention is not where this concentrates. The MLP half is: widening the existing li==5
-//     gate/up/product/down probe (2140) to layer 35 showed token 0's `product` (gate·up, sumAbs
-//     10,618) gets amplified 5.6× by the down_proj matmul into `down` (sumAbs 59,920) — down_proj
-//     is a legitimately high-gain transform at this layer, not a bug magnifying a small input.
-//  4. An INDEPENDENT fresh oracle re-run this lane did directly (transformers 5.6.0.dev0 + torch
-//     2.10.0, MPS, same real Qwen/Qwen3-4B checkpoint and prompt tokens — not the cached constants
-//     below) confirms the mechanism precisely: hidden dim 4 (a massive-activation channel) sits
-//     flat at ~4,800 (token 0) through layers ~28-33, drops to 3,280 at layer 34, then to -0.445 at
-//     layer 35 — a real, large, trained near-EXACT cancellation, deliberately annihilating an
-//     outlier channel right before the final norm/head. Our engine's OWN dim-4 trajectory moves in
-//     the SAME direction (flat ~3,200 through 28-33, 2,128 at layer 34, 928 at layer 35) — the
-//     model's trained correction the engine IS applying, just imprecisely — and dim 4 alone
-//     explains under 2% of token 0's total sumAbs excess (928 of ~53,995): the same
-//     amplified-cancellation pattern recurs across many of layer 35's other outlier-channel rows,
-//     not one dimension.
-//  5. The residual-add kernel itself is not a candidate: vv_Addbfloat16 (setBin's addPSO,
-//     decode_forward_arch_icb.go's `setBin` closure at 1885) is MLX's own shipped elementwise op
-//     (external/mlx/mlx/backend/metal/kernels/binary.metal + binary_ops.h's `struct Add { T
-//     operator()(T x,T y){return x+y;} }` instantiated over bf16.h's bfloat16_t, itself a typedef
-//     of Metal's NATIVE bfloat scalar) — a plain native-hardware add, identical for every layer,
-//     external/ (not this fence, not even engine/metal's own kernels/), and running on the SAME
-//     Apple Silicon bfloat arithmetic path transformers' MPS backend does.
-//
-// Conclusion: layers 0-34's already-accepted, in-band ~-10%/-19% undershoot (present since layer
-// 6, root cause out of THIS lane's fence too — model/arch/Qwen/qwen3/ is forbidden here just as it
-// was for the prior #67 lane) is not absorbed at layer 35 — it is AMPLIFIED, because this layer's
-// trained job is a near-exact cancellation of several outlier channels, an inherently
-// ill-conditioned operation with zero tolerance for input error. That is a property of the model's
-// weights meeting upstream imprecision, not a discrete last-layer control-flow bug reachable from
-// decode_forward_arch.go/decode_forward_arch_icb.go — both verified byte-for-byte structurally
-// identical for the last layer and every other. No fix applied here: forcing a change to either
-// fence file would be a no-op (nothing wrong found to change) or an unjustified hack risking
-// gemma4/every-other-arch's bytes for zero benefit — the "stop at diagnosis" case. A real fix
-// means either tightening the layers-6..34 upstream drift (a different fence) or adding
-// mixed/higher-precision accumulation through the affected span (touches kernels/ and/or
-// model/arch/Qwen/qwen3/, both forbidden here) — named for whichever lane owns that next.
+//  2. The all-layer table's layer-35 row was extracted from output_hidden_states, whose
+//     FINAL entry transformers appends POST-model.norm — a different quantity from the
+//     raw post-block stream every other row (and this capture's contract) carries. That
+//     convention mismatch presented as a +454% "layer-35 divergence" and survived an
+//     earlier norm-check because that check normed the already-normed oracle row. The
+//     table now stores the hook-extracted raw value (see the table comment).
 //
 // Oracle: transformers 5.5.4 + torch 2.13.0, bfloat16, MPS, Qwen/Qwen3-4B,
 // output_hidden_states=True over the 5 raw prompt tokens (no chat template).
@@ -407,6 +320,13 @@ func TestForwardCaptureHiddensQwen3FaithfulToOrdinaryDecode(t *testing.T) {
 // output_hidden_states=True over the same 5 raw prompt tokens ("The capital of France is", no
 // chat template, no BOS). Not required at test time; this is the readout of that one-time
 // extraction, exactly as oracleAuxLayerTotalSumAbs is.
+//
+// Layer 35 is the one row NOT taken from output_hidden_states: transformers appends the FINAL
+// entry post-model.norm (hidden_states[36] == norm(raw layer-35 out), proven byte-exact:
+// maxAbsDiff 0.0000), while this capture's contract — and every other row — is the RAW
+// post-block residual stream. The raw value below is hook-extracted (x_in + attn + down) from
+// the same stack; the post-norm 20410.58 it replaces was the +454% "layer-35 divergence"
+// artefact.
 var oracleAllLayerTotalSumAbs = map[int]float64{
 	0:  1792.79541015625,
 	1:  2387.3935546875,
@@ -443,14 +363,15 @@ var oracleAllLayerTotalSumAbs = map[int]float64{
 	32: 50895.984375,
 	33: 55627.7421875,
 	34: 61843.16015625,
-	35: 20410.583984375,
+	35: 124450.7109,
 }
 
 const (
 	// oracleAllLayerGrandTotalSumAbs is the sum of oracleAllLayerTotalSumAbs over all 36 layers —
 	// the same "grand total" metric oracleGrandTotalSumAbs computes over just the 5 DFlash
-	// layers, widened to the full depth.
-	oracleAllLayerGrandTotalSumAbs = 780273.1669921875
+	// layers, widened to the full depth (layer 35 at its raw post-block value — see the map
+	// comment).
+	oracleAllLayerGrandTotalSumAbs = 884313.2939453125
 	// oracleAllLayerGrandTotalBandFrac is a coarse, WEAK sanity check on the all-layer grand
 	// total: #67's own bisection found it nearly USELESS as a diagnostic — a +454% single-layer
 	// fault at layer 35 (see oracleAllLayerPerLayerBandFrac below) happens to land the grand
@@ -512,6 +433,123 @@ func TestOracleAllLayerTotalSumAbsAgreesWithFiveLayerOracle(t *testing.T) {
 // shared undershoot) and the real gate, a PER-LAYER band every layer must individually sit
 // inside — mirroring TestForwardCaptureHiddensQwen3VsRealOracle's own soft-gate shape, but
 // unwilling to let one bad layer hide behind 35 good ones.
+// oracleQwen3Layer6MLPOps is the torch/transformers per-op readout INSIDE layer 6's MLP —
+// the massive-activation onset (#67): the spike channels are created by THIS layer's
+// down_proj in one shot (tok0 dim4 goes +5.56 → +4544.0 through the matmul). sumAbs over
+// all 5 prompt tokens per op; same extraction stack as the file header (transformers 5.5.4 +
+// torch 2.13.0 bf16 MPS, forward hooks on model.layers[6]'s submodules).
+var oracleQwen3Layer6MLPOps = map[string]float64{
+	"ln2":  3958.93,
+	"gate": 73374.45,
+	"up":   17839.51,
+	"prod": 7991.68,
+	"down": 12147.17,
+}
+
+// oracleQwen3Layer6DownTok0Dims are token 0's largest down_proj output channels (the spike
+// write): dim → value.
+var oracleQwen3Layer6DownTok0Dims = map[int]float64{4: 4544.0, 396: -1288.0, 0: -215.0, 100: -203.0}
+
+// TestQwen3Layer6MLPOpsVsRealOracle bisects INSIDE the massive-activation onset layer:
+// which MLP op first departs from the oracle. The all-layers instrument above shows the
+// engine's stream runs -19.7% right at layer 6 and the deficit persists to the layer-35
+// cancellation (+454%); this instrument names the op that under-produces the spike.
+func TestQwen3Layer6MLPOpsVsRealOracle(t *testing.T) {
+	requireNativeRuntime(t)
+	targetDir := core.Getenv("LTHN_DFLASH_ZLAB_TARGET")
+	if core.Trim(targetDir) == "" {
+		t.Skip("set LTHN_DFLASH_ZLAB_TARGET to a local Qwen/Qwen3-4B snapshot (see file doc comment)")
+	}
+	ids := []int32{oraclePromptTok0, oraclePromptTok1, oraclePromptTok2, oraclePromptTok3, oraclePromptTok4}
+
+	prevICB := icbDisabledForTest
+	icbDisabledForTest = true
+	defer func() { icbDisabledForTest = prevICB }()
+	probeLayer := 6
+	if v := core.Getenv("LTHN_L6_PROBE_LAYER"); core.Trim(v) != "" {
+		if r := core.ParseInt(core.Trim(v), 10, 32); r.OK {
+			probeLayer = int(r.Value.(int64))
+		}
+	}
+	prevProbe, prevRows := capturedMLPProbeLayer, capturedLayer5MLP
+	capturedMLPProbeLayer, capturedLayer5MLP = probeLayer, nil
+	defer func() { capturedMLPProbeLayer, capturedLayer5MLP = prevProbe, prevRows }()
+	prevAttn, prevMLPRes := capturedAttnHiddens, capturedMLPResHiddens
+	capturedAttnHiddens, capturedMLPResHiddens = nil, nil
+	defer func() { capturedAttnHiddens, capturedMLPResHiddens = prevAttn, prevMLPRes }()
+
+	target, err := LoadDir(targetDir, 0)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	defer func() { _ = target.Close() }()
+	if _, _, err := target.ForwardCaptureHiddens(ids); err != nil {
+		t.Fatalf("ForwardCaptureHiddens: %v", err)
+	}
+	if len(capturedLayer5MLP) != len(ids) {
+		t.Fatalf("captured %d MLP probe rows, want %d (one per token)", len(capturedLayer5MLP), len(ids))
+	}
+
+	sum := func(pick func(capturedMLPInternal) []byte) float64 {
+		var s float64
+		for _, row := range capturedLayer5MLP {
+			s += olmoeHiddenSumAbs(pick(row))
+		}
+		return s
+	}
+	got := map[string]float64{
+		"ln2":  sum(func(r capturedMLPInternal) []byte { return r.normed }),
+		"gate": sum(func(r capturedMLPInternal) []byte { return r.gate }),
+		"up":   sum(func(r capturedMLPInternal) []byte { return r.up }),
+		"prod": sum(func(r capturedMLPInternal) []byte { return r.product }),
+		"down": sum(func(r capturedMLPInternal) []byte { return r.down }),
+	}
+	t.Logf("%5s  %14s  %14s  %9s", "op", "got", "want", "rel%")
+	for _, op := range []string{"ln2", "gate", "up", "prod", "down"} {
+		want := oracleQwen3Layer6MLPOps[op]
+		rel := (got[op] - want) / want
+		t.Logf("%5s  %14.2f  %14.2f  %+8.2f%%", op, got[op], want, rel*100)
+	}
+	tok0Down := bf16ToF32Slice(capturedLayer5MLP[0].down)
+	for _, dim := range []int{4, 396, 0, 100} {
+		want := oracleQwen3Layer6DownTok0Dims[dim]
+		t.Logf("tok0 down dim%-4d got=%+10.2f  want=%+10.2f", dim, tok0Down[dim], want)
+	}
+	if dump := core.Getenv("LTHN_L6_DUMP"); core.Trim(dump) != "" {
+		for name, pick := range map[string]func(capturedMLPInternal) []byte{
+			"normed": func(r capturedMLPInternal) []byte { return r.normed },
+			"gate":   func(r capturedMLPInternal) []byte { return r.gate },
+			"up":     func(r capturedMLPInternal) []byte { return r.up },
+			"prod":   func(r capturedMLPInternal) []byte { return r.product },
+		} {
+			f32 := bf16ToF32Slice(pick(capturedLayer5MLP[0]))
+			raw := make([]byte, len(f32)*4)
+			for i, v := range f32 {
+				binary.LittleEndian.PutUint32(raw[i*4:], math.Float32bits(v))
+			}
+			if r := core.WriteFile(core.PathJoin(dump, "l6_tok0_"+name+".f32"), raw, 0o644); !r.OK {
+				t.Fatalf("dump %s: %v", name, r.Value)
+			}
+		}
+		// Both residual halves, every (token, layer): rows[tok*N+l], f32 rows of dModel.
+		for name, rows := range map[string][][]byte{"halves_attn": capturedAttnHiddens, "halves_out": capturedMLPResHiddens} {
+			var raw []byte
+			for _, row := range rows {
+				f32 := bf16ToF32Slice(row)
+				chunk := make([]byte, len(f32)*4)
+				for i, v := range f32 {
+					binary.LittleEndian.PutUint32(chunk[i*4:], math.Float32bits(v))
+				}
+				raw = append(raw, chunk...)
+			}
+			if r := core.WriteFile(core.PathJoin(dump, name+".f32"), raw, 0o644); !r.OK {
+				t.Fatalf("dump %s: %v", name, r.Value)
+			}
+		}
+		t.Logf("tok0 vectors + all-layer halves dumped to %s (f32 little-endian)", dump)
+	}
+}
+
 func TestForwardCaptureHiddensQwen3AllLayersVsRealOracle(t *testing.T) {
 	requireNativeRuntime(t)
 	targetDir := core.Getenv("LTHN_DFLASH_ZLAB_TARGET")

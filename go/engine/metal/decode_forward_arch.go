@@ -1587,10 +1587,14 @@ var (
 	capturedAttnHiddens   [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
 	capturedMLPResHiddens [][]byte // post-MLP hidden (attn_res + FFN) per layer — isolates the MLP from the PLE gate + scalar
 	capturedLayer5MLP     []capturedMLPInternal
+	// capturedMLPProbeLayer selects which layer capturedLayer5MLP records
+	// (default 5, the gemma4-31b diag's layer; the qwen3 #67 op bisection
+	// points it at the massive-activation onset).
+	capturedMLPProbeLayer = 5
 )
 
 type capturedMLPInternal struct {
-	gate, up, product, down []byte
+	normed, gate, up, product, down []byte
 }
 
 // stepToken decodes ONE token (its embedding) at sequence position pos, writing this
@@ -2138,12 +2142,13 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
-			if li == 5 {
+			if li == capturedMLPProbeLayer {
 				captureFF := s.dFF
 				if s.lb[li].dFF > 0 {
 					captureFF = s.lb[li].dFF
 				}
 				capturedLayer5MLP = append(capturedLayer5MLP, capturedMLPInternal{
+					normed:  append([]byte(nil), s.bufferBytes(s.msc.mlpNormed, s.dModel*bf16Size)...),
 					gate:    append([]byte(nil), s.bufferBytes(s.msc.gate, captureFF*bf16Size)...),
 					up:      append([]byte(nil), s.bufferBytes(s.msc.up, captureFF*bf16Size)...),
 					product: append([]byte(nil), s.bufferBytes(s.msc.gated, captureFF*bf16Size)...),
