@@ -88,7 +88,17 @@ func loadHIPComposedTextModel(path string, _ inference.LoadConfig) (inference.Te
 // follow-up, not part of this change. The model owns host f32 weights; its projection hooks remain
 // available for portable HIP++ acceleration.
 type hipComposedTextModel struct {
-	model            sharedmodel.SessionModel
+	// model is typed to the narrower TokenModel, not SessionModel: model.Generate's
+	// exported family (GenerateSampledWithStopTokensTransformEach, called by
+	// hipComposedEngineSession.generate below) already accepts a plain TokenModel and
+	// does its own runtime SessionModel type-assertion internally
+	// (model/token.go's generateUntilTransform) — a concrete value stored through this
+	// narrower field type still satisfies that assertion at its true type, so Mamba2's
+	// OpenSession fast path (model/arch/mamba2's MambaTokenModel) is unaffected. The
+	// narrower type lets a backend without a persistent incremental cache (qwen3_moe's
+	// v1 forward pass, qwen3_moe_runtime.go) reuse this same bridge on the shared
+	// whole-sequence fallback, with no SessionModel stub to write.
+	model            sharedmodel.TokenModel
 	tokenizer        engine.TextTokenizer
 	modelType        string
 	numLayers        int
@@ -156,7 +166,7 @@ func (*hipComposedTextModel) PeakMemoryBytes() uint64 { return 0 }
 // token prefix. Each decode deterministically rebuilds recurrent/KV state from that prefix; generated
 // tokens are committed so later turns and snapshots are complete.
 type hipComposedEngineSession struct {
-	model        sharedmodel.SessionModel
+	model        sharedmodel.TokenModel // see hipComposedTextModel.model's doc for why TokenModel, not SessionModel
 	prompt       []int32
 	architecture string
 	numLayers    int

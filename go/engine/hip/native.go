@@ -136,6 +136,9 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 	if mambaModel, matched, err := loadHIPMamba2TextModel(path, loadConfig); err != nil || matched {
 		return mambaModel, err
 	}
+	if qwen3MoEModel, matched, err := loadHIPQwen3MoETextModel(path, loadConfig); err != nil || matched {
+		return qwen3MoEModel, err
+	}
 	if composedModel, matched, err := loadHIPComposedTextModel(path, loadConfig); err != nil || matched {
 		return composedModel, err
 	}
