@@ -90,21 +90,26 @@ var mtpVerifyFoldForced = os.Getenv("LTHN_MTP_VERIFY_FOLD") == "1"
 // rate is at least the plain stretch's (#299).
 var mtpReengageDisabled = os.Getenv("LTHN_MTP_REENGAGE") == "0"
 
-// mtpRowsHeadArmed scores verify rows through the K-row fused qmm_t head — one
-// batched sweep of the vocab projection instead of K per-row matvecs. Its logits
-// ride the same token-identity tier as the verify fold; LTHN_MTP_ROWS_HEAD=0 is
-// the per-row forensics escape for parity A/B against unbatched plain.
-var mtpRowsHeadArmed = os.Getenv("LTHN_MTP_ROWS_HEAD") != "0"
+// mtpRowsHeadForced re-arms the K-row fused rows head in the byte-exact greedy
+// verify (LTHN_MTP_ROWS_HEAD=1) — the #55 A/B lever. That head scores verify
+// rows through the qmm_t token-identity tier, whose logits bytes differ from
+// the per-row qmv tier plain decode picks with; at a near-tied argmax the two
+// tiers can disagree, which would emit a committed token plain decode would
+// not. The exact lane therefore defaults to the per-row canonical head.
+var mtpRowsHeadForced = os.Getenv("LTHN_MTP_ROWS_HEAD") == "1"
 
-// mtpVerifyFoldArmed reports whether the assistant verify forward uses the batched
-// fold. The fold serves every lane: its batched numerics are the model's own
-// arithmetic in a deterministic, run-to-run-stable order, and a per-row byte-exact
-// verify costs at least K plain steps by construction — parity with the unbatched
-// plain decode is an A/B forensics tool, not a product contract.
-// LTHN_MTP_VERIFY_FOLD=0 forces the per-row lane for that A/B.
+// mtpVerifyFoldArmed is the #55 routing rule for the assistant verify forward:
+// the batched small-K fold (qmm token-identity tier — NOT byte-identical to
+// sequential decode; a near-tied argmax can flip a committed token) arms only
+// when the caller does not need byte-exactness (the sampled lane), or when the
+// LTHN_MTP_VERIFY_FOLD=1 A/B lever forces it. exact=true is the greedy lane's
+// byte-exact contract: never fold unless forced. Byte-exactness here is what
+// keeps the emitted stream invariant to the re-engagement policy's wall-clock
+// verdicts: the fold/plain cycle STRUCTURE is timing-dependent by design
+// (#299), so any lane whose bytes differ from plain decode makes that timing
+// observable as a flipped near-tied token downstream.
 func mtpVerifyFoldArmed(exact bool) bool {
-	_ = exact // both lanes fold; the parameter survives for the =0 forensics path's call sites
-	return mtpVerifyFoldForced || !mtpVerifyFoldDisabled
+	return mtpVerifyFoldForced || (!exact && !mtpVerifyFoldDisabled)
 }
 
 // mtpDiagDraftCalls counts draft-block invocations for the #352 instrument (single decode goroutine).

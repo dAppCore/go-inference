@@ -5741,6 +5741,8 @@ func (s *ArchSession) generatePipelinedGPUTail(gen []int32, maxNew, eosID int, s
 		} else {
 			s.rememberRetainedHiddenFrom(prev.lastOut)
 		}
+		mtpBoundaryTrace("stretch-drain", s.pos, tk, s.retainedHidden)
+		mtpBoundaryTraceKV(s, "stretch-drain")
 	})
 	if rerr != nil {
 		return nil, rerr

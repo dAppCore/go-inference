@@ -25,22 +25,24 @@ import (
 
 func restoreMTPFoldLevers(t *testing.T) {
 	t.Helper()
-	forced, disabled, rowsHead := mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadArmed
+	forced, disabled, rowsHead := mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadForced
 	t.Cleanup(func() {
-		mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadArmed = forced, disabled, rowsHead
+		mtpVerifyFoldForced, mtpVerifyFoldDisabled, mtpRowsHeadForced = forced, disabled, rowsHead
 	})
 }
 
-// TestMtpVerifyFoldArmed_Good pins the default routing: the batched fold serves
-// BOTH lanes; the per-row lane exists only behind the =0 forensics lever.
+// TestMtpVerifyFoldArmed_Good pins the default #55 routing: the byte-exact
+// greedy lane (exact=true) never takes the fold; the sampled lane keeps it.
+// The greedy contract is what keeps the emitted stream invariant to the
+// re-engagement policy's wall-clock verdicts (mtpVerifyFoldArmed's doc).
 func TestMtpVerifyFoldArmed_Good(t *testing.T) {
 	restoreMTPFoldLevers(t)
 	mtpVerifyFoldForced, mtpVerifyFoldDisabled = false, false
-	if !mtpVerifyFoldArmed(true) {
-		t.Fatal("greedy verify did not arm the batched fold — the default throughput tier regressed to the per-row lane")
+	if mtpVerifyFoldArmed(true) {
+		t.Fatal("exact greedy verify armed the batched fold — the byte-exact contract cannot hold on the token-identity tier (#55)")
 	}
 	if !mtpVerifyFoldArmed(false) {
-		t.Fatal("sampled verify did not arm the batched fold — the default throughput tier regressed to the per-row lane")
+		t.Fatal("sampled verify did not arm the batched fold — the sampled lane's throughput tier regressed")
 	}
 }
 

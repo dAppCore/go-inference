@@ -1210,6 +1210,8 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 	if err != nil {
 		return AssistantDraftBlockResult{}, core.E("native.assistant draft block", "target boundary hidden", err)
 	}
+	mtpBoundaryTrace("draft-entry", target.pos, lastToken, target.retainedHidden)
+	mtpBoundaryTraceKV(target, "draft-entry")
 	currentToken := lastToken
 	var tokens []int32
 	if copyTokens {
@@ -1254,6 +1256,10 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 			}
 			if !copyTokens {
 				target.mtpDraftTokens = ctokens
+			}
+			if mtpBoundaryTraceOn {
+				nativeTraceLog(core.Sprintf("mtp-boundary draft-exit pos=%d toks=%v h=%016x\n",
+					target.pos, ctokens, mtpBoundaryHash(target.retainedHidden)))
 			}
 			return AssistantDraftBlockResult{Tokens: ctokens, Hidden: chidden}, nil
 		}
@@ -1534,6 +1540,7 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 		}
 	}
 
+	mtpBoundaryTrace("verify-first", target.pos, first, target.retainedHidden)
 	posBefore := target.pos
 	result := AssistantVerifyResult{}
 	if copyOutputs {
@@ -1572,6 +1579,7 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 	if len(rows) < len(draftTokens) || len(hiddens) < len(draftTokens) {
 		return AssistantVerifyResult{}, core.NewError("native.assistant verify target rows are incomplete")
 	}
+	mtpBoundaryTraceRows(posBefore, -1, first, rows)
 
 	accepted := 0
 	for i, draft := range draftTokens {
@@ -1660,6 +1668,7 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 		// the retained hidden if a later consumer wants the logits bytes.
 		target.rememberRetainedHidden(hidden)
 	}
+	mtpBoundaryTrace("verify-adopt", target.pos, result.ReplacementToken, target.retainedHidden)
 	target.rememberAssistantAcceptedIDs(posBefore, result.AcceptedTokens)
 	target.rememberBoundaryGreedy(rows[accepted-1], target.retainedHidden, suppress)
 	return result, nil
@@ -2540,9 +2549,10 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	// OTHER round shape this default is what the log below reports, instead of silently reusing a
 	// STALE snapshot left over from a previous round.
 	mtpRowsDiagLast = mtpRowsDiagSnapshot{K: len(draftTokens), Reason: "rows-moe-seam-not-reached"}
-	// Both verify tiers take the batched fold by default; LTHN_MTP_VERIFY_FOLD=0
-	// forces the per-row forensics lane and LTHN_MTP_ROWS_HEAD=0 the per-row
-	// head (the parity-vs-unbatched-plain A/B levers).
+	// #55 routing: this greedy tier is byte-exact — per-row forward and per-row
+	// canonical head — so the emitted stream stays invariant to the wall-clock
+	// re-engagement verdicts (mtpVerifyFoldArmed's doc). LTHN_MTP_VERIFY_FOLD=1
+	// and LTHN_MTP_ROWS_HEAD=1 force the fold/rows-head tiers (the A/B levers).
 	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens, true)
 	if err != nil {
 		return nil, nil, err
@@ -2560,7 +2570,7 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	// combined with THIS round's attention/MoE wall + expert-group histogram, captured moments ago
 	// inside verifyAssistantDraftHiddens above (mtpRowsDiagLast).
 	headT0 := time.Now()
-	if mtpRowsHeadArmed {
+	if mtpRowsHeadForced {
 		if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
 			return nil, nil, gerr
 		} else if ok {
@@ -2681,14 +2691,15 @@ func mtpDiagTop2BF16Suppressed(logits []byte, vocab int, suppress []int32) (int3
 }
 
 // verifyAssistantDraftHiddens forwards the draft block through the target and
-// returns the per-row hiddens. Both tiers take the small-K batched FOLD by
-// default: weights swept once per block through the qmm token-identity tier —
-// deterministic run-to-run, the model's own arithmetic in batched order. The
-// fold is not byte-identical to the UNBATCHED plain decode; that parity is a
-// forensics A/B, not a product contract — LTHN_MTP_VERIFY_FOLD=0 forces the
-// per-row lane (qmv dot-body per row, byte-identical to sequential plain
-// decode) for it. exact survives for the =0 lane's call sites (the per-row
-// rows-MoE driver arms only there).
+// returns the per-row hiddens. Routing is the #55 rule (mtpVerifyFoldArmed):
+// exact=true is the greedy lane's byte-exact contract — the per-row lane (qmv
+// dot-body per row, byte-identical to sequential plain decode) — because the
+// re-engagement policy composes fold and plain stretches on wall-clock
+// verdicts, and only byte-parity keeps that composition invisible in the
+// emitted stream. The sampled lane (exact=false) takes the small-K batched
+// FOLD: weights swept once per block through the qmm token-identity tier,
+// deterministic run-to-run but not byte-identical to unbatched plain decode.
+// LTHN_MTP_VERIFY_FOLD forces either side for the parity A/B.
 func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32, exact bool) ([][]byte, error) {
 	if mtpVerifyFoldArmed(exact) {
 		s.state.verifyFoldSmallK = true
