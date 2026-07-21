@@ -790,6 +790,23 @@ func moeRouterQuantDeviceTopKBuffersWithBufferInPool(x []byte, xBuf metal.MTLBuf
 func encMoERouterQuantTopKRow(enc metal.MTLComputeCommandEncoderObject, scratch *routerDeviceScratch, inputBuf metal.MTLBuffer, normBuf bufView, wBuf, scalesBuf, biasesBuf bufView, scaleBuf metal.MTLBuffer, scaleOff uint, hasPerExpertScale bool, rmsPSO, qmvPSO, routerPSO metal.MTLComputePipelineState, rmsTG uint, dModel, numExperts, topK int, eps float32) {
 	sink := encSink{enc}
 	emitRMSNorm(sink, rmsPSO, inputBuf, normBuf.buf, scratch.normedBuf, normBuf.off, dModel, eps, rmsTG)
+	encMoERouterQuantTopKTail(enc, scratch, wBuf, scalesBuf, biasesBuf, scaleBuf, scaleOff, hasPerExpertScale, qmvPSO, routerPSO, dModel, numExperts, topK, scratch.idxBuf, 0, scratch.weightBuf, 0)
+}
+
+// encMoERouterQuantTopKRowTo is encMoERouterQuantTopKRow with the topK select's
+// idx/weight outputs redirected — the device-routed verify lane (#53) points K
+// rows' selects at row offsets of ONE shared pair buffer, which the expert
+// gathers then read WITHOUT the indices ever returning to the host.
+func encMoERouterQuantTopKRowTo(enc metal.MTLComputeCommandEncoderObject, scratch *routerDeviceScratch, inputBuf metal.MTLBuffer, inputOff uint, normBuf bufView, wBuf, scalesBuf, biasesBuf bufView, scaleBuf metal.MTLBuffer, scaleOff uint, hasPerExpertScale bool, rmsPSO, qmvPSO, routerPSO metal.MTLComputePipelineState, rmsTG uint, dModel, numExperts, topK int, eps float32, idxOut metal.MTLBuffer, idxOff uint, weightOut metal.MTLBuffer, weightOff uint) {
+	sink := encSink{enc}
+	emitRMSNormRows(sink, rmsPSO, inputBuf, normBuf.buf, scratch.normedBuf, inputOff, normBuf.off, 0, dModel, eps, 1, rmsTG)
+	encMoERouterQuantTopKTail(enc, scratch, wBuf, scalesBuf, biasesBuf, scaleBuf, scaleOff, hasPerExpertScale, qmvPSO, routerPSO, dModel, numExperts, topK, idxOut, idxOff, weightOut, weightOff)
+}
+
+// encMoERouterQuantTopKTail encodes the score QMV + the 32-lane topK select —
+// the shared tail of the single-row primitive and the row-offset To-variant.
+func encMoERouterQuantTopKTail(enc metal.MTLComputeCommandEncoderObject, scratch *routerDeviceScratch, wBuf, scalesBuf, biasesBuf bufView, scaleBuf metal.MTLBuffer, scaleOff uint, hasPerExpertScale bool, qmvPSO, routerPSO metal.MTLComputePipelineState, dModel, numExperts, topK int, idxOut metal.MTLBuffer, idxOff uint, weightOut metal.MTLBuffer, weightOff uint) {
+	sink := encSink{enc}
 	emitQMV(sink, qmvPSO, wBuf.buf, wBuf.off, scalesBuf.buf, scalesBuf.off, biasesBuf.buf, biasesBuf.off, scratch.normedBuf, scratch.scoresBuf, 0, dModel, numExperts)
 	if scaleBuf == nil {
 		scaleBuf = scratch.scoresBuf
@@ -801,8 +818,8 @@ func encMoERouterQuantTopKRow(enc metal.MTLComputeCommandEncoderObject, scratch 
 	sink.setPSO(routerPSO)
 	sink.setBuf(scratch.scoresBuf, 0, 0)
 	sink.setBuf(scaleBuf, scaleOff, 1)
-	sink.setBuf(scratch.idxBuf, 0, 2)
-	sink.setBuf(scratch.weightBuf, 0, 3)
+	sink.setBuf(idxOut, idxOff, 2)
+	sink.setBuf(weightOut, weightOff, 3)
 	sink.setI32(int32(numExperts), 4)
 	sink.setI32(int32(topK), 5)
 	sink.setI32(scaleFlag, 6)

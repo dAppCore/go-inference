@@ -6,6 +6,7 @@ package native
 
 import (
 	"os"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -271,6 +272,12 @@ func mtpRowsMoEBatched(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, K int,
 }
 
 func mtpRowsMoEBatchedInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, K int, eps float32) ([]byte, bool, error) {
+	// device-routed fast path (#53): routers write the pair idx/weights on-device,
+	// the expert stage runs as all-routes gathers, ONE command buffer, ONE wait.
+	// A pipeline miss falls through to the grouped-by-expert path below.
+	if out, gok, gerr := mtpRowsMoEBatchedGatherInPool(hSlab, w, dModel, dFF, K, eps); gok || gerr != nil {
+		return out, gok, gerr
+	}
 	numExperts, topK, expertDFF := w.NumExperts, w.TopK, w.ExpertDFF
 	rowBytes := dModel * bf16Size
 
@@ -682,4 +689,268 @@ func encQMVByteExactAt(enc metal.MTLComputeCommandEncoderObject, wq, scales, bia
 		// composition, mirroring qmvByteExactServable exactly.
 	}
 	return encQMVRowsBF16ChunkedAt(enc, wq.buf, scales.buf, biases.buf, in, out, wq.off, scales.off, biases.off, inOff, outOff, rows, outDim, inDim, gs, bits)
+}
+
+// mtpRowsGatherLhsTables returns the two cached lhs index tables the K-row
+// gathers bind: rows[z] = z/topK (gate/up read row z's expert-branch norm) and
+// iota[z] = z (the gelu-down reads route z's own gate/up rows). Keyed (K,
+// topK), device-resident for the process — the tables are pure geometry.
+var (
+	mtpRowsLhsTablesMu sync.Mutex
+	mtpRowsLhsTables   = map[[2]int][2]metal.MTLBuffer{}
+)
+
+func mtpRowsGatherLhsTables(K, topK int) (rowsBuf, iotaBuf metal.MTLBuffer) {
+	key := [2]int{K, topK}
+	mtpRowsLhsTablesMu.Lock()
+	defer mtpRowsLhsTablesMu.Unlock()
+	if t, ok := mtpRowsLhsTables[key]; ok {
+		return t[0], t[1]
+	}
+	pairs := K * topK
+	rows := make([]int32, pairs)
+	iota := make([]int32, pairs)
+	for z := range pairs {
+		rows[z] = int32(z / topK)
+		iota[z] = int32(z)
+	}
+	rowsBuf = device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&rows[0]), uint(pairs*4), metal.MTLResourceStorageModeShared)
+	iotaBuf = device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&iota[0]), uint(pairs*4), metal.MTLResourceStorageModeShared)
+	mtpRowsLhsTables[key] = [2]metal.MTLBuffer{rowsBuf, iotaBuf}
+	return rowsBuf, iotaBuf
+}
+
+// mtpRowsMoEBatchedGatherInPool is the DEVICE-ROUTED form of the batched MoE
+// step (#53): the K routers' topK selects write row offsets of ONE pair
+// idx/weight buffer on-device, the expert stage runs as three all-routes
+// gathers (lthn_gather_qmv — the same qmv bodies, so the same bytes; the
+// gelu-fused down folds the expert gelu into its x-load), and the WHOLE MoE
+// block — routers, local MLP, routed experts, combine — encodes into ONE
+// command buffer with ONE wait. No index ever returns to the host mid-layer;
+// the per-row reduction stays the #53 contract's untouched single-row kernel.
+// ok=false (no error) when a pipeline is unavailable — the grouped-by-expert
+// path serves as the fallback.
+func mtpRowsMoEBatchedGatherInPool(hSlab []byte, w MoEQuantLayerWeights, dModel, dFF, K int, eps float32) ([]byte, bool, error) {
+	numExperts, topK, expertDFF := w.NumExperts, w.TopK, w.ExpertDFF
+	rowBytes := dModel * bf16Size
+	pairs := K * topK
+	if !routerTopKUsable(numExperts, topK) {
+		return nil, false, nil
+	}
+
+	// router pipelines (the per-row trio, unchanged).
+	rGroupSize, rBits := quantWeightGeometryForShape(w.Router, numExperts, dModel, w.RouterGroupSize, w.RouterBits)
+	if rGroupSize <= 0 || dModel%rGroupSize != 0 {
+		return nil, false, nil
+	}
+	rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
+	if err != nil {
+		return nil, false, nil
+	}
+	rmsTG := rmsThreadgroup(dModel, rmsPSO)
+	rQmvPSO, err := pipelineFor(qmvBF16KernelName(numExperts, dModel, rGroupSize, rBits))
+	if err != nil {
+		return nil, false, nil
+	}
+	routerPSO, err := routerTopKPipelineK(topK)
+	if err != nil {
+		return nil, false, nil
+	}
+
+	// expert weight views + the gather pipelines. Fused ExpGateUp addresses the
+	// gate as rowBase 0 and the up as rowBase expertDFF inside each expert's
+	// 2·expertDFF-row block (expertRows bakes the block stride).
+	fusedExperts := len(w.ExpGateUp.Packed) > 0
+	var gateView, gateScales, gateBiases, upView, upScales, upBiases bufView
+	var expGS, expBits, gateRows, gateBase, upBase int
+	if fusedExperts {
+		v, s, b, gs, bits, verr := quantWeightViewsForShape("native.mtpRowsMoEBatchedGather: expert gate_up", w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if verr != nil {
+			return nil, false, nil
+		}
+		gateView, gateScales, gateBiases = v, s, b
+		upView, upScales, upBiases = v, s, b
+		expGS, expBits, gateRows, gateBase, upBase = gs, bits, 2*expertDFF, 0, expertDFF
+	} else {
+		gv, gs1, gb, gg, gbits, gerr := quantWeightViewsForShape("native.mtpRowsMoEBatchedGather: expert gate", w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if gerr != nil {
+			return nil, false, nil
+		}
+		uv, us, ub, _, _, uerr := quantWeightViewsForShape("native.mtpRowsMoEBatchedGather: expert up", w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if uerr != nil {
+			return nil, false, nil
+		}
+		gateView, gateScales, gateBiases = gv, gs1, gb
+		upView, upScales, upBiases = uv, us, ub
+		expGS, expBits, gateRows, gateBase, upBase = gg, gbits, expertDFF, 0, 0
+	}
+	downView, downScales, downBiases, downGS, downBits, derr := quantWeightViewsForShape("native.mtpRowsMoEBatchedGather: expert down", w.ExpDown, numExperts*dModel, expertDFF, w.ExpertGroupSize, w.ExpertBits)
+	if derr != nil {
+		return nil, false, nil
+	}
+	gateKey := lthnGatherQMVKey{groupSize: expGS, bits: expBits, expertRows: gateRows, fast: expertDFF%8 == 0 && dModel%512 == 0, batchedX: true}
+	gPSO, gOK := lthnGatherQMVPipeline(gateKey)
+	if !gOK {
+		return nil, false, nil
+	}
+	downKey := lthnGatherQMVKey{groupSize: downGS, bits: downBits, expertRows: dModel, batchedX: true, gelu: true}
+	dPSO, dOK := lthnGatherQMVPipeline(downKey)
+	if !dOK {
+		return nil, false, nil
+	}
+	wsumPSO, err := moeWeightedSumPipeline()
+	if err != nil {
+		return nil, false, nil
+	}
+	combinePSO, err := moeCombineNormsPipeline()
+	if err != nil {
+		return nil, false, nil
+	}
+	combineTG := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+	if combineTG > combinePSO.MaxTotalThreadsPerThreadgroup() {
+		return nil, false, nil
+	}
+
+	// local MLP views (the dense half, batched across rows exactly as before).
+	localGateView, localGateScales, localGateBiases, localGateGS, localGateBits, err := quantWeightViewsForShape("native.mtpRowsMoEBatchedGather: local gate", w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits)
+	if err != nil {
+		return nil, false, nil
+	}
+	localUpView, localUpScales, localUpBiases, localUpGS, localUpBits, err := quantWeightViewsForShape("native.mtpRowsMoEBatchedGather: local up", w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits)
+	if err != nil {
+		return nil, false, nil
+	}
+	localDownView, localDownScales, localDownBiases, localDownGS, localDownBits, err := quantWeightViewsForShape("native.mtpRowsMoEBatchedGather: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)
+	if err != nil {
+		return nil, false, nil
+	}
+	pre1 := bf16WeightView(w.PreFFNormW, w.preFFNormView)
+	pre2 := bf16WeightView(w.PreFFNorm2W, w.preFFNorm2View)
+	post1 := bf16WeightView(w.PostFFNorm1W, w.postFFNorm1View)
+	post2 := bf16WeightView(w.PostFFNorm2W, w.postFFNorm2View)
+	post := bf16WeightView(w.PostFFNormW, w.postFFNormView)
+	rNormBuf := bf16WeightView(w.RouterNormWScaled, w.routerNormView)
+	rWBuf, rScalesBuf, rBiasesBuf := quantWeightViews(w.Router)
+	var rScaleBuf metal.MTLBuffer
+	var rScaleOff uint
+	if w.PerExpertScale != nil {
+		sv := bf16WeightView(w.PerExpertScale, w.perExpertScaleView)
+		rScaleBuf, rScaleOff = sv.buf, sv.off
+	}
+
+	hBuf := sharedBytes(hSlab)
+	localNormBuf := scratchBF16(K * dModel)
+	expertNormBuf := scratchBF16(K * dModel)
+	localGateBuf := scratchBF16(K * dFF)
+	localUpBuf := scratchBF16(K * dFF)
+	localGatedBuf := scratchBF16(K * dFF)
+	localOutBuf := scratchBF16(K * dModel)
+	gateAllBuf := scratchBF16(pairs * expertDFF)
+	upAllBuf := scratchBF16(pairs * expertDFF)
+	downAllBuf := scratchBF16(pairs * dModel)
+	expertAccBuf := scratchBF16(K * dModel)
+	outBuf := scratchBF16(K * dModel)
+	// i32 pair indices ride a bf16-pool buffer of 2x the element count (the
+	// pool hands out raw bytes; 2 bf16 = 1 i32).
+	idxAllDev := scratchBF16(pairs * 2)
+	weightsAllDev := scratchBF16(pairs)
+	if hBuf == nil || localNormBuf == nil || expertNormBuf == nil || localGateBuf == nil || localUpBuf == nil ||
+		localGatedBuf == nil || localOutBuf == nil || gateAllBuf == nil || upAllBuf == nil || downAllBuf == nil ||
+		expertAccBuf == nil || outBuf == nil || idxAllDev == nil || weightsAllDev == nil {
+		return nil, false, core.NewError("native.mtpRowsMoEBatchedGather: scratch allocation failed")
+	}
+	lhsRows, lhsIota := mtpRowsGatherLhsTables(K, topK)
+
+	scratches := make([]*routerDeviceScratch, K)
+	defer func() {
+		for _, sc := range scratches {
+			if sc != nil {
+				putRouterDeviceScratch(sc)
+			}
+		}
+	}()
+
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	sink := encSink{enc}
+	for r := range K {
+		scratch, serr := getRouterDeviceScratch(dModel, numExperts, topK)
+		if serr != nil {
+			endEncodingFast(enc)
+			return nil, false, serr
+		}
+		scratches[r] = scratch
+		encMoERouterQuantTopKRowTo(enc, scratch, hBuf, uint(r*rowBytes), rNormBuf, rWBuf, rScalesBuf, rBiasesBuf, rScaleBuf, rScaleOff, w.PerExpertScale != nil,
+			rmsPSO, rQmvPSO, routerPSO, rmsTG, dModel, numExperts, topK, eps,
+			idxAllDev, uint(r*topK*4), weightsAllDev, uint(r*topK*bf16Size))
+	}
+	emitRMSNormRows(sink, rmsPSO, hBuf, pre1.buf, localNormBuf, 0, pre1.off, 0, dModel, eps, K, rmsTG)
+	emitRMSNormRows(sink, rmsPSO, hBuf, pre2.buf, expertNormBuf, 0, pre2.off, 0, dModel, eps, K, rmsTG)
+	if hOK, herr := encQMVRowsGroupAt(enc, localGateView, localGateScales, localGateBiases, localNormBuf, localGateBuf, 0, 0, K, dFF, dModel, localGateGS, localGateBits); herr != nil || !hOK {
+		endEncodingFast(enc)
+		return nil, false, herr
+	}
+	if hOK, herr := encQMVRowsGroupAt(enc, localUpView, localUpScales, localUpBiases, localNormBuf, localUpBuf, 0, 0, K, dFF, dModel, localUpGS, localUpBits); herr != nil || !hOK {
+		endEncodingFast(enc)
+		return nil, false, herr
+	}
+	if err := encGeluGateMulFused(enc, localGateBuf, localUpBuf, localGatedBuf, K*dFF); err != nil {
+		endEncodingFast(enc)
+		return nil, false, err
+	}
+	if hOK, herr := encQMVRowsGroupAt(enc, localDownView, localDownScales, localDownBiases, localGatedBuf, localOutBuf, 0, 0, K, dModel, dFF, localDownGS, localDownBits); herr != nil || !hOK {
+		endEncodingFast(enc)
+		return nil, false, herr
+	}
+	emitLthnGatherQMVRoutes(sink, gPSO, expertNormBuf, 0,
+		gateView.buf, gateView.off, gateScales.buf, gateScales.off, gateBiases.buf, gateBiases.off,
+		lhsRows, idxAllDev, 0, gateAllBuf, 0, expertDFF, dModel, expGS, expBits, gateBase, pairs)
+	emitLthnGatherQMVRoutes(sink, gPSO, expertNormBuf, 0,
+		upView.buf, upView.off, upScales.buf, upScales.off, upBiases.buf, upBiases.off,
+		lhsRows, idxAllDev, 0, upAllBuf, 0, expertDFF, dModel, expGS, expBits, upBase, pairs)
+	emitLthnGatherQMVGeluRoutes(sink, dPSO, gateAllBuf, 0, upAllBuf, 0,
+		downView.buf, downView.off, downScales.buf, downScales.off, downBiases.buf, downBiases.off,
+		lhsIota, idxAllDev, 0, downAllBuf, 0, dModel, expertDFF, downGS, downBits, 0, pairs)
+	sink.setPSO(wsumPSO)
+	sink.setBuf(downAllBuf, 0, 0)
+	sink.setBuf(weightsAllDev, 0, 1)
+	sink.setBuf(expertAccBuf, 0, 2)
+	sink.setI32(int32(dModel), 3)
+	sink.setI32(int32(topK), 4)
+	wsumGroup := min(uint(dModel), uint(256))
+	sink.dispatchThreads(metal.MTLSize{Width: uint(dModel), Height: uint(K), Depth: 1}, metal.MTLSize{Width: wsumGroup, Height: 1, Depth: 1})
+	sink.setPSO(combinePSO)
+	sink.setBuf(localOutBuf, 0, 0)
+	sink.setBuf(post1.buf, post1.off, 1)
+	sink.setBuf(expertAccBuf, 0, 2)
+	sink.setBuf(post2.buf, post2.off, 3)
+	sink.setBuf(post.buf, post.off, 4)
+	sink.setBuf(hBuf, 0, 5)
+	sink.setBuf(outBuf, 0, 6)
+	sink.setF32(eps, 7)
+	sink.setI32(int32(dModel), 8)
+	sink.dispatchThreads(metal.MTLSize{Width: combineTG * uint(K), Height: 1, Depth: 1}, metal.MTLSize{Width: combineTG, Height: 1, Depth: 1})
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+
+	// diag: the group histogram reads the pair indices AFTER the wait — host
+	// grouping is instrumentation only on this path, never a dependency.
+	idxHost := unsafe.Slice((*int32)(idxAllDev.Contents()), pairs)
+	counts := map[int32]int{}
+	for _, e := range idxHost {
+		counts[e]++
+	}
+	maxGroup := 0
+	for _, m := range counts {
+		if m > maxGroup {
+			maxGroup = m
+		}
+		mtpRowsMoEGroupHistBump(m)
+	}
+	mtpRowsMoEMaxGroupSize.Store(int64(maxGroup))
+
+	outSlab := make([]byte, K*rowBytes)
+	copy(outSlab, unsafe.Slice((*byte)(outBuf.Contents()), K*rowBytes))
+	return outSlab, true, nil
 }
