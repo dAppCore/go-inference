@@ -7,6 +7,7 @@ package native
 import (
 	"os"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
@@ -41,19 +42,39 @@ var batchedTQPrefillDisabledForTest bool
 // clean before/after receipt on a live box.
 var tqBatchedPrefillEnvOff = os.Getenv("LTHN_TQ_BATCHED_PREFILL") == "0"
 
+// tqAllocLogOn is the dev instrument (LTHN_TQ_ALLOC_LOG=1): log every TQ
+// prefill-scratch buffer at its first allocation (layer, maxLen, kvDim,
+// bytes, running total) — the deep-prefill RSS-blowup finder. Zero cost off.
+var tqAllocLogOn = os.Getenv("LTHN_TQ_ALLOC_LOG") == "1"
+
+// tqAllocLogTotal accumulates logged scratch bytes this process (dev
+// instrument only — never read outside tqAllocLogOn).
+var tqAllocLogTotal int64
+
 // tqPrefillScratch holds each TurboQuant global owner layer's reusable bf16
 // reconstruction of its code history — one K plane and one V plane per layer,
 // laid out [rows × kvHeads × headDim] bf16 exactly as a bf16 KV cache, so the
 // batched SDPA reads them with the ordinary bf16 strides. hwm[li] is the number
 // of rows already reconstructed into that layer's scratch (the incremental
-// high-water mark). Buffers are sized to maxLen once (prefill never re-allocs
-// mid-run, which would drop the accumulated history) and released at the
-// prefill→decode transition.
+// high-water mark). rowsCap[li] is the plane's CURRENT row capacity — planned
+// to what this prefill has actually reached, not the session's maxLen (a
+// warm-kernel pass or a short turn no longer pays a full-context bf16 mirror
+// for a few hundred rows). Capacity grows by doubling, carrying the
+// already-dequantised [0,hwm) rows forward (ensureLayer), and is released at
+// the prefill→decode transition.
 type tqPrefillScratch struct {
 	k, v    []metal.MTLBuffer
 	hwm     []int
 	rowsCap []int
 }
+
+// tqPrefillScratchMinRows is the smallest capacity a layer's first touch
+// allocates. Below this a doubling grow would trigger on almost every chunk
+// (laneOverlapPrefillChunkRows=512 rows), turning the amortised O(log maxLen)
+// reallocations into O(prefillRows/512); the floor keeps a short prefill (a
+// warm-kernel pass, a short turn) far below maxLen while a deep one still
+// amortises to a handful of grows.
+const tqPrefillScratchMinRows = 4096
 
 // ensureTQPrefill lazily builds the per-session TQ prefill scratch keyed by
 // layer count. The buffers themselves are allocated on first touch per layer
@@ -61,6 +82,9 @@ type tqPrefillScratch struct {
 // pays nothing.
 func (s *archDecodeState) ensureTQPrefill(nLayers int) *tqPrefillScratch {
 	if s.tqPrefill == nil {
+		if tqAllocLogOn {
+			nativeTraceLog(core.Sprintf("native: tq-prefill-scratch NEW-WRAPPER state=%p maxLen=%d nLayers=%d\n", s, s.maxLen, nLayers))
+		}
 		s.tqPrefill = &tqPrefillScratch{
 			k:       make([]metal.MTLBuffer, nLayers),
 			v:       make([]metal.MTLBuffer, nLayers),
@@ -71,18 +95,60 @@ func (s *archDecodeState) ensureTQPrefill(nLayers int) *tqPrefillScratch {
 	return s.tqPrefill
 }
 
-// ensureLayer allocates layer li's K/V scratch planes at maxLen rows (the code
-// cache's own row capacity for a global owner) the first time the layer lands a
-// batched TQ chunk. maxLen is the hard cap on any chunk's basePos+K, so the
-// plane never grows mid-prefill.
-func (sc *tqPrefillScratch) ensureLayer(li, maxLen, kvDim int) {
-	if sc.k[li] != nil {
+// ensureLayer allocates or grows layer li's K/V scratch planes to cover at
+// least `need` rows (the chunk about to land needs [0, need) addressable),
+// never beyond maxLen (the code cache's own row capacity for a global owner —
+// the hard cap on any chunk's basePos+K). A first touch allocates
+// max(need, tqPrefillScratchMinRows); a later chunk that outgrows the current
+// capacity DOUBLES it (capped at maxLen) rather than topping up to the exact
+// need, so a deep prefill still amortises to O(log maxLen) reallocations.
+//
+// Growing carries the already-dequantised [0,hwm) rows forward via a
+// synchronous GPU blit into the new planes — safe because the chunk whose
+// landing wrote those rows already committed and completed its own command
+// buffer before returning to the caller that invokes the NEXT chunk's landing
+// (and this one), so there is no in-flight GPU write left to race.
+func (sc *tqPrefillScratch) ensureLayer(li, need, maxLen, kvDim int) {
+	if need > maxLen {
+		need = maxLen
+	}
+	if sc.k[li] != nil && sc.rowsCap[li] >= need {
 		return
 	}
-	sc.k[li] = scratchBF16(maxLen * kvDim)
-	sc.v[li] = scratchBF16(maxLen * kvDim)
-	sc.rowsCap[li] = maxLen
-	sc.hwm[li] = 0
+	newCap := max(need, tqPrefillScratchMinRows)
+	if sc.rowsCap[li] > 0 {
+		newCap = max(newCap, sc.rowsCap[li]*2) // doubling grow, not a bare top-up
+	}
+	if newCap > maxLen {
+		newCap = maxLen
+	}
+	newK := scratchBF16(newCap * kvDim)
+	newV := scratchBF16(newCap * kvDim)
+	oldCap := sc.rowsCap[li]
+	if sc.k[li] != nil {
+		if sc.hwm[li] > 0 {
+			validBytes := uint(sc.hwm[li] * kvDim * bf16Size)
+			cb := commandBufferFast(queue)
+			blit := blitCommandEncoderFast(cb)
+			blit.CopyFromBufferSourceOffsetToBufferDestinationOffsetSize(sc.k[li], 0, newK, 0, validBytes)
+			blit.CopyFromBufferSourceOffsetToBufferDestinationOffsetSize(sc.v[li], 0, newV, 0, validBytes)
+			endBlitEncodingFast(blit)
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+		}
+		releaseDeviceBuffers(sc.k[li], sc.v[li])
+	} else {
+		sc.hwm[li] = 0
+	}
+	sc.k[li], sc.v[li] = newK, newV
+	sc.rowsCap[li] = newCap
+	if tqAllocLogOn {
+		nBytes := int64(newCap) * int64(kvDim) * bf16Size * 2 // k + v planes
+		tqAllocLogTotal += nBytes
+		nativeTraceLog(core.Sprintf(
+			"native: tq-prefill-scratch layer=%d oldCap=%d newCap=%d maxLen=%d kvDim=%d bytes=%dMiB total=%dMiB\n",
+			li, oldCap, newCap, maxLen, kvDim, nBytes>>20, tqAllocLogTotal>>20))
+	}
 }
 
 // tqBatchedLanding lands the chunk's staged (roped/normed) K/V rows into layer
@@ -114,8 +180,8 @@ func (s *archDecodeState) tqBatchedLanding(enc metal.MTLComputeCommandEncoder, l
 	}
 
 	sc := s.ensureTQPrefill(len(s.specs))
-	sc.ensureLayer(li, s.maxLen, kvDim)
 	end := basePos + K
+	sc.ensureLayer(li, end, s.maxLen, kvDim)
 	lo := sc.hwm[li]
 	if basePos < lo {
 		lo = basePos // re-visit: re-cover the current chunk's fresh codes
@@ -183,9 +249,18 @@ func (s *archDecodeState) releaseTQPrefillScratch() {
 		return
 	}
 	sc := s.tqPrefill
+	live := 0
+	for i := range sc.k {
+		if sc.k[i] != nil {
+			live++
+		}
+	}
 	releaseDeviceBuffers(sc.k...)
 	releaseDeviceBuffers(sc.v...)
 	for i := range sc.k {
 		sc.k[i], sc.v[i], sc.hwm[i], sc.rowsCap[i] = nil, nil, 0, 0
+	}
+	if tqAllocLogOn {
+		nativeTraceLog(core.Sprintf("native: tq-prefill-scratch RELEASE liveLayers=%d\n", live))
 	}
 }
