@@ -266,36 +266,58 @@ panel/overlay body, footer key hints, all inside one rounded border.
   content through byte-exact at the slot's full width, closing the gap the
   previous round left open (docs/ctml.md S:15.2/S:15.5). Wide layouts
   (`shellwide.ctml`, `<layout variant="HCRF">`) bind the main panel to C
-  and the inspector to R, one `RenderTerm` call (`renderBandLayout`) in
+  and the inspector to R, one `RenderTerm` call (`renderWideLayout`) in
   place of `lipgloss.JoinHorizontal` and a manual `│` separator column.
   Every single-pane shape — Narrow either way, Overlay with the inspector
   closed — binds the one active pane to C (`shellregion.ctml`,
   `<layout variant="HCF">`), replacing a bare `fitPane` call. The ONE shape
-  that still cannot join them is Overlay with the inspector open: two
-  independently-sized panes stacked vertically with a rule between, which
-  HLCRF's five-letter slot vocabulary has no pair for (H/F are whole-page
-  top/bottom bands, not a reusable mid-page pair, and go-html's own
-  automatic L/C/R vertical stacking triggers only below 80 columns —
-  S:15.1 — above this layout kind's own floor). That one shape stays
-  exactly the pre-.ctml host composition: `shell.ctml`'s H/F-only layout,
-  split by `renderBandFrame`, with `renderInspectorStack` composing the
-  region between the bands — the same HF+host-composition idiom a
+  that still cannot join header+region+footer into a single call is
+  Overlay with the inspector open: `shell.ctml`'s H/F-only layout, split by
+  `renderBandFrame`, stays host-joined (`lipgloss.JoinVertical`) with the
+  region rendered between the bands — the same HF+host-composition idiom a
   widget-carrying overlay uses for a live Bubbles widget between its own
-  bands.
-- **The Wide inspector is now 28 columns, not 32.** go-html's non-FitSlots
-  middle band gives R a fixed outer-width budget (the unexported
-  `termAsideWidth`, S:15.1) whenever R is present at ≥80 columns — there is
-  no `TermOptions`/`Layout` lever to request a different width, and a
-  zero-chrome C does not collapse the C/R junction either: go-html always
-  inserts its own single blank-space gutter before R, so the old visible
-  `│` rule is gone with it (the gutter is blank; there is no theme lever to
-  paint a glyph into it). `regionAsideWidth` (`layout.go`) mirrors the
-  fixed budget as a documented local constant — go-html exports no
-  accessor for it (S:15.5) — and `TestRegionAsideWidth_MatchesGoHTML` pins
-  it against a live `RenderTermBoxes` call so upstream drift fails loudly
-  rather than silently reflowing the frame. The main panel gains the 4
-  columns back (`measureFrame`'s Wide case); this is a real, visible width
-  delta, tied entirely to that one doctrine clause.
+  bands. What changed as of go-html v0.15.0 (docs/ctml.md S:15.7) is that
+  the REGION itself no longer hand-stacks: two independently-sized panes
+  stacked vertically with a rule between is a documented idiom — an `HC`
+  layout, H the upper pane with its own bottom border as the divider, C the
+  lower pane — not a missing construct, since only the *middle* band's
+  L/C/R packing is width-gated (side by side ≥80 columns, stacked below);
+  H/middle/F themselves stack vertically at any width. `renderInspectorStack`
+  (`layout.go`) now renders `shellinspectorpair.ctml`'s `<layout
+  variant="HC">` through its own `RenderTerm` call, replacing the old
+  `lipgloss.JoinVertical(inspector, separator, main)` plus a manually
+  `core.Repeat("─", …)` rule line. It stays a SEPARATE call from
+  `shell.ctml`'s H/F band, rather than nesting fully into one page-wide
+  call: `TermTheme` is one flat struct threaded through every nested
+  `Layout` in a single render, so a unified call would force the page
+  header's `H` (needing zero chrome, pre-fitted byte-exact like every
+  sibling shell) and the pair's own `H` (needing its natural bordered
+  chrome, since that border IS the rule) to share one `Header` style — a
+  throwaway probe during this slice confirmed zeroing `Header` for the page
+  header silently zeroed the pair's divider too. `shellinspectorpair.ctml`'s
+  own header comment has the full account.
+- **The Wide inspector is 32 columns again, not 28.** go-html v0.15.0 adds
+  `TermOptions.AsideWidth` (S:15.1): a width *request* that overrides the
+  non-FitSlots middle band's fixed R budget (the unexported
+  `termAsideWidth`, still 28 by default) per render, with C absorbing the
+  difference. `renderWideLayout` (`layout.go`) is the one render path that
+  sets it, requesting `wideInspectorWidth` (32) — restoring both the
+  pre-.ctml value and name. A zero-chrome C still does not collapse the C/R
+  junction: go-html always inserts its own single-column gutter before R,
+  but that gutter is now paintable — `TermTheme.GutterRule` (S:15.6) sets
+  the glyph rendered there, the full band height, in the theme's `Rule`
+  style; `shellWideTheme` sets `GutterRule = "│"` (repointed at
+  `styles.separator`'s own colour) so the historic visible rule returns.
+  `wideInspectorWidth` documents the REQUEST rather than mirroring
+  go-html's own unrequested default — go-html exports no accessor for that
+  default (S:15.5) — and `TestWideInspectorWidth_MatchesRequest` pins the
+  request against a live `RenderTermBoxes` call on the real
+  `shellwide.ctml` render path (the box map is the render-time source of
+  truth, S:15.5) so upstream regression in honouring `AsideWidth` fails
+  loudly rather than silently reflowing the frame back to 28. The main
+  panel gets its historic width back too (`measureFrame`'s Wide case); both
+  the width and the rule are real, visible deltas, tied entirely to these
+  two doctrine clauses.
 - **Mouse hit-testing needed no re-plumbing, this slice included.**
   `onMouse` resolves against its own independent `renderPanelBarBoxes`
   call, keyed off `frameInsetRows`/`frameInsetCols` and the tab strip's
