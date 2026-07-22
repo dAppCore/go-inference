@@ -1532,6 +1532,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			vsReplay.executeInto(enc, basePos, pleSlabBuf)
 			readRows, outRows = inRows, inRows
 			readOff = rowOff
+			if verifyStackReplayCmds > 0 {
+				// #71 sub-layer bisect: partial layer 1 replayed, live from layer 2.
+				li = 1
+				continue
+			}
+			if n := verifyStackReplayLayers; n > 0 && n < len(vsReplay.layerMarks) {
+				// #71 bisect: ICB served layers 1..n only; live-encode the rest.
+				li = n
+				continue
+			}
 			li = layerEnd - 2
 			continue
 		}
@@ -2522,6 +2532,72 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		}
 	}
 	hostSpan("reloadKV", reloadStart, K)
+	if verifyStackRowHashArmed && s.verifyFoldSmallK {
+		// #71: slab NaN census after the pass — the first NaN slab in dataflow
+		// order names the producing op inside the replayed interior.
+		scan := func(name string, b metal.MTLBuffer) {
+			if b == nil {
+				return
+			}
+			n := int(b.Length()) / 2
+			nan, inf, minV, maxV, first := bf16BufStats(b, 0, n)
+			if nan > 0 || inf > 0 {
+				nativeTraceLog(core.Sprintf("slabscan %s: n=%d NaN=%d Inf=%d first=%d min=%.3g max=%.3g\n", name, n, nan, inf, first, minV, maxV))
+			}
+		}
+		scan("attnNormSlab", attnNormSlab)
+		scan("qSlab", qSlab)
+		scan("attnSlab", attnSlab)
+		scan("attnOutSlab", attnOutSlab)
+		scan("hSlab", hSlab)
+		scan("mlpNormSlab", mlpNormSlab)
+		scan("gateSlab", gateSlab)
+		scan("upSlab", upSlab)
+		scan("gatedSlab", gatedSlab)
+		scan("downSlab", downSlab)
+		scan("pleSlab", pleSlabBuf)
+		for i := 0; i < K && i < len(readRows); i++ {
+			if readRows[i] == nil {
+				continue
+			}
+			nan, inf, minV, maxV, first := bf16BufStats(readRows[i], readOff[i], s.dModel)
+			nativeTraceLog(core.Sprintf("rowscan r%d: NaN=%d Inf=%d first=%d min=%.3g max=%.3g\n", i, nan, inf, first, minV, maxV))
+		}
+		if icbK != nil {
+			for mli := range s.specs {
+				if mli >= len(icbK) || icbK[mli] == nil {
+					continue
+				}
+				rb := s.icb.rowBytes[mli]
+				span := (basePos + K) * rb
+				if int(icbK[mli].Length()) < span {
+					continue
+				}
+				kb := unsafe.Slice((*byte)(icbK[mli].Contents()), span)
+				vb := unsafe.Slice((*byte)(icbV[mli].Contents()), span)
+				// q8 caches are int8 codes — a scan for 0x80 runs (impossible from
+				// the store) is weak; scan the f32 SCALE planes instead for NaN.
+				_ = kb
+				_ = vb
+				if q := s.icb.kvQ8; q != nil && mli < len(q.kScales) && q.kScales[mli] != nil {
+					sl := int(q.kScales[mli].Length()) / 4
+					f := unsafe.Slice((*float32)(q.kScales[mli].Contents()), sl)
+					bad, firstBad := 0, -1
+					for j, v := range f {
+						if v != v || (v > 1e30 || v < -1e30) {
+							if bad == 0 {
+								firstBad = j
+							}
+							bad++
+						}
+					}
+					if bad > 0 {
+						nativeTraceLog(core.Sprintf("scalescan L%d k: bad=%d first=%d\n", mli, bad, firstBad))
+					}
+				}
+			}
+		}
+	}
 	if verifyStackRowHashArmed && icbK != nil && s.verifyFoldSmallK {
 		for _, mli := range []int{4, 9} {
 			if mli < len(icbK) && icbK[mli] != nil {

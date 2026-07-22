@@ -560,6 +560,26 @@ func (s *archDecodeState) pleSlabBuffer(slab []byte) (metal.MTLBuffer, error) {
 	if len(slab) == 0 {
 		return nil, core.NewError("native.archDecodeState.pleSlabBuffer: empty PLE slab")
 	}
+	if verifyStackPLEPad {
+		// #71 identity-replay probe: grow-only slab so a K change never swaps
+		// the buffer identity under a verify-stack recording.
+		if s.pleSlabScratch != nil && len(s.pleSlabScratch.bytes) < len(slab) {
+			s.pleSlabScratch.Close()
+			s.pleSlabScratch = nil
+		}
+		if s.pleSlabScratch == nil {
+			n := len(slab)
+			if n < 1<<20 {
+				n = 1 << 20
+			}
+			scratch, err := newPinnedNoCopyBytes(n)
+			if err != nil {
+				return nil, err
+			}
+			s.pleSlabScratch = scratch
+		}
+		return s.pleSlabScratch.copyPrefixBuffer(slab)
+	}
 	if s.pleSlabScratch != nil && len(s.pleSlabScratch.bytes) != len(slab) {
 		s.pleSlabScratch.Close()
 		s.pleSlabScratch = nil

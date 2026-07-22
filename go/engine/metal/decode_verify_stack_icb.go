@@ -7,6 +7,8 @@ package native
 import (
 	"math"
 	"os"
+	"sort"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -174,6 +176,9 @@ type verifyStackICB struct {
 	rebinds     []vsRebind
 	dyn         []vsDynScalar
 	key         verifyStackKey
+	// layerMarks[i] is the command index at interior layer i+1's entry — the
+	// prefix-replay bisect (LTHN_VERIFY_STACK_REPLAY_LAYERS) cuts on these.
+	layerMarks []int
 	// pleSlabID is the slab identity the recording bound; a differing current
 	// slab is re-pointed by the PLE rebinds and declared resident additionally.
 	pleSlabID uintptr
@@ -204,8 +209,14 @@ func (v *verifyStackICB) prepare(basePos int, pleSlab metal.MTLBuffer) {
 		rb := &v.rebinds[i]
 		switch rb.kind {
 		case vsRebindGlobalRow:
+			if verifyStackNoRebind {
+				continue
+			}
 			setICBKernelBufferAtCommandIndexFast(v.icb, rb.cmdIdx, rb.buf, uint(basePos*rb.stride), rb.bindIdx)
 		case vsRebindSlideSlot:
+			if verifyStackNoRebind {
+				continue
+			}
 			slot := (basePos + rb.row) % rb.slideW
 			setICBKernelBufferAtCommandIndexFast(v.icb, rb.cmdIdx, rb.buf, uint(slot*rb.stride), rb.bindIdx)
 		case vsRebindPLESlab:
@@ -261,6 +272,11 @@ type verifyStackRecorder struct {
 	overlap      bool // one-shot: next command records WITHOUT a barrier
 	key          verifyStackKey
 	pleSlabID    uintptr
+	debugOps     bool     // LTHN_VERIFY_STACK_DEBUG: collect per-command op tags
+	pendingOp    string   // op tag armed for the next nextCmd allocation
+	cmdOps       []string // per-command kernel tags (debug only)
+	layerMarks   []int    // used-count at each layerEntry (debug only)
+	lastSkipped  bool     // the last rec* was skipped (skip-op probe) — marks no-op
 }
 
 // setLayer arms the mirror for interior layers only — the live edges (layer 0
@@ -295,6 +311,15 @@ func newVerifyStackRecorder(nLayers, k int, key verifyStackKey, pleSlab metal.MT
 		residentSeen: make(map[uintptr]struct{}, nLayers*48+64),
 		key:          key,
 		pleSlabID:    bufID(pleSlab),
+		debugOps:     os.Getenv("LTHN_VERIFY_STACK_DEBUG") != "",
+	}
+}
+
+// op arms the kernel-class tag for the next nextCmd allocation (debug only) —
+// the per-op histogram finish prints is the E4B-vs-E2B stream differ.
+func (r *verifyStackRecorder) op(name string) {
+	if r != nil && r.debugOps {
+		r.pendingOp = name
 	}
 }
 
@@ -319,6 +344,29 @@ func (r *verifyStackRecorder) overlapNext() {
 }
 
 var verifyStackAllBarriers = os.Getenv("LTHN_VERIFY_STACK_ALLBARRIERS") == "1"
+
+// verifyStackPLEPad (LTHN_VERIFY_STACK_PLE_PAD=1) sizes the PLE slab grow-only
+// so K changes keep the buffer identity — the #71 identity-replay probe.
+var verifyStackPLEPad = os.Getenv("LTHN_VERIFY_STACK_PLE_PAD") == "1"
+
+// verifyStackSkipOp (LTHN_VERIFY_STACK_SKIP_OP=<class>) omits ONE op class
+// from the recording — the #71 poison-op discriminator: at replay the skipped
+// op's output keeps the record-along pass's near-correct bytes, so the NaN
+// vanishes iff the skipped class is the corrupting one.
+var verifyStackSkipOp = os.Getenv("LTHN_VERIFY_STACK_SKIP_OP")
+
+func (r *verifyStackRecorder) skip(class string) bool {
+	if verifyStackSkipOp != "" && verifyStackSkipOp == class {
+		r.lastSkipped = true
+		return true
+	}
+	return false
+}
+
+// verifyStackNoRebind (LTHN_VERIFY_STACK_NO_REBIND=1) skips the GlobalRow /
+// SlideSlot rewrites in prepare — valid ONLY when replaying at the recorded
+// basePos (the #71 bootstrap-identity probe isolating the rewrite primitive).
+var verifyStackNoRebind = os.Getenv("LTHN_VERIFY_STACK_NO_REBIND") == "1"
 
 var verifyStackRowHashArmed = os.Getenv("LTHN_VERIFY_STACK_ROWHASH") == "1"
 
@@ -359,6 +407,11 @@ func (r *verifyStackRecorder) nextCmd() (metal.MTLIndirectComputeCommand, bool) 
 	r.overlap = false
 	r.used++
 	r.lastBinds = r.lastBinds[:0]
+	r.lastSkipped = false
+	if r.debugOps {
+		r.cmdOps = append(r.cmdOps, r.pendingOp)
+		r.pendingOp = ""
+	}
 	return c, true
 }
 
@@ -366,7 +419,7 @@ func (r *verifyStackRecorder) nextCmd() (metal.MTLIndirectComputeCommand, bool) 
 // (buf, off) as a per-pass rebind. An op whose expected pos-dependent bind is
 // absent fails the recording — the drift guard against emit-ABI changes.
 func (r *verifyStackRecorder) markRebindLast(buf metal.MTLBuffer, off uint, kind vsRebindKind, stride, row, slideW int) {
-	if r == nil || r.failed {
+	if r == nil || r.failed || r.lastSkipped {
 		return
 	}
 	id := bufID(buf)
@@ -388,7 +441,7 @@ func (r *verifyStackRecorder) markRebindLast(buf metal.MTLBuffer, off uint, kind
 // markPLESlabLast registers the just-recorded command's PLE slab bind for
 // per-pass re-pointing (the pinned slab reallocates whenever K changes).
 func (r *verifyStackRecorder) markPLESlabLast(pleSlab metal.MTLBuffer, off uint) {
-	if r == nil || r.failed || pleSlab == nil {
+	if r == nil || r.failed || pleSlab == nil || r.lastSkipped {
 		return
 	}
 	id := bufID(pleSlab)
@@ -427,6 +480,7 @@ func (r *verifyStackRecorder) dynI32(kind vsScalarKind, row, capW int) metal.MTL
 func (r *verifyStackRecorder) layerEntry() {
 	if r != nil {
 		r.layerEntries++
+		r.layerMarks = append(r.layerMarks, r.used)
 	}
 }
 
@@ -438,7 +492,60 @@ func (r *verifyStackRecorder) finish() *verifyStackICB {
 		return nil
 	}
 	if os.Getenv("LTHN_VERIFY_STACK_DEBUG") != "" {
-		nativeTraceLog(core.Sprintf("verify-stack record finish: k=%d failed=%v used=%d entries=%d/%d\n", r.key.k, r.failed, r.used, r.layerEntries, r.nLayers-2))
+		nativeTraceLog(core.Sprintf("verify-stack record finish: k=%d failed=%v used=%d entries=%d/%d rebinds=%d dyn=%d resident=%d\n",
+			r.key.k, r.failed, r.used, r.layerEntries, r.nLayers-2, len(r.rebinds), len(r.dyn), len(r.resident)))
+		if r.debugOps && len(r.cmdOps) > 0 && len(r.layerMarks) > 1 {
+			seq := ""
+			for _, o := range r.cmdOps[:r.layerMarks[1]] {
+				seq += " " + o
+			}
+			nativeTraceLog(core.Sprintf("verify-stack layer1 seq:%s\n", seq))
+		}
+		if r.debugOps && len(r.cmdOps) > 0 {
+			hist := map[string]int{}
+			for _, o := range r.cmdOps {
+				hist[o]++
+			}
+			names := make([]string, 0, len(hist))
+			for n := range hist {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			for _, n := range names {
+				nativeTraceLog(core.Sprintf("verify-stack ops: %4d x %s\n", hist[n], n))
+			}
+			// per-layer command spans, run-length compressed (marks are the
+			// used-count at each interior layer's entry).
+			spans := make([]int, 0, len(r.layerMarks))
+			for i, m := range r.layerMarks {
+				end := r.used
+				if i+1 < len(r.layerMarks) {
+					end = r.layerMarks[i+1]
+				}
+				spans = append(spans, end-m)
+			}
+			line, runLen, runVal := "", 0, -1
+			flush := func() {
+				if runLen > 0 {
+					line += core.Sprintf(" %dx%d", runLen, runVal)
+				}
+			}
+			for _, s := range spans {
+				if s != runVal {
+					flush()
+					runLen, runVal = 1, s
+				} else {
+					runLen++
+				}
+			}
+			flush()
+			nativeTraceLog(core.Sprintf("verify-stack layer spans (pre-entry=%d):%s\n", func() int {
+				if len(r.layerMarks) > 0 {
+					return r.layerMarks[0]
+				}
+				return 0
+			}(), line))
+		}
 	}
 	if r.failed || r.used == 0 || r.layerEntries != r.nLayers-2 {
 		return nil
@@ -451,8 +558,39 @@ func (r *verifyStackRecorder) finish() *verifyStackICB {
 		rebinds:     r.rebinds,
 		dyn:         r.dyn,
 		key:         r.key,
+		layerMarks:  r.layerMarks,
 		pleSlabID:   r.pleSlabID,
 	}
+}
+
+// verifyStackReplayLayers is the #71 bisect lever: replay only the recorded
+// commands through interior layer N (LTHN_VERIFY_STACK_REPLAY_LAYERS=N), the
+// fold live-encodes the rest. <=0 or unset replays the whole interior.
+var verifyStackReplayLayers = func() int {
+	n, err := strconv.Atoi(os.Getenv("LTHN_VERIFY_STACK_REPLAY_LAYERS"))
+	if err != nil {
+		return 0
+	}
+	return n
+}()
+
+// verifyStackReplayCmds cuts finer: replay only the first M recorded commands
+// (sub-layer bisect; wins over the layers lever, fold resumes live at layer 2).
+var verifyStackReplayCmds = func() int {
+	n, err := strconv.Atoi(os.Getenv("LTHN_VERIFY_STACK_REPLAY_CMDS"))
+	if err != nil {
+		return 0
+	}
+	return n
+}()
+
+// prefixLen reports the command-range length replaying interior layers 1..n —
+// the bisect cut at layer n's exit (marks[n] is layer n+1's entry).
+func (v *verifyStackICB) prefixLen(n int) uint {
+	if n <= 0 || n >= len(v.layerMarks) {
+		return v.rng.Length
+	}
+	return uint(v.layerMarks[n])
 }
 
 // vsRecordSink records into an ICB command (fastICBSink semantics), captures
@@ -540,11 +678,15 @@ func (r *verifyStackRecorder) recRMSRows(x, w, out metal.MTLBuffer, xOff, wOff, 
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("rms") {
+		return
+	}
 	pso, err := pipelineForICB(rmsKernelBF16(axisSize))
 	if err != nil {
 		r.fail()
 		return
 	}
+	r.op(rmsKernelBF16(axisSize))
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -556,11 +698,15 @@ func (r *verifyStackRecorder) recAdd(a metal.MTLBuffer, aOff uint, b metal.MTLBu
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("add") {
+		return
+	}
 	pso, err := pipelineForICB("vv_Addbfloat16")
 	if err != nil {
 		r.fail()
 		return
 	}
+	r.op("vv_Addbfloat16")
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -586,11 +732,15 @@ func (r *verifyStackRecorder) recGeluGateMul(gate, up, out metal.MTLBuffer, gate
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("gelu") {
+		return
+	}
 	pso, err := geluPipelineICB()
 	if err != nil {
 		r.fail()
 		return
 	}
+	r.op("gelu_gate_mul")
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -602,11 +752,15 @@ func (r *verifyStackRecorder) recMulRows(a, b, out metal.MTLBuffer, aOff, bOff, 
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("mul") {
+		return
+	}
 	pso, err := mulRowsPipelineICB()
 	if err != nil {
 		r.fail()
 		return
 	}
+	r.op("mul_rows")
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -618,11 +772,15 @@ func (r *verifyStackRecorder) recRMSNormResidualRows(x, weight, res, out metal.M
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("rmsres") {
+		return
+	}
 	pso, err := rmsResidualPipelineICB(axisSize)
 	if err != nil {
 		r.fail()
 		return
 	}
+	r.op(core.Sprintf("rms_residual|%d", axisSize))
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -634,11 +792,15 @@ func (r *verifyStackRecorder) recPLEGateGeluRows(gatePacked, gateScales, gateBia
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("ple") {
+		return
+	}
 	pso, ok := lthnPLEGateGeluPipelineICB(bits)
 	if !ok {
 		r.fail()
 		return
 	}
+	r.op(core.Sprintf("ple_gate_gelu|b%d", bits))
 	c, okc := r.nextCmd()
 	if !okc {
 		return
@@ -650,11 +812,15 @@ func (r *verifyStackRecorder) recQMMT(wq, scales, biases, x, out metal.MTLBuffer
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("qmmt") {
+		return
+	}
 	pso, err := pipelineForICB(qmmTKernelName(outDim, gs, bits))
 	if err != nil {
 		r.fail()
 		return
 	}
+	r.op(qmmTKernelName(outDim, gs, bits))
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -664,6 +830,9 @@ func (r *verifyStackRecorder) recQMMT(wq, scales, biases, x, out metal.MTLBuffer
 
 func (r *verifyStackRecorder) recGemvBatched(mat metal.MTLBuffer, matOff uint, vec metal.MTLBuffer, vecOff uint, out metal.MTLBuffer, outOff uint, outDim, inDim, batch int) {
 	if r == nil || r.failed {
+		return
+	}
+	if r.skip("gemv") {
 		return
 	}
 	if batch >= steelGEMMMinRows {
@@ -676,6 +845,7 @@ func (r *verifyStackRecorder) recGemvBatched(mat metal.MTLBuffer, matOff uint, v
 		r.fail()
 		return
 	}
+	r.op(gemvKernelName("bfloat16", bm, bn, sm, sn, tm, tn))
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -687,6 +857,9 @@ func (r *verifyStackRecorder) recGemvBatched(mat metal.MTLBuffer, matOff uint, v
 // types the dense fold drives. Unknown projector types fail the recording.
 func (r *verifyStackRecorder) recProjectRows(proj projector, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) {
 	if r == nil || r.failed {
+		return
+	}
+	if r.skip("proj") {
 		return
 	}
 	switch m := proj.(type) {
@@ -725,6 +898,7 @@ func (r *verifyStackRecorder) recQMVProjectRows(m qmvProjector, in, out metal.MT
 				r.fail()
 				return
 			}
+			r.op(core.Sprintf("qmv_rows_tiled|%v", plan.tiledKey))
 			c, okc := r.nextCmd()
 			if !okc {
 				return
@@ -742,6 +916,7 @@ func (r *verifyStackRecorder) recQMVProjectRows(m qmvProjector, in, out metal.MT
 			r.fail()
 			return
 		}
+		r.op(core.Sprintf("gather_qmv|%v", plan.gatherKey))
 		c, okc := r.nextCmd()
 		if !okc {
 			return
@@ -764,6 +939,9 @@ func (r *verifyStackRecorder) recQKNormRopeRows(x, w, out metal.MTLBuffer, xOff,
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("qknorm") {
+		return
+	}
 	pso, err := qkNormRopeRowsPipelineICB()
 	if err != nil {
 		r.fail()
@@ -773,6 +951,7 @@ func (r *verifyStackRecorder) recQKNormRopeRows(x, w, out metal.MTLBuffer, xOff,
 	if rotaryDim > 0 && rotaryDim < headDim {
 		rd = rotaryDim
 	}
+	r.op("qknorm_rope_rows")
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -809,6 +988,9 @@ func (r *verifyStackRecorder) recQKNormRopeAt(x, w, out metal.MTLBuffer, xOff, w
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("qknorm") {
+		return
+	}
 	pso, err := qkNormRopePipelineICB()
 	if err != nil {
 		r.fail()
@@ -818,6 +1000,7 @@ func (r *verifyStackRecorder) recQKNormRopeAt(x, w, out metal.MTLBuffer, xOff, w
 	if rotaryDim > 0 && rotaryDim < headDim {
 		rd = rotaryDim
 	}
+	r.op("qknorm_rope_at")
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -832,6 +1015,9 @@ func (r *verifyStackRecorder) recKVQ8StoreRows(stage, cache metal.MTLBuffer, cac
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("kvq8") {
+		return
+	}
 	pso, err := kvQ8StoreRowsPipelineICBVS()
 	if err != nil {
 		r.fail()
@@ -841,6 +1027,7 @@ func (r *verifyStackRecorder) recKVQ8StoreRows(stage, cache metal.MTLBuffer, cac
 		r.fail()
 		return
 	}
+	r.op("kv_q8_store_rows")
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -865,6 +1052,9 @@ func (r *verifyStackRecorder) recSDPARow(headDim int, q metal.MTLBuffer, qOff ui
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("sdpa") {
+		return
+	}
 	if capW <= 0 || capW >= sdpa2PassMinKV {
 		r.fail()
 		return
@@ -878,6 +1068,7 @@ func (r *verifyStackRecorder) recSDPARow(headDim int, q metal.MTLBuffer, qOff ui
 	if nBuf == nil {
 		return
 	}
+	r.op(core.Sprintf("sdpa_row|hd%d", headDim))
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -891,6 +1082,9 @@ func (r *verifyStackRecorder) recSDPAMultiQ(headDim int, q, k, v, out metal.MTLB
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("sdpa") {
+		return
+	}
 	pso, err := sdpaMultiQPipelineICBForHeadDim(headDim)
 	if err != nil {
 		r.fail()
@@ -900,6 +1094,7 @@ func (r *verifyStackRecorder) recSDPAMultiQ(headDim int, q, k, v, out metal.MTLB
 	if nBuf == nil {
 		return
 	}
+	r.op(core.Sprintf("sdpa_multiq|hd%d", headDim))
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -928,6 +1123,9 @@ func (r *verifyStackRecorder) recSDPAMultiQQ8(headDim int, q, k, v, out, kScales
 	if r == nil || r.failed {
 		return
 	}
+	if r.skip("sdpa") {
+		return
+	}
 	pso, err := sdpaMultiQQ8PipelineICBForHeadDim(headDim)
 	if err != nil {
 		r.fail()
@@ -937,6 +1135,7 @@ func (r *verifyStackRecorder) recSDPAMultiQQ8(headDim int, q, k, v, out, kScales
 	if nBuf == nil {
 		return
 	}
+	r.op(core.Sprintf("sdpa_multiq_q8|hd%d", headDim))
 	c, ok := r.nextCmd()
 	if !ok {
 		return
@@ -1046,7 +1245,12 @@ func (v *verifyStackICB) executeInto(enc metal.MTLComputeCommandEncoderObject, b
 	resident, residentIDs := v.declareList(pleSlab)
 	useResourcesIDsFastObject(enc, resident, residentIDs, metal.MTLResourceUsageRead|metal.MTLResourceUsageWrite)
 	t2 := time.Now()
-	executeCommandsInBufferWithRangeObjectFast(enc, v.icb, v.rng)
+	rng := v.rng
+	rng.Length = v.prefixLen(verifyStackReplayLayers)
+	if m := verifyStackReplayCmds; m > 0 && uint(m) < rng.Length {
+		rng.Length = uint(m)
+	}
+	executeCommandsInBufferWithRangeObjectFast(enc, v.icb, rng)
 	if debug {
 		nativeTraceLog(core.Sprintf("verify-stack replay: k=%d basePos=%d staged=%v cmds=%d rebinds=%d dyn=%d resident=%d prep=%.2fms declare=%.2fms\n",
 			v.key.k, basePos, v.key.staged, v.rng.Length, len(v.rebinds), len(v.dyn), len(resident),
