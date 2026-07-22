@@ -1,0 +1,30 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  databulk.ctml : the bulk-apply confirm overlay (Data panel) — the
+  two-phase "no confirm, no writes" gate showing the exact item count.
+
+  Idiom: full <layout variant="HCF"> via ctml.ParseLayout — every region
+  is text, so the whole overlay renders in one RenderTerm call
+  (renderOverlayLayout). H is the title band, C the count/note content,
+  F the phase-dependent key hints.
+
+  Host seams (dataoverlay.go):
+    - Sequence  bulk : one row {title, count} — the action title and the
+      item count, bound mid-sentence between static runs.
+    - Sequence  note : zero-or-one row {text} — the shared note, only
+      when one was collected (an empty sequence renders nothing).
+    - Sequences arm / confirm : zero-or-one rows selecting the footer
+      prompt — .ctml class and text are static, so the armed state is
+      carried by WHICH sequence holds the row, the selection-as-
+      sequence-split idiom.
+    - Classes   overlay-keys : mapped onto the existing uiStyles palette
+      by overlayFrameTheme.
+
+  Single-row constructs stay on one source line so a text run's edge
+  whitespace ("This will apply to ") survives.
+-->
+<layout variant="HCF">
+<h><each items="bulk" as="row"><h2>Bulk <span>{{row.title}}</span></h2><p>This will apply to <span>{{row.count}}</span> item(s) matching the current filter.</p></each></h>
+<c><each items="note" as="row"><p>Note: <span>{{row.text}}</span></p></each></c>
+<f><each items="arm" as="row"><p class="overlay-keys">enter continues · esc cancels</p></each><each items="confirm" as="row"><p class="overlay-keys">enter applies this action to every listed item · esc cancels</p></each></f>
+</layout>
