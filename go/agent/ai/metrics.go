@@ -79,7 +79,7 @@ func Record(event Event) (result core.Result) {
 	if !dirResult.OK {
 		return metricsFailureResult("record event", dirResult)
 	}
-	dir := dirResult.Value.(string)
+	dir := dirResult.String()
 
 	if err := coreio.Local.EnsureDir(dir); err != nil {
 		return metricsFailure("record event", err)
@@ -108,7 +108,7 @@ func Record(event Event) (result core.Result) {
 		return metricsFailure("record event", nil)
 	}
 
-	if _, err := file.Write(append(data.Value.([]byte), '\n')); err != nil {
+	if _, err := file.Write(append(data.Bytes(), '\n')); err != nil {
 		return metricsFailure("record event", err)
 	}
 
@@ -121,7 +121,7 @@ func ReadEvents(since time.Time) core.Result {
 	if !dirResult.OK {
 		return metricsFailureResult("read events", dirResult)
 	}
-	dir := dirResult.Value.(string)
+	dir := dirResult.String()
 
 	var events []Event
 	now := time.Now()

@@ -15,7 +15,7 @@ import (
 // x-reading GEMMs (in_proj_qkv, in_proj_z, in_proj_a, in_proj_b) encoded into ONE command buffer. They
 // all read the same x [L,D], so the GEMMs are independent — no barrier between them — and pay ONE
 // command-buffer round-trip where the per-projection ProjMatMulInto hook pays four. in_proj_a/b are
-// sub-floor standalone (a few KMACs each), yet ride the fused CB for free. Mirrors composed_mlp_device.go:
+// sub-floor standalone (a few KMACs each), yet ride the fused CB for free. Mirrors mlp_device.go:
 // pooled pinned scratch per shape key, resident f32 weights, one emitSteelGemm per matmul (steel nt,
 // fused kernel — the same device-f32 tier the standalone projection GEMM already serves), one commit+wait.
 

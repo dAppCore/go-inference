@@ -207,6 +207,16 @@ func (r *ChatCompletionRequest) unmarshalField(data []byte, i int, key []byte) (
 		}
 		r.ChatTemplateKwargs = kw
 		return next, nil
+	case "mm_processor_kwargs":
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		kw, next, err := parseMMProcessorKwargs(data, i)
+		if err != nil {
+			return next, err
+		}
+		r.MMProcessorKwargs = kw
+		return next, nil
 	case "stream":
 		if jsonenc.IsJSONNull(data, i) {
 			return i + 4, nil
@@ -340,6 +350,40 @@ func parseChatMessage(data []byte, i int) (ChatMessage, int, error) {
 			}
 			msg.Content = s
 			i = vnext
+		case "reasoning", "reasoning_content":
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+				break
+			}
+			s, vnext, verr := jsonenc.ParseJSONString(data, i)
+			if verr != nil {
+				return msg, vnext, verr
+			}
+			if string(key) == "reasoning" {
+				msg.Reasoning = s
+			} else {
+				msg.ReasoningContent = s
+			}
+			i = vnext
+		case "tool_calls":
+			// Assistant history replayed by a stateless client: decode the
+			// call list so openAIMessageContent can re-render each call into
+			// its native span. Cold path — stdlib decode over the subslice,
+			// like the content-part array above.
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+				break
+			}
+			vnext, verr := jsonenc.SkipJSONValue(data, i)
+			if verr != nil {
+				return msg, vnext, verr
+			}
+			var calls []ToolCall
+			if result := core.JSONUnmarshal(data[i:vnext], &calls); !result.OK {
+				return msg, vnext, result.Err()
+			}
+			msg.ToolCalls = calls
+			i = vnext
 		default:
 			vnext, verr := jsonenc.SkipJSONValue(data, i)
 			if verr != nil {
@@ -457,6 +501,79 @@ func parseChatTemplateKwargs(data []byte, i int) (*ChatTemplateKwargs, int, erro
 				}
 				budget := int(v)
 				kw.ThinkingBudget = &budget
+				i = n
+			}
+		case "preserve_thinking":
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+			} else {
+				v, n, err := jsonenc.ParseJSONBool(data, i)
+				if err != nil {
+					return nil, n, err
+				}
+				kw.PreserveThinking = &v
+				i = n
+			}
+		default:
+			n, err := jsonenc.SkipJSONValue(data, i)
+			if err != nil {
+				return nil, n, err
+			}
+			i = n
+		}
+		i = jsonenc.SkipJSONWhitespace(data, i)
+		if i >= len(data) {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		if data[i] == ',' {
+			i++
+			continue
+		}
+		if data[i] == '}' {
+			return kw, i + 1, nil
+		}
+		return nil, i, jsonenc.ErrInvalidJSON
+	}
+}
+
+// parseMMProcessorKwargs walks an mm_processor_kwargs object, capturing the
+// fields the runtime acts on (max_soft_tokens) and skipping the rest — mirrors
+// the single-pass object walk in parseChatTemplateKwargs.
+func parseMMProcessorKwargs(data []byte, i int) (*MMProcessorKwargs, int, error) {
+	i, err := jsonenc.MatchObjectStart(data, i)
+	if err != nil {
+		return nil, i, err
+	}
+	kw := &MMProcessorKwargs{}
+	i = jsonenc.SkipJSONWhitespace(data, i)
+	if i < len(data) && data[i] == '}' {
+		return kw, i + 1, nil
+	}
+	for {
+		i = jsonenc.SkipJSONWhitespace(data, i)
+		if i >= len(data) || data[i] != '"' {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		key, next, err := jsonenc.ParseJSONStringRaw(data, i)
+		if err != nil {
+			return nil, next, err
+		}
+		i = jsonenc.SkipJSONWhitespace(data, next)
+		if i >= len(data) || data[i] != ':' {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		i = jsonenc.SkipJSONWhitespace(data, i+1)
+		switch string(key) {
+		case "max_soft_tokens":
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+			} else {
+				v, n, err := jsonenc.ParseJSONInt(data, i)
+				if err != nil {
+					return nil, n, err
+				}
+				budget := int(v)
+				kw.MaxSoftTokens = &budget
 				i = n
 			}
 		default:

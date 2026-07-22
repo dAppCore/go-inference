@@ -1276,3 +1276,166 @@ kernel void lthn_bf16_lm_head_argmax_tiles_rows_bf16(
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Reduction-shaped top-k (#23): the two kernels below replace the insertion-
+// sort tile/merge pair for the sampled TopK pick. The old kernels' cost was
+// never "GPU selection is slow" in principle — it was per-lane
+// float[64]+int[64] candidate arrays (register spills at every occupancy) and
+// a lane-0-only serial merge of 32*64 insertions per threadgroup. Here every
+// lane keeps its tile slice in ≤32 registers with a CACHED running max, and
+// each of the top_k rounds is one simd_max + one winner-local rescan — data-
+// independent control flow, no spills, no serial section. Stage 1 emits each
+// tile's top_k in DESCENDING order, which turns stage 2 into a cursor merge
+// of sorted lists followed by the existing lthn_sample_topk_window tail (so
+// temperature / top-p / draw semantics are byte-shared with the old path).
+
+constant constexpr uint lthn_topk_reduce_tile_rows = 1024;
+constant constexpr uint lthn_topk_reduce_max_tiles = 256; // 262144-vocab / 1024; guarded in the encoder
+
+// lthn_bf16_logits_topk_reduce_bf16 — stage 1: one simdgroup per 1024-row
+// tile; lane L owns rows start+L, start+L+32, … (slot s ⇔ row start+s*32+L,
+// so no index registers). Rows are transformed ONCE at load (suppress → -inf,
+// soft-cap, repeat penalty) and the k rounds pick the tile's descending top_k.
+kernel void lthn_bf16_logits_topk_reduce_bf16(
+    device const bfloat* logits [[buffer(0)]],
+    device float*        values [[buffer(1)]],
+    device int*          indices [[buffer(2)]],
+    constant int&        vocab [[buffer(3)]],
+    device const int*    suppress [[buffer(4)]],
+    constant int&        suppress_count [[buffer(5)]],
+    device const int*    history [[buffer(6)]],
+    constant int&        history_count [[buffer(7)]],
+    constant float&      repeat_penalty [[buffer(8)]],
+    constant float&      soft_cap [[buffer(9)]],
+    constant int&        top_k [[buffer(10)]],
+    uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
+  if (lane >= 32u || vocab <= 0 || top_k <= 0 || top_k > int(lthn_topk_max_k)) {
+    return;
+  }
+  const uint start = tile * lthn_topk_reduce_tile_rows;
+  const uint end = min(start + lthn_topk_reduce_tile_rows, uint(vocab));
+
+  // Load-and-transform the lane's ≤32 rows into registers.
+  float v[32];
+  for (uint s = 0u; s < 32u; ++s) {
+    const uint row = start + s * 32u + lane;
+    float sampled = -INFINITY;
+    if (row < end && !lthn_lm_head_row_suppressed(row, suppress, suppress_count)) {
+      sampled = lthn_sample_softcap(float(logits[row]), soft_cap);
+      sampled = lthn_repeat_penalized_logit(row, sampled, history, history_count, repeat_penalty);
+    }
+    v[s] = sampled;
+  }
+
+  // Cached lane maximum (value + first slot holding it).
+  float lv = v[0];
+  uint ls = 0u;
+  for (uint s = 1u; s < 32u; ++s) {
+    if (v[s] > lv) {
+      lv = v[s];
+      ls = s;
+    }
+  }
+
+  for (int k = 0; k < top_k; ++k) {
+    const float sv = simd_max(lv);
+    // Deterministic winner: the lowest lane holding the round maximum.
+    const uint winner = simd_min((lv == sv) ? lane : 32u);
+    if (lane == winner) {
+      const uint out = tile * uint(top_k) + uint(k);
+      values[out] = sv;
+      indices[out] = (sv == -INFINITY) ? -1 : int(start + ls * 32u + lane);
+      // Clear the emitted slot and refresh this lane's cached max.
+      v[ls] = -INFINITY;
+      lv = v[0];
+      ls = 0u;
+      for (uint s = 1u; s < 32u; ++s) {
+        if (v[s] > lv) {
+          lv = v[s];
+          ls = s;
+        }
+      }
+    }
+  }
+}
+
+// lthn_topk_reduce_merge_sample_f32 — stage 2: one simdgroup merges the tiles'
+// DESCENDING top_k lists by cursor (lane L owns lists L, L+32, …, each cursor's
+// head value cached in registers) and hands the merged descending window to
+// lthn_sample_topk_window — the exact temperature/top-p/draw tail the old
+// merge kernel used, so the pick distribution is unchanged by construction.
+// params.n carries the TILE COUNT (not the flat candidate count).
+kernel void lthn_topk_reduce_merge_sample_f32(
+    device const float* values [[buffer(0)]],
+    device const int*   indices [[buffer(1)]],
+    device int*         out [[buffer(2)]],
+    constant lthn_topk_sample_params& params [[buffer(3)]],
+    uint lane [[thread_index_in_threadgroup]]) {
+  const int tiles = params.n;
+  const int top_k = params.top_k;
+  if (lane >= 32u || tiles <= 0 || tiles > int(lthn_topk_reduce_max_tiles) ||
+      top_k <= 0 || top_k > int(lthn_topk_max_k)) {
+    if (lane == 0u) {
+      out[0] = -1;
+    }
+    return;
+  }
+  // Lane L owns lists L, L+32, …: per-list cursor + cached head value.
+  const uint listsPerLane = (uint(tiles) + 31u) / 32u; // ≤ 8 at 256 tiles
+  float head[8];
+  uint cur[8];
+  for (uint j = 0u; j < 8u; ++j) {
+    const uint list = lane + j * 32u;
+    cur[j] = 0u;
+    head[j] = (j < listsPerLane && list < uint(tiles)) ? values[list * uint(top_k)] : -INFINITY;
+  }
+  // Cached lane maximum across its list heads.
+  float lv = head[0];
+  uint lj = 0u;
+  for (uint j = 1u; j < 8u; ++j) {
+    if (head[j] > lv) {
+      lv = head[j];
+      lj = j;
+    }
+  }
+
+  threadgroup float merged_values[lthn_topk_max_k];
+  threadgroup int merged_indices[lthn_topk_max_k];
+  for (int k = 0; k < top_k; ++k) {
+    const float sv = simd_max(lv);
+    const uint winner = simd_min((lv == sv) ? lane : 32u);
+    if (lane == winner) {
+      const uint list = lane + lj * 32u;
+      const uint at = list * uint(top_k) + cur[lj];
+      merged_values[k] = sv;
+      merged_indices[k] = (sv == -INFINITY) ? -1 : indices[at];
+      cur[lj] += 1u;
+      head[lj] = (cur[lj] < uint(top_k)) ? values[list * uint(top_k) + cur[lj]] : -INFINITY;
+      lv = head[0];
+      lj = 0u;
+      for (uint j = 1u; j < 8u; ++j) {
+        if (head[j] > lv) {
+          lv = head[j];
+          lj = j;
+        }
+      }
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (lane != 0u) {
+    return;
+  }
+  float window_values[lthn_topk_max_k];
+  int window_indices[lthn_topk_max_k];
+  for (int i = 0; i < top_k; ++i) {
+    window_values[i] = merged_values[i];
+    window_indices[i] = merged_indices[i];
+  }
+  for (int i = top_k; i < int(lthn_topk_max_k); ++i) {
+    window_values[i] = -INFINITY;
+    window_indices[i] = -1;
+  }
+  out[0] = lthn_sample_topk_window(window_values, window_indices, params);
+}

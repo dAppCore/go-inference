@@ -31,6 +31,14 @@ type DenseConfig struct {
 	Scale                 float32                  `json:"-"`
 	RMSNormEps            float64                  `json:"rms_norm_eps"`
 	RopeTheta             float64                  `json:"rope_theta"`
+	// NormTopKProb is qwen3_moe's router combine-weight order (norm_topk_prob):
+	// true softmaxes over all experts then renormalises the gathered top-k to sum
+	// to one; false gathers the top-k without renormalising. See
+	// hipQwen3MoERouterSelect (qwen3_moe's only reader today) and
+	// engine/metal/router.go's identical #65 distinction. A plain bool, not a
+	// pointer, mirroring model/arch/Qwen/qwenmoe.Config's own NormTopKProb field —
+	// the checkpoint's config.json is trusted to state this explicitly.
+	NormTopKProb bool `json:"norm_topk_prob"`
 	PartialRotaryFactor   float64                  `json:"partial_rotary_factor"`
 	MaxPositionEmbeddings int                      `json:"max_position_embeddings"`
 	LayerTypes            []string                 `json:"layer_types"`

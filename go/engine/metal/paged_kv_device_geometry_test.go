@@ -282,7 +282,7 @@ func TestDevicePagedKVCache_ScaleState_Bad(t *testing.T) {
 func TestEncAttnHalfKVPaged_Bad(t *testing.T) {
 	var enc metal.MTLComputeCommandEncoderObject
 	var cb metal.MTLCommandBufferObject
-	got, concurrent, err := encAttnHalfKVPaged(enc, cb, nil, false, nil, nil, nil, nil, 0, bufView{}, bufView{}, bufView{}, bufView{}, nil, attnScratch{}, nil, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, nil)
+	got, concurrent, err := encAttnHalfKVPaged(enc, cb, nil, false, nil, nil, nil, nil, 0, bufView{}, bufView{}, bufView{}, bufView{}, nil, attnScratch{}, nil, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, nil)
 	if err == nil {
 		t.Fatal("encAttnHalfKVPaged accepted a sliding window without a cache")
 	}
@@ -293,11 +293,11 @@ func TestEncAttnHalfKVPaged_Bad(t *testing.T) {
 
 func TestEncAttnHalfSharedPaged_Bad(t *testing.T) {
 	var enc metal.MTLComputeCommandEncoderObject
-	if err := encAttnHalfSharedPaged(enc, nil, nil, nil, nil, 0, bufView{}, bufView{}, bufView{}, attnScratch{}, nil, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, nil); err == nil {
+	if err := encAttnHalfSharedPaged(enc, nil, nil, nil, nil, 0, bufView{}, bufView{}, bufView{}, attnScratch{}, nil, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, nil); err == nil {
 		t.Fatal("encAttnHalfSharedPaged accepted a nil cache")
 	}
 	c := &devicePagedKVCache{}
-	if err := encAttnHalfSharedPaged(enc, nil, c, nil, nil, 0, bufView{}, bufView{}, bufView{}, attnScratch{}, nil, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, nil); err == nil {
+	if err := encAttnHalfSharedPaged(enc, nil, c, nil, nil, 0, bufView{}, bufView{}, bufView{}, attnScratch{}, nil, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, nil); err == nil {
 		t.Fatal("encAttnHalfSharedPaged accepted a cache shorter than the requested position")
 	}
 }

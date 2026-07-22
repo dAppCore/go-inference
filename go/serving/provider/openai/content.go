@@ -28,8 +28,13 @@ type chatContentPart struct {
 	InputAudio *chatContentInputAudio `json:"input_audio"`
 }
 
+// chatContentImageURL is the OpenAI image_url content part. Detail is the
+// OpenAI-native sizing hint ("low"/"high"/"auto") applyContentParts maps onto
+// the message's ImageDetail — see ChatMessage.ImageDetail and request.go's
+// visionBudgetOverride for the resolution into a vision soft-token budget.
 type chatContentImageURL struct {
-	URL string `json:"url"`
+	URL    string `json:"url"`
+	Detail string `json:"detail"`
 }
 
 // chatContentInputAudio is the OpenAI input_audio part: bare base64 audio
@@ -66,6 +71,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	m.Content = ""
 	m.Images = nil
 	m.Audios = nil
+	m.ImageDetail = ""
 
 	content := trimJSONSpace(wire.Content)
 	if len(content) == 0 || string(content) == "null" {
@@ -111,6 +117,12 @@ func (m *ChatMessage) applyContentParts(parts []chatContentPart) error {
 				return err
 			}
 			m.Images = append(m.Images, decoded)
+			// "auto" (the OpenAI default) and an absent detail never overwrite
+			// a prior explicit low/high hint from an earlier part in this
+			// same message — only an explicit value is ever recorded.
+			if d := core.Lower(core.Trim(part.ImageURL.Detail)); d == "low" || d == "high" {
+				m.ImageDetail = d
+			}
 		case "input_audio":
 			if part.InputAudio == nil || part.InputAudio.Data == "" {
 				return core.E("openai.ChatMessage", core.Sprintf("content[%d].input_audio.data is required", index), nil)
@@ -158,14 +170,7 @@ func decodeImageDataURL(url string) ([]byte, error) {
 	if !decoded.OK {
 		return nil, core.E("openai.ChatMessage", "image base64 payload is invalid", decoded.Err())
 	}
-	bytes, ok := decoded.Value.([]byte)
-	if !ok {
-		text, textOK := decoded.Value.(string)
-		if !textOK {
-			return nil, core.E("openai.ChatMessage", "image base64 decode returned an unexpected type", nil)
-		}
-		bytes = []byte(text)
-	}
+	bytes := decoded.Bytes()
 	if len(bytes) == 0 {
 		return nil, core.E("openai.ChatMessage", "image payload is empty", nil)
 	}
@@ -182,14 +187,7 @@ func decodeAudioBase64(payload string) ([]byte, error) {
 	if !decoded.OK {
 		return nil, core.E("openai.ChatMessage", "audio base64 payload is invalid", decoded.Err())
 	}
-	bytes, ok := decoded.Value.([]byte)
-	if !ok {
-		text, textOK := decoded.Value.(string)
-		if !textOK {
-			return nil, core.E("openai.ChatMessage", "audio base64 decode returned an unexpected type", nil)
-		}
-		bytes = []byte(text)
-	}
+	bytes := decoded.Bytes()
 	if len(bytes) == 0 {
 		return nil, core.E("openai.ChatMessage", "audio payload is empty", nil)
 	}

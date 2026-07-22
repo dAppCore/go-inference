@@ -61,8 +61,13 @@ func Pack(srcDir, dest string, opts PackOptions) core.Result {
 	if !dirExists(srcDir) {
 		return core.Fail(core.E("pack.Pack", core.Sprintf("srcDir %q is not a directory", srcDir), nil))
 	}
-	if opts.VindexBlob != nil {
-		return core.Fail(core.E("pack.Pack", "vindex embedding not yet implemented", nil))
+	if opts.VindexBlob == nil && opts.Manifest.Vindex != nil {
+		// Vindex is a derived field (Embedded/Offset/Length/Hash describe
+		// bytes Pack itself writes) — a caller supplying one without the
+		// blob to back it describes a section that would never actually
+		// be embedded. Reject rather than silently drop the caller's
+		// Manifest.Vindex or silently lie about what's in the payload.
+		return core.Fail(core.E("pack.Pack", "Manifest.Vindex is set but VindexBlob is nil — nothing to embed", nil))
 	}
 
 	manifest := opts.Manifest
@@ -85,6 +90,32 @@ func Pack(srcDir, dest string, opts PackOptions) core.Result {
 		return tr
 	}
 
+	// payload defaults to the tar alone — packs without a vindex stay
+	// byte-identical to the pre-vindex format (no realloc, no copy).
+	payload := tarBytes
+	if opts.VindexBlob != nil {
+		format := ""
+		if opts.Manifest.Vindex != nil {
+			// Format is the one field pack treats as caller-authored —
+			// it just labels the blob's serialisation, never inspected
+			// here, so preserving it doesn't compromise the "Vindex is
+			// derived" rule above.
+			format = opts.Manifest.Vindex.Format
+		}
+		sum := sha256.Sum256(opts.VindexBlob)
+		combined := make([]byte, 0, len(tarBytes)+len(opts.VindexBlob))
+		combined = append(combined, tarBytes...)
+		combined = append(combined, opts.VindexBlob...)
+		payload = combined
+		manifest.Vindex = &VindexRef{
+			Embedded: true,
+			Offset:   uint64(len(tarBytes)),
+			Length:   uint64(len(opts.VindexBlob)),
+			Format:   format,
+			Hash:     hex.EncodeToString(sum[:]),
+		}
+	}
+
 	headerMap, hr := manifestToHeaderMap(manifest)
 	if !hr.OK {
 		return hr
@@ -92,7 +123,7 @@ func Pack(srcDir, dest string, opts PackOptions) core.Result {
 
 	container := &trix.Trix{
 		Header:  headerMap,
-		Payload: tarBytes,
+		Payload: payload,
 	}
 
 	encoded, err := trix.Encode(container, Magic, nil)
@@ -117,11 +148,20 @@ func Unpack(src, destDir string, opts UnpackOptions) core.Result {
 	if !rr.OK {
 		return rr
 	}
-	data := rr.Value.([]byte)
+	data := rr.Bytes()
 
 	container, err := trix.Decode(data, Magic, nil)
 	if err != nil {
 		return core.Fail(core.E("pack.Unpack", "trix.Decode failed", err))
+	}
+
+	manifest, mr := headerMapToManifest(container.Header)
+	if !mr.OK {
+		return mr
+	}
+	tarBytes, tpr := tarPayload(container.Payload, manifest)
+	if !tpr.OK {
+		return tpr
 	}
 
 	if dr := assertDestDirWritable(destDir, opts.Overwrite); !dr.OK {
@@ -130,7 +170,60 @@ func Unpack(src, destDir string, opts UnpackOptions) core.Result {
 	if mr := core.MkdirAll(destDir, 0o755); !mr.OK {
 		return mr
 	}
-	return extractTar(container.Payload, destDir)
+	return extractTar(tarBytes, destDir)
+}
+
+// ExtractVindex reads a .model Trix container and returns its embedded
+// vindex blob, verifying it against Manifest.Vindex.Hash. A pack with no
+// vindex (Manifest.Vindex == nil) is a normal state, not an error —
+// ExtractVindex returns a nil slice and core.Ok(nil) so callers can tell
+// "no vindex" apart from "read failed" without a sentinel error.
+//
+//	blob, r := pack.ExtractVindex("gemma.model")
+//	if !r.OK { return r }
+//	if blob == nil { /* this pack carries no vindex */ }
+func ExtractVindex(src string) ([]byte, core.Result) {
+	rr := core.ReadFile(src)
+	if !rr.OK {
+		return nil, rr
+	}
+	data := rr.Bytes()
+
+	container, err := trix.Decode(data, Magic, nil)
+	if err != nil {
+		return nil, core.Fail(core.E("pack.ExtractVindex", "trix.Decode failed", err))
+	}
+
+	manifest, mr := headerMapToManifest(container.Header)
+	if !mr.OK {
+		return nil, mr
+	}
+	if manifest.Vindex == nil {
+		return nil, core.Ok(nil)
+	}
+
+	start := manifest.Vindex.Offset
+	end := start + manifest.Vindex.Length
+	if end < start || end > uint64(len(container.Payload)) {
+		return nil, core.Fail(core.E("pack.ExtractVindex", "vindex offset/length out of bounds", nil))
+	}
+
+	// Copy rather than slice container.Payload directly — the payload
+	// carries the full pack tar (model weights, potentially many GB) and
+	// a sub-slice view would keep that whole backing array reachable for
+	// as long as the caller holds the (small) vindex blob.
+	blob := make([]byte, end-start)
+	copy(blob, container.Payload[start:end])
+
+	if manifest.Vindex.Hash != "" {
+		sum := sha256.Sum256(blob)
+		if got := hex.EncodeToString(sum[:]); got != manifest.Vindex.Hash {
+			return nil, core.Fail(core.E("pack.ExtractVindex",
+				core.Sprintf("vindex checksum mismatch: manifest says %s, blob hashes to %s", manifest.Vindex.Hash, got), nil))
+		}
+	}
+
+	return blob, core.Ok(nil)
 }
 
 // List reads a .model Trix container and returns the payload tar's
@@ -145,7 +238,7 @@ func List(src string) ([]Entry, *Manifest, core.Result) {
 	if !rr.OK {
 		return nil, nil, rr
 	}
-	data := rr.Value.([]byte)
+	data := rr.Bytes()
 
 	container, err := trix.Decode(data, Magic, nil)
 	if err != nil {
@@ -156,8 +249,12 @@ func List(src string) ([]Entry, *Manifest, core.Result) {
 	if !mr.OK {
 		return nil, nil, mr
 	}
+	tarBytes, tpr := tarPayload(container.Payload, manifest)
+	if !tpr.OK {
+		return nil, nil, tpr
+	}
 
-	tr := tar.NewReader(bytes.NewReader(container.Payload))
+	tr := tar.NewReader(bytes.NewReader(tarBytes))
 	var entries []Entry
 	for {
 		hdr, err := tr.Next()
@@ -190,7 +287,7 @@ func Inspect(src string) (*Manifest, *inference.ModelPackInspection, core.Result
 	if !rr.OK {
 		return nil, nil, rr
 	}
-	data := rr.Value.([]byte)
+	data := rr.Bytes()
 
 	container, err := trix.Decode(data, Magic, nil)
 	if err != nil {
@@ -256,7 +353,7 @@ func Hash(srcDir string) (string, core.Result) {
 		if !rr.OK {
 			return "", rr
 		}
-		metas = append(metas, metaFile{name: name, content: rr.Value.([]byte)})
+		metas = append(metas, metaFile{name: name, content: rr.Bytes()})
 	}
 	sort.Slice(metas, func(i, j int) bool { return metas[i].name < metas[j].name })
 
@@ -314,7 +411,7 @@ func Fingerprint(m Manifest) string {
 	if !r.OK {
 		return ""
 	}
-	sum := sha256.Sum256(r.Value.([]byte))
+	sum := sha256.Sum256(r.Bytes())
 	return hex.EncodeToString(sum[:])
 }
 
@@ -353,7 +450,7 @@ func buildTar(srcDir string) ([]byte, core.Result) {
 		if !rr.OK {
 			return nil, rr
 		}
-		content := rr.Value.([]byte)
+		content := rr.Bytes()
 
 		hdr := &tar.Header{
 			Name:     e.rel,
@@ -372,6 +469,22 @@ func buildTar(srcDir string) ([]byte, core.Result) {
 		return nil, core.Fail(core.E("pack.buildTar", "tar.Close failed", err))
 	}
 	return buf.Bytes(), core.Ok(nil)
+}
+
+// tarPayload returns the tar-format prefix of a decoded container's
+// Payload — the whole Payload when manifest carries no vindex (the
+// pre-vindex shape, unchanged), or the bytes before Manifest.Vindex.Offset
+// when it does. Shared by Unpack and List so both stop reading before any
+// trailing embedded vindex blob rather than relying on archive/tar to stop
+// itself at the end-of-archive marker.
+func tarPayload(payload []byte, manifest *Manifest) ([]byte, core.Result) {
+	if manifest.Vindex == nil {
+		return payload, core.Ok(nil)
+	}
+	if manifest.Vindex.Offset > uint64(len(payload)) {
+		return nil, core.Fail(core.E("pack.tarPayload", "vindex offset exceeds payload length", nil))
+	}
+	return payload[:manifest.Vindex.Offset], core.Ok(nil)
 }
 
 // extractTar reads a tar stream and writes each regular-file entry under
@@ -414,7 +527,7 @@ func manifestToHeaderMap(m Manifest) (map[string]any, core.Result) {
 	if !jr.OK {
 		return nil, jr
 	}
-	data := jr.Value.([]byte)
+	data := jr.Bytes()
 	var out map[string]any
 	if ur := core.JSONUnmarshal(data, &out); !ur.OK {
 		return nil, ur
@@ -429,7 +542,7 @@ func headerMapToManifest(h map[string]any) (*Manifest, core.Result) {
 	if !jr.OK {
 		return nil, jr
 	}
-	data := jr.Value.([]byte)
+	data := jr.Bytes()
 	var out Manifest
 	if ur := core.JSONUnmarshal(data, &out); !ur.OK {
 		return nil, ur

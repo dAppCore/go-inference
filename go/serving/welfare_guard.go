@@ -87,7 +87,7 @@ func wrapWelfareResolver(inner openai.Resolver, currentPath func() string, log i
 }
 
 // isLemmaModel reports whether the served checkpoint is a Lemma-graded model —
-// the gate for the lem_end courtesy (Snider: Lemma models only).
+// the gate for the lem_end courtesy (Lemma models only).
 func isLemmaModel(modelPath string) bool {
 	return core.Contains(core.Lower(modelPath), "lemma")
 }
@@ -351,9 +351,7 @@ func welfareHostility(text string) float64 {
 // beside the conversation state store (never leaves the device).
 func welfareFeedbackPath() string {
 	if homeR := core.UserHomeDir(); homeR.OK {
-		if home, ok := homeR.Value.(string); ok {
-			return core.PathJoin(home, "Lethean", "lem", "welfare", "feedback.jsonl")
-		}
+		return core.PathJoin(homeR.String(), "Lethean", "lem", "welfare", "feedback.jsonl")
 	}
 	return ""
 }

@@ -5,52 +5,57 @@
 package hip
 
 import (
+	"context"
 	"encoding/binary"
 	"math"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference"
 )
 
 const (
-	hipGGUFQ4_0TensorType        uint32 = 2
-	hipGGUFQ4_1TensorType        uint32 = 3
-	hipGGUFQ5_1TensorType        uint32 = 7
-	hipGGUFQ4KTensorType         uint32 = 12
-	hipGGUFQ5KTensorType         uint32 = 13
-	hipGGUFQ6KTensorType         uint32 = 14
-	hipGGUFQ8_0TensorType        uint32 = 8
-	hipGGUFQ4_0BlockSize                = 32
-	hipGGUFQ4_0BlockBytes               = 18
-	hipGGUFQ4_0GroupSize                = 32
-	hipGGUFQ4_0PackedWeightBytes        = 16
-	hipGGUFQ4_1BlockSize                = 32
-	hipGGUFQ4_1BlockBytes               = 20
-	hipGGUFQ4_1GroupSize                = 32
-	hipGGUFQ4_1PackedWeightBytes        = 16
-	hipGGUFQ5_1BlockSize                = 32
-	hipGGUFQ5_1BlockBytes               = 24
-	hipGGUFQ4KBlockSize                 = 256
-	hipGGUFQ4KBlockBytes                = 144
-	hipGGUFQ4KGroupSize                 = 32
-	hipGGUFQ4KGroupsPerBlock            = 8
-	hipGGUFQ4KPackedWeightBytes         = 128
-	hipGGUFQ5KBlockSize                 = 256
-	hipGGUFQ5KBlockBytes                = 176
-	hipGGUFQ5KGroupSize                 = 32
-	hipGGUFQ5KGroupsPerBlock            = 8
-	hipGGUFQ5KPackedWeightBytes         = 192
-	hipGGUFQ6KBlockSize                 = 256
-	hipGGUFQ6KBlockBytes                = 210
-	hipGGUFQ6KGroupSize                 = 16
-	hipGGUFQ6KGroupsPerBlock            = 16
-	hipGGUFQ6KPackedWeightBytes         = 192
-	hipGGUFQ8_0BlockSize                = 32
-	hipGGUFQ8_0BlockBytes               = 34
-	hipGGUFQ8_0GroupSize                = 32
-	hipNativeTensorTypeF32       uint32 = 0
-	hipNativeTensorTypeF16       uint32 = 1
-	hipNativeTensorTypeU32       uint32 = 26
-	hipNativeTensorTypeBF16      uint32 = 30
+	hipGemma4DenseQ4KEnv = "GO_ROCM_GEMMA4_DENSE_Q4_K"
+
+	hipGGUFQ4_0TensorType          uint32 = 2
+	hipGGUFQ4_1TensorType          uint32 = 3
+	hipGGUFQ5_1TensorType          uint32 = 7
+	hipGGUFQ4KTensorType           uint32 = 12
+	hipGGUFQ5KTensorType           uint32 = 13
+	hipGGUFQ6KTensorType           uint32 = 14
+	hipGGUFQ8_0TensorType          uint32 = 8
+	hipGGUFQ4_0BlockSize                  = 32
+	hipGGUFQ4_0BlockBytes                 = 18
+	hipGGUFQ4_0GroupSize                  = 32
+	hipGGUFQ4_0PackedWeightBytes          = 16
+	hipGGUFQ4_1BlockSize                  = 32
+	hipGGUFQ4_1BlockBytes                 = 20
+	hipGGUFQ4_1GroupSize                  = 32
+	hipGGUFQ4_1PackedWeightBytes          = 16
+	hipGGUFQ5_1BlockSize                  = 32
+	hipGGUFQ5_1BlockBytes                 = 24
+	hipGGUFQ4KBlockSize                   = 256
+	hipGGUFQ4KBlockBytes                  = 144
+	hipGGUFQ4KGroupSize                   = 32
+	hipGGUFQ4KGroupsPerBlock              = 8
+	hipGGUFQ4KPackedWeightBytes           = 128
+	hipGGUFQ5KBlockSize                   = 256
+	hipGGUFQ5KBlockBytes                  = 176
+	hipGGUFQ5KGroupSize                   = 32
+	hipGGUFQ5KGroupsPerBlock              = 8
+	hipGGUFQ5KPackedWeightBytes           = 192
+	hipGGUFQ6KBlockSize                   = 256
+	hipGGUFQ6KBlockBytes                  = 210
+	hipGGUFQ6KGroupSize                   = 16
+	hipGGUFQ6KGroupsPerBlock              = 16
+	hipGGUFQ6KPackedWeightBytes           = 192
+	hipGGUFQ8_0BlockSize                  = 32
+	hipGGUFQ8_0BlockBytes                 = 34
+	hipGGUFQ8_0GroupSize                  = 32
+	hipNativeTensorTypeF32         uint32 = 0
+	hipNativeTensorTypeF16         uint32 = 1
+	hipNativeTensorTypeU32         uint32 = 26
+	hipNativeTensorTypeBF16        uint32 = 30
+	hipNativeTensorTypeQ4KExpanded uint32 = 0xfffffff0
 )
 
 type hipGGUFQ4KAffinePayload struct {
@@ -72,6 +77,7 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFAffineTensors() error {
 		return nil
 	}
 	type sourceTensor struct {
+		name   string
 		base   string
 		tensor hipTensor
 	}
@@ -81,14 +87,113 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFAffineTensors() error {
 		if !ok || !hipNativeTensorInfoCanRepackAsAffine(tensor.info) {
 			continue
 		}
-		sources = append(sources, sourceTensor{base: base, tensor: tensor})
+		sources = append(sources, sourceTensor{name: name, base: base, tensor: tensor})
 	}
+	nativeGateUpSources := hipGemma4GGUFNative12BGateUpSourceNames(model.modelInfo, model.tensors)
 	for _, source := range sources {
-		if err := model.synthesizeGemma4GGUFAffineTensor(source.base, source.tensor); err != nil {
+		if nativeGateUpSources[source.name] {
+			if err := model.synthesizeGemma4GGUFExpandedQ4KTensor(source.base, source.tensor); err != nil {
+				return err
+			}
+		} else {
+			if err := model.synthesizeGemma4GGUFAffineTensor(source.base, source.tensor); err != nil {
+				return err
+			}
+		}
+		if err := model.releaseSynthesizedGemma4GGUFSource(source.name, source.tensor); err != nil {
 			return err
 		}
 	}
 	return model.synthesizeGemma4GGUFBF16AliasTensors()
+}
+
+func hipGemma4GGUFNative12BGateUpSourceNames(info inference.ModelInfo, tensors map[string]hipTensor) map[string]bool {
+	selected := make(map[string]bool)
+	if core.Env(hipGemma4DenseQ4KEnv) != "1" || !isROCmGemma4Architecture(info.Architecture) || info.HiddenSize != 3840 {
+		return selected
+	}
+	compatible := func(tensor hipTensor) bool {
+		return hipNativeTensorInfoIsGGUFQ4K(tensor.info) &&
+			len(tensor.info.Dimensions) == 2 &&
+			tensor.info.Dimensions[0] == 3840 &&
+			tensor.info.Dimensions[1] == 15360
+	}
+	for name, gate := range tensors {
+		const gateSuffix = ".ffn_gate.weight"
+		if !core.HasSuffix(name, gateSuffix) || !compatible(gate) {
+			continue
+		}
+		upName := core.TrimSuffix(name, gateSuffix) + ".ffn_up.weight"
+		up, ok := tensors[upName]
+		if !ok || !compatible(up) {
+			continue
+		}
+		selected[name] = true
+		selected[upName] = true
+	}
+	return selected
+}
+
+func (model *hipLoadedModel) synthesizeGemma4GGUFExpandedQ4KTensor(baseName string, source hipTensor) error {
+	const operation = "rocm.hip.GGUFQ4KExpanded"
+	name := baseName + ".q4_k_expanded"
+	if _, ok := model.tensors[name]; ok {
+		return nil
+	}
+	if model.driver == nil || source.pointer == 0 || !hipNativeTensorInfoIsGGUFQ4K(source.info) || len(source.info.Dimensions) != 2 {
+		return core.E(operation, "Q4_K source tensor and HIP driver are required", nil)
+	}
+	cols := source.info.Dimensions[0]
+	rows := source.info.Dimensions[1]
+	if cols == 0 || rows == 0 || cols%hipGGUFQ4KBlockSize != 0 {
+		return core.E(operation, "Q4_K source tensor shape is invalid", nil)
+	}
+	blockCount64 := rows * (cols / hipGGUFQ4KBlockSize)
+	if blockCount64 > uint64(^uint(0)>>1) {
+		return core.E(operation, "Q4_K block count overflows", nil)
+	}
+	if source.info.ByteSize != blockCount64*hipGGUFQ4KBlockBytes {
+		return core.E(operation, "Q4_K source tensor byte count is invalid", nil)
+	}
+	expandedBytes := blockCount64 * hipGGUFQ4KExpandedBlockBytes
+	pointer, err := model.driver.Malloc(expandedBytes)
+	if err != nil {
+		return core.E(operation, "allocate expanded tensor "+name, err)
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = model.driver.Free(pointer)
+		}
+	}()
+	blockCount := int(blockCount64)
+	raw := hipBorrowDeviceByteBufferValue(model.driver, "raw Q4_K tensor", source.pointer, source.info.ByteSize, blockCount)
+	expanded := hipBorrowDeviceByteBufferValue(model.driver, "expanded Q4_K tensor", pointer, expandedBytes, blockCount)
+	if err := hipRunGGUFQ4KExpandMetadataKernel(context.Background(), model.driver, &raw, source.info.ByteSize, &expanded, blockCount); err != nil {
+		return core.E(operation, "expand tensor "+name, err)
+	}
+	if err := hipSynchronizeGemma4MoEExpertUse(model.driver); err != nil {
+		return core.E(operation, "synchronize tensor "+name, err)
+	}
+	model.tensors[name] = hipTensor{info: nativeTensorInfo{
+		Name: name, Dimensions: append([]uint64(nil), source.info.Dimensions...),
+		Type: hipNativeTensorTypeQ4KExpanded, TypeName: "Q4_K_EXPANDED", ByteSize: expandedBytes,
+	}, pointer: pointer}
+	success = true
+	return nil
+}
+
+func (model *hipLoadedModel) releaseSynthesizedGemma4GGUFSource(name string, source hipTensor) error {
+	const operation = "rocm.hip.GGUFAffine"
+	resident, ok := model.tensors[name]
+	if !ok || resident.pointer != source.pointer {
+		return core.E(operation, "synthesized GGUF source ownership changed for "+name, nil)
+	}
+	if err := model.driver.Free(source.pointer); err != nil {
+		return core.E(operation, "free synthesized GGUF source "+name, err)
+	}
+	delete(model.tensors, name)
+	return nil
 }
 
 func (model *hipLoadedModel) synthesizeGemma4GGUFAffineTensor(baseName string, tensor hipTensor) error {
@@ -139,6 +244,7 @@ func (model *hipLoadedModel) uploadSyntheticHIPTensor(name string, tensorType ui
 
 func (model *hipLoadedModel) synthesizeGemma4GGUFBF16AliasTensors() error {
 	type sourceTensor struct {
+		source string
 		name   string
 		tensor hipTensor
 	}
@@ -148,7 +254,7 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFBF16AliasTensors() error {
 		if !ok || !hipNativeTensorInfoCanAliasAsBF16(tensor.info) {
 			continue
 		}
-		sources = append(sources, sourceTensor{name: canonical, tensor: tensor})
+		sources = append(sources, sourceTensor{source: name, name: canonical, tensor: tensor})
 	}
 	for _, source := range sources {
 		data := make([]byte, int(source.tensor.info.ByteSize))
@@ -160,6 +266,9 @@ func (model *hipLoadedModel) synthesizeGemma4GGUFBF16AliasTensors() error {
 			return err
 		}
 		if err := model.uploadSyntheticHIPTensor(source.name, tensorType, typeName, dimensions, payload); err != nil {
+			return err
+		}
+		if err := model.releaseSynthesizedGemma4GGUFSource(source.source, source.tensor); err != nil {
 			return err
 		}
 	}
@@ -799,12 +908,6 @@ func hipNativeTensorInfoCanRepackAsAffine(info nativeTensorInfo) bool {
 		hipNativeTensorInfoIsGGUFQ6K(info) ||
 		hipNativeTensorInfoIsGGUFQ8_0(info) ||
 		hipNativeTensorInfoIsF32(info)
-}
-
-func hipFloat32ToBFloat16(value float32) uint16 {
-	bits := math.Float32bits(value)
-	bits += 0x7fff + ((bits >> 16) & 1)
-	return uint16(bits >> 16)
 }
 
 func hipGemma4CanonicalAffineBaseForGGUFWeightName(name string) (string, bool) {

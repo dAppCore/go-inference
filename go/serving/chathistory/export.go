@@ -18,7 +18,7 @@ import (
 // This is the simplest export — the file IS the format. For tools
 // that prefer line-delimited records, ExportJSONL.
 //
-//	if err := h.CopyTo("/Users/snider/Downloads/snider-chats-2026-05-26.duckdb"); err != nil { ... }
+//	if err := h.CopyTo("/Users/you/Downloads/chat-history.duckdb"); err != nil { ... }
 func (h *History) CopyTo(dest string) error {
 	if h == nil || h.db == nil {
 		return core.E("chathistory.CopyTo", "history closed", nil)
@@ -224,7 +224,7 @@ func (h *History) ExportJSONL(dest string) error {
 		if !marshalled.OK {
 			return core.E("chathistory.ExportJSONL", "marshal conversation", marshalled.Value.(error))
 		}
-		line := marshalled.Value.([]byte)
+		line := marshalled.Bytes()
 		if _, err := f.Write(line); err != nil {
 			return core.E("chathistory.ExportJSONL", "write line", err)
 		}

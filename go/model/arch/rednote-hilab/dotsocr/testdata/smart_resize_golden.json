@@ -1,0 +1,55 @@
+{
+  "factor": 28,
+  "min_pixels": 3136,
+  "max_pixels": 11289600,
+  "cases": [
+    {
+      "height": 84,
+      "width": 280,
+      "resized_height": 84,
+      "resized_width": 280
+    },
+    {
+      "height": 100,
+      "width": 100,
+      "resized_height": 112,
+      "resized_width": 112
+    },
+    {
+      "height": 45,
+      "width": 30,
+      "resized_height": 84,
+      "resized_width": 56
+    },
+    {
+      "height": 2000,
+      "width": 3000,
+      "resized_height": 1988,
+      "resized_width": 2996
+    },
+    {
+      "height": 56,
+      "width": 56,
+      "resized_height": 56,
+      "resized_width": 56
+    },
+    {
+      "height": 10,
+      "width": 1900,
+      "resized_height": 28,
+      "resized_width": 784
+    },
+    {
+      "height": 30,
+      "width": 45,
+      "resized_height": 56,
+      "resized_width": 84
+    },
+    {
+      "height": 500,
+      "width": 500,
+      "resized_height": 504,
+      "resized_width": 504
+    }
+  ]
+}

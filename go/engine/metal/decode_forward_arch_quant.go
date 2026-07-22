@@ -147,7 +147,7 @@ func decodeForwardArchQuantInto(
 	withAutoreleasePool(func() {
 		setup := getArchQuantLayerBufScratch(nLayers)
 		defer putArchQuantLayerBufScratch(setup)
-		lb, moeQuant, berr := buildQuantArchLayerBufsIntoScratch(setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil)
+		lb, moeQuant, berr := buildQuantArchLayerBufsIntoScratch(setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil, eps)
 		if berr != nil {
 			err = berr
 			return
@@ -219,17 +219,31 @@ func validateMoEQuantLayerWeights(fn string, w *MoEQuantLayerWeights, dModel, dF
 	if w.NumExperts <= 0 || w.TopK <= 0 || w.TopK > w.NumExperts || w.ExpertDFF <= 0 {
 		return core.NewError(fn + ": invalid MoE quant geometry")
 	}
-	for _, norm := range [][]byte{w.PreFFNormW, w.PreFFNorm2W, w.PostFFNorm1W, w.PostFFNorm2W, w.PostFFNormW, w.RouterNormWScaled} {
-		if len(norm) != dModel*bf16Size {
+	// PreFFNormW is always required (see MoELayerWeights doc's bf16 rationale — the same zoo-vs-
+	// gemma4 shape split applies to the quant struct); every other norm — including the router's
+	// own norm, RouterNormWScaled — is OPTIONAL: nil/empty = identity/skip. A llama-family zoo layer
+	// (mixtral/dbrx/olmoe) sets PreFFNormW only; gemma4's checkpoint always populates all six, so
+	// this is zero behaviour change for it.
+	if len(w.PreFFNormW) != dModel*bf16Size {
+		return core.NewError(fn + ": MoE PreFFNormW size mismatch")
+	}
+	for _, norm := range [][]byte{w.PreFFNorm2W, w.PostFFNorm1W, w.PostFFNorm2W, w.PostFFNormW, w.RouterNormWScaled} {
+		if len(norm) != 0 && len(norm) != dModel*bf16Size {
 			return core.NewError(fn + ": MoE norm weight size mismatch")
 		}
 	}
 	if w.PerExpertScale != nil && len(w.PerExpertScale) != w.NumExperts*bf16Size {
 		return core.NewError(fn + ": MoE per-expert scale size mismatch")
 	}
-	if !quantWeightShapeOK(w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
-		!quantWeightShapeOK(w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
-		!quantWeightShapeOK(w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits) {
+	// hasLocal marks gemma4's always-on dense MLP branch (see MoELayerWeights doc); a zoo layer
+	// declares none of the three, so the shape check below — which would otherwise reject an
+	// absent local branch's zero-value QuantWeights — only runs when at least one is present (a
+	// PARTIALLY specified local branch is still a malformed layer and still rejected).
+	hasLocal := len(w.LocalGate.Packed) != 0 || len(w.LocalUp.Packed) != 0 || len(w.LocalDown.Packed) != 0
+	if hasLocal &&
+		(!quantWeightShapeOK(w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
+			!quantWeightShapeOK(w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits) ||
+			!quantWeightShapeOK(w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)) {
 		return core.NewError(fn + ": MoE local MLP quant size mismatch")
 	}
 	if !quantWeightShapeOK(w.Router, w.NumExperts, dModel, w.RouterGroupSize, w.RouterBits) {
@@ -251,19 +265,19 @@ func validateMoEQuantLayerWeights(fn string, w *MoEQuantLayerWeights, dModel, dF
 // NewArchQuantSession. sb is the zero-copy weight source (see buildBF16ArchLayerBufs): non-nil
 // binds every weight (norms + the quant triples) as no-copy shard views; nil uploads owned copies.
 // MUST be called inside a withAutoreleasePool.
-func buildQuantArchLayerBufs(qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
-	return buildQuantArchLayerBufsInternal(make([]archLayerBufs, len(qlayers)), make([]*MoEQuantLayerWeights, len(qlayers)), nil, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+func buildQuantArchLayerBufs(qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
+	return buildQuantArchLayerBufsInternal(make([]archLayerBufs, len(qlayers)), make([]*MoEQuantLayerWeights, len(qlayers)), nil, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildQuantArchLayerBufsIntoScratch(setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
+func buildQuantArchLayerBufsIntoScratch(setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
 	if setup == nil || !setup.fits(len(qlayers)) {
-		return buildQuantArchLayerBufs(qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+		return buildQuantArchLayerBufs(qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb, eps...)
 	}
 	setup.reset(len(qlayers))
-	return buildQuantArchLayerBufsInternal(setup.lb, setup.moe, setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+	return buildQuantArchLayerBufsInternal(setup.lb, setup.moe, setup, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLayerWeights, setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
+func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLayerWeights, setup *archQuantLayerBufScratch, qlayers []QuantizedLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, eps float32, sb *shardBuffers) ([]archLayerBufs, []*MoEQuantLayerWeights, error) {
 	var ferr error
 	view := func(b []byte) bufView {
 		if sb != nil {
@@ -343,8 +357,24 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		lb[li].anw = normView(ql.AttnNormW)
 		lb[li].postAttnNorm = normView(ql.PostAttnNormW)
 		lb[li].postFFNorm = normView(ql.PostFFNormW)
-		lb[li].qNorm = normView(ql.QNormW)
-		lb[li].kNorm = normView(ql.KNormW)
+		// #65: see buildBF16ArchLayerBufsInternal's identical granularity split — a whole-vector
+		// q_norm/k_norm is left the zero bufView here and bound into a qkNormWideProjector wrap below.
+		qWide, qgErr := qkNormGranularity("q_norm", ql.QNormW, nHeads, lhd)
+		if qgErr != nil && ferr == nil {
+			ferr = qgErr
+		}
+		kWide, kgErr := qkNormGranularity("k_norm", ql.KNormW, lkv, lhd)
+		if kgErr != nil && ferr == nil {
+			ferr = kgErr
+		}
+		lb[li].qNormWide, lb[li].kNormWide = qWide, kWide
+		if !qWide {
+			lb[li].qNorm = normView(ql.QNormW)
+		}
+		if !kWide {
+			lb[li].kNorm = normView(ql.KNormW)
+		}
+		lb[li].sinks = normView(ql.Sinks)                            // gpt_oss attention sinks (zero bufView otherwise)
 		lb[li].layerScalar = layerScalarBuf(ql.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
 			if setup != nil {
@@ -363,6 +393,7 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		proj := qmvProjector{
 			q: mkW(ql.Q), k: mkW(ql.K), v: mkW(ql.V), o: mkW(ql.O),
 			bQ: normView(ql.BQ), bK: normView(ql.BK), bV: normView(ql.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
+			bO:     normView(ql.BO), // gpt_oss o_proj bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 			groupSize: ql.GroupSize, bits: ql.Bits,
 		}
@@ -397,7 +428,18 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 			lb[li].mnw = normView(ql.MLPNormW)
 			proj.gate, proj.up, proj.down = mkW(ql.Gate), mkW(ql.Up), mkW(ql.Down)
 		}
-		lb[li].proj = proj
+		if qWide || kWide {
+			wrap := qkNormWideProjector{projector: proj, nHeads: nHeads, nKVHeads: lkv, headDim: lhd, eps: eps}
+			if qWide {
+				wrap.qNorm = normView(ql.QNormW)
+			}
+			if kWide {
+				wrap.kNorm = normView(ql.KNormW)
+			}
+			lb[li].proj = wrap
+		} else {
+			lb[li].proj = proj
+		}
 	}
 	return lb, moeQuant, ferr
 }

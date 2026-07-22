@@ -82,7 +82,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "model does not support tool calling: architecture "+model.Info().Architecture, "tools")
 		return
 	}
-	messages := requestMessages(req.Messages, offeredTools, model.Info().Architecture)
+	messages := requestMessages(req.Messages, offeredTools, req.preserveThinking(), model.Info().Architecture)
 	if messagesCarryImages(messages) {
 		vision, ok := inference.As[inference.VisionModel](model)
 		if !ok || !vision.AcceptsImages() {
@@ -470,7 +470,7 @@ func (c *contentStreamer) emitted() string {
 	return c.content.String()
 }
 
-func requestMessages(messages []ChatMessage, tools []Tool, architecture ...string) []inference.Message {
+func requestMessages(messages []ChatMessage, tools []Tool, preserveThinking bool, architecture ...string) []inference.Message {
 	out := make([]inference.Message, 0, len(messages)+1)
 	arch := "gemma4"
 	if len(architecture) > 0 {
@@ -479,10 +479,40 @@ func requestMessages(messages []ChatMessage, tools []Tool, architecture ...strin
 	if decl := renderOpenAITools(tools, arch); decl != "" {
 		out = append(out, inference.Message{Role: "system", Content: decl})
 	}
-	for _, msg := range messages {
-		out = append(out, inference.Message{Role: msg.Role, Content: openAIMessageContent(msg), Images: msg.Images, Audios: msg.Audios})
+	// Reasoning preservation (the gemma4 canonical-template gate): an
+	// assistant turn's echoed thought re-frames into the native thought span
+	// when the turn follows the last user message — the live agentic exchange
+	// keeps its chain of thought across a stateless replay — or, under
+	// preserve_thinking, on tool-calling turns anywhere in history. Earlier
+	// turns replay clean.
+	lastUser := -1
+	for i, msg := range messages {
+		if msg.Role == "user" {
+			lastUser = i
+		}
+	}
+	for i, msg := range messages {
+		content := openAIMessageContent(msg)
+		if thought := messageReasoning(msg); thought != "" &&
+			(i > lastUser || (preserveThinking && len(msg.ToolCalls) > 0)) {
+			content = parser.ChannelOpenMarker + "thought\n" + thought + "\n" + parser.ChannelCloseMarker + content
+		}
+		out = append(out, inference.Message{Role: msg.Role, Content: content, Images: msg.Images, Audios: msg.Audios})
 	}
 	return out
+}
+
+// messageReasoning is the echoed thought text of an assistant turn: the
+// canonical reasoning spelling wins, reasoning_content is the compat fallback.
+// Non-assistant roles carry no thought channel.
+func messageReasoning(msg ChatMessage) string {
+	if msg.Role != "assistant" {
+		return ""
+	}
+	if msg.Reasoning != "" {
+		return msg.Reasoning
+	}
+	return msg.ReasoningContent
 }
 
 // renderOpenAITools converts OpenAI function declarations to the neutral shape
@@ -612,7 +642,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 		_, _ = w.Write([]byte(`{}`))
 		return
 	}
-	_, _ = w.Write(result.Value.([]byte))
+	_, _ = w.Write(result.Bytes())
 }
 
 func writeError(w http.ResponseWriter, status int, message, param string) {

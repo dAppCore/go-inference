@@ -17,3 +17,10 @@ go/lem
 
 # task build:embed output
 /bin/
+bench/last-run.json
+
+# generated at build:embed time — never commit compiled metallibs
+cli/*.metallib.gz
+
+# built example binaries — never commit build output (the 783MiB HEAD ballast, #51)
+examples/bin/

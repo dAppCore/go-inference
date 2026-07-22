@@ -11,6 +11,7 @@ import (
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/arch/Qwen/qwen35"
 	"dappco.re/go/inference/model/vision"
 )
 
@@ -41,6 +42,12 @@ type NativeTokenModel struct {
 	// (engine.SamplingDefaultsDeclarer) — the zero value when the checkpoint
 	// declares none.
 	declaredSampling engine.SamplingDefaults
+	// defaultSystem is the checkpoint chat_template's own default system prompt
+	// (engine.ExtractDefaultSystem) — a Qwen2.5-style template's no-system
+	// fallback text, "" for a template that injects none (gemma, Qwen3.5/3.6).
+	// DeclaredChatTemplate hands it to the ChatML dialect so a served checkpoint
+	// frames its exact default rather than a hardcoded family constant.
+	defaultSystem string
 	// openSession builds a fresh persistent-cache decode session (ArchSession /
 	// ArchQuantSession) — the incremental O(1)/token path model.Generate prefers
 	// over the whole-sequence NativeBackend.DecodeForward. It takes the model's shardBuffers so the
@@ -63,6 +70,11 @@ type NativeTokenModel struct {
 	// unifiedVision is the encoder-free vision embedder (gemma4_unified, 12B):
 	// packs carry either the SigLIP tower (vision) or this — never both.
 	unifiedVision *vision.Unified
+	// qwenVision is the qwen35 factory vision tower (#59 item 1) — the third, mutually-exclusive
+	// vision payload: qwen hybrids never ship the SigLIP/unified payloads and vice versa. Attached
+	// by the load seam (loadQwenVisionTower); nil for every other checkpoint. Projection runs the
+	// tower's own patchify policy (qwen_vision.go), not the gemma feature config.
+	qwenVision *qwen35.VisionTower
 	// visionFeatureCfg is the image_processor preprocessing config (patch size,
 	// soft-token budget, pooling, rescale) read from processor_config.json at load
 	// time — ProjectImage needs it to patchify before the tower. nil for a
@@ -89,6 +101,9 @@ type NativeTokenModel struct {
 type archSessionConfig struct {
 	pagedKVPageSize int
 	pagedKVPrealloc bool
+	// kvCacheMode is the load-requested LIVE cache mode ("" = native;
+	// "turboquant[:N]" = TurboQuant codes on qualifying global owners).
+	kvCacheMode string
 }
 
 // Close releases a directory-loaded model's memory-mapped checkpoint (no-op when the weights are
@@ -155,6 +170,9 @@ func (m *NativeTokenModel) AcceptsImageInput() bool {
 	if m.unifiedVision != nil {
 		return unifiedVisionEnabled
 	}
+	if m.qwenVision != nil {
+		return true
+	}
 	return m.vision != nil
 }
 
@@ -174,12 +192,46 @@ func (m *NativeTokenModel) ProjectImage(image []byte) ([]byte, int, error) {
 	if m == nil {
 		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: nil model")
 	}
-	if !m.AcceptsImageInput() {
-		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: model has no vision tower")
+	return m.projectImageWithCfg(image, m.visionFeatureCfgAt(0))
+}
+
+// ProjectImageAt is ProjectImage with a per-request soft-token budget override
+// (engine.VisionBudgetTokenModel — the OCR lane): the feature config retained
+// at load is CLONED with MaxSoftTokens = budget for this one projection, so a
+// single request can spend a higher budget (gemma4's supported set is
+// 70/140/280/560/1120; 1120·pool² patches is what the tower's position table
+// was sized for) while the loaded default and every other request stay
+// untouched. budget <= 0 is the model default — identical to ProjectImage.
+func (m *NativeTokenModel) ProjectImageAt(image []byte, budget int) ([]byte, int, error) {
+	if m == nil {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImageAt: nil model")
 	}
+	return m.projectImageWithCfg(image, m.visionFeatureCfgAt(budget))
+}
+
+// visionFeatureCfgAt resolves the feature config one projection runs under:
+// the retained load-time config for budget <= 0, else a COPY with the
+// requested soft-token budget — the retained config is never mutated, so
+// concurrent default-budget requests are unaffected.
+func (m *NativeTokenModel) visionFeatureCfgAt(budget int) *VisionImageFeatureConfig {
 	cfg := m.visionFeatureCfg
 	if cfg == nil {
 		cfg = &VisionImageFeatureConfig{} // VisionImagePatches normalises to HF defaults
+	}
+	if budget <= 0 {
+		return cfg
+	}
+	at := *cfg
+	at.MaxSoftTokens = int32(budget)
+	return &at
+}
+
+// projectImageWithCfg is the shared per-image body behind ProjectImage and
+// ProjectImageAt: preprocess under cfg, run the resident tower, return
+// features + soft-token count.
+func (m *NativeTokenModel) projectImageWithCfg(image []byte, cfg *VisionImageFeatureConfig) ([]byte, int, error) {
+	if !m.AcceptsImageInput() {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: model has no vision tower")
 	}
 	if m.unifiedVision != nil {
 		patches, positions, n, err := UnifiedVisionImagePatches(image, cfg)
@@ -192,14 +244,19 @@ func (m *NativeTokenModel) ProjectImage(image []byte) ([]byte, int, error) {
 		}
 		return features, n, nil
 	}
-	patches, softTokens, err := VisionImagePatches(image, cfg)
+	if m.qwenVision != nil {
+		// The qwen tower's grid is image-native (its own crop/patchify policy); the gemma feature
+		// config — including a per-request soft-token budget — does not apply to it.
+		return projectQwenImage(m.qwenVision, image)
+	}
+	patches, gridH, gridW, softTokens, err := VisionImagePatchesGrid(image, cfg)
 	if err != nil {
 		return nil, 0, core.E("native.vision", "preprocess image", err)
 	}
 	if softTokens <= 0 {
 		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: image produced no soft tokens")
 	}
-	features, err := m.ProjectImageFeatures(patches)
+	features, err := m.ProjectImageFeaturesAt(patches, gridH, gridW)
 	if err != nil {
 		return nil, 0, core.E("native.vision", "project", err)
 	}
@@ -212,6 +269,8 @@ func (m *NativeTokenModel) ImagePlaceholderTokenID() int32 {
 		return 0
 	case m.unifiedVision != nil:
 		return m.unifiedVision.Cfg.ImageTokenID
+	case m.qwenVision != nil:
+		return m.qwenVision.Cfg.ImageTokenID
 	case m.vision != nil:
 		return m.vision.Cfg.ImageTokenID
 	}
@@ -225,6 +284,12 @@ func (m *NativeTokenModel) ImagePlaceholderBlock(softTokens int) string {
 	if m.unifiedVision != nil {
 		cfg := m.unifiedVision.Cfg
 		return nativeVisionPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
+	}
+	if m.qwenVision != nil {
+		// The Qwen-VL family's stable spellings — <|vision_start|> + <|image_pad|>×n +
+		// <|vision_end|> — are the arch package's constants; the numeric id the run must tokenise
+		// back to is the config's image_token_id (chatMultimodal verifies the round-trip).
+		return nativeVisionPlaceholderBlock(qwen35.VisionBeginToken, qwen35.VisionPadToken, qwen35.VisionEndToken, softTokens)
 	}
 	if m.vision == nil {
 		return ""
@@ -282,6 +347,26 @@ func (m *NativeTokenModel) ProjectImageFeatures(patches []byte) ([]byte, error) 
 	if !ok {
 		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeatures: model has no vision payload")
 	}
+	return VisionTower(patches, weights, cfg)
+}
+
+// ProjectImageFeaturesAt is ProjectImageFeatures with the TRUE patch grid the
+// preprocessing produced: the tower lays its split-axis position field and
+// 3×3 pooling on exactly these dims instead of re-deriving a (possibly
+// transposed or plain wrong) grid from the patch count. ProjectImage threads
+// the grid from VisionImagePatchesGrid through here.
+func (m *NativeTokenModel) ProjectImageFeaturesAt(patches []byte, gridH, gridW int) ([]byte, error) {
+	if m == nil {
+		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeaturesAt: nil model")
+	}
+	if gridH <= 0 || gridW <= 0 {
+		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeaturesAt: grid dims must be positive")
+	}
+	weights, cfg, ok := nativeVisionFromLoaded(m.vision)
+	if !ok {
+		return nil, core.NewError("native.NativeTokenModel.ProjectImageFeaturesAt: model has no vision payload")
+	}
+	cfg.GridH, cfg.GridW = gridH, gridW
 	return VisionTower(patches, weights, cfg)
 }
 
@@ -824,7 +909,7 @@ func NewBF16TokenModel(g *BF16Model, arch model.Arch, maxLen int, opts ...Backen
 	if err != nil {
 		return nil, err
 	}
-	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc}
+	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc, kvCacheMode: b.kvCacheMode}
 	scale := embedScaleOf(arch)
 	vocab, dModel, eps, softCap := arch.Vocab, arch.Hidden, arch.Eps, arch.SoftCap
 	tm := &NativeTokenModel{
@@ -865,7 +950,7 @@ func NewQuantTokenModel(g *QuantModel, arch model.Arch, maxLen int, opts ...Back
 	if err != nil {
 		return nil, err
 	}
-	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc}
+	sessionCfg := archSessionConfig{pagedKVPageSize: b.pagedKVPageSize, pagedKVPrealloc: b.pagedKVPrealloc, kvCacheMode: b.kvCacheMode}
 	scale := embedScaleOf(arch)
 	vocab, dModel, eps, softCap := arch.Vocab, arch.Hidden, arch.Eps, arch.SoftCap
 	gs, bits := g.GroupSize, g.Bits

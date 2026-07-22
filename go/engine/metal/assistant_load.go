@@ -1210,6 +1210,8 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 	if err != nil {
 		return AssistantDraftBlockResult{}, core.E("native.assistant draft block", "target boundary hidden", err)
 	}
+	mtpBoundaryTrace("draft-entry", target.pos, lastToken, target.retainedHidden)
+	mtpBoundaryTraceKV(target, "draft-entry")
 	currentToken := lastToken
 	var tokens []int32
 	if copyTokens {
@@ -1232,6 +1234,35 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 		nativeTraceLog(core.Sprintf("mtp-diag draft call %d: last=%d fused=%v finalNorm=%v kvExport=%.1fms+load=%.1fms hidden{%s}\n",
 			mtpDiagDraftCalls, lastToken, fused != nil, len(target.finalNorm) == len(currentHidden),
 			diagKVMs, float64(time.Since(diagT0).Microseconds())/1000-diagKVMs, mtpDiagBF16Stats(currentHidden)))
+	}
+	// Device-chained block (#53 rows-head device-direct): the whole K-step
+	// draft in one command buffer — one wait, one readback — proposing the
+	// same tokens as the per-step loop below (assistant_draft_chain.go). The
+	// conf-capture lever keeps the loop: it needs the full host logits row.
+	if fused != nil && confProbs == nil {
+		hiddenScratch := target.mtpDraftScratch(&target.mtpDraftHidden, pair.TargetArch.Hidden*bf16Size)
+		var chainT0 time.Time
+		if diagDraft {
+			chainT0 = time.Now()
+		}
+		ctokens, chidden, chained, cerr := fused.draftBlockChained(target, currentToken, maxDraftTokens, tokens, hiddenScratch, suppress)
+		if cerr != nil {
+			return AssistantDraftBlockResult{}, cerr
+		}
+		if chained {
+			if diagDraft {
+				nativeTraceLog(core.Sprintf("mtp-diag draft chain: K=%d %.1fms tokens=%v\n",
+					maxDraftTokens, float64(time.Since(chainT0).Microseconds())/1000, ctokens))
+			}
+			if !copyTokens {
+				target.mtpDraftTokens = ctokens
+			}
+			if mtpBoundaryTraceOn {
+				nativeTraceLog(core.Sprintf("mtp-boundary draft-exit pos=%d toks=%v h=%016x\n",
+					target.pos, ctokens, mtpBoundaryHash(target.retainedHidden)))
+			}
+			return AssistantDraftBlockResult{Tokens: ctokens, Hidden: chidden}, nil
+		}
 	}
 	for len(tokens) < maxDraftTokens {
 		tokenEmbedding, err := target.embedID(currentToken)
@@ -1272,6 +1303,15 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 					return AssistantDraftBlockResult{}, herr
 				}
 				tok, headed = t, hok
+			} else if vl := fused.plainHeadLogits(); vl != nil && confProbs == nil {
+				// plain tied-embedding head (26B pair): the vocab gemv already ran
+				// in the fused CB — selection is one host argmax over its logits,
+				// replacing the separate MatVecBF16Into submit+wait per step.
+				t, gerr := pair.Assistant.draftGreedyTokenWithSuppress(vl, suppress)
+				if gerr != nil {
+					return AssistantDraftBlockResult{}, gerr
+				}
+				tok, headed = t, true
 			}
 			if !headed {
 				logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
@@ -1360,6 +1400,23 @@ func (pair *AssistantPair) draftBlockSampledFromSessionWithSuppress(target *Arch
 	if fused != nil {
 		if err := fused.loadKV(targetKVs); err != nil {
 			fused = nil
+		}
+	}
+	// Device-chained block (#53 rows-head device-direct): drafts are ALWAYS
+	// the drafter's argmax (see the comment in the loop below), so the
+	// sampled lane chains exactly like the greedy one — proposal picks stay
+	// identical, and sampling remains entirely the target verify's concern.
+	if fused != nil {
+		hiddenScratch := target.mtpDraftScratch(&target.mtpDraftHidden, pair.TargetArch.Hidden*bf16Size)
+		ctokens, chidden, chained, cerr := fused.draftBlockChained(target, currentToken, maxDraftTokens, tokens, hiddenScratch, params.SuppressTokens)
+		if cerr != nil {
+			return AssistantDraftBlockResult{}, cerr
+		}
+		if chained {
+			if !copyTokens {
+				target.mtpDraftTokens = ctokens
+			}
+			return AssistantDraftBlockResult{Tokens: ctokens, Hidden: chidden}, nil
 		}
 	}
 	for len(tokens) < maxDraftTokens {
@@ -1460,18 +1517,30 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 	if copyOutputs {
 		boundaryHidden = append([]byte(nil), target.retainedHidden...)
 	}
-	boundaryLogits, err := target.BoundaryLogits()
-	if err != nil {
-		return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary logits", err)
+	// The previous round's K-row verify head already produced this boundary's
+	// argmax (content-keyed cache); a hit skips the full-vocab head pass + host
+	// rescan. copyOutputs callers need the logits bytes regardless.
+	var boundaryLogits []byte
+	first, haveFirst := int32(0), false
+	if !copyOutputs {
+		first, haveFirst = target.cachedBoundaryGreedy(target.retainedHidden, suppress)
 	}
-	if copyOutputs {
-		boundaryLogits = append([]byte(nil), boundaryLogits...)
-	}
-	first, err := greedyBF16Suppressed(boundaryLogits, target.arch.Vocab, suppress)
-	if err != nil {
-		return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary token", err)
+	if !haveFirst {
+		var err error
+		boundaryLogits, err = target.BoundaryLogits()
+		if err != nil {
+			return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary logits", err)
+		}
+		if copyOutputs {
+			boundaryLogits = append([]byte(nil), boundaryLogits...)
+		}
+		first, err = greedyBF16Suppressed(boundaryLogits, target.arch.Vocab, suppress)
+		if err != nil {
+			return AssistantVerifyResult{}, core.E("native.assistant verify", "target boundary token", err)
+		}
 	}
 
+	mtpBoundaryTrace("verify-first", target.pos, first, target.retainedHidden)
 	posBefore := target.pos
 	result := AssistantVerifyResult{}
 	if copyOutputs {
@@ -1500,6 +1569,7 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 			target.rememberRetainedLogits(boundaryLogits)
 			result.Logits = append([]byte(nil), boundaryLogits...)
 		}
+		target.rememberBoundaryGreedy(first, target.retainedHidden, suppress)
 		return result, nil
 	}
 	rows, hiddens, err := target.verifyAssistantDraftRows(draftTokens, suppress)
@@ -1509,6 +1579,7 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 	if len(rows) < len(draftTokens) || len(hiddens) < len(draftTokens) {
 		return AssistantVerifyResult{}, core.NewError("native.assistant verify target rows are incomplete")
 	}
+	mtpBoundaryTraceRows(posBefore, -1, first, rows)
 
 	accepted := 0
 	for i, draft := range draftTokens {
@@ -1551,21 +1622,29 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 		}
 		target.rememberAssistantAcceptedIDs(posBefore, result.AcceptedTokens)
 		target.rememberRetainedHidden(boundaryHidden)
-		target.rememberRetainedLogits(boundaryLogits)
+		if len(boundaryLogits) != 0 {
+			target.rememberRetainedLogits(boundaryLogits)
+		}
 		if copyOutputs {
 			result.Logits = append([]byte(nil), boundaryLogits...)
 		}
+		target.rememberBoundaryGreedy(first, target.retainedHidden, suppress)
 		return result, nil
 	}
 
-	// Adopt the boundary from the verify pass — the sampled lane's exact shape
-	// (verifyDraftBlockSampledFromSession): the accepted prefix's KV rows are
-	// already correct (batched/sequential verify parity), hiddens[accepted-1] IS
-	// the hidden at the last accepted token, and rows[accepted-1] already set the
-	// replacement above. Re-forwarding the accepted tokens (the old reforge) paid
-	// `accepted` extra target forwards per accepting round — more target work per
-	// committed token than plain decode, which kept MTP slower than plain even at
-	// 67% acceptance.
+	// Adopt the boundary from the verify pass. This adoption is sound ONLY
+	// because the greedy verify forward runs the per-row lane
+	// (verifyAssistantDraftHiddens exact=true): each row's hidden and KV bytes
+	// are identical to the sequential plain-decode step, so
+	// hiddens[accepted-1] IS the canonical hidden at the last accepted token
+	// and the accepted prefix's KV rows are the bytes plain decode would have
+	// written. Under the batched FOLD the same adoption was NOT sound — fold
+	// numerics drift from sequential decode and flipped near-tied argmaxes
+	// downstream (#55). Re-forwarding the accepted tokens (the old reforge)
+	// paid `accepted` extra target forwards per accepting round — more target
+	// work per committed token than plain decode, which kept MTP slower than
+	// plain even at 67% acceptance; the per-row verify makes the reforge
+	// unnecessary rather than paying it back.
 	target.pos = posBefore + accepted
 	if err := target.truncateSpeculativeKV(target.pos); err != nil {
 		return AssistantVerifyResult{}, err
@@ -1574,17 +1653,24 @@ func (pair *AssistantPair) verifyDraftBlockFromSessionWithSuppress(target *ArchS
 	if len(hidden) != target.arch.Hidden*bf16Size {
 		return AssistantVerifyResult{}, core.NewError("native.assistant verify accepted hidden has wrong size")
 	}
-	logits, err := target.headLogitsScratch(hidden, false)
-	if err != nil {
-		return AssistantVerifyResult{}, core.E("native.assistant verify", "accepted boundary logits", err)
-	}
 	if copyOutputs {
+		logits, err := target.headLogitsScratch(hidden, false)
+		if err != nil {
+			return AssistantVerifyResult{}, core.E("native.assistant verify", "accepted boundary logits", err)
+		}
 		result.Hidden = append([]byte(nil), hidden...)
 		result.Logits = append([]byte(nil), logits...)
+		target.rememberRetainedHidden(hidden)
+		target.rememberRetainedLogits(logits)
+	} else {
+		// The greedy loop's lane: rows[accepted-1] IS this boundary's argmax, so
+		// the full-vocab head pass is deferred — BoundaryLogits recomputes from
+		// the retained hidden if a later consumer wants the logits bytes.
+		target.rememberRetainedHidden(hidden)
 	}
-	target.rememberRetainedHidden(hidden)
-	target.rememberRetainedLogits(logits)
+	mtpBoundaryTrace("verify-adopt", target.pos, result.ReplacementToken, target.retainedHidden)
 	target.rememberAssistantAcceptedIDs(posBefore, result.AcceptedTokens)
+	target.rememberBoundaryGreedy(rows[accepted-1], target.retainedHidden, suppress)
 	return result, nil
 }
 
@@ -1626,7 +1712,7 @@ func (pair *AssistantPair) verifyDraftBlockSampledFromSession(target *ArchSessio
 	} else {
 		result.DraftedTokens = draftTokens
 	}
-	hiddens, err := target.verifyAssistantDraftHiddens(draftTokens)
+	hiddens, err := target.verifyAssistantDraftHiddens(draftTokens, false)
 	if err != nil {
 		return AssistantVerifyResult{}, err
 	}
@@ -1721,13 +1807,17 @@ func (pair *AssistantPair) GenerateFromSession(target *ArchSession, promptIDs []
 
 // GenerateFromSessionEach is GenerateFromSession with per-token streaming.
 //
-// Scheduling (#299): drafting is adaptive, gated on measured token rates. A
-// low-accept patience bail no longer retires the drafter for the request — it
-// runs a bounded plain stretch (whose rate is measured live), then re-probes
-// drafting and stays engaged only while the delivered rate holds at or above
-// plain (see the re-engagement constants above nativeAssistantLowAcceptPatience
-// for the full policy). LTHN_MTP_REENGAGE=0 restores the permanent bail — with
-// it set, the token stream is byte-identical to the pre-#299 loop.
+// Scheduling: with the verify fold armed (mtpVerifyFoldArmed — the default),
+// the stream rides ONE deterministic lane: drafting stays engaged, and the
+// only bail is the count-based low-accept patience, which finishes the
+// request plain permanently. The #299 wall-clock re-engagement machinery
+// (bounded plain stretches, rate-measured probes, deep bootstrap) runs only
+// on the byte-exact per-row lane (LTHN_MTP_VERIFY_FOLD=0), where byte-parity
+// with plain decode keeps its timing-dependent lane composition invisible in
+// the emitted stream; on the fold tier that same composition would surface
+// as flipped near-tie tokens (the q8race bistability), so it is pinned off.
+// LTHN_MTP_REENGAGE=0 pins the wall-clock machinery off on the per-row lane
+// too (the pre-#299 permanent bail).
 func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptIDs []int32, maxNew, eosID, draftTokens int, suppress []int32, yield AssistantTokenSink) (AssistantGenerateResult, error) {
 	if pair == nil || pair.Assistant == nil {
 		return AssistantGenerateResult{}, core.NewError("native.assistant generation requires a validated pair")
@@ -1755,6 +1845,15 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 	stopped := false
 	lowAcceptStreak := 0
 	var reng mtpReengage
+	// The fold rearm's determinism pin: when the greedy verify rides the fold
+	// (mtpVerifyFoldArmed — the default), its stream is not byte-identical to
+	// plain decode, so the wall-clock re-engage machinery (probe/cooldown/
+	// deep-bootstrap, #299) would make TIMING observable as flipped near-tie
+	// tokens — the q8race bistability. One lane per stream: wall-clock
+	// re-engagement runs only on the byte-exact per-row lane
+	// (LTHN_MTP_VERIFY_FOLD=0); folding streams keep the count-based
+	// low-accept bail (deterministic) and finish plain permanently on it.
+	wallReengage := !mtpReengageDisabled && !mtpVerifyFoldArmed()
 	dl := newMTPDraftLen(draftTokens)
 	// runPlainStretch runs the bounded cooldown stretch (committing a pending
 	// lead first), measures the live plain rate, and re-arms drafting into a
@@ -1854,7 +1953,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			dl.cycle(true, target.pos)
 			lowAcceptStreak = 0
 			carryLead = -1
-			if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+			if wallReengage && !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 				if mtpDiagForTest {
 					nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 				}
@@ -1866,17 +1965,19 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 				}
 				continue
 			}
-			bail := false
-			if wasProbing {
-				bail = reng.probeCycle(newDrafts, len(result.Tokens))
-			} else {
-				bail = reng.engagedCycle(newDrafts, time.Since(cycleT0).Seconds(), len(result.Tokens))
-			}
-			if bail && !mtpConfForce {
-				if done, perr := runPlainStretch(carryLead); perr != nil {
-					return result, perr
-				} else if done {
-					break
+			if wallReengage {
+				bail := false
+				if wasProbing {
+					bail = reng.probeCycle(newDrafts, len(result.Tokens))
+				} else {
+					bail = reng.engagedCycle(newDrafts, time.Since(cycleT0).Seconds(), len(result.Tokens))
+				}
+				if bail && !mtpConfForce {
+					if done, perr := runPlainStretch(carryLead); perr != nil {
+						return result, perr
+					} else if done {
+						break
+					}
 				}
 			}
 			continue
@@ -1897,7 +1998,9 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		// Give up on drafting only after the drafter has stayed weak for several
 		// consecutive blocks — one near-tie block is transient, not a mismatched pair.
 		if !mtpConfForce && !stopped && len(result.Tokens) < maxNew && lowAcceptStreak >= nativeAssistantLowAcceptPatience {
-			if mtpReengageDisabled {
+			if !wallReengage {
+				// Count-based and permanent: the deterministic bail shape both
+				// LTHN_MTP_REENGAGE=0 and the folding greedy lane take.
 				if err := nativeAssistantFinishLowAcceptFromTargetCache(target, &result, replacement, maxNew, eosID, suppress, yield); err != nil {
 					return result, err
 				}
@@ -1918,7 +2021,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		if stopped {
 			break
 		}
-		if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+		if wallReengage && !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 			if mtpDiagForTest {
 				nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 			}
@@ -1930,17 +2033,19 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			}
 			continue
 		}
-		bail := false
-		if wasProbing {
-			bail = reng.probeCycle(newDrafts, len(result.Tokens))
-		} else {
-			bail = reng.engagedCycle(newDrafts+1, time.Since(cycleT0).Seconds(), len(result.Tokens))
-		}
-		if bail && !mtpConfForce {
-			if done, perr := runPlainStretch(replacement); perr != nil {
-				return result, perr
-			} else if done {
-				break
+		if wallReengage {
+			bail := false
+			if wasProbing {
+				bail = reng.probeCycle(newDrafts, len(result.Tokens))
+			} else {
+				bail = reng.engagedCycle(newDrafts+1, time.Since(cycleT0).Seconds(), len(result.Tokens))
+			}
+			if bail && !mtpConfForce {
+				if done, perr := runPlainStretch(replacement); perr != nil {
+					return result, perr
+				} else if done {
+					break
+				}
 			}
 		}
 	}
@@ -2457,7 +2562,19 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 		mtpDiagVerifyRowsCalls++
 		diagT0 = time.Now()
 	}
-	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens)
+	// #53 diag (mtp-diag rows-moe, mtp_rows_driver.go): default to "not reached" BEFORE calling
+	// down — verifyAssistantDraftHiddens only reaches verifyRowsMoEBatchedHiddens when exact AND
+	// mtpRowsMoEArmed AND the earlier dense-batched lane (verifyBatchedHiddens) declined; on any
+	// OTHER round shape this default is what the log below reports, instead of silently reusing a
+	// STALE snapshot left over from a previous round.
+	mtpRowsDiagLast = mtpRowsDiagSnapshot{K: len(draftTokens), Reason: "rows-moe-seam-not-reached"}
+	// Routing (rearmed): the fold tier is the default verify forward here too
+	// (mtpVerifyFoldArmed's doc — determinism now comes from the generate loop
+	// pinning wall-clock re-engagement off while folding, not from byte-parity
+	// with plain decode). LTHN_MTP_VERIFY_FOLD=0 restores the byte-exact
+	// per-row tier — forward and canonical head — for parity forensics;
+	// LTHN_MTP_ROWS_HEAD=1 forces the qmm_t rows-head tier (#55 A/B lever).
+	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens, true)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2469,26 +2586,57 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	if len(hiddens) != len(draftTokens) {
 		return nil, nil, core.NewError("native.assistant verify target rows are incomplete")
 	}
-	if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
-		return nil, nil, gerr
-	} else if ok {
-		if diagVerify {
-			nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms rows-head=%.1fms\n",
-				len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
+	// #53 diag: the head/greedy stage below is the ONE macro-stage the layer-major driver has no
+	// visibility into (it runs on the hiddens the driver already returned) — timed here and
+	// combined with THIS round's attention/MoE wall + expert-group histogram, captured moments ago
+	// inside verifyAssistantDraftHiddens above (mtpRowsDiagLast).
+	headT0 := time.Now()
+	if mtpRowsHeadForced {
+		if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
+			return nil, nil, gerr
+		} else if ok {
+			if diagVerify {
+				nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms rows-head=%.1fms\n",
+					len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
+			}
+			if mtpDiagForTest {
+				s.mtpDiagCrossCheckRows(hiddens, suppress, rows)
+			}
+			mtpRowsDiagEmitRound(time.Since(headT0))
+			return rows, hiddens, nil
 		}
-		return rows, hiddens, nil
 	}
-	for i, hidden := range hiddens {
-		token, err := s.greedyFromHiddenInPool(hidden, suppress)
-		if err != nil {
-			return nil, nil, err
+	headLabel := "rows-canon-head"
+	batched := false
+	// Batched canonical tier first: the verify rows all resolve to the same
+	// greedyInPool route (their hiddens are fresh host copies, never the
+	// retained buffer, so the direct-buffer shortcut above them never fires) —
+	// one command buffer for the K unchanged per-row chains replaces K
+	// commit+wait round-trips. canUseDirectHeadGreedy is exactly the guard
+	// under which greedyInPool would take the encodeGreedyAt route for every
+	// row; anything else keeps the per-row loop, byte-identically.
+	if s.canUseDirectHeadGreedy() {
+		ok, gerr := s.headEnc.greedyRowsCanonicalInPool(hiddens, suppress, rows)
+		if gerr != nil {
+			return nil, nil, gerr
 		}
-		rows[i] = token
+		batched = ok
+	}
+	if !batched {
+		headLabel = "perrow-head"
+		for i, hidden := range hiddens {
+			token, err := s.greedyFromHiddenInPool(hidden, suppress)
+			if err != nil {
+				return nil, nil, err
+			}
+			rows[i] = token
+		}
 	}
 	if diagVerify {
-		nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms perrow-head=%.1fms\n",
-			len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
+		nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms %s=%.1fms\n",
+			len(draftTokens), fwdMs, headLabel, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
 	}
+	mtpRowsDiagEmitRound(time.Since(headT0))
 	return rows, hiddens, nil
 }
 
@@ -2521,14 +2669,80 @@ func (s *ArchSession) greedyRowsFromHiddensInPool(hiddens [][]byte, suppress []i
 	return s.headEnc.greedyRowsBufferInPool(s.mtpVerifyGreedyRowsBuf, uint(rowBytes), len(hiddens), suppress, out)
 }
 
-func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32) ([][]byte, error) {
-	if !mtpVerifyFoldDisabled {
-		// verify blocks are 4-7 rows: below batchedDenseICBMaxRows the ICB
-		// per-row interleave reads every quant weight K times (K× a plain
-		// step — the whole speculative win gone on dense targets). Let this
-		// verify take the batched fold: weights swept once, token-identity
-		// tier (the same boundary the prompt-scale qmm trades at), routing
-		// deterministic. LTHN_MTP_VERIFY_FOLD=0 restores the per-row lane.
+// mtpDiagRowsXchkRound counts verify rounds for the #55 rows-tier cross-check
+// (single decode goroutine, diag only).
+var mtpDiagRowsXchkRound int
+
+// mtpDiagRowsXchkLogged caps the #55 mismatch log so a pathological run cannot
+// flood the trace.
+var mtpDiagRowsXchkLogged int
+
+// mtpDiagCrossCheckRows re-derives every verify row's greedy token through the
+// per-row canonical tier (headLogitsScratch qmv + host argmax — the tier plain
+// decode and the boundary `first` use) and logs any row where the K-row fused
+// rows head (qmm_t token-identity tier) picked a different token, with the
+// canonical top-2 ids/logits/gap. Diag-only (#55): this is the instrument that
+// witnesses a near-tie argmax flip between the two head tiers live.
+func (s *ArchSession) mtpDiagCrossCheckRows(hiddens [][]byte, suppress []int32, rows []int32) {
+	mtpDiagRowsXchkRound++
+	if mtpDiagRowsXchkLogged >= 40 || !s.canUseHeadLogitsScratch() {
+		return
+	}
+	for i, hidden := range hiddens {
+		logits, err := s.headLogitsScratch(hidden, false)
+		if err != nil {
+			return
+		}
+		t1, v1, t2, v2 := mtpDiagTop2BF16Suppressed(logits, s.arch.Vocab, suppress)
+		if t1 < 0 || i >= len(rows) {
+			return
+		}
+		if rows[i] != t1 && mtpDiagRowsXchkLogged < 40 {
+			mtpDiagRowsXchkLogged++
+			nativeTraceLog(core.Sprintf(
+				"mtp-diag rows-xchk MISMATCH round=%d row=%d qmm_t-pick=%d canonical-top1=%d(%.6f) top2=%d(%.6f) gap=%.6f\n",
+				mtpDiagRowsXchkRound, i, rows[i], t1, v1, t2, v2, v1-v2))
+		}
+	}
+}
+
+// mtpDiagTop2BF16Suppressed host-scans a bf16 logits row for the top-2
+// unsuppressed ids (ties break to the lower id, matching greedyBF16Suppressed).
+func mtpDiagTop2BF16Suppressed(logits []byte, vocab int, suppress []int32) (int32, float32, int32, float32) {
+	if len(logits) < vocab*bf16Size {
+		return -1, 0, -1, 0
+	}
+	best, second := -1, -1
+	var bestV, secondV float32
+	for i := range vocab {
+		if tokenSuppressed(i, suppress) {
+			continue
+		}
+		v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1])
+		switch {
+		case best < 0 || v > bestV:
+			second, secondV = best, bestV
+			best, bestV = i, v
+		case second < 0 || v > secondV:
+			second, secondV = i, v
+		}
+	}
+	return int32(best), bestV, int32(second), secondV
+}
+
+// verifyAssistantDraftHiddens forwards the draft block through the target and
+// returns the per-row hiddens. Routing is mtpVerifyFoldArmed's rearmed rule:
+// the small-K batched FOLD (weights swept once per block through the qmm
+// token-identity tier, deterministic run-to-run but not byte-identical to
+// unbatched plain decode) is the default for every lane; determinism on the
+// greedy lane is preserved by GenerateFromSessionEach pinning the wall-clock
+// re-engage machinery off while folding. LTHN_MTP_VERIFY_FOLD=0 restores the
+// per-row byte-exact lane (qmv dot-body per row, byte-identical to sequential
+// plain decode) everywhere — the parity-forensics anchor. Where the fold's
+// dense lane declines structurally (quant-MoE), exact=true falls through to
+// the layer-major rows driver, then the per-row loop, unchanged.
+func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32, exact bool) ([][]byte, error) {
+	if mtpVerifyFoldArmed() {
 		s.state.verifyFoldSmallK = true
 		defer func() { s.state.verifyFoldSmallK = false }()
 	}
@@ -2544,6 +2758,18 @@ func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32) ([][]byte
 	}
 
 	rowBytes := s.arch.Hidden * bf16Size
+	// #53: LTHN_MTP_ROWS_MOE=1 arms the layer-major driver (mtp_rows_driver.go) for the byte-exact
+	// greedy lane ONLY — it groups each layer's MoE expert weight sweep across the K draft rows
+	// instead of paying it once per row. Declines cleanly (ok=false, no side effect) on any geometry
+	// it does not implement, falling straight through to the unchanged per-row lane below. The
+	// sampled fold lane (verifyBatchedHiddens above) is untouched by this lever.
+	if exact && mtpRowsMoEArmed {
+		if rows, ok, rerr := s.verifyRowsMoEBatchedHiddens(draftTokens, rowBytes); rerr != nil {
+			return nil, rerr
+		} else if ok {
+			return rows, nil
+		}
+	}
 	if rows, ok := s.mtpVerifyHiddenRowsScratch(len(draftTokens), rowBytes); ok {
 		for i, draft := range draftTokens {
 			hidden, err := s.stepID(draft)

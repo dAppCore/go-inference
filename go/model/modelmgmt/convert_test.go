@@ -34,8 +34,16 @@ func TestConvert_ReadSafetensors_Good(t *core.T) {
 	core.AssertLen(t, sd.Data, 4)
 }
 
+// TestConvert_ReadSafetensors_Bad covers three distinct invalid inputs: a
+// missing file, a directory given as the path, and an existing-but-empty
+// file (too short to even hold the 8-byte header-length prefix) — distinct
+// from Ugly's 5-byte "short" case below.
 func TestConvert_ReadSafetensors_Bad(t *core.T) {
 	assertResultError(t, ReadSafetensors(core.JoinPath(t.TempDir(), "missing.safetensors")))
+	assertResultError(t, ReadSafetensors(t.TempDir()))
+	empty := core.JoinPath(t.TempDir(), "empty.safetensors")
+	core.RequireNoError(t, coreio.Local.Write(empty, ""))
+	assertResultError(t, ReadSafetensors(empty))
 }
 
 func TestConvert_ReadSafetensors_Ugly(t *core.T) {

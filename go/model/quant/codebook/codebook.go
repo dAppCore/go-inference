@@ -121,7 +121,7 @@ func ReadProfile(root string) (*Profile, error) {
 		}
 		return nil, read.Value.(error)
 	}
-	return ParseProfile(read.Value.([]byte))
+	return ParseProfile(read.Bytes())
 }
 
 // desc, _ := codebook.NewTensorDescriptor("layer0.mlp.w", []uint64{4096, 4096}, profile)

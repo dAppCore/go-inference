@@ -91,7 +91,7 @@ func do(t *testing.T, method, path, body string) *httptest.ResponseRecorder {
 
 // TestOllamaChatHandler_MethodRejection_Bad pins that a non-POST /api/chat is
 // rejected (405) before any model work.
-func TestOllamaChatHandler_MethodRejection_Bad(t *testing.T) {
+func TestOllamaChatHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	rec := do(t, http.MethodGet, "/api/chat", "")
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /api/chat = %d, want 405", rec.Code)
@@ -100,7 +100,7 @@ func TestOllamaChatHandler_MethodRejection_Bad(t *testing.T) {
 
 // TestOllamaChatHandler_BadBody_Ugly pins that a malformed JSON body is a 400,
 // not a panic or a 500.
-func TestOllamaChatHandler_BadBody_Ugly(t *testing.T) {
+func TestOllamaChatHandler_BadBody_StatusBadRequest_Ugly(t *testing.T) {
 	rec := do(t, http.MethodPost, "/api/chat", "{not json")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("POST /api/chat malformed = %d, want 400", rec.Code)
@@ -474,8 +474,7 @@ func doWith(t *testing.T, model inference.TextModel, method, path, body string) 
 // TestAnthropicMessagesHandler_Good_ThinkingBlock pins the typed reasoning
 // shape on non-streaming /v1/messages: the thought channel arrives as a
 // leading {"type":"thinking"} content block and the text block carries ONLY
-// the visible answer — it used to leak the reasoning into the text block
-// (handover 2026-07-18b follow-up).
+// the visible answer — it used to leak the reasoning into the text block.
 func TestAnthropicMessagesHandler_Good_ThinkingBlock(t *testing.T) {
 	rec := doWith(t, thinkingFakeModel(), http.MethodPost, "/v1/messages",
 		`{"model":"test-model","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`)

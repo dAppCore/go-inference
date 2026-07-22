@@ -292,12 +292,19 @@ func (s *SessionHandle) Generate(ctx context.Context, cfg inference.GenerateConf
 
 // CaptureKV copies the retained KV cache to a portable kv.Snapshot.
 func (s *SessionHandle) CaptureKV(ctx context.Context) (*kv.Snapshot, error) {
+	return s.CaptureKVWithOptions(ctx, kv.CaptureOptions{})
+}
+
+// CaptureKVWithOptions copies retained KV with explicit native/raw and trusted
+// prefix capture controls. Backend model-level KVSnapshotter adapters use this
+// method so those public options reach the concrete engine session unchanged.
+func (s *SessionHandle) CaptureKVWithOptions(ctx context.Context, opts kv.CaptureOptions) (*kv.Snapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.readyForGenerateLocked("engine.SessionHandle.CaptureKV"); err != nil {
+	if err := s.readyForGenerateLocked("engine.SessionHandle.CaptureKVWithOptions"); err != nil {
 		s.err = err
 		return nil, err
 	}
@@ -305,7 +312,7 @@ func (s *SessionHandle) CaptureKV(ctx context.Context) (*kv.Snapshot, error) {
 		s.err = err
 		return nil, err
 	}
-	snap, err := s.sess.CaptureKVWithOptions(kv.CaptureOptions{})
+	snap, err := s.sess.CaptureKVWithOptions(opts)
 	if err != nil {
 		s.err = err
 		return nil, err

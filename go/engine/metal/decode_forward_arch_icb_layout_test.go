@@ -76,15 +76,20 @@ func TestResolveArchICBOpLayout_Ugly(t *testing.T) {
 
 // TestArchICBOpLayoutTotal_Good: the whole-stack command count is the uniform per-layer
 // stride times the layer count plus the stack-global additions — the 2-pass SDPA op per
-// recorded GLOBAL layer and the two quantise-store ops per q8 owner. This total is what
+// recorded GLOBAL layer, the two quantise-store ops per q8 owner, and the TurboQuant
+// lane's ops (2 stores per TQ owner + rot/unrot per TQ-reading layer). This total is what
 // the recorder allocates and what the record loop's running counter must land on.
 func TestArchICBOpLayoutTotal_Good(t *testing.T) {
 	lay := archICBOpLayout{opsPerLayer: 24}
-	if got := lay.total(30, 0, 0); got != 720 {
+	if got := lay.total(30, 0, 0, 0); got != 720 {
 		t.Fatalf("uniform total = %d, want 720", got)
 	}
 	// 30 layers, 6 global layers recording 2-pass SDPA, 6 q8 owners (2 stores each)
-	if got := lay.total(30, 6, 12); got != 738 {
+	if got := lay.total(30, 6, 12, 0); got != 738 {
 		t.Fatalf("total with stack-global additions = %d, want 738", got)
+	}
+	// the TurboQuant lane instead: 6 TQ owners = 12 store ops + 6 reading layers × (rot+unrot) = 24
+	if got := lay.total(30, 6, 0, 24); got != 750 {
+		t.Fatalf("total with TQ additions = %d, want 750", got)
 	}
 }

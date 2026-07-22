@@ -5,6 +5,7 @@
 package hip
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 const (
+	hipDisableDecodeKernelBatchEnv                          = "GO_ROCM_DISABLE_DECODE_KERNEL_BATCH"
 	hipKernelNamePrefill                                    = "rocm_prefill"
 	hipKernelNameDecode                                     = "rocm_decode"
 	hipKernelNameKVEncodeToken                              = "rocm_kv_encode_token"
@@ -22,12 +24,23 @@ const (
 	hipKernelNameProjectionBatch                            = "rocm_projection_batch"
 	hipKernelNameMLXQ4Proj                                  = "rocm_mlx_q4_projection"
 	hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360            = "rocm_mlx_q4_projection_q4_g32_rows3840_cols15360"
+	hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16       = "rocm_mlx_q4_projection_q4_g64_rows3840_cols15360_row16"
+	hipKernelNameMLXQ4ProjQ4G64E4BRow8                      = "rocm_mlx_q4_projection_q4_g64_e4b_row8"
+	hipKernelNameMLXQ4ProjQ8G64Row8                         = "rocm_mlx_q4_projection_q8_g64_row8"
 	hipKernelNameMLXQ4ProjCols256                           = "rocm_mlx_q4_projection_cols256"
 	hipKernelNameMLXQ4ProjQ6G16Row16                        = "rocm_mlx_q4_projection_q6_g16_row16"
 	hipKernelNameMLXQ4ProjQ6Row16                           = "rocm_mlx_q4_projection_q6_row16"
 	hipKernelNameMLXQ4ProjQ6Row32                           = "rocm_mlx_q4_projection_q6_row32"
 	hipKernelNameMLXQ4ProjQ6Row64                           = "rocm_mlx_q4_projection_q6_row64"
 	hipKernelNameMLXQ4ProjBatch                             = "rocm_mlx_q4_projection_batch"
+	hipKernelNameMLXQ4ProjBatchQ4G64Tokens16                = "rocm_mlx_q4_projection_batch_q4_g64_tokens16"
+	hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared     = "rocm_mlx_q4_projection_batch_q4_g64_row16_tokens16_shared"
+	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16           = "rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16"
+	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared     = "rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16_shared"
+	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared     = "rocm_mlx_q4_projection_batch_q8_g64_row16_tokens64_shared"
+	hipKernelNameMLXQ4ProjBatchQ8G64Row32Tokens64Shared     = "rocm_mlx_q4_projection_batch_q8_g64_row32_tokens64_shared"
+	hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared     = "rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_shared"
+	hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Aligned    = "rocm_mlx_q4_projection_batch_q8_g64_row64_tokens64_aligned"
 	hipKernelNameMLXQ4ProjBatchQ6Row16                      = "rocm_mlx_q4_projection_batch_q6_row16"
 	hipKernelNameMLXQ4ProjGreedy                            = "rocm_mlx_q4_projection_greedy"
 	hipKernelNameMLXQ4ProjGreedyQ6Row64                     = "rocm_mlx_q4_projection_greedy_q6_row64"
@@ -48,11 +61,17 @@ const (
 	hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16         = "rocm_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16"
 	hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840     = "rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840"
 	hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8 = "rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8"
+	hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8 = "rocm_mlx_q4_gelu_tanh_multiply_q4_g64_rows15360_cols3840_row8"
+	hipKernelNameMLXQ4GELUTanhMulQ4G64E4BRow16              = "rocm_mlx_q4_gelu_tanh_multiply_q4_g64_e4b_row16"
+	hipKernelNameMLXQ4GELUTanhMulQ8G64Row8                  = "rocm_mlx_q4_gelu_tanh_multiply_q8_g64_row8"
 	hipKernelNameMLXQ4GELUTanhMLPQ4G32Cols1536Persistent    = "rocm_mlx_q4_gelu_tanh_mlp_q4_g32_cols1536_persistent"
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536                 = "rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536"
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32            = "rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32"
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64            = "rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64"
 	hipKernelNameMLXQ4GELUTanhMulBatch                      = "rocm_mlx_q4_gelu_tanh_multiply_batch"
+	hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8     = "rocm_mlx_q4_gelu_tanh_multiply_batch_q4_g64_cols2816_row8"
+	hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16            = "rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_row16"
+	hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32      = "rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_rows2112_cols2816_row16_tokens32_shared"
 	hipKernelNameMLXQ4GELUTanhProj                          = "rocm_mlx_q4_gelu_tanh_projection"
 	hipKernelNameMLXQ4GELUTanhProjQ6Row16                   = "rocm_mlx_q4_gelu_tanh_projection_q6_row16"
 	hipKernelNameMLXQ4GELUTanhProjBatch                     = "rocm_mlx_q4_gelu_tanh_projection_batch"
@@ -72,12 +91,15 @@ const (
 	hipKernelNameAttention                                  = "rocm_attention"
 	hipKernelNameAttentionHeads                             = "rocm_attention_heads"
 	hipKernelNameAttentionHeadsBatchCausal                  = "rocm_attention_heads_batch_causal"
+	hipKernelNameAttentionHeadsBatchCapped                  = "rocm_attention_heads_batch_capped"
 	hipKernelNameAttentionHeadsLaneBatch                    = "rocm_attention_heads_lane_batch"
 	hipKernelNameAttentionHeadsBatchCausalQueryRMSRoPE      = "rocm_attention_heads_batch_causal_query_rms_rope"
 	hipKernelNameAttentionHeadsChunkedStage1                = "rocm_attention_heads_chunked_stage1"
 	hipKernelNameAttentionHeadsChunkedStage2                = "rocm_attention_heads_chunked_stage2"
 	hipKernelNameAttentionHeadsBatchChunkedStage1           = "rocm_attention_heads_batch_chunked_stage1_v2"
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA2       = "rocm_attention_heads_batch_chunked_stage1_gqa2"
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA4       = "rocm_attention_heads_batch_chunked_stage1_gqa4"
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA8       = "rocm_attention_heads_batch_chunked_stage1_gqa8"
 	hipKernelNameAttentionHeadsBatchChunkedStage2           = "rocm_attention_heads_batch_chunked_stage2"
 	hipKernelNameVectorAdd                                  = "rocm_vector_add"
 	hipKernelNameVectorAddScaled                            = "rocm_vector_add_scaled"
@@ -88,6 +110,10 @@ const (
 	hipKernelNameMoERouter                                  = "rocm_moe_router"
 	hipKernelNameMoELazy                                    = "rocm_moe_lazy_experts"
 	hipKernelNameMoECombineNorms                            = "rocm_moe_combine_norms"
+	hipKernelNameMoEBatchGatherRows                         = "rocm_moe_batch_gather_rows"
+	hipKernelNameMoEBatchScatterRoutes                      = "rocm_moe_batch_scatter_routes"
+	hipKernelNameMoEBatchReduceRoutes                       = "rocm_moe_batch_reduce_routes"
+	hipKernelNameMoEMLXAffineRoutes                         = "rocm_moe_mlx_affine_routes"
 	hipKernelNameGGUFQ4_0Projection                         = "rocm_gguf_q4_0_projection"
 	hipKernelNameGGUFQ4_0GELUTanhGateUp                     = "rocm_gguf_q4_0_gelu_tanh_gate_up"
 	hipKernelNameGGUFQ4_0SelectedExpertGateUp               = "rocm_gguf_q4_0_selected_expert_gate_up"
@@ -97,11 +123,24 @@ const (
 	hipKernelNameGGUFQ4KSelectedExpertGateUp                = "rocm_gguf_q4_k_selected_expert_gate_up"
 	hipKernelNameGGUFQ5_1SelectedExpertDown                 = "rocm_gguf_q5_1_selected_expert_down"
 	hipKernelNameGGUFQ8_0SelectedExpertDown                 = "rocm_gguf_q8_0_selected_expert_down"
+	hipKernelNameGGUFQ4KSelectedExpertGateUpPair16          = "rocm_gguf_q4_k_selected_expert_gate_up_pair16"
+	hipKernelNameGGUFQ4KSelectedExpertGateUpSplitPair16     = "rocm_gguf_q4_k_selected_expert_gate_up_split_pair16"
+	hipKernelNameGGUFQ4KExpandMetadata                      = "rocm_gguf_q4_k_expand_metadata"
+	hipKernelNameGGUFQ4KExpandedSelectedGateUpSplitPair16   = "rocm_gguf_q4_k_expanded_selected_expert_gate_up_split_pair16"
+	hipKernelNameGGUFQ5_1SelectedExpertDownPair16           = "rocm_gguf_q5_1_selected_expert_down_pair16"
+	hipKernelNameGGUFQ5_1SelectedExpertDownExpert8Pair16    = "rocm_gguf_q5_1_selected_expert_down_expert8_pair16"
+	hipKernelNameGGUFQ8_0SelectedExpertDownPair16           = "rocm_gguf_q8_0_selected_expert_down_pair16"
 	hipKernelNameJANGTQ                                     = "rocm_jangtq_projection"
 	hipKernelNameCodebook                                   = "rocm_codebook_lookup"
 	hipKernelNameLoRA                                       = "rocm_lora_projection"
 	hipKernelNameEmbedLookup                                = "rocm_embedding_lookup"
 	hipKernelNameEmbedLookupGreedyToken                     = "rocm_embedding_lookup_greedy_token"
+	hipKernelNameDiffusionExpectedEmbedding                 = "rocm_diffusion_expected_embedding"
+	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows16  = "rocm_diffusion_expected_embedding_affine_g64_rows16"
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4  = "rocm_diffusion_expected_embedding_q8_g64_dims4_rows4"
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64   = "rocm_diffusion_expected_embedding_q8_g64_tile32x64"
+	hipKernelNameDiffusionSampleProbabilities               = "rocm_diffusion_sample_probabilities"
+	hipKernelNameDiffusionSampleProbabilitiesWide           = "rocm_diffusion_sample_probabilities_wide"
 	hipKernelNameEmbedMean                                  = "rocm_embedding_mean_pool"
 	hipKernelNameRerank                                     = "rocm_rerank_cosine"
 	hipKernelNameTinyPrefill                                = "rocm_tiny_prefill"
@@ -112,6 +151,19 @@ const (
 	hipKernelNameAdamWUpdate                                = "rocm_adamw_update"
 	hipKernelNameAutoRoundQuantize                          = "rocm_autoround_quantize"
 )
+
+const (
+	hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704                        = "rocm_mlx_q4_projection_batch_q4_g64_rows2816_cols704_row16_tokens16_shared"
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64             = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64"
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4 = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4"
+	hipKernelNameQ8_1QuantizeF32                                           = "rocm_q8_1_quantize_f32"
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8                 = "rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_row8"
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8            = "rocm_gguf_q4_k_expanded_q8_1_gelu_tanh_gate_up_pair_batch_row8"
+)
+
+func hipDecodeKernelBatchEnabled() bool {
+	return core.Env(hipDisableDecodeKernelBatchEnv) != "1"
+}
 
 type hipKernelLaunchConfig struct {
 	Name           string
@@ -129,8 +181,135 @@ type nativeHIPKernelLauncher interface {
 	LaunchKernel(config hipKernelLaunchConfig) error
 }
 
+type nativeHIPKernelBatchLauncher interface {
+	LaunchKernelBatch(configs []hipKernelLaunchConfig) error
+}
+
 type nativeHIPDeviceSynchronizer interface {
 	DeviceSynchronize() error
+}
+
+type hipKernelLaunchBatchContextKey struct{}
+
+const (
+	hipKernelLaunchBatchAlign        = 16
+	hipKernelLaunchBatchInitialBytes = 128 << 10
+)
+
+type hipKernelLaunchBatchBuffer struct {
+	configs []hipKernelLaunchConfig
+	offsets []int
+	lengths []int
+	payload []byte
+}
+
+var hipKernelLaunchBatchBuffers = sync.Pool{
+	New: func() any {
+		return &hipKernelLaunchBatchBuffer{
+			configs: make([]hipKernelLaunchConfig, 0, 512),
+			offsets: make([]int, 0, 512),
+			lengths: make([]int, 0, 512),
+			payload: make([]byte, 0, hipKernelLaunchBatchInitialBytes),
+		}
+	},
+}
+
+type hipKernelLaunchBatch struct {
+	driver   nativeHIPDriver
+	launcher nativeHIPKernelBatchLauncher
+	buffer   *hipKernelLaunchBatchBuffer
+	closed   bool
+}
+
+func hipBeginKernelLaunchBatch(ctx context.Context, driver nativeHIPDriver) (context.Context, *hipKernelLaunchBatch) {
+	if ctx == nil || driver == nil || hipActiveDecodeRouteMetrics() != nil {
+		return ctx, nil
+	}
+	launcher, ok := driver.(nativeHIPKernelBatchLauncher)
+	if !ok {
+		return ctx, nil
+	}
+	batch := &hipKernelLaunchBatch{
+		driver:   driver,
+		launcher: launcher,
+		buffer:   hipKernelLaunchBatchBuffers.Get().(*hipKernelLaunchBatchBuffer),
+	}
+	return context.WithValue(ctx, hipKernelLaunchBatchContextKey{}, batch), batch
+}
+
+func hipLaunchKernelContext(ctx context.Context, driver nativeHIPDriver, config hipKernelLaunchConfig) error {
+	if ctx != nil {
+		if batch, ok := ctx.Value(hipKernelLaunchBatchContextKey{}).(*hipKernelLaunchBatch); ok && batch != nil && batch.driver == driver {
+			if batch.closed {
+				return core.E("rocm.hip.LaunchKernelBatch", "kernel launch batch is closed", nil)
+			}
+			if err := config.Validate(); err != nil {
+				return err
+			}
+			batch.append(config)
+			return nil
+		}
+	}
+	return hipLaunchKernel(driver, config)
+}
+
+func (batch *hipKernelLaunchBatch) Flush() error {
+	if batch == nil || batch.closed {
+		return nil
+	}
+	batch.closed = true
+	buffer := batch.buffer
+	batch.buffer = nil
+	defer hipReleaseKernelLaunchBatchBuffer(buffer)
+	configs := buffer.configs
+	if len(configs) == 0 {
+		return nil
+	}
+	for index := range configs {
+		offset := buffer.offsets[index]
+		end := offset + buffer.lengths[index]
+		configs[index].Args = buffer.payload[offset:end:end]
+	}
+	return batch.launcher.LaunchKernelBatch(configs)
+}
+
+func (batch *hipKernelLaunchBatch) Discard() {
+	if batch == nil || batch.closed {
+		return
+	}
+	batch.closed = true
+	buffer := batch.buffer
+	batch.buffer = nil
+	hipReleaseKernelLaunchBatchBuffer(buffer)
+}
+
+func (batch *hipKernelLaunchBatch) append(config hipKernelLaunchConfig) {
+	buffer := batch.buffer
+	offset := (len(buffer.payload) + hipKernelLaunchBatchAlign - 1) &^ (hipKernelLaunchBatchAlign - 1)
+	end := offset + len(config.Args)
+	if end > len(buffer.payload) {
+		buffer.payload = append(buffer.payload, make([]byte, end-len(buffer.payload))...)
+	}
+	copy(buffer.payload[offset:end], config.Args)
+	hipReleaseLaunchPacket(config.Args)
+	config.Args = nil
+	buffer.configs = append(buffer.configs, config)
+	buffer.offsets = append(buffer.offsets, offset)
+	buffer.lengths = append(buffer.lengths, end-offset)
+}
+
+func hipReleaseKernelLaunchBatchBuffer(buffer *hipKernelLaunchBatchBuffer) {
+	if buffer == nil {
+		return
+	}
+	for index := range buffer.configs {
+		buffer.configs[index] = hipKernelLaunchConfig{}
+	}
+	buffer.configs = buffer.configs[:0]
+	buffer.offsets = buffer.offsets[:0]
+	buffer.lengths = buffer.lengths[:0]
+	buffer.payload = buffer.payload[:0]
+	hipKernelLaunchBatchBuffers.Put(buffer)
 }
 
 type hipLaunchPacketPool struct {

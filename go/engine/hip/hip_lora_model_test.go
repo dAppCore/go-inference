@@ -7,10 +7,88 @@ package hip
 import (
 	"context"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference"
 )
+
+func TestHIPLoRAModel_MetalHeadAdapterArtifact_Good(t *testing.T) {
+	path := t.TempDir()
+	wantA := []float32{0.25, -0.5}
+	wantB := []float32{0.75, 1.25, -1.5}
+
+	core.RequireNoError(t, saveMetalHeadLoRAAdapter(path, wantA, wantB, 3, 2, 1, 4))
+	adapter, err := loadMetalHeadLoRAAdapter(path)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, wantA, adapter.a)
+	core.AssertEqual(t, wantB, adapter.b)
+	core.AssertEqual(t, 1, adapter.rank)
+	core.AssertEqual(t, 2, adapter.hiddenSize)
+	core.AssertEqual(t, 3, adapter.vocabSize)
+	core.AssertEqual(t, float32(4), adapter.alpha)
+
+	_, err = os.Stat(filepath.Join(path, "adapter.safetensors"))
+	core.RequireNoError(t, err)
+	_, err = os.Stat(filepath.Join(path, "adapter_config.json"))
+	core.RequireNoError(t, err)
+}
+
+func TestHIPLoRAModel_MetalHeadAdapterArtifact_Bad(t *testing.T) {
+	path := t.TempDir()
+	core.RequireNoError(t, os.WriteFile(filepath.Join(path, "adapter_config.json"), []byte(`{"rank":1,"alpha":4}`), 0o644))
+
+	_, err := loadMetalHeadLoRAAdapter(path)
+
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "load adapter.safetensors")
+}
+
+func TestHIPLoRAModel_Gemma4MetalHeadAdapter_Good(t *testing.T) {
+	path := t.TempDir()
+	core.RequireNoError(t, saveMetalHeadLoRAAdapter(path, []float32{0.25, -0.5}, []float32{0.75, 1.25, -1.5}, 3, 2, 1, 4))
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "gemma4_text", HiddenSize: 2, VocabSize: 3}}
+
+	adapter, identity, err := model.loadGemma4HeadLoRAAdapter(path)
+
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []float32{0.25, -0.5}, adapter.a)
+	core.AssertEqual(t, []float32{0.75, 1.25, -1.5}, adapter.b)
+	core.AssertEqual(t, "hip_gemma4_lm_head", identity.Labels["adapter_runtime"])
+	core.AssertEqual(t, []string{"lm_head.weight"}, identity.TargetKeys)
+}
+
+func TestHIPLoRAModel_Gemma4MetalHeadAdapter_Bad(t *testing.T) {
+	path := t.TempDir()
+	core.RequireNoError(t, saveMetalHeadLoRAAdapter(path, []float32{0.25, -0.5}, []float32{0.75, 1.25, -1.5}, 3, 2, 1, 4))
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "gemma4_text", HiddenSize: 4, VocabSize: 3}}
+
+	_, _, err := model.loadGemma4HeadLoRAAdapter(path)
+
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "hidden size mismatch")
+}
+
+func TestHIPLoRAModel_Gemma4ForwardConfig_Good(t *testing.T) {
+	adapter := &hipLoadedSmallLoRAAdapter{a: []float32{1, 2}, b: []float32{1, 2, 3}, rank: 1, alpha: 2}
+	model := &hipLoadedModel{
+		gemma4LoRA: adapter,
+		q4ConfigOK: true,
+		q4Layers:   1,
+		q4Config: hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{{
+			HiddenSize: 2,
+			VocabSize:  3,
+		}}},
+	}
+
+	cfg, err := model.cachedGemma4Q4ForwardConfig(1)
+
+	core.RequireNoError(t, err)
+	core.AssertTrue(t, cfg.HeadLoRA == adapter)
+	core.AssertTrue(t, cfg.usesDenseProjectionWeights())
+}
 
 func TestHIPLoRAModel_TinyAdapterValidation_Bad(t *testing.T) {
 	cfg := hipLoadedTinyLMConfig{HiddenSize: 2, VocabSize: 3}

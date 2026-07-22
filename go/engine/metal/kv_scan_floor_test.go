@@ -14,8 +14,8 @@ import (
 // TestKVScanBandwidthFloorRealE2B computes the #365 KV-scan bandwidth FLOOR from real
 // e2b geometry (no decode) and prints it beside the measured per-token cost, to settle
 // whether the deep-context tax is fundamental bytes (→ quant is the honest lever) or the
-// 2-pass sdpa running OVER its floor (→ fix the kernel, Snider's "degrades more than it
-// should"). Per token a global layer scans its whole K+V; sliding layers scan only the
+// 2-pass sdpa running OVER its floor (→ fix the kernel: it may degrade more than it
+// should). Per token a global layer scans its whole K+V; sliding layers scan only the
 // window. floor = bytes / peak-bandwidth; compare its 256→16K delta to the measured
 // ICB delta (~0.94 ms/token, 176→151 tok/s).
 //

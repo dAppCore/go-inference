@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -38,6 +39,13 @@ const (
 	hipMLXQ4GELUTanhMLPPersistentRouteEnv                 = "GO_ROCM_ENABLE_EXPERIMENTAL_PERSISTENT_MLP"
 	hipMLXQ4Projection12BDownRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_DOWN_PROJECTION"
 	hipMLXQ4GELUTanh12BGateUpRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_GATE_UP"
+	hipMLXQ4ProjectionBatchQ4SharedDisableEnv             = "GO_ROCM_DISABLE_Q4_BATCH_SHARED"
+	hipMLXQ4ProjectionBatchQ8SharedDisableEnv             = "GO_ROCM_DISABLE_Q8_BATCH_SHARED"
+	hipMLXQ4ProjectionBatchQ8Tokens64DisableEnv           = "GO_ROCM_DISABLE_Q8_BATCH_TOKENS64"
+	hipMLXQ4ProjectionBatchQ8Row32DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW32"
+	hipMLXQ4ProjectionBatchQ8Row64DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW64"
+	hipMLXQ4GELUTanhBatch26BQ4DisableEnv                  = "GO_ROCM_DISABLE_Q4_GELU_BATCH_26B_Q4"
+	hipMLXQ4GELUTanhBatchQ8Tokens32DisableEnv             = "GO_ROCM_DISABLE_Q8_GELU_BATCH_TOKENS32"
 	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
 	hipMLXQ4Projection12BHeadGridEnv                      = "GO_ROCM_EXPERIMENTAL_12B_HEAD_GRID"
 	hipMLXQ4GELUTanhProjLaunchArgsVersion          uint32 = 1
@@ -56,6 +64,9 @@ const (
 	hipMLXQ4ProjectionBits                                = 4
 	hipMLXQ4ProjectionBlockSize                    uint32 = 256
 	hipMLXQ4ProjectionRowsPerBlock                        = 8
+	hipMLXQ4ProjectionRow16RowsPerBlock                   = 16
+	hipMLXQ4ProjectionRow32RowsPerBlock                   = 32
+	hipMLXQ4ProjectionRow64RowsPerBlock                   = 64
 	hipMLXQ4ProjectionCols256RowsPerBlock                 = 32
 	hipMLXQ4ProjectionQ6Row16RowsPerBlock                 = 16
 	hipMLXQ4ProjectionQ6Row32RowsPerBlock                 = 32
@@ -67,6 +78,11 @@ const (
 	hipMLXQ4GELUTanhQ6Cols1536Row32RowsPerBlock           = 32
 	hipMLXQ4GELUTanhQ6Cols1536Row64RowsPerBlock           = 64
 	hipMLXQ4ProjectionBatchTokensPerBlock                 = 8
+	hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock               = 32
+	hipMLXQ4ProjectionBatchWideTokensPerBlock             = 16
+	hipMLXQ4ProjectionBatchQ8Tokens64PerBlock             = 64
+	hipMLXQ4ProjectionBatchQ8Row32MinRows                 = 32
+	hipMLXQ4ProjectionBatchQ8Row64MinRows                 = 2048
 	hipMLXQ4ProjectionGreedyRowsPerBlock                  = 32
 	hipMLXQ4ProjectionGreedyQ6RowsPerBlock                = 64
 	hipMLXQ4ProjectionBestBytes                           = 8
@@ -75,13 +91,33 @@ const (
 	hipPackedTopKChunkSize                                = 4096
 )
 
+const (
+	hipMLXQ4ProjectionBatch26BDownDisableEnv        = "GO_ROCM_DISABLE_Q4_BATCH_26B_DOWN"
+	hipMLXQ4ProjectionBatchQ8Row64AlignedDisableEnv = "GO_ROCM_DISABLE_Q8_BATCH_ROW64_ALIGNED"
+)
+
 var (
 	hipMLXQ4GELUTanhMLPPersistentRouteEnabled = os.Getenv(hipMLXQ4GELUTanhMLPPersistentRouteEnv) == "1"
-	hipMLXQ4Projection12BDownRouteEnabled     = os.Getenv(hipMLXQ4Projection12BDownRouteEnv) == "1"
-	hipMLXQ4GELUTanh12BGateUpRouteEnabled     = os.Getenv(hipMLXQ4GELUTanh12BGateUpRouteEnv) == "1"
-	hipMLXQ4GELUTanh12BGateUpGeometry         = os.Getenv(hipMLXQ4GELUTanh12BGateUpGeometryEnv)
+	hipMLXQ4Projection12BDownRouteEnabled     = hipMLXQ4Projection12BDownRouteEnabledFromEnv(os.Getenv(hipMLXQ4Projection12BDownRouteEnv))
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled     = hipMLXQ4GELUTanh12BGateUpRouteEnabledFromEnv(os.Getenv(hipMLXQ4GELUTanh12BGateUpRouteEnv))
+	hipMLXQ4GELUTanh12BGateUpGeometry         = hipMLXQ4GELUTanh12BGateUpGeometryFromEnv(os.Getenv(hipMLXQ4GELUTanh12BGateUpGeometryEnv))
 	hipMLXQ4Projection12BHeadGridBlocks       = hipExperimentalProjectionGridBlocks(hipMLXQ4Projection12BHeadGridEnv)
 )
+
+func hipMLXQ4Projection12BDownRouteEnabledFromEnv(value string) bool {
+	return value != "0"
+}
+
+func hipMLXQ4GELUTanh12BGateUpRouteEnabledFromEnv(value string) bool {
+	return value != "0"
+}
+
+func hipMLXQ4GELUTanh12BGateUpGeometryFromEnv(value string) string {
+	if value == "" {
+		return "row8"
+	}
+	return value
+}
 
 func hipExperimentalProjectionGridBlocks(name string) int {
 	blocks, err := strconv.Atoi(os.Getenv(name))
@@ -134,6 +170,8 @@ var hipDeviceByteBufferPool = struct {
 }{
 	entries: make(map[uint64][]hipDeviceByteBufferPoolEntry),
 }
+
+var hipDeviceByteBufferPoolSuppressions atomic.Int64
 
 const (
 	hipDeviceByteBufferPoolMaxBytes           = 768 << 20
@@ -218,16 +256,17 @@ type hipMLXQ4ProjectionDeviceBuffers struct {
 }
 
 type hipMLXQ4DeviceWeightConfig struct {
-	WeightPointer nativeDevicePointer
-	ScalePointer  nativeDevicePointer
-	BiasPointer   nativeDevicePointer
-	WeightBytes   uint64
-	ScaleBytes    uint64
-	BiasBytes     uint64
-	Rows          int
-	Cols          int
-	GroupSize     int
-	Bits          int
+	WeightPointer  nativeDevicePointer
+	ScalePointer   nativeDevicePointer
+	BiasPointer    nativeDevicePointer
+	WeightBytes    uint64
+	ScaleBytes     uint64
+	BiasBytes      uint64
+	Rows           int
+	Cols           int
+	GroupSize      int
+	Bits           int
+	WeightEncoding uint32
 }
 
 type hipMLXQ4ProjectionLaunchArgs struct {
@@ -603,11 +642,46 @@ func (cfg hipMLXQ4DeviceWeightConfig) quantBits() int {
 	return hipMLXQ4ProjectionBitsOrDefault(cfg.Bits)
 }
 
+func (cfg hipMLXQ4DeviceWeightConfig) denseWeightEncoding() (uint32, bool) {
+	switch cfg.WeightEncoding {
+	case hipProjectionWeightEncodingBF16:
+		return cfg.WeightEncoding, true
+	default:
+		return 0, false
+	}
+}
+
+func (cfg hipMLXQ4DeviceWeightConfig) hasCompleteWeightStorage() bool {
+	if _, dense := cfg.denseWeightEncoding(); dense {
+		return cfg.WeightPointer != 0
+	}
+	return cfg.WeightPointer != 0 && cfg.ScalePointer != 0 && cfg.BiasPointer != 0
+}
+
+func (cfg hipMLXQ4DeviceWeightConfig) validateDenseInputCount(inputCount int) error {
+	encoding, ok := cfg.denseWeightEncoding()
+	if !ok {
+		return core.E("rocm.hip.ProjectionLaunch", core.Sprintf("unsupported dense projection weight encoding %d", cfg.WeightEncoding), nil)
+	}
+	if inputCount != cfg.Cols {
+		return core.E("rocm.hip.ProjectionLaunch", "dense projection input count must match cols", nil)
+	}
+	return (hipBF16DeviceWeightConfig{
+		WeightPointer: cfg.WeightPointer,
+		WeightBytes:   cfg.WeightBytes,
+		Rows:          cfg.Rows,
+		Cols:          cfg.Cols,
+	}).validate(encoding)
+}
+
 func (cfg hipMLXQ4DeviceWeightConfig) validate(input []float32) error {
 	return cfg.validateInputCount(len(input))
 }
 
 func (cfg hipMLXQ4DeviceWeightConfig) validateInputCount(inputCount int) error {
+	if cfg.WeightEncoding != 0 {
+		return cfg.validateDenseInputCount(inputCount)
+	}
 	if cfg.WeightPointer == 0 || cfg.ScalePointer == 0 || cfg.BiasPointer == 0 {
 		return core.E("rocm.hip.MLXQ4ProjectionLaunch", "MLX q4 projection device weight, scale, and bias pointers are required", nil)
 	}
@@ -631,6 +705,9 @@ func (cfg hipMLXQ4DeviceWeightConfig) validateBatchInputCount(inputCount int, ba
 	}
 	if inputCount != cfg.Cols*batch {
 		return core.E("rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 projection batch input count mismatch", nil)
+	}
+	if cfg.WeightEncoding != 0 {
+		return cfg.validateDenseInputCount(cfg.Cols)
 	}
 	if cfg.WeightPointer == 0 || cfg.ScalePointer == 0 || cfg.BiasPointer == 0 {
 		return core.E("rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 projection device weight, scale, and bias pointers are required", nil)
@@ -2390,7 +2467,7 @@ func hipRunMLXQ4ProjectionKernel(ctx context.Context, driver nativeHIPDriver, re
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	output, err := buffers.ReadOutput()
@@ -2472,6 +2549,32 @@ func hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx context.Context, driver nati
 	return output, nil
 }
 
+func hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, softcap float32, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) (hipGreedySampleResult, error) {
+	if _, dense := cfg.denseWeightEncoding(); !dense {
+		return hipGreedySampleResult{}, core.E("rocm.hip.DenseProjectionGreedyLaunch", "dense projection weights are required", nil)
+	}
+	logits, err := hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, input, cfg)
+	if err != nil {
+		return hipGreedySampleResult{}, err
+	}
+	defer logits.Close()
+	var suppress *hipDeviceTokenBuffer
+	if len(suppressTokens) > 0 {
+		if workspace != nil {
+			suppress, err = workspace.EnsureSuppressTokenBuffer(driver, suppressTokens)
+		} else {
+			suppress, err = hipUploadTokenIDs(driver, suppressTokens)
+		}
+		if err != nil {
+			return hipGreedySampleResult{}, err
+		}
+		if workspace == nil {
+			defer suppress.Close()
+		}
+	}
+	return hipRunSoftcapGreedyKernelWithDeviceLogitsSuppressBuffer(ctx, driver, logits, softcap, suppress)
+}
+
 func hipRunMLXQ4ProjectionKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, output *hipDeviceByteBuffer) error {
 	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, cfg, output, nil)
 }
@@ -2494,6 +2597,9 @@ func hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx context.C
 	}
 	if output == nil || output.Pointer() == 0 || output.Count() != cfg.Rows || output.SizeBytes() != uint64(cfg.Rows*4) {
 		return core.E("rocm.hip.MLXQ4ProjectionLaunch", "MLX q4 projection output shape mismatch", nil)
+	}
+	if encoding, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, output, workspace)
 	}
 	launchArgs := hipMLXQ4ProjectionLaunchArgs{
 		InputPointer:  input.Pointer(),
@@ -2525,7 +2631,7 @@ func hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx context.C
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -2579,6 +2685,9 @@ func hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx context.Context, 
 	if output == nil || output.Pointer() == 0 || output.Count() != outputCount || output.SizeBytes() != uint64(outputCount*4) {
 		return core.E("rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 projection batch output shape mismatch", nil)
 	}
+	if encoding, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, batch, output)
+	}
 	launchBytes, err := (hipMLXQ4ProjectionBatchLaunchArgs{
 		InputPointer:  input.Pointer(),
 		WeightPointer: cfg.WeightPointer,
@@ -2603,7 +2712,7 @@ func hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -2751,7 +2860,7 @@ func hipRunMLXQ4TripleProjectionKernelWithDeviceInputViewsOutputWithWorkspace(ct
 	if err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
 	first := hipDeviceByteBuffer{
@@ -2891,7 +3000,7 @@ func hipRunMLXQ4PairProjectionKernelWithDeviceInputViewsOutputWithWorkspace(ctx 
 	if err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
 	first := hipDeviceByteBuffer{
@@ -2912,6 +3021,66 @@ func hipRunMLXQ4PairProjectionKernelWithDeviceInputViewsOutputWithWorkspace(ctx 
 		label:     "MLX q4 pair projection second output",
 	}
 	return first, second, nil
+}
+
+func hipRunDenseGELUTanhMultiplyKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateCfg, upCfg hipMLXQ4DeviceWeightConfig, batch int, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	count := batch * gateCfg.Rows
+	gate, err := hipAllocateByteBuffer(driver, "rocm.hip.GELUTanhMultiplyLaunch", "dense gate projection output", uint64(count*4), count)
+	if err != nil {
+		return err
+	}
+	defer gate.Close()
+	up, err := hipAllocateByteBuffer(driver, "rocm.hip.GELUTanhMultiplyLaunch", "dense up projection output", uint64(count*4), count)
+	if err != nil {
+		return err
+	}
+	defer up.Close()
+	gateEncoding, _ := gateCfg.denseWeightEncoding()
+	upEncoding, _ := upCfg.denseWeightEncoding()
+	if batch == 1 {
+		err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, gateCfg.WeightPointer, gateCfg.WeightBytes, gateCfg.Rows, gateCfg.Cols, gateEncoding, gate, workspace)
+		if err == nil {
+			err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, upCfg.WeightPointer, upCfg.WeightBytes, upCfg.Rows, upCfg.Cols, upEncoding, up, workspace)
+		}
+	} else {
+		err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, gateCfg.WeightPointer, gateCfg.WeightBytes, gateCfg.Rows, gateCfg.Cols, gateEncoding, batch, gate)
+		if err == nil {
+			err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, upCfg.WeightPointer, upCfg.WeightBytes, upCfg.Rows, upCfg.Cols, upEncoding, batch, up)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchGELUTanhMultiplyDeviceBuffers(driver, &hipGELUTanhMultiplyDeviceBuffers{
+		Gate:   gate,
+		Up:     up,
+		Output: output,
+		Count:  count,
+	})
+}
+
+func hipRunDenseGELUTanhProjectionKernelWithDeviceMultiplierOutput(ctx context.Context, driver nativeHIPDriver, input, multiplier *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, batch int, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	count := batch * cfg.Rows
+	projected, err := hipAllocateByteBuffer(driver, "rocm.hip.GELUTanhProjectionLaunch", "dense gated projection output", uint64(count*4), count)
+	if err != nil {
+		return err
+	}
+	defer projected.Close()
+	encoding, _ := cfg.denseWeightEncoding()
+	if batch == 1 {
+		err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, projected, workspace)
+	} else {
+		err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, batch, projected)
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchGELUTanhMultiplyDeviceBuffers(driver, &hipGELUTanhMultiplyDeviceBuffers{
+		Gate:   projected,
+		Up:     multiplier,
+		Output: output,
+		Count:  count,
+	})
 }
 
 func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateCfg, upCfg hipMLXQ4DeviceWeightConfig) (*hipDeviceByteBuffer, error) {
@@ -2982,6 +3151,13 @@ func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutputWithWorkspace(ctx con
 	if output == nil || output.Pointer() == 0 || output.Count() != gateCfg.Rows || output.SizeBytes() != uint64(gateCfg.Rows*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhMultiplyLaunch", "MLX q4 GELU tanh multiply output shape mismatch", nil)
 	}
+	if gateEncoding, dense := gateCfg.denseWeightEncoding(); dense {
+		upEncoding, upDense := upCfg.denseWeightEncoding()
+		if !upDense || upEncoding != gateEncoding {
+			return core.E("rocm.hip.MLXQ4GELUTanhMultiplyLaunch", "gate and up dense projection encodings must match", nil)
+		}
+		return hipRunDenseGELUTanhMultiplyKernelWithDeviceInputOutput(ctx, driver, input, gateCfg, upCfg, 1, output, workspace)
+	}
 	launchArgs := hipMLXQ4GELUTanhMulLaunchArgs{
 		InputPointer:      input.Pointer(),
 		GateWeightPointer: gateCfg.WeightPointer,
@@ -3018,7 +3194,7 @@ func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutputWithWorkspace(ctx con
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -3027,6 +3203,9 @@ func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutputWithWorkspace(ctx con
 func hipMLXQ4GELUTanhMLPPersistentCompatible(input *hipDeviceByteBuffer, gateCfg, upCfg, downCfg hipMLXQ4DeviceWeightConfig) bool {
 	return input != nil &&
 		input.Pointer() != 0 &&
+		gateCfg.WeightEncoding == 0 &&
+		upCfg.WeightEncoding == 0 &&
+		downCfg.WeightEncoding == 0 &&
 		input.Count() == 1536 &&
 		input.SizeBytes() == uint64(1536*4) &&
 		gateCfg.Rows > 0 &&
@@ -3119,7 +3298,7 @@ func hipRunMLXQ4GELUTanhMLPPersistentKernelWithDeviceInputOutputWithWorkspace(ct
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateCfg, upCfg hipMLXQ4DeviceWeightConfig, batch int) (*hipDeviceByteBuffer, error) {
@@ -3181,11 +3360,11 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, batch)
+	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.Cols, gateCfg.GroupSize, gateCfg.Bits, batch)
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	success = true
@@ -3218,6 +3397,13 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(ctx context.Con
 	if output == nil || output.Pointer() == 0 || output.Count() != outputCount || output.SizeBytes() != uint64(outputCount*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhMultiplyBatchLaunch", "MLX q4 GELU tanh multiply batch output shape mismatch", nil)
 	}
+	if gateEncoding, dense := gateCfg.denseWeightEncoding(); dense {
+		upEncoding, upDense := upCfg.denseWeightEncoding()
+		if !upDense || upEncoding != gateEncoding {
+			return core.E("rocm.hip.MLXQ4GELUTanhMultiplyBatchLaunch", "gate and up dense projection encodings must match", nil)
+		}
+		return hipRunDenseGELUTanhMultiplyKernelWithDeviceInputOutput(ctx, driver, input, gateCfg, upCfg, batch, output, nil)
+	}
 	launchBytes, err := (hipMLXQ4GELUTanhMulBatchLaunchArgs{
 		InputPointer:      input.Pointer(),
 		GateWeightPointer: gateCfg.WeightPointer,
@@ -3244,11 +3430,11 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(ctx context.Con
 	if err != nil {
 		return err
 	}
-	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, batch)
+	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.Cols, gateCfg.GroupSize, gateCfg.Bits, batch)
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4GELUTanhProjectionKernelWithDeviceMultiplier(ctx context.Context, driver nativeHIPDriver, input, multiplier *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig) (*hipDeviceByteBuffer, error) {
@@ -3313,6 +3499,9 @@ func hipRunMLXQ4GELUTanhProjectionKernelWithDeviceMultiplierOutputWithWorkspace(
 	if output == nil || output.Pointer() == 0 || output.Count() != cfg.Rows || output.SizeBytes() != uint64(cfg.Rows*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhProjectionLaunch", "MLX q4 GELU tanh projection output shape mismatch", nil)
 	}
+	if _, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunDenseGELUTanhProjectionKernelWithDeviceMultiplierOutput(ctx, driver, input, multiplier, cfg, 1, output, workspace)
+	}
 	launchArgs := hipMLXQ4GELUTanhProjLaunchArgs{
 		InputPointer:      input.Pointer(),
 		WeightPointer:     cfg.WeightPointer,
@@ -3345,7 +3534,7 @@ func hipRunMLXQ4GELUTanhProjectionKernelWithDeviceMultiplierOutputWithWorkspace(
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -3417,6 +3606,9 @@ func hipRunMLXQ4GELUTanhProjectionBatchKernelWithDeviceMultiplierOutput(ctx cont
 	if output == nil || output.Pointer() == 0 || output.Count() != outputCount || output.SizeBytes() != uint64(outputCount*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhProjectionBatchLaunch", "MLX q4 GELU tanh projection batch output shape mismatch", nil)
 	}
+	if _, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunDenseGELUTanhProjectionKernelWithDeviceMultiplierOutput(ctx, driver, input, multiplier, cfg, batch, output, nil)
+	}
 	launchBytes, err := (hipMLXQ4GELUTanhProjBatchLaunchArgs{
 		InputPointer:      input.Pointer(),
 		WeightPointer:     cfg.WeightPointer,
@@ -3443,7 +3635,7 @@ func hipRunMLXQ4GELUTanhProjectionBatchKernelWithDeviceMultiplierOutput(ctx cont
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -3526,7 +3718,7 @@ func hipRunRMSNormResidualAddGELUTanhProjectionKernelWithDeviceMultiplierOutputW
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4ProjectionSoftcapGreedyKernelWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, softcap float32) (hipGreedySampleResult, error) {
@@ -3626,7 +3818,7 @@ func hipRunMLXQ4ProjectionSoftcapGreedyKernelWithDeviceInputBufferSuppressBuffer
 	if err != nil {
 		return hipGreedySampleResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipGreedySampleResult{}, err
 	}
 	packed, err := hipReadDeviceUint64(driver, best.Pointer())
@@ -3734,7 +3926,7 @@ func hipRunMLXQ4ProjectionSoftcapGreedyBatchKernelWithDeviceInputBufferSuppressB
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	packed, err := hipReadUint64DeviceOutput(best, "rocm.hip.MLXQ4ProjectionGreedyBatchLaunch", "MLX q4 projection greedy batch best", batch)
@@ -4034,7 +4226,7 @@ func hipLaunchMLXQ4ProjectionSoftcapGreedyKernelWithDeviceInputBufferSuppressBuf
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4ProjectionSoftcapSelectedGreedyTokenKernelWithDeviceInputBufferResult(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, softcap float32, selected *hipDeviceTokenBuffer, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) (hipGreedySampleResult, *hipDeviceByteBuffer, error) {
@@ -4139,7 +4331,7 @@ func hipLaunchMLXQ4ProjectionSoftcapSelectedGreedyKernelWithDeviceInputBufferIni
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunOrderedEmbeddingCandidatesKernel(ctx context.Context, driver nativeHIPDriver, topK *hipDeviceByteBuffer, topKCount int, tokenOrderingPointer nativeDevicePointer, tokenOrderingBytes uint64, tokenOrderingElementBytes, numCentroids, tokensPerCentroid int, suppress *hipDeviceTokenBuffer, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceTokenBuffer, error) {
@@ -4202,7 +4394,7 @@ func hipRunOrderedEmbeddingCandidatesKernel(ctx context.Context, driver nativeHI
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	return output, nil
@@ -4254,7 +4446,7 @@ func hipRunPackedTopKKernelWithWorkspaceOutput(ctx context.Context, driver nativ
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, 0, err
 	}
 	return output, outputCount, nil
@@ -4337,7 +4529,7 @@ func hipRunMLXQ4ProjectionSoftcapScoreTopKDeviceWithDeviceInputBufferSuppress(ct
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, 0, err
 	}
 	return hipRunPackedTopKReduceKernelWithWorkspace(ctx, driver, scores, cfg.Rows, topK, workspace)
@@ -4391,7 +4583,7 @@ func hipRunPackedTopKSampleKernel(ctx context.Context, driver nativeHIPDriver, i
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
 	packed, err := hipReadDeviceUint64(driver, output.Pointer())
@@ -4482,7 +4674,7 @@ func hipRunMLXQ4ProjectionSoftcapScoreKernelWithDeviceInputBufferSuppress(ctx co
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	var top []uint64
@@ -4591,7 +4783,7 @@ func hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx c
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
 	var receiptHostSample hipGreedySampleResult
@@ -4731,6 +4923,41 @@ func hipMLXQ4ProjectionLaunchConfig(args []byte, rows int) (hipKernelLaunchConfi
 }
 
 func hipMLXQ4ProjectionLaunchConfigForShape(args []byte, rows, cols, groupSize, bits int) (hipKernelLaunchConfig, error) {
+	if rows == 3840 && cols == 15360 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 12B down projection row16 blocks", (rows+hipMLXQ4ProjectionRow16RowsPerBlock-1)/hipMLXQ4ProjectionRow16RowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
+	if groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 &&
+		((rows == 2048 && cols == 2560) || (rows == 2560 && cols == 2048)) {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 E4B projection row8 blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjQ4G64E4BRow8,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if hipMLXQ4Projection12BDownRouteEnabled && rows == 3840 && cols == 15360 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group32 12B down projection row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
 		if err != nil {
@@ -4755,6 +4982,23 @@ func hipMLXQ4ProjectionLaunchConfigForShape(args []byte, rows, cols, groupSize, 
 		}
 		config := hipKernelLaunchConfig{
 			Name:   hipKernelNameMLXQ4ProjCols256,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
+	if cols >= 2560 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q8 group64 row8 projection row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjQ8G64Row8,
 			Args:   args,
 			GridX:  gridX,
 			GridY:  1,
@@ -4883,6 +5127,24 @@ func hipPackedTopKLaunchConfig(args []byte, chunkCount int) (hipKernelLaunchConf
 	return config, config.Validate()
 }
 
+func hipProjectionLaunchConfig(args []byte, rows int) (hipKernelLaunchConfig, error) {
+	gridX, err := rocmDeviceKVPositiveUint32("projection rows", rows)
+	if err != nil {
+		return hipKernelLaunchConfig{}, err
+	}
+	config := hipKernelLaunchConfig{
+		Name:   hipKernelNameProjection,
+		Args:   args,
+		GridX:  gridX,
+		GridY:  1,
+		GridZ:  1,
+		BlockX: hipMLXQ4ProjectionBlockSize,
+		BlockY: 1,
+		BlockZ: 1,
+	}
+	return config, config.Validate()
+}
+
 func hipProjectionBatchLaunchConfig(args []byte, rows, batch int) (hipKernelLaunchConfig, error) {
 	gridX, err := rocmDeviceKVPositiveUint32("projection batch row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
 	if err != nil {
@@ -4928,6 +5190,78 @@ func hipMLXQ4ProjectionBatchLaunchConfig(args []byte, rows, batch int) (hipKerne
 }
 
 func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
+	if batch >= hipMLXQ4ProjectionBatchWideTokensPerBlock && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		kernelName := hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared
+		rowsPerBlock := hipMLXQ4ProjectionRow16RowsPerBlock
+		if core.Env(hipMLXQ4ProjectionBatchQ4SharedDisableEnv) == "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ4G64Tokens16
+			rowsPerBlock = hipMLXQ4ProjectionRowsPerBlock
+		} else if rows == 2816 && cols == 704 && core.Env(hipMLXQ4ProjectionBatch26BDownDisableEnv) != "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704
+		}
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 tokens16 projection batch row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		gridY, err := rocmDeviceKVPositiveUint32("MLX q4 group64 tokens16 projection batch token blocks", (batch+hipMLXQ4ProjectionBatchWideTokensPerBlock-1)/hipMLXQ4ProjectionBatchWideTokensPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   kernelName,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  gridY,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
+	if batch >= hipMLXQ4ProjectionBatchWideTokensPerBlock && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		kernelName := hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared
+		tokensPerBlock := hipMLXQ4ProjectionBatchWideTokensPerBlock
+		rowsPerBlock := hipMLXQ4ProjectionRow16RowsPerBlock
+		if core.Env(hipMLXQ4ProjectionBatchQ8SharedDisableEnv) == "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16
+		} else if batch >= hipMLXQ4ProjectionBatchQ8Tokens64PerBlock && core.Env(hipMLXQ4ProjectionBatchQ8Tokens64DisableEnv) != "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared
+			tokensPerBlock = hipMLXQ4ProjectionBatchQ8Tokens64PerBlock
+			if rows >= hipMLXQ4ProjectionBatchQ8Row32MinRows && core.Env(hipMLXQ4ProjectionBatchQ8Row32DisableEnv) != "1" {
+				kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row32Tokens64Shared
+				rowsPerBlock = hipMLXQ4ProjectionRow32RowsPerBlock
+				if rows >= hipMLXQ4ProjectionBatchQ8Row64MinRows && core.Env(hipMLXQ4ProjectionBatchQ8Row64DisableEnv) != "1" {
+					kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared
+					rowsPerBlock = hipMLXQ4ProjectionRow64RowsPerBlock
+					if rows%hipMLXQ4ProjectionRow64RowsPerBlock == 0 &&
+						batch%hipMLXQ4ProjectionBatchQ8Tokens64PerBlock == 0 &&
+						core.Env(hipMLXQ4ProjectionBatchQ8Row64AlignedDisableEnv) != "1" {
+						kernelName = hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Aligned
+					}
+				}
+			}
+		}
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q8 group64 projection batch row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		gridY, err := rocmDeviceKVPositiveUint32("MLX q8 group64 projection batch token blocks", (batch+tokensPerBlock-1)/tokensPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   kernelName,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  gridY,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if cols >= 1536 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 6 {
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 q6 row16 projection batch row blocks", (rows+hipMLXQ4ProjectionQ6Row16RowsPerBlock-1)/hipMLXQ4ProjectionQ6Row16RowsPerBlock)
 		if err != nil {
@@ -5196,6 +5530,57 @@ func hipMLXQ4GELUTanhMultiplyLaunchConfig(args []byte, rows int) (hipKernelLaunc
 }
 
 func hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(args []byte, rows, cols, groupSize, bits int) (hipKernelLaunchConfig, error) {
+	if rows == 15360 && cols == 3840 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 12B GELU tanh multiply row8 blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
+	if rows == 10240 && cols == 2560 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 E4B GELU tanh multiply row16 blocks", (rows+hipMLXQ4ProjectionRow16RowsPerBlock-1)/hipMLXQ4ProjectionRow16RowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4GELUTanhMulQ4G64E4BRow16,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
+	if cols >= 2560 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q8 group64 GELU tanh multiply row8 blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4GELUTanhMulQ8G64Row8,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if hipMLXQ4GELUTanh12BGateUpRouteEnabled && rows == 15360 && cols == 3840 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
 		rowsPerBlock := hipMLXQ4GELUTanhQ4G32Cols1536Row16RowsPerBlock
 		name := hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840
@@ -5287,17 +5672,30 @@ func hipMLXQ4GELUTanhMLPPersistentLaunchConfig(args []byte) (hipKernelLaunchConf
 	return config, config.Validate()
 }
 
-func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, batch int) (hipKernelLaunchConfig, error) {
-	gridX, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, cols, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
+	kernelName := hipKernelNameMLXQ4GELUTanhMulBatch
+	rowsPerBlock := hipMLXQ4ProjectionRowsPerBlock
+	tokensPerBlock := hipMLXQ4ProjectionBatchTokensPerBlock
+	if rows == 704 && cols == 2816 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 && core.Env(hipMLXQ4GELUTanhBatch26BQ4DisableEnv) != "1" {
+		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8
+	} else if rows == 2112 && cols == 2816 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 && batch >= hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock && core.Env(hipMLXQ4GELUTanhBatchQ8Tokens32DisableEnv) != "1" {
+		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32
+		rowsPerBlock = hipMLXQ4ProjectionRow16RowsPerBlock
+		tokensPerBlock = hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock
+	} else if groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16
+		rowsPerBlock = hipMLXQ4ProjectionRow16RowsPerBlock
+	}
+	gridX, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}
-	gridY, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch token blocks", (batch+hipMLXQ4ProjectionBatchTokensPerBlock-1)/hipMLXQ4ProjectionBatchTokensPerBlock)
+	gridY, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch token blocks", (batch+tokensPerBlock-1)/tokensPerBlock)
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}
 	config := hipKernelLaunchConfig{
-		Name:   hipKernelNameMLXQ4GELUTanhMulBatch,
+		Name:   kernelName,
 		Args:   args,
 		GridX:  gridX,
 		GridY:  gridY,
@@ -5466,7 +5864,45 @@ func hipRecordDeviceAllocationLabel(driver nativeHIPDriver, sizeBytes uint64, op
 }
 
 func hipDeviceByteBufferPoolEnabled() bool {
-	return os.Getenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL") != "1"
+	return os.Getenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL") != "1" && hipDeviceByteBufferPoolSuppressions.Load() == 0
+}
+
+func hipSuppressDeviceByteBufferPool() func() {
+	hipDeviceByteBufferPoolSuppressions.Add(1)
+	hipDrainDeviceByteBufferPool()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			hipDeviceByteBufferPoolSuppressions.Add(-1)
+		})
+	}
+}
+
+func hipDrainDeviceByteBufferPool() {
+	hipDeviceByteBufferPool.Lock()
+	entries := make([]hipDeviceByteBufferPoolEntry, 0)
+	for index := range hipDeviceByteBufferPool.single {
+		slot := &hipDeviceByteBufferPool.single[index]
+		for entryIndex := 0; entryIndex < int(slot.count); entryIndex++ {
+			if entry := slot.entries[entryIndex]; entry.driver != nil && entry.pointer != 0 {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	for _, bucket := range hipDeviceByteBufferPool.entries {
+		for _, entry := range bucket {
+			if entry.driver != nil && entry.pointer != 0 {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	hipDeviceByteBufferPool.single = [hipDeviceByteBufferPoolSingleSlots]hipDeviceByteBufferPoolSingleSlot{}
+	hipDeviceByteBufferPool.entries = make(map[uint64][]hipDeviceByteBufferPoolEntry)
+	hipDeviceByteBufferPool.bytes = 0
+	hipDeviceByteBufferPool.Unlock()
+	for _, entry := range entries {
+		_ = entry.driver.Free(entry.pointer)
+	}
 }
 
 func hipPrewarmDeviceByteBufferPool(driver nativeHIPDriver, sizeBytes uint64, count int) {
@@ -5544,6 +5980,9 @@ func hipDeviceByteBufferPoolPut(driver nativeHIPDriver, pointer nativeDevicePoin
 	}
 	hipDeviceByteBufferPool.Lock()
 	defer hipDeviceByteBufferPool.Unlock()
+	if !hipDeviceByteBufferPoolEnabled() {
+		return false
+	}
 	if hipDeviceByteBufferPool.bytes+sizeBytes > hipDeviceByteBufferPoolMaxBytes {
 		return false
 	}

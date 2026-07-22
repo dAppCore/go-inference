@@ -103,13 +103,37 @@ type projector interface {
 	// this projector, not just byte-correct: bf16/dense weights are weight-bound
 	// (fold receipted 1.51× vs batched replay); 4-bit quant streams are 4× thinner
 	// and the fold's re-encode tax outweighs the saving at K ≤ lthnQMVRowsMaxM
-	// (live E2B K=4: fold ~114 vs replay ~118 tok/s, 2026-07-13). AUTO mode
+	// (live E2B K=4: fold ~114 vs replay ~118 tok/s). AUTO mode
 	// consults this; forced mode (receipts) does not.
 	foldProfitable() bool
 	// hasV reports whether a distinct V projection weight exists. gemma4 K==V layers
 	// (12B/31B: attention_k_eq_v) carry NO v_proj — V is the k-proj output (pre-knorm/
 	// rope) value-normed — so the decode projects V via wK; hasV()==false signals that.
 	hasV() bool
+	// usesSiLU reports whether the feed-forward gate activation is SiLU/swish (llama/mistral/
+	// qwen SwiGLU) rather than the gemma-family GELU. Set per model from Arch.Activation at
+	// build; the MLP encode picks silu(gate)·up vs gelu(gate)·up. The zero value is GELU, so
+	// every existing (gemma) projector stays byte-identical.
+	usesSiLU() bool
+	// withSiLU returns a copy of the projector with the feed-forward SiLU flag set — the session
+	// constructor stamps every layer's projector with the model's activation once, off the shared
+	// builder path (which stays activation-agnostic). A false argument is a no-op-equivalent copy.
+	withSiLU(bool) projector
+}
+
+// ffnUsesSiLU maps a checkpoint's declared feed-forward activation to the gate the decode encodes:
+// SiLU/swish (llama/mistral/qwen SwiGLU) vs the gemma-family GELU. An unset/unknown activation
+// keeps GELU so the gemma path — the only one exercised before — stays byte-identical.
+func ffnUsesSiLU(activation string) bool {
+	return activation == "silu" || activation == "swish"
+}
+
+// ffnUsesClampedSwiGLU recognises gpt_oss's clamped-sigmoid SwiGLU marker — the deliberately
+// non-standard string gptoss.Config.Arch declares so ffnUsesSiLU can NEVER mis-route it onto the
+// plain (uncapped, unshifted) SiLU kernel (see model/arch/openai/gptoss/config.go). It selects the
+// MoEExpertsQuantClampedSiLU expert path via MoEQuantLayerWeights.ClampedSwiGLU.
+func ffnUsesClampedSwiGLU(activation string) bool {
+	return activation == "gpt_oss_clamped_swiglu"
 }
 
 // bf16Projector drives a bf16 gemv per projection (the original weight path). Each weight is a
@@ -118,13 +142,21 @@ type projector interface {
 type bf16Projector struct {
 	wQ, wK, wV, wO, wGate, wUp, wDown bufView
 	bQ, bK, bV                        bufView // Qwen2/2.5 additive q/k/v projection bias (zero bufView ⇒ none)
+	bO                                bufView // gpt_oss additive o_proj bias (attention_bias=true reaches o_proj); zero bufView ⇒ none
 	dModel, qDim, kvDim, dFF          int
+	mlpUsesSiLU                       bool // SwiGLU (llama/mistral/qwen); zero ⇒ gemma GELU (byte-identical)
 }
 
-func (b bf16Projector) hasV() bool { return b.wV.buf != nil }
+func (b bf16Projector) hasV() bool     { return b.wV.buf != nil }
+func (b bf16Projector) usesSiLU() bool { return b.mlpUsesSiLU }
+func (b bf16Projector) withSiLU(v bool) projector {
+	b.mlpUsesSiLU = v
+	return b
+}
 
-// biasView returns the additive projection bias for q/k/v (a zero bufView for every other
-// projection — o_proj and the MLP never carry one in the supported arches).
+// biasView returns the additive projection bias for q/k/v/o (a zero bufView for every other
+// projection — the MLP never carries one in the supported arches; o_proj's is gpt_oss's
+// attention_bias=true, zero for every other arch so their dispatch stream is unchanged).
 func (b bf16Projector) biasView(p projIndex) bufView {
 	switch p {
 	case projQ:
@@ -133,6 +165,8 @@ func (b bf16Projector) biasView(p projIndex) bufView {
 		return b.bK
 	case projV:
 		return b.bV
+	case projO:
+		return b.bO
 	}
 	return bufView{}
 }
@@ -216,14 +250,22 @@ func (w qmvWeight) dense() bool { return w.present() && w.scales.buf == nil && w
 type qmvProjector struct {
 	q, k, v, o, gate, up, down qmvWeight
 	bQ, bK, bV                 bufView // Qwen2/2.5 additive q/k/v bias (plain bf16; zero bufView ⇒ none)
+	bO                         bufView // gpt_oss additive o_proj bias (plain bf16; zero bufView ⇒ none)
 	dModel, qDim, kvDim, dFF   int
 	groupSize, bits            int
+	mlpUsesSiLU                bool // SwiGLU (llama/mistral/qwen); zero ⇒ gemma GELU (byte-identical)
 }
 
-func (m qmvProjector) hasV() bool { return m.v.present() }
+func (m qmvProjector) hasV() bool     { return m.v.present() }
+func (m qmvProjector) usesSiLU() bool { return m.mlpUsesSiLU }
+func (m qmvProjector) withSiLU(v bool) projector {
+	m.mlpUsesSiLU = v
+	return m
+}
 
-// biasView returns the additive projection bias for q/k/v (a zero bufView otherwise) — the
-// same q/k/v-only bias as the bf16 path; the affine pack still ships it as a plain bf16 vector.
+// biasView returns the additive projection bias for q/k/v/o (a zero bufView otherwise) — the
+// same bias seam as the bf16 path; the affine pack still ships each as a plain bf16 vector.
+// o_proj's bias is gpt_oss's attention_bias=true; zero for every other arch (byte-identical).
 func (m qmvProjector) biasView(p projIndex) bufView {
 	switch p {
 	case projQ:
@@ -232,6 +274,8 @@ func (m qmvProjector) biasView(p projIndex) bufView {
 		return m.bK
 	case projV:
 		return m.bV
+	case projO:
+		return m.bO
 	}
 	return bufView{}
 }
@@ -330,14 +374,14 @@ func (m qmvProjector) rowsCapable() bool {
 // gate carries the rule). Any weight the plan would send to the gather or
 // qmm_t fallback declines the byte tier and the fold keeps the byte-identical
 // merged ICB replay. History: the packs=1 predecessor claimed qmv_impl parity
-// for ALL 256-multiples and was refuted 2026-07-13 (value-dependent ~1 ulp
+// for ALL 256-multiples and was refuted (value-dependent ~1 ulp
 // accumulation drift — surfaced as the hd-256 fold failure at step 6); the
 // fast-twin match + this per-weight plan check replaced the blanket decline
 // that closed that exposure.
 // foldProfitable: a genuinely-quantised weight keeps the replay in AUTO mode —
 // the 4-bit stream is 4× thinner than bf16, so weight-read-once saves little
 // while the fold pays the re-encode tax the recorded replay avoids (live E2B
-// K=4: fold ~114 vs replay ~118 tok/s aggregate, 2026-07-13). An all-dense
+// K=4: fold ~114 vs replay ~118 tok/s aggregate). An all-dense
 // mixed pack is bf16 in practice and keeps the win. Revisit at K>4 tiled-M.
 func (m qmvProjector) foldProfitable() bool {
 	for p := projQ; p <= projDown; p++ {
@@ -365,7 +409,7 @@ func (m qmvProjector) rowsByteTier(rows int) bool {
 		if w.bits > 0 {
 			gs, bits = w.gs, w.bits
 		}
-		if rows > lthnQMVRowsMaxM {
+		if rows > qmvRowsTiledCap() {
 			// The chunked byte-tier route (projectRowsByteTier): every chunk size
 			// must resolve a tiled PSO on the fast-twin envelope.
 			if rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
@@ -392,7 +436,7 @@ func (m qmvProjector) rowsByteTier(rows int) bool {
 // the per-lane replay outranks the gather's throughput. Callers gate on
 // rowsByteTier first; a false return here means the byte route fell through.
 func (m qmvProjector) projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) (bool, error) {
-	if rows <= lthnQMVRowsMaxM {
+	if rows <= qmvRowsTiledCap() {
 		return m.projectRows(enc, in, out, inOff, outOff, rows, p)
 	}
 	w, outDim, inDim, ok := m.weightDims(p)

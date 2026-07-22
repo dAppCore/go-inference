@@ -13,6 +13,46 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
+// gemma3ToyConfigJSON is a gemma-3 config.json carrying every hyperparameter
+// gemma3's dedicated GGUF export lane requires (num_hidden_layers, hidden_size,
+// num_attention_heads, intermediate_size, head_dim — model/arch/google/gemma3/
+// gguf.gemma3Metadata refuses a config missing any of these) plus the
+// context/kv-head/eps/rope fields it writes unconditionally. The toy tensors
+// below don't need to agree dimensionally with these values — gemma3Metadata
+// validates presence, not cross-consistency with the tensor shapes.
+const gemma3ToyConfigJSON = `{"model_type":"gemma3","hidden_size":64,"num_hidden_layers":1,` +
+	`"num_attention_heads":4,"num_key_value_heads":1,"intermediate_size":128,"head_dim":16,` +
+	`"max_position_embeddings":8192,"rms_norm_eps":1e-06,"rope_theta":1000000}`
+
+// writeGGUFTokenizer writes a minimal valid SentencePiece tokenizer.model (a
+// two-piece ModelProto) into dir. gemma3's dedicated GGUF export lane reads
+// real per-token scores from tokenizer.model rather than the score-less
+// tokenizer.json (model/arch/google/gemma3/gguf.gemma3Tokenizer) and fails
+// loudly when the file is absent, so the GGUF lane toy fixtures need one even
+// though no other quant lane reads it. Hand-encoded protobuf wire bytes —
+// ModelProto field 1 (length-delimited) repeated per piece, each piece's own
+// field 1 (length-delimited) its text — mirrors the technique
+// model/arch/google/gemma3/gguf/tokenizer_test.go uses for the same reader. A
+// piece with no score/type field defaults to score 0, type NORMAL, which is
+// enough for gemma3Tokenizer's header build (it only requires len(pieces) > 0).
+func writeGGUFTokenizer(t *testing.T, dir string) {
+	t.Helper()
+	// piece builds one SentencePiece submessage body: field 1 (length-delimited
+	// string) is the piece text; score/type are left unset (default 0/NORMAL).
+	piece := func(text string) []byte {
+		return append([]byte{0x0A, byte(len(text))}, text...)
+	}
+	// Wrap each piece body as a ModelProto field-1 (length-delimited) entry.
+	var model []byte
+	for _, body := range [][]byte{piece("<unk>"), piece("the")} {
+		model = append(model, 0x0A, byte(len(body)))
+		model = append(model, body...)
+	}
+	if r := core.WriteFile(filepath.Join(dir, "tokenizer.model"), model, 0o644); !r.OK {
+		t.Fatalf("write tokenizer.model: %v", r.Err())
+	}
+}
+
 // writeToyModel writes a minimal dense model directory (one eligible 2-D weight + a 1-D
 // norm, F32 storage) so the quant verb has something real to convert without a GPU or a
 // downloaded checkpoint.
@@ -37,9 +77,10 @@ func writeToyModel(t *testing.T) string {
 	if r := core.WriteFile(filepath.Join(dir, "model.safetensors"), blob, 0o644); !r.OK {
 		t.Fatalf("write shard: %v", r.Err())
 	}
-	if r := core.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"model_type":"gemma3","hidden_size":64}`), 0o644); !r.OK {
+	if r := core.WriteFile(filepath.Join(dir, "config.json"), []byte(gemma3ToyConfigJSON), 0o644); !r.OK {
 		t.Fatalf("write config: %v", r.Err())
 	}
+	writeGGUFTokenizer(t, dir)
 	return dir
 }
 
@@ -111,9 +152,10 @@ func writeGGUFToy(t *testing.T) string {
 	if r := core.WriteFile(filepath.Join(dir, "model.safetensors"), blob, 0o644); !r.OK {
 		t.Fatalf("write shard: %v", r.Err())
 	}
-	if r := core.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"model_type":"gemma3","hidden_size":64}`), 0o644); !r.OK {
+	if r := core.WriteFile(filepath.Join(dir, "config.json"), []byte(gemma3ToyConfigJSON), 0o644); !r.OK {
 		t.Fatalf("write config: %v", r.Err())
 	}
+	writeGGUFTokenizer(t, dir)
 	return dir
 }
 

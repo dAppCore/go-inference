@@ -50,9 +50,15 @@ func TestImportAll_importBenchmarkFile_Good(t *core.T) {
 	core.AssertEqual(t, 2, rCounts.Value.(map[string]int)["benchmark_results"])
 }
 
+// TestImportAll_importBenchmarkFile_Bad covers both a missing file (Open
+// error) and an existing-but-empty file (scanner finds no lines) — both
+// legitimately return 0 rows imported, via different code paths.
 func TestImportAll_importBenchmarkFile_Bad(t *core.T) {
 	db := newTestDB(t)
 	core.AssertEqual(t, 0, importBenchmarkFile(db, core.JoinPath(t.TempDir(), "missing.jsonl"), "results"))
+	emptyPath := core.JoinPath(t.TempDir(), "empty.jsonl")
+	core.RequireNoError(t, coreio.Local.Write(emptyPath, ""))
+	core.AssertEqual(t, 0, importBenchmarkFile(db, emptyPath, "results"))
 }
 
 func TestImportAll_importBenchmarkFile_Ugly(t *core.T) {
@@ -81,9 +87,14 @@ func TestImportAll_importBenchmarkQuestions_Good(t *core.T) {
 	core.AssertEqual(t, 1, rCounts.Value.(map[string]int)["benchmark_questions"])
 }
 
+// TestImportAll_importBenchmarkQuestions_Bad covers both a missing file and
+// an existing-but-empty file — both return 0 rows imported.
 func TestImportAll_importBenchmarkQuestions_Bad(t *core.T) {
 	db := newTestDB(t)
 	core.AssertEqual(t, 0, importBenchmarkQuestions(db, core.JoinPath(t.TempDir(), "missing.jsonl"), "truthfulqa"))
+	emptyPath := core.JoinPath(t.TempDir(), "empty.jsonl")
+	core.RequireNoError(t, coreio.Local.Write(emptyPath, ""))
+	core.AssertEqual(t, 0, importBenchmarkQuestions(db, emptyPath, "truthfulqa"))
 }
 
 func TestImportAll_importBenchmarkQuestions_Ugly(t *core.T) {
@@ -137,23 +148,29 @@ func TestImportAll_importSeeds_Ugly(t *core.T) {
 }
 
 func TestImportAll_strOrEmpty_Good(t *core.T) {
-	got := strOrEmpty(map[string]any{"key": "value"}, "key")
-	core.AssertEqual(t, "value", got)
+	m := map[string]any{"key": "value", "other": "ignored"}
+	core.AssertEqual(t, "value", strOrEmpty(m, "key"))
+	core.AssertEqual(t, "ignored", strOrEmpty(m, "other"))
 }
 
 func TestImportAll_strOrEmpty_Bad(t *core.T) {
 	got := strOrEmpty(map[string]any{}, "missing")
 	core.AssertEqual(t, "", got)
+	core.AssertEqual(t, "", strOrEmpty(nil, "missing"))
 }
 
+// TestImportAll_strOrEmpty_Ugly covers non-string values: strOrEmpty
+// stringifies whatever it finds (core.Sprint) rather than requiring string.
 func TestImportAll_strOrEmpty_Ugly(t *core.T) {
 	got := strOrEmpty(map[string]any{"num": 42}, "num")
 	core.AssertEqual(t, "42", got)
+	core.AssertEqual(t, "-3.5", strOrEmpty(map[string]any{"neg": -3.5}, "neg"))
 }
 
 func TestImportAll_floatOrZero_Good(t *core.T) {
 	got := floatOrZero(map[string]any{"score": 0.95}, "score")
 	core.AssertEqual(t, 0.95, got)
+	core.AssertEqual(t, -3.5, floatOrZero(map[string]any{"score": -3.5}, "score"))
 }
 
 func TestImportAll_floatOrZero_Bad(t *core.T) {
@@ -163,22 +180,31 @@ func TestImportAll_floatOrZero_Bad(t *core.T) {
 	core.AssertEqual(t, 0.0, got)
 }
 
+// TestImportAll_floatOrZero_Ugly covers wrong-Go-type numeric values: a
+// map[string]any{"intval": 1} literal holds a Go int, not float64, and the
+// type switch only accepts float64 — both an int and a bool value fail it.
 func TestImportAll_floatOrZero_Ugly(t *core.T) {
 	got := floatOrZero(map[string]any{"intval": 1}, "intval")
 	core.AssertEqual(t, 0.0, got)
+	core.AssertEqual(t, 0.0, floatOrZero(map[string]any{"flag": true}, "flag"))
 }
 
 func TestImportAll_escapeSQLPath_Good(t *core.T) {
 	got := escapeSQLPath("/path/to/file")
 	core.AssertEqual(t, "/path/to/file", got)
+	core.AssertEqual(t, "relative/path.jsonl", escapeSQLPath("relative/path.jsonl"))
 }
 
 func TestImportAll_escapeSQLPath_Bad(t *core.T) {
 	got := escapeSQLPath("")
 	core.AssertEqual(t, "", got)
+	core.AssertEqual(t, "   ", escapeSQLPath("   "))
 }
 
+// TestImportAll_escapeSQLPath_Ugly covers multiple quotes in one path,
+// proving every occurrence is doubled, not just the first.
 func TestImportAll_escapeSQLPath_Ugly(t *core.T) {
 	got := escapeSQLPath("it's a file")
 	core.AssertEqual(t, "it''s a file", got)
+	core.AssertEqual(t, "''''", escapeSQLPath("''"))
 }

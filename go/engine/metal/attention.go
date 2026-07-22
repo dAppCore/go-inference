@@ -809,13 +809,18 @@ func slideWindow(pos, slideW int) (start, n int) {
 // kvByteOff offsets the K and V bindings (bytes) — used to attend a window of the
 // cache starting at a non-zero row (sliding-window attention reads the last W rows).
 func encSDPAStrided(enc metal.MTLComputeCommandEncoder, q, k, v, out metal.MTLBuffer, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
-	pso, err := sdpaVectorPipelineForHeadDim(headDim)
+	pso, rtDim, err := sdpaVectorDispatchForHeadDim(headDim)
 	if err != nil {
 		return err
 	}
 	// single-pass SDPA through the SHARED emitSDPA body (with the ICB recorder's SDPA op). nBuf=nil → N
 	// is inlined here (the re-encode path knows the live length); the ICB binds its rebound N buffer.
-	emitSDPA(encSink{enc}, pso, q, k, v, out, kvByteOff, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	// rtDim: headDim has no fixed pipeline (#28) — the runtime-dim fallback needs one extra binding.
+	if rtDim {
+		emitSDPARTDim(encSink{enc}, pso, q, k, v, out, kvByteOff, nil, nHeads, nKVHeads, headDim, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	} else {
+		emitSDPA(encSink{enc}, pso, q, k, v, out, kvByteOff, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	}
 	return nil
 }
 
@@ -860,25 +865,62 @@ func encSDPADecode(enc metal.MTLComputeCommandEncoder, sc attnScratch, q, k, v, 
 // exactly as they did on the shared single-row scratch).
 func encSDPADecodeAt(enc metal.MTLComputeCommandEncoder, sc attnScratch, q metal.MTLBuffer, qOff uint, k, v, out metal.MTLBuffer, outOff uint, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
 	if n >= sdpa2PassMinKV && sc.p2Partials != nil && !sdpa2PassDisabledForTest {
+		// The 2-pass kernel pair needs BOTH fixed pipelines (pass 2, the merge kernel, has no
+		// runtime-dim port yet — #28's named remaining boundary, see sdpa_rtdim.go). When headDim
+		// has no fixed instantiation, fall all the way through to the single-pass runtime-dim
+		// fallback below instead of erroring here: it has no length ceiling, just no 2-pass
+		// long-context parallelism past the knee — correct at any kvLen, never a cliff.
 		blocks := sdpa2PassBlocks(n, nKVHeads)
-		pso1, err := sdpaVector2Pass1PipelineForHeadDim(headDim, blocks)
+		if pso1, err1 := sdpaVector2Pass1PipelineForHeadDim(headDim, blocks); err1 == nil {
+			if pso2, err2 := sdpaVector2Pass2PipelineForHeadDim(headDim); err2 == nil {
+				sink := encSink{enc}
+				emitSDPA2Pass1At(sink, pso1, q, qOff, k, v, sc.p2Partials, sc.p2Sums, sc.p2Maxs, kvByteOff, 1, nHeads, nKVHeads, n, int(blocks), kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+				emitSDPA2Pass2At(sink, pso2, sc.p2Partials, sc.p2Sums, sc.p2Maxs, out, outOff, 1, nHeads, int(blocks))
+				return nil
+			}
+		}
+	}
+	pso, rtDim, err := sdpaVectorDispatchForHeadDim(headDim)
+	if err != nil {
+		return err
+	}
+	if rtDim {
+		emitSDPARTDimAt(encSink{enc}, pso, q, qOff, k, v, out, outOff, kvByteOff, nil, nHeads, nKVHeads, headDim, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	} else {
+		emitSDPAAt(encSink{enc}, pso, q, qOff, k, v, out, outOff, kvByteOff, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	}
+	return nil
+}
+
+// encSDPADecodeSinksAt is encSDPADecodeAt for a layer that carries attention sinks (gpt_oss): the
+// SAME single-pass/2-pass routing and knee, but through the has_sinks(25) pipeline variants with the
+// sinks logits bound (buffer 16 + num_q_heads 17 single-pass; buffer 18 pass 1 — MLX v0.32.0
+// sdpa_vector.h). A zero sinks bufView delegates to encSDPADecodeAt unchanged, so every sink-free
+// caller/arch stays byte-identical by construction.
+func encSDPADecodeSinksAt(enc metal.MTLComputeCommandEncoder, sc attnScratch, sinks bufView, q metal.MTLBuffer, qOff uint, k, v, out metal.MTLBuffer, outOff uint, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
+	if sinks.buf == nil {
+		return encSDPADecodeAt(enc, sc, q, qOff, k, v, out, outOff, nHeads, nKVHeads, headDim, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale, kvByteOff)
+	}
+	if n >= sdpa2PassMinKV && sc.p2Partials != nil && !sdpa2PassDisabledForTest {
+		blocks := sdpa2PassBlocks(n, nKVHeads)
+		pso1, err := sdpaVector2Pass1SinksPipelineForHeadDim(headDim, blocks)
 		if err != nil {
 			return err
 		}
-		pso2, err := sdpaVector2Pass2PipelineForHeadDim(headDim)
+		pso2, err := sdpaVector2Pass2PipelineForHeadDim(headDim) // pass 2 is sink-agnostic (the sink mass rides block 0's sums/maxs)
 		if err != nil {
 			return err
 		}
 		sink := encSink{enc}
-		emitSDPA2Pass1At(sink, pso1, q, qOff, k, v, sc.p2Partials, sc.p2Sums, sc.p2Maxs, kvByteOff, 1, nHeads, nKVHeads, n, int(blocks), kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+		emitSDPA2Pass1NAtSinks(sink, pso1, q, qOff, k, v, sc.p2Partials, sc.p2Sums, sc.p2Maxs, kvByteOff, nil, 1, nHeads, nKVHeads, n, int(blocks), kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale, sinks.buf, sinks.off)
 		emitSDPA2Pass2At(sink, pso2, sc.p2Partials, sc.p2Sums, sc.p2Maxs, out, outOff, 1, nHeads, int(blocks))
 		return nil
 	}
-	pso, err := sdpaVectorPipelineForHeadDim(headDim)
+	pso, err := sdpaVectorSinksPipelineForHeadDim(headDim)
 	if err != nil {
 		return err
 	}
-	emitSDPAAt(encSink{enc}, pso, q, qOff, k, v, out, outOff, kvByteOff, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	emitSDPAAtSinks(encSink{enc}, pso, q, qOff, k, v, out, outOff, kvByteOff, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale, sinks.buf, sinks.off, nHeads)
 	return nil
 }
 
@@ -961,6 +1003,12 @@ func encUnaryDTObject(enc metal.MTLComputeCommandEncoderObject, op string, dt sc
 // encTanhBF16 is the bf16-bound tanh (gemma's gelu nonlinearity) — scheme.BFloat16 through encUnaryDT.
 func encTanhBF16(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, n int) error {
 	return encUnaryDT(enc, "Tanh", scheme.BFloat16, in, out, n)
+}
+
+// encSigmoidBF16 is the bf16-bound sigmoid (the SwiGLU gate's nonlinearity — silu(x)=x·σ(x)) —
+// scheme.BFloat16 through encUnaryDT, mirroring the standalone SigmoidBF16.
+func encSigmoidBF16(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, n int) error {
+	return encUnaryDT(enc, "Sigmoid", scheme.BFloat16, in, out, n)
 }
 
 func encTanhBF16Object(enc metal.MTLComputeCommandEncoderObject, in, out metal.MTLBuffer, n int) error {
@@ -1087,7 +1135,7 @@ func attentionBlockInto(out []byte, x, normWeight, wQ, wO, kCache, vCache []byte
 			encErr = err
 			return
 		}
-		sdpaPSO, err := sdpaVectorPipelineForHeadDim(headDim)
+		sdpaPSO, sdpaRTDim, err := sdpaVectorDispatchForHeadDim(headDim)
 		if err != nil {
 			encErr = err
 			return
@@ -1104,7 +1152,12 @@ func attentionBlockInto(out []byte, x, normWeight, wQ, wO, kCache, vCache []byte
 		emitRMSNorm(sink, rmsPSO, xBuf, nwBuf, sc.normed, 0, dModel, eps, rmsTG)
 		emitBF16GemvPlan(sink, qPlan, wqBuf, sc.normed, sc.q, dModel, qDim)
 		emitRopeAt(sink, ropePSO, sc.q, sc.qr, 0, 0, offBuf, 0, nil, nHeads, headDim, headDim, scale, float32(math.Log2(float64(base))))
-		emitSDPA(sink, sdpaPSO, sc.qr, kBuf, vBuf, sc.attn, 0, nil, nHeads, nKVHeads, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		// sdpaRTDim: headDim has no fixed pipeline (#28) — the runtime-dim fallback needs one extra binding.
+		if sdpaRTDim {
+			emitSDPARTDim(sink, sdpaPSO, sc.qr, kBuf, vBuf, sc.attn, 0, nil, nHeads, nKVHeads, headDim, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		} else {
+			emitSDPA(sink, sdpaPSO, sc.qr, kBuf, vBuf, sc.attn, 0, nil, nHeads, nKVHeads, kvLen, int64(kvLen*headDim), int64(headDim), int64(kvLen*headDim), int64(headDim), scale)
+		}
 		emitBF16GemvPlan(sink, oPlan, woBuf, sc.attn, sc.attnOut, qDim, dModel)
 		emitBinary(sink, addPSO, xBuf, 0, sc.attnOut, 0, outBuf, 0, dModel)
 		endEncodingFast(enc)

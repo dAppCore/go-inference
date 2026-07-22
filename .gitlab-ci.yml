@@ -1,0 +1,77 @@
+# CI for go-inference on the git.lthn.sh homelab runner (shell executor, AMD box,
+# concurrent = 1 → one job at a time). The junctures come from the shared gates in
+# dappcore/devops/build — the gate owns WHEN, this file owns WHAT:
+#
+#   push    (gate/push.yml)     → build: compile bin/lem for linux/amd64 (engine/hip cgo).
+#   pr      (gate/pr.yml)       → lint → test: gofmt+vet, then the portable suite. Test is
+#                                 skipped if lint fails; "Pipelines must succeed" gates the merge.
+#   release (gate/release.yml)  → per-backend CLI binaries, on a git tag only.
+#   graphify (gitlab/graphify.yml) → auxiliary code-graph refresh (dev/main, allow_failure).
+include:
+  - { project: 'dappcore/devops/build', file: '/gate/push.yml',      ref: dev }
+  - { project: 'dappcore/devops/build', file: '/gate/pr.yml',        ref: dev }
+  - { project: 'dappcore/devops/build', file: '/gate/release.yml',   ref: dev }
+  - { project: 'dappcore/devops/build', file: '/gitlab/graphify.yml', ref: dev }
+
+# Run one pipeline per change: MR pipelines for MRs, tag pipelines for releases,
+# branch pipelines otherwise — and never a redundant branch pipeline while an MR
+# is open for that branch.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+variables:
+  GOTOOLCHAIN: "auto"                 # box go is 1.22; go.mod's 1.26 directive auto-fetches
+  GIT_SUBMODULE_STRATEGY: none        # a plain Go compile/test needs no vendored C sources
+
+# --- PUSH: standard flow — does it still build? ----------------------------
+build:
+  extends: .gate-push
+  script:
+    - go version
+    - make build
+
+# --- PR gate: lint THEN test (the test stage is skipped if lint fails) ------
+lint:
+  extends: .gate-lint
+  script:
+    - cd go
+    - test -z "$(gofmt -l .)"
+    - go vet ./...
+
+test:
+  extends: .gate-test
+  script:
+    - cd go
+    - go test -count=1 ./...
+
+# --- RELEASE: per-backend CLI binaries, on a tag ---------------------------
+.release-cli:
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_SHORT_SHA"
+    paths: [ build/bin/ ]
+    expire_in: 1 week
+
+lem-cpu-x86:
+  extends: [.gate-release, .release-cli]
+  script: [ make lem-cpu-x86 ]
+
+lem-cpu-aarch64:
+  extends: [.gate-release, .release-cli]
+  script: [ make lem-cpu-aarch64 ]
+
+lem-amd:
+  extends: [.gate-release, .release-cli]
+  variables:
+    GIT_SUBMODULE_STRATEGY: normal    # GitLab inits the ROCm sources for the static archives
+  script: [ make lem-amd ]
+
+lem-cuda:
+  extends: [.gate-release, .release-cli]
+  variables:
+    GIT_SUBMODULE_STRATEGY: normal
+  script: [ make lem-cuda ]

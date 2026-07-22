@@ -18,9 +18,13 @@ func TestExpand_GetCompletedIDs_Good(t *core.T) {
 	core.AssertTrue(t, ids["s1"])
 }
 
+// TestExpand_GetCompletedIDs_Bad covers an unreachable InfluxDB host,
+// asserting both the failure and that the error names the query step this
+// wrapper adds around the underlying InfluxClient error.
 func TestExpand_GetCompletedIDs_Bad(t *core.T) {
 	influx := datapipe.NewInfluxClient("http://127.0.0.1:1", "test")
-	assertResultError(t, GetCompletedIDs(influx))
+	r := GetCompletedIDs(influx)
+	assertResultError(t, r, "query expansion_gen")
 }
 
 func TestExpand_GetCompletedIDs_Ugly(t *core.T) {

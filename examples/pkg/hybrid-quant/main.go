@@ -33,10 +33,10 @@ func main() {
 		os.Exit(2)
 	}
 
-	// LoadModel routes a qwen3_5 checkpoint through the composed loader (registered in model/composed);
-	// a quantised pack keeps its projections packed and is served through the quant matvec seam. The
-	// TEXT tower only — a multimodal wrapper's vision tensors are skipped at load; image input keeps
-	// refusing cleanly through the existing text-only machinery.
+	// LoadModel routes a qwen3_5 checkpoint through the factory route (model.Load + the fused
+	// arch session — the ONLY route since #50 retired the composed engine); a quantised pack keeps
+	// its projections packed and is served through the quant matvec seam. The TEXT tower only —
+	// image input refuses cleanly through the existing text-only machinery.
 	r := inference.LoadModel(*model)
 	if !r.OK {
 		fmt.Fprintln(os.Stderr, "load:", r.Value)

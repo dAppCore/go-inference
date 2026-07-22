@@ -65,6 +65,15 @@ type TextModel struct {
 	// built from the detected turn markers + thoughtSuppressor — that fallback
 	// is the byte-for-byte compatibility spine.
 	chatTmpl ChatTemplate
+	// chatTmplSet reports whether chatTmpl was actually resolved by NewTextModel — the
+	// precise "is this template real" test chatTemplate() gates on. A checkpoint MAY
+	// legitimately declare a template with an empty Open (e.g. a standalone-recurrent
+	// arch's plain-completion dialect, no bracket markers at all — engine/metal's
+	// plainCompletionChatTemplate), so "Open == ''" cannot double as the "never
+	// resolved" sentinel: that conflated a real declaration with a bare *TextModel{}
+	// test literal that skipped NewTextModel entirely, silently overriding the
+	// declared empty-bracket dialect back to gemma's <start_of_turn> markers.
+	chatTmplSet bool
 
 	// modelStops is the model-derived stop set (EOS + turn-close + template +
 	// declared stops), resolved ONCE in NewTextModel because its inputs are
@@ -183,15 +192,16 @@ func NewTextModel(tm TokenModel, tok TextTokenizer, modelType string, info infer
 	turns := DetectTurnTokens(tok)
 	// The chat dialect is DECLARED by the model when it can (a second
 	// architecture self-reports its own template through ChatTemplateDeclarer);
-	// otherwise it is the tokenizer-detected gemma dialect, so an undeclaring
-	// model renders exactly as before.
-	tmpl := GemmaChatTemplate(turns, suppressor)
+	// otherwise it is tokenizer-DETECTED — ChatML for a <|im_start|> vocab
+	// (Qwen/Yi/Mistral), else the gemma dialect, so a gemma checkpoint renders
+	// exactly as before while a ChatML checkpoint stops being mis-framed as gemma.
+	tmpl := DetectChatTemplate(tok, turns, suppressor)
 	if d, ok := tm.(ChatTemplateDeclarer); ok {
 		if declared, ok := d.DeclaredChatTemplate(); ok {
 			tmpl = declared
 		}
 	}
-	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, declaredSampling: resolveDeclaredSampling(tm), lastErr: core.Ok(nil)}
+	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, chatTmplSet: true, declaredSampling: resolveDeclaredSampling(tm), lastErr: core.Ok(nil)}
 	// The model-derived stop set never changes after construction (its inputs —
 	// tokenizer, template, StopTokenDeclarer — are all fixed now), so resolve it
 	// once here instead of rebuilding the slice and re-scanning the tokenizer on
@@ -202,11 +212,14 @@ func NewTextModel(tm TokenModel, tok TextTokenizer, modelType string, info infer
 }
 
 // chatTemplate is the resolved chat dialect the render/stop paths drive,
-// defaulting a zero-value TextModel (no template resolved) to the legacy gemma
-// dialect — the same fallback turnTokens() applies, so a bare *TextModel
-// literal renders and stops exactly as it always did.
+// defaulting a zero-value TextModel (no template resolved — chatTmplSet is
+// false on a bare *TextModel literal that skipped NewTextModel) to the legacy
+// gemma dialect — the same fallback turnTokens() applies, so a bare *TextModel
+// literal renders and stops exactly as it always did. Gated on chatTmplSet,
+// NOT chatTmpl.Open == "", because a real declared dialect MAY legitimately
+// have an empty Open (see chatTmplSet's doc comment).
 func (m *TextModel) chatTemplate() ChatTemplate {
-	if m == nil || m.chatTmpl.Open == "" {
+	if m == nil || !m.chatTmplSet {
 		return GemmaChatTemplate(TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}, false)
 	}
 	return m.chatTmpl
@@ -294,6 +307,71 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 		return m.chatMultimodal(ctx, messages, v, a, cfg)
 	}
 	return m.stream(ctx, m.encode(renderChatTemplate(m.chatTemplate(), messages, cfg.EnableThinking)), cfg)
+}
+
+// OpenRetainedSession opens ONE session for [TextModel.ChatRetained] to reuse
+// across several independent turns, returned as an opaque handle (any) so a
+// caller outside this package (generate's warm-then-timed driver) need not
+// import engine.Session. Close it with CloseRetainedSession once every turn
+// is done. Every Chat call opens (and, on return, closes) its OWN session —
+// fresh-session-per-call is the right default for the general contract — but
+// a caller that knows it is about to drive several UNRELATED turns in
+// sequence (a kernel-warm pass, then the timed run) pays for that session's
+// --context-sized decode-state build ONCE across the whole sequence instead
+// of once per turn, by reusing the retained session ChatRetained resets on
+// each call rather than opening a fresh one.
+func (m *TextModel) OpenRetainedSession() (any, error) {
+	return m.openSession()
+}
+
+// CloseRetainedSession releases a session OpenRetainedSession opened.
+func (m *TextModel) CloseRetainedSession(rs any) error {
+	sess, ok := rs.(Session)
+	if !ok || sess == nil {
+		return core.NewError("engine.TextModel.CloseRetainedSession: not a retained session")
+	}
+	return sess.Close()
+}
+
+// ChatRetained streams messages' completion over rs (from
+// OpenRetainedSession), replacing any state already on it — [TextModel.Chat]'s
+// text-only render + prefill + decode body (identical encode/template/stop-
+// token/metrics/error handling), run against a caller-retained session
+// instead of the fresh-session-per-call default. sess.PrefillTokens documents
+// "replacing any prior state", so this call's decode is the same as a fresh
+// session's would be; only the buffer allocation is shared across calls, not
+// any KV content. Images/audio/video are declined — the multimodal prefill
+// path (chatMultimodal) is not wired to a retained session, so such a turn
+// must go through Chat instead.
+func (m *TextModel) ChatRetained(ctx context.Context, rs any, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	cfg := inference.ApplyGenerateOpts(opts)
+	if messagesHaveImages(messages) || messagesHaveAudios(messages) || messagesHaveVideos(messages) {
+		return func(yield func(inference.Token) bool) {
+			m.setErr(core.NewError("engine.TextModel.ChatRetained: multimodal turns are not supported on a retained session"))
+		}
+	}
+	sess, ok := rs.(Session)
+	if !ok || sess == nil {
+		return func(yield func(inference.Token) bool) {
+			m.setErr(core.NewError("engine.TextModel.ChatRetained: invalid retained session"))
+		}
+	}
+	ids := m.encode(renderChatTemplate(m.chatTemplate(), messages, cfg.EnableThinking))
+	return func(yield func(inference.Token) bool) {
+		start := time.Now()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if len(ids) == 0 {
+			m.setErr(core.NewError("engine.TextModel.ChatRetained: empty prompt after tokenisation"))
+			return
+		}
+		if err := sess.PrefillTokens(ids); err != nil {
+			m.setErr(err)
+			return
+		}
+		m.decodeFromPrefilled(ctx, sess, len(ids), cfg, start, yield)
+	}
 }
 
 // FormatChatPrompt renders a fresh multi-turn prompt with the model's turn
@@ -392,8 +470,7 @@ func (m *TextModel) Tokenize(text string) ([]int32, error) {
 // (with Decode and ApplyChatTemplate) is what lets the serve scheduler's
 // continuous-batching coordinator bind to a real engine model: the CB gate
 // probes inference.TokenizerModel, and until these were exported the engine
-// never satisfied it — CB silently served the plain path on every live boot
-// (found 2026-07-13).
+// never satisfied it — CB silently served the plain path on every live boot.
 func (m *TextModel) Encode(text string) []int32 {
 	if m == nil || m.tok == nil {
 		return nil
@@ -466,14 +543,22 @@ func (m *TextModel) stream(ctx context.Context, ids []int32, cfg inference.Gener
 		// of the last request is reused in place, only the divergent suffix
 		// is prefilled. A failed cached prefill drops the resident session
 		// and the request falls through to the fresh-session path below.
-		if rs, release, ok := m.acquireReuseSession(); ok {
-			if _, err := rs.PrefillTokensCached(ids); err == nil {
-				m.decodeFromPrefilled(ctx, rs, len(ids), cfg, start, yield)
+		// cfg.DisablePromptReuse skips this lane entirely — a caller that
+		// knows it never sends two calls sharing a prefix (a one-shot bench/
+		// CLI run) pays nothing for a reuse guarantee it will never use; on a
+		// q8-KV-capable model the lane otherwise arms position-invariant
+		// per-token landing on its resident session ahead of EVERY prefill
+		// regardless of length, not just the ones that actually reuse (#54).
+		if !cfg.DisablePromptReuse {
+			if rs, release, ok := m.acquireReuseSession(); ok {
+				if _, err := rs.PrefillTokensCached(ids); err == nil {
+					m.decodeFromPrefilled(ctx, rs, len(ids), cfg, start, yield)
+					release()
+					return
+				}
+				m.dropReuseSession()
 				release()
-				return
 			}
-			m.dropReuseSession()
-			release()
 		}
 		sess, err := m.openSession()
 		if err != nil {
@@ -800,6 +885,33 @@ func (m *TextModel) stopTokens(cfg inference.GenerateConfig) []int32 {
 	return m.buildStopTokens(cfg)
 }
 
+// EOSDeclarer is the optional [TextTokenizer] capability for tokenizers that
+// can distinguish a genuinely declared EOS/stop token from int32(0), the Go
+// zero value EOS() falls back to when a tokenizer.json declares none of
+// <eos>/<end_of_turn>/<|im_end|>/<|eot_id|>/<turn|> at all (decode/tokenizer.
+// Tokenizer implements it). Without this gate, buildStopTokens armed that
+// fallback zero as a live stop token, so a checkpoint whose tokenizer lacked a
+// declared EOS silently truncated Generate the first time greedy decoding
+// produced token id 0 (#64). A tokenizer whose EOS() is a fixed, always-
+// present terminator regardless of any declaration — rwkv7.WorldTokenizer's
+// reserved id 0, kept outside its byte-trie vocabulary specifically so it can
+// never collide with a real content token — need not implement this
+// capability: hasDeclaredEOS treats an unasserted capability as "the id is
+// real", preserving that tokenizer's own contract unchanged.
+type EOSDeclarer interface {
+	HasEOSToken() bool
+}
+
+// hasDeclaredEOS reports whether tok's EOS() id should be armed as a stop
+// token. Tokenizers implementing EOSDeclarer are asked directly; a tokenizer
+// without that capability is trusted as before — its own EOS() contract
+// already resolves the question (e.g. engine/hip's decoder returns -1, not a
+// fallback zero, when it carries no declared EOS).
+func hasDeclaredEOS(tok TextTokenizer) bool {
+	d, ok := tok.(EOSDeclarer)
+	return !ok || d.HasEOSToken()
+}
+
 // buildStopTokens assembles the stop set from scratch: request stop tokens
 // first, then the tokenizer's EOS, the template turn-close id, any
 // template-implied stop strings, and a checkpoint-declared stop set — each
@@ -809,7 +921,7 @@ func (m *TextModel) buildStopTokens(cfg inference.GenerateConfig) []int32 {
 	stop := append([]int32(nil), cfg.StopTokens...)
 	tmpl := m.chatTemplate()
 	if m.tok != nil {
-		if eos := m.tok.EOS(); eos >= 0 {
+		if eos := m.tok.EOS(); eos >= 0 && hasDeclaredEOS(m.tok) {
 			stop = append(stop, eos)
 		}
 		// The turn-close marker ends an assistant turn on chat-tuned checkpoints

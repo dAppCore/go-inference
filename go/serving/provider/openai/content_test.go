@@ -64,6 +64,61 @@ func TestChatMessage_DecodeRequest_ContentParts_Good(t *testing.T) {
 	}
 }
 
+// TestChatMessage_DecodeRequest_ContentParts_Good_ImageDetail pins the
+// OpenAI-native image_url.detail capture: "low"/"high" land on the message's
+// ImageDetail (request.go's visionBudgetOverride maps them onto a vision
+// soft-token budget); "auto" and an absent detail leave it empty.
+func TestChatMessage_DecodeRequest_ContentParts_Good_ImageDetail(t *testing.T) {
+	cases := []struct{ name, detailField, want string }{
+		{"low", `,"detail":"low"`, "low"},
+		{"high", `,"detail":"high"`, "high"},
+		{"auto", `,"detail":"auto"`, ""},
+		{"absent", ``, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","messages":[{"role":"user","content":[` +
+				`{"type":"image_url","image_url":{"url":"` + imageDataURL("PNG") + `"` + tc.detailField + `}}]}]}`
+			req, err := DecodeRequest(strings.NewReader(body))
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := req.Messages[0].ImageDetail; got != tc.want {
+				t.Fatalf("ImageDetail = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestChatMessage_DecodeRequest_ContentParts_Ugly_ImageDetailLastExplicitWins
+// pins the within-message resolution: the last part carrying an explicit
+// low/high detail wins, and a later "auto" part never erases an earlier
+// explicit hint.
+func TestChatMessage_DecodeRequest_ContentParts_Ugly_ImageDetailLastExplicitWins(t *testing.T) {
+	body := `{"model":"m","messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"` + imageDataURL("PNG-ONE") + `","detail":"low"}},` +
+		`{"type":"image_url","image_url":{"url":"` + imageDataURL("PNG-TWO") + `","detail":"high"}}]}]}`
+	req, err := DecodeRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := req.Messages[0].ImageDetail; got != "high" {
+		t.Fatalf("ImageDetail = %q, want %q (the last explicit part)", got, "high")
+	}
+
+	// A trailing "auto" must NOT erase the earlier explicit "high".
+	body = `{"model":"m","messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"` + imageDataURL("PNG-ONE") + `","detail":"high"}},` +
+		`{"type":"image_url","image_url":{"url":"` + imageDataURL("PNG-TWO") + `","detail":"auto"}}]}]}`
+	req, err = DecodeRequest(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := req.Messages[0].ImageDetail; got != "high" {
+		t.Fatalf("ImageDetail = %q, want %q (a later \"auto\" must not overwrite an earlier explicit hint)", got, "high")
+	}
+}
+
 // A local engine never fetches remote URLs out of a prompt, and malformed
 // payloads fail loudly at the door.
 func TestChatMessage_DecodeRequest_ContentParts_Bad(t *testing.T) {

@@ -14,8 +14,10 @@
 // group_size, desc_act, sym), AWQ (w_bit/bits, q_group_size/group_size,
 // zero_point, version), compressed-tensors (config_groups → weight num_bits,
 // type, symmetric, strategy, actorder; derives a W{w}A{a} Scheme), fp8
-// (activation_scheme, weight_block_size) and bitsandbytes (load_in_4bit /
-// load_in_8bit, bnb_4bit_quant_type).
+// (activation_scheme, weight_block_size), bitsandbytes (load_in_4bit /
+// load_in_8bit, bnb_4bit_quant_type) and AMD Quark's native "quark" shape
+// (global_quant_config.weight.{dtype,group_size,symmetric},
+// global_quant_config.input_tensors.is_dynamic — see MethodQuark).
 package quant
 
 import (
@@ -42,6 +44,28 @@ const (
 	MethodFP8 Method = "fp8"
 	// MethodBitsAndBytes is the bitsandbytes load_in_4bit / load_in_8bit format.
 	MethodBitsAndBytes Method = "bitsandbytes"
+	// MethodQuark is AMD Quark's native quantisation_config serialization — a
+	// richer nested shape (global_quant_config / layer_quant_config /
+	// algo_config) than the other methods' flat bits/group_size fields; see
+	// readQuark. Quark covers FP8, INT8/4/2, FP6, and the OCP-microscaled
+	// MXFP4/MX lane (global_quant_config.weight: dtype "fp4", qscheme
+	// "per_group", group_size 32, scale_format "e8m0" — AMD's MI350/CDNA4
+	// low-precision format; see model/quant/mxfp4 for the element codec).
+	//
+	// Confirmed against two real checkpoints — quant_method "quark" appears
+	// verbatim in both:
+	//   - huggingface.co/amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test/blob/main/config.json
+	//     (global_quant_config.weight.dtype = "fp8_e4m3", qscheme "per_tensor")
+	//   - huggingface.co/amd/Qwen3.5-397B-A17B-MXFP4/blob/main/config.json
+	//     (global_quant_config.weight.dtype = "fp4", qscheme "per_group",
+	//     group_size 32, scale_format "e8m0")
+	// and by Quark's own HF integration doc
+	// (huggingface.co/docs/transformers/en/quantization/quark): "Public models
+	// using Quark native serialization can be found at
+	// huggingface.co/models?other=quark". The same doc notes Quark can ALSO
+	// re-emit AutoAWQ-/native-fp8-compatible configs tagged "awq"/"fp8"
+	// instead — those already dispatch to MethodAWQ/MethodFP8, not this one.
+	MethodQuark Method = "quark"
 	// MethodNone means the model carries no quantisation_config — full precision.
 	MethodNone Method = "none"
 	// MethodUnknown means a quantisation_config is present but its method is
@@ -52,6 +76,21 @@ const (
 // QuantInfo is the normalised view of a model's quantisation. Fields that a
 // given method does not express stay at their zero value; method-specific keys
 // the struct does not model are preserved in Raw.
+//
+// QuantInfo answers a different question from model.QuantConfig
+// (model/quant_config.go), and the two are intentionally NOT unified: this
+// type detects HOW AN EXTERNAL TOOL QUANTISED A CHECKPOINT — it reads the
+// HuggingFace "quantization_config" key (gptq/awq/compressed-tensors/fp8/
+// bitsandbytes/quark provenance and their method-specific parameters), which
+// is import/interop metadata no in-tree engine currently loads from. Once a
+// model is converted into this engine's own on-disk shape, the ENGINE'S OWN
+// runtime dequant instructions — group_size/bits/mode plus per-module
+// overrides — live in the different, MLX-native "quantization" block that
+// model.QuantConfig parses; that is what the assembler actually calls at
+// load time. Use QuantInfo when detecting/importing an externally-produced
+// checkpoint; use model.QuantConfig when driving this engine's own
+// dequantisation. See docs/design-rocm.md §B.3 (dispatch item 11) for the
+// full reasoning.
 //
 //	qi := quantfmt.QuantInfo{Method: quantfmt.MethodGPTQ, Bits: 4, GroupSize: 128}
 type QuantInfo struct {
@@ -147,6 +186,8 @@ func fromConfig(cfg map[string]any) QuantInfo {
 		readFP8(&qi, cfg)
 	case MethodBitsAndBytes:
 		readBitsAndBytes(&qi, cfg)
+	case MethodQuark:
+		readQuark(&qi, cfg)
 	default:
 		// Unknown method, or none given but other quant fields present — harvest
 		// the generic bits/group_size so callers still learn the width.
@@ -172,6 +213,8 @@ func normaliseMethod(raw string) Method {
 		return MethodFP8
 	case "bitsandbytes", "bnb":
 		return MethodBitsAndBytes
+	case "quark":
+		return MethodQuark
 	default:
 		return MethodUnknown
 	}
@@ -225,6 +268,71 @@ func readBitsAndBytes(qi *QuantInfo, cfg map[string]any) {
 		// Neither flag set — bitsandbytes defaults to 4-bit loading.
 		qi.Bits = 4
 		qi.Scheme = str(cfg, "bnb_4bit_quant_type")
+	}
+}
+
+// readQuark fills fields from AMD Quark's native "quark" config shape: bits
+// and the Scheme tag come from global_quant_config.weight.dtype
+// (quarkDtypeBits), GroupSize and Symmetric come from the same weight block,
+// and Activation mirrors fp8's static/dynamic reading, derived from
+// global_quant_config.input_tensors.is_dynamic. A "per_group" qscheme with an
+// "e8m0" scale_format and group_size 32 is AMD's OCP-microscaled MXFP4/MX lane
+// (model/quant/mxfp4 packs/unpacks that element format); a "per_tensor"
+// qscheme with no group_size is the plain per-tensor FP8/INT8 lane. Confirmed
+// against two real checkpoints — see MethodQuark's doc comment for both
+// config.json URLs.
+//
+//	readQuark(&qi, map[string]any{"global_quant_config": map[string]any{"weight": map[string]any{"dtype": "fp4", "group_size": 32.0}}})
+func readQuark(qi *QuantInfo, cfg map[string]any) {
+	gqc, ok := cfg["global_quant_config"].(map[string]any)
+	if !ok {
+		return
+	}
+	if weight, ok := gqc["weight"].(map[string]any); ok {
+		dtype := str(weight, "dtype")
+		qi.Bits = quarkDtypeBits(dtype)
+		qi.GroupSize = num(weight, "group_size")
+		qi.Symmetric = boolOf(weight, "symmetric")
+		qi.Scheme = dtype
+	}
+	if input, ok := gqc["input_tensors"].(map[string]any); ok {
+		if boolOf(input, "is_dynamic") {
+			qi.Activation = "dynamic"
+		} else {
+			qi.Activation = "static"
+		}
+	}
+}
+
+// quarkDtypeBits maps AMD Quark's documented weight/activation dtype strings
+// to a nominal bit-width. The dtype set is Quark's own documented "Data
+// types" support matrix
+// (huggingface.co/docs/transformers/en/quantization/quark): int8, int4, int2,
+// bfloat16, float16, fp8_e5m2, fp8_e4m3, fp6_e3m2, fp6_e2m3, fp4, OCP MX, MX6,
+// MX9, bfp16. Each bit count is that format's own sign+exponent+mantissa (or
+// integer) width; the bare "OCP MX" tag names no fixed element width so it
+// stays unmapped (0) rather than guessed. Verified against two real
+// checkpoints: amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test ("fp8_e4m3") and
+// amd/Qwen3.5-397B-A17B-MXFP4 ("fp4" — the OCP-microscaled MXFP4 element
+// model/quant/mxfp4 packs/unpacks).
+//
+//	quarkDtypeBits("fp4") == 4
+func quarkDtypeBits(dtype string) int {
+	switch core.Lower(core.Trim(dtype)) {
+	case "int2":
+		return 2
+	case "int4", "fp4":
+		return 4
+	case "fp6_e3m2", "fp6_e2m3", "mx6":
+		return 6
+	case "int8", "fp8_e4m3", "fp8_e5m2":
+		return 8
+	case "mx9":
+		return 9
+	case "bfloat16", "float16", "bfp16":
+		return 16
+	default:
+		return 0
 	}
 }
 

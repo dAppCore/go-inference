@@ -85,28 +85,27 @@ func (b *rocmBackend) PlanReactiveSequenceMixer(ctx context.Context, modelPath s
 		report.PlanningReady = true
 		if missing := reactiveComposedStackMissingTensors(plan, tensorNames); len(missing) > 0 {
 			report.Status = "incomplete"
-			report.ExecutionStatus = "composed_stack_missing_runner_pending"
+			report.ExecutionStatus = "composed_stack_missing_runner_retired"
 			report.MissingTensors = missing
 			report.Labels["sequence_mixer_report_status"] = report.Status
 			report.Labels["sequence_mixer_tensor_binding"] = "mixer_ready"
 			report.Labels["sequence_mixer_composed_stack"] = "missing"
 			report.Labels["sequence_mixer_composed_stack_missing"] = core.Join(",", missing...)
 			report.Notes = append(report.Notes,
-				"ROCm validated the sequence-mixer plan, but the full go-mlx composed block stack is incomplete.",
+				"ROCm validated the sequence-mixer plan, but the full go-mlx composed block stack is incomplete; the composed session runner is retired (#50) regardless, so completing the stack would not by itself unlock execution.",
 				"Missing composed tensors: "+core.Join(",", missing...),
 			)
 			return report, nil
 		}
-		report.Status = "ready_for_native_load"
-		report.ExecutionStatus = "load_plan_ready_runner_pending"
+		report.Status = "runner_retired"
+		report.ExecutionStatus = "composed_route_retired"
 		report.TensorBindingReady = true
 		report.ComposedStackReady = true
 		report.Labels["sequence_mixer_report_status"] = report.Status
 		report.Labels["sequence_mixer_tensor_binding"] = "ready"
 		report.Labels["sequence_mixer_composed_stack"] = "ready"
 		report.Notes = append(report.Notes,
-			"ROCm validated the go-mlx composed loader contract and can carry this plan into native load.",
-			"Generic composed HIP forward execution is still pending; existing hand-written ROCm model paths remain the execution lane.",
+			"ROCm validated the composed loader contract, but the portable incremental session runner is retired (#50) — loadHIPComposedTextModel declines this architecture outright; no native ROCm execution path serves this layer-mixer plan, factory-native port pending.",
 		)
 	case "invalid":
 		report.Status = "invalid"
@@ -124,6 +123,13 @@ func (b *rocmBackend) PlanReactiveSequenceMixer(ctx context.Context, modelPath s
 	return report, nil
 }
 
+// baseReactiveSequenceMixerReport builds the report shell every PlanReactiveSequenceMixer outcome starts
+// from. RunnerReady starts — and, as of #50, STAYS — false: every architecture this report can ever
+// describe is, by construction, one whose config declares config-composed sequence-mixer layer types, and
+// composed_runtime.go's loadHIPComposedTextModel now declines every such architecture outright (the
+// "portable composed incremental runner" model/composed used to back this report is retired; nothing in
+// this package replaced it). No branch below re-sets RunnerReady true; a future factory-native HIP port for
+// one of these mixer kinds would need to flip it deliberately, not by an unexamined default.
 func baseReactiveSequenceMixerReport(modelPath string, inspection *inference.ModelPackInspection) *ReactiveSequenceMixerReport {
 	labels := map[string]string{
 		"backend":                      "rocm",
@@ -131,7 +137,7 @@ func baseReactiveSequenceMixerReport(modelPath string, inspection *inference.Mod
 		"production_requires_env_gate": "false",
 		"production_requires_cli_flag": "false",
 		"sequence_mixer_report":        "true",
-		"sequence_mixer_runner_status": "hip_composed_runner_pending",
+		"sequence_mixer_runner_status": "composed_route_retired",
 	}
 	var model inference.ModelIdentity
 	if inspection != nil {

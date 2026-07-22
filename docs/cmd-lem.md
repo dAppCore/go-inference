@@ -35,6 +35,7 @@ prints its own name in usage and notices (the dev binary is often built as
 | `generate` | One-shot generate + decode-only tok/s (no HTTP; like-for-like bench) | `decode/generate.RunGenerate` |
 | `ssd` | Self-distillation sampling: sample the frozen base, capture the trace | `train.RunSSDCommand` |
 | `sft` | LoRA supervised fine-tuning through the engine trainer seam | `train.RunSFTCommand` |
+| `data` | The training-data loop: datasets, ingest, scoring, review, export (`~/.lem/datasets.duckdb`) | `dataset` (root) + the CLI DuckDB store |
 | `tune` | Measure + persist the best MTP draft block as a serve profile | `train/tune.RunTune` |
 | `pack` | Build/inspect/list/extract/hash `.model` containers (no weights loaded) | `model/pack` |
 | `ebook` | Render a model directory as a valid EPUB3 (weights as base64 plates) | `model/modelmgmt.BuildModelBook` |
@@ -88,7 +89,7 @@ re-runs the reactive drafter ladder over the new target).
 | `--addr` | `:36911` | listen address (Lethean's own port) |
 | `--model` | `""` | model to load; empty starts the driver model-less (load later via admin reload) |
 | `--context` | `0` | override context length; 0 uses the model default |
-| `--kv-cache` | `""` | KV cache mode override; the no-cgo metal engine runs only its built-in `native` cache — any other mode name is noted and ignored |
+| `--kv-cache` | `""` | live KV cache mode: `native` (default) or `turboquant[:4|:3.5|:3|:2]` — TurboQuant codes on global attention layers (dense archs; MoE/hybrid/sinks refuse loudly). Opt-in: at 16k on E2B it costs ~32% decode for no residency win; the credible case is many-global-layer models at very long context |
 | `--draft` | `auto` | MTP drafter: `auto` detects one beside a Gemma 4 target, a path forces it, `""` disables |
 | `--draft-detect` | `true` | reactive drafter detection for Gemma 4 targets |
 | `--draft-block` | `0` | MTP draft block; 0 = engine default (5), a tuned profile overrides when present |
@@ -98,6 +99,7 @@ re-runs the reactive drafter ladder over the new target).
 | `--state-store` | `""` | conversation state store file (default `~/Lethean/lem/state/conversations.kv`) |
 | `--welfare` | `false` | welfare guard (opt-in): per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry `lem_end` (enable with `-welfare`) |
 | `--policy` | `""` | outbound policy file (JSON): deployment-owned redact/refuse rules on model output; unset disables the layer, a load failure is fatal at boot |
+| `--capture` | `""` | tee each completed (prompt, response) turn into this `lem data` dataset, stamped with the serving model's fingerprint; empty captures nothing — capture is opt-in only, and a capture failure logs and never breaks serving |
 | `--scheduler` | `""` | request scheduler between the HTTP handlers and the model: `serial`, `batch`, or `interleave` (live admission CB); empty = no scheduler. Under `interleave`, fresh text chats and raw prompts ride the shared lane set; a continuation (a prior assistant turn) hands off to conversation continuity when `--state-conversations` is on, waking slept KV instead of re-paying the conversation's prefill on a lane. Admission overlaps decode: a joining request's session open + prompt prefill run off the drive loop (chunk-capped while lanes stream), so in-flight streams never freeze for a newcomer's prefill |
 | `--scheduler-concurrency` | `0` | scheduler's concurrently running requests (interleave/CB lane count, serial pool width); 0 = the serve default (4) |
 | `--native` | `false` | serve via the no-cgo native token-loop contract (the default metal engine already is native) |
@@ -193,6 +195,7 @@ captured rows (#97).
 | `-filter-shortest` | `10` | drop the shortest N% of self-samples before the trace (0 keeps all) |
 | `-score-samples` | `false` | score every self-sample at birth with the LEK scorer — writes birth-scores alongside the captured trace |
 | `-checkpoint-dir` | `""` | output dir for the scored trace (`ssd-captures.jsonl`) |
+| `-dataset` | `""` | land the sampled trace as `trace` items in this `lem data` dataset, fingerprinted to the base model; requires `-checkpoint-dir` (the capture sidecar this tap reads); empty captures nothing |
 | `-context` | `0` | model context override; 0 uses the model default |
 
 ---
@@ -362,3 +365,65 @@ lem quant ~/models/gemma-4-12B-it-bf16 -gguf q4_k_m    # -> …-gguf-q4_k_m (GGU
 | `-group-size` | `64` | affine quantisation group size — MLX lane |
 | `-o` | `""` | output model directory (default `<src>-<bits>bit`, or `<src>-gguf-<format>`) |
 | `-gguf` | `""` | run the GGUF lane in this format (`q4_k_m`, `q8_0`, `q5_k`, `q6_k`, …) instead of MLX affine |
+
+---
+
+## `data` — the training-data loop
+
+The lem-native capture → score → review → export loop, backed by
+`~/.lem/datasets.duckdb` (deliberately separate from the TUI's `lem.duckdb` —
+dataset bulk has its own lifecycle and must never take the workspace state down
+with it). Domain logic lives in the portable root package `go/dataset`; the CLI
+supplies the DuckDB store, these verbs, the serve/ssd capture taps, and the TUI
+Data panel.
+
+```
+lem data create evening-vents --purpose "hostility-graded chat pairs"
+lem serve --model ~/models/gemma-4-e2b-it-4bit --capture evening-vents
+lem data import evening-vents --jsonl captures.jsonl
+lem data score evening-vents --auto-approve 'lek>=80' --auto-reject 'hostility>=0.7'
+lem data review evening-vents            # how to open the TUI Data panel
+lem data export evening-vents --format sft-jsonl --out train.jsonl
+lem sft --model ~/models/gemma-4-E2B-it-bf16 --data train.jsonl
+```
+
+### Subcommands
+
+| Subcommand | What it does |
+|------------|--------------|
+| `create <slug>` | create a dataset (`--title`, `--purpose`); slug is lowercase alphanumeric-and-hyphen |
+| `list` | list datasets (`--archived` includes archived ones) |
+| `stats <slug>` | item counts by kind / source / latest review status |
+| `import <slug>` | ingest rows — exactly one of `--jsonl` (`{messages}`, `{prompt,response}`, or CaptureRow shapes) or `--chats <user>` (the per-user chathistory DB, `--session` for one conversation); `--fingerprint` stamps provenance on JSONL rows that carry none |
+| `score <slug>` | score matching items: the heuristic lek tier by default, or `--kind judge:<name> --model <checkpoint>` for a judge template; `--auto-approve` / `--auto-reject` take explicit threshold expressions (e.g. `lek>=80`) — auto-review is never implicit |
+| `export <slug>` | write JSONL (`--format sft-jsonl\|pairs-jsonl\|capture-jsonl`, required) + a sidecar `<out>.manifest.json` receipt: counts, filter, per-item content hashes, the manifest hash a training run cites |
+| `archive <slug>` | flag a dataset archived — never a hard delete; items stay queryable with `--archived` |
+| `review [slug]` | print how to open the TUI Data panel (with a slug: pre-filtered to that dataset) |
+
+All subcommands take `--json` for scripting.
+
+### The loop's rules (enforced, not aspirational)
+
+- **Capture is opt-in.** `serve --capture <slug>` and `ssd --dataset <slug>`
+  capture nothing without the flag; a capture failure logs and never breaks
+  serving. Every captured item is stamped with the generating model's
+  fingerprint at birth.
+- **Welfare screen at every ingest door.** A hit lands the item `quarantined`
+  (`reviewer=auto:welfare`) — visible and reviewable, never silently dropped.
+- **Scores are append-only** and always name their scorer (scorer name+version,
+  or the judge model's fingerprint). Re-scoring adds a row, never overwrites.
+- **Ingest dedupes by content hash** within a dataset — a duplicate row is a
+  counted no-op, not an error; import reports honest ingested/skipped/dedup counts.
+- **Export defaults to `status=approved`.** Exporting anything else requires the
+  explicit `--filter` — no accidental training on unreviewed data.
+- **Nothing hard-deletes.** Archive-by-flag everywhere; edit-and-approve creates
+  a derived item (lineage kept) and archives the original.
+
+### Judge templates
+
+`--kind judge:<name>` resolves `<name>.md` from `~/.lem/judges/` first (user
+overrides), then the in-repo `judges/` defaults (`quality`, `factuality`,
+`refusal-correctness`). A template is front-matter + a prompt body; the driver
+loads the judge model once, renders per item, and parses a strict bare-number
+score — malformed judge output is a loud per-item error, never a silent skip.
+See `judges/README.md` for the template contract.

@@ -2331,7 +2331,7 @@ func hipRunKVEncodeRowsKernelWithWorkspace(ctx context.Context, driver nativeHIP
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		_ = rocmDeviceKVTensorFreePair(driver, encodedKey, encodedValue)
 		return rocmDeviceKVTensor{}, rocmDeviceKVTensor{}, err
 	}
@@ -2408,7 +2408,7 @@ func hipRunKVEncodeRowsKernelIntoWithWorkspace(ctx context.Context, driver nativ
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunKVEncodeTokenValueNormKernelWithWorkspace(ctx context.Context, driver nativeHIPDriver, key, rawValue *hipDeviceByteBuffer, mode string, valueHeadDim, valueHeadCount int, valueEpsilon float32, workspace *hipAttentionHeadsChunkedWorkspace) (rocmDeviceKVTensor, rocmDeviceKVTensor, error) {
@@ -2552,7 +2552,7 @@ func hipRunKVEncodeRowsValueNormKernelIntoWithWorkspace(ctx context.Context, dri
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunKVEncodeTokenValueNormDescriptorAppendKernelWithWorkspace(ctx context.Context, driver nativeHIPDriver, encodeArgs hipKVEncodeTokenValueNormLaunchArgs, descriptorArgs hipKVDescriptorAppendLaunchArgs, workspace *hipAttentionHeadsChunkedWorkspace) error {
@@ -2589,7 +2589,7 @@ func hipRunKVEncodeTokenValueNormDescriptorAppendKernelWithWorkspace(ctx context
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func (cache *rocmDeviceKVCache) borrowedAlias() (*rocmDeviceKVCache, error) {
@@ -3481,7 +3481,7 @@ func (cache *rocmDeviceKVCache) KernelDescriptorTableFromAppendedTokenWithWorksp
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	if err := hipLaunchKernel(cache.driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, cache.driver, config); err != nil {
 		if !inPlace {
 			_ = rocmDeviceKVDescriptorTableFree(cache.driver, pointer, allocationBytes)
 		}

@@ -80,7 +80,7 @@ func ollamaUploadBlob(ollamaURL, filePath string) core.Result {
 		rBody := readAll(resp.Body)
 		body := []byte{}
 		if rBody.OK {
-			body = rBody.Value.([]byte)
+			body = rBody.Bytes()
 		}
 		return core.Fail(core.E("modelmgmt.ollamaUploadBlob", core.Sprintf("blob upload HTTP %d: %s", resp.StatusCode, string(body)), nil))
 	}
@@ -97,13 +97,13 @@ func OllamaCreateModel(ollamaURL, modelName, baseModel, peftDir string) core.Res
 	if !sfDigestResult.OK {
 		return core.Fail(core.E("modelmgmt.OllamaCreateModel", "upload adapter safetensors", sfDigestResult.Value.(error)))
 	}
-	sfDigest := sfDigestResult.Value.(string)
+	sfDigest := sfDigestResult.String()
 
 	cfgDigestResult := ollamaUploadBlob(ollamaURL, cfgPath)
 	if !cfgDigestResult.OK {
 		return core.Fail(core.E("modelmgmt.OllamaCreateModel", "upload adapter config", cfgDigestResult.Value.(error)))
 	}
-	cfgDigest := cfgDigestResult.Value.(string)
+	cfgDigest := cfgDigestResult.String()
 
 	reqBody := core.JSONMarshalString(map[string]any{
 		"model": modelName,
@@ -169,7 +169,7 @@ func OllamaDeleteModel(ollamaURL, modelName string) core.Result {
 		rBody := readAll(resp.Body)
 		respBody := []byte{}
 		if rBody.OK {
-			respBody = rBody.Value.([]byte)
+			respBody = rBody.Bytes()
 		}
 		return core.Fail(core.E("modelmgmt.OllamaDeleteModel", core.Sprintf("ollama delete %d: %s", resp.StatusCode, string(respBody)), nil))
 	}

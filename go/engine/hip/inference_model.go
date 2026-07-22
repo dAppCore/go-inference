@@ -33,12 +33,17 @@ import (
 
 var (
 	_ engine.TokenModel                = (*hipTokenModel)(nil)
+	_ engine.VisionTokenModel          = (*hipTokenModel)(nil)
+	_ engine.VideoTokenModel           = (*hipTokenModel)(nil)
+	_ engine.AudioInputTokenModel      = (*hipTokenModel)(nil)
+	_ engine.CacheModeReporter         = (*hipTokenModel)(nil)
 	_ engine.PromptReuseCapableModel   = (*hipTokenModel)(nil)
 	_ engine.StopTokenDeclarer         = (*hipTokenModel)(nil)
 	_ engine.SamplingDefaultsDeclarer  = (*hipTokenModel)(nil)
 	_ engine.ThoughtSuppressorDeclarer = (*hipTokenModel)(nil)
 	_ engine.ChatTemplateDeclarer      = (*hipTokenModel)(nil)
 	_ engine.LaneSetOpener             = (*hipTokenModel)(nil)
+	_ engine.TrainerModel              = (*hipTokenModel)(nil)
 )
 
 // hipTokenModel wraps a loaded Gemma4-Q4 hip model as the shared
@@ -54,17 +59,6 @@ type hipTokenModel struct {
 	declaredStops    []int32
 	declaredSampling engine.SamplingDefaults
 }
-
-// Training boundary: hipTokenModel deliberately does not implement
-// engine.TrainerModel yet. The Gemma4-Q4 package forward remains experimental,
-// and its exposed logits/final-hidden buffers do not form a retained Batch
-// forward with response loss masking. RunNativeLoRABackwardPass consumes
-// caller-provided activations and upstream gradients rather than gradients from
-// that model forward, while the current adapter loader supports only tiny,
-// small dense Qwen/Gemma LM-head, and BERT classifier adapters, not Gemma4.
-// Adding OpenTrainer before those paths compose through Batch -> loss ->
-// backward -> AdamW -> Save -> reload would advertise synthetic-array updates
-// as model training.
 
 // newHipTokenModel binds a loaded model + tokenizer as an engine.TokenModel,
 // parsing the checkpoint's generation_config sampling defaults from the loaded
@@ -92,7 +86,46 @@ func (m *hipTokenModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	if m == nil || m.tokenizer == nil {
 		return engine.ChatTemplate{}, false
 	}
+	architecture := m.modelType
+	if m.loaded != nil && m.loaded.modelInfo.Architecture != "" {
+		architecture = m.loaded.modelInfo.Architecture
+	}
+	if template, ok := hipArchitectureChatTemplate(architecture); ok {
+		return template, true
+	}
 	return engine.GemmaChatTemplate(engine.DetectTurnTokens(m.tokenizer), m.NeedsThoughtChannelSuppressor()), true
+}
+
+func hipArchitectureChatTemplate(architecture string) (engine.ChatTemplate, bool) {
+	templateID, ok := ROCmChatTemplateID(architecture)
+	if !ok || templateID != "qwen" {
+		return engine.ChatTemplate{}, false
+	}
+	return hipQwenChatTemplate(), true
+}
+
+func hipQwenChatTemplate() engine.ChatTemplate {
+	return engine.ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+		Thinking:      &engine.ChatThinking{OffSuffix: "<think>\n\n</think>\n\n"},
+		Stops:         []string{"<|im_end|>"},
+	}
+}
+
+func formatHIPArchitectureChatTemplate(messages []inference.Message, architecture string, enableThinking *bool) (string, bool) {
+	template, ok := hipArchitectureChatTemplate(architecture)
+	if !ok {
+		return "", false
+	}
+	prompt := engine.RenderChatTurns(template, messages)
+	if template.Thinking != nil && !template.ResolveThinking(enableThinking) {
+		prompt += template.Thinking.OffSuffix
+	}
+	return prompt, true
 }
 
 // OpenEngineSession opens a fresh retained Gemma4-Q4 decode session as the
@@ -104,6 +137,15 @@ func (m *hipTokenModel) OpenEngineSession() (engine.Session, error) {
 	return newHipEngineSession(m.loaded)
 }
 
+// OpenTrainer opens a retained Gemma4 BF16 or quantized output-head LoRA lifecycle through the
+// shared engine.TrainerModel contract.
+func (m *hipTokenModel) OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error) {
+	if m == nil {
+		return nil, core.NewError("hip.TokenModel: model is not initialised")
+	}
+	return newHIPLoRATrainer(m.loaded, cfg)
+}
+
 // Close releases the loaded model's resident weights.
 func (m *hipTokenModel) Close() error {
 	if m == nil || m.loaded == nil {
@@ -113,6 +155,231 @@ func (m *hipTokenModel) Close() error {
 }
 
 func (m *hipTokenModel) SessionsReusePrompts() bool { return true }
+
+func (m *hipTokenModel) SupportedCacheModes() []string {
+	return []string{rocmKVCacheModeFP16, rocmKVCacheModeQ8, rocmKVCacheModeKQ8VQ4}
+}
+
+func (m *hipTokenModel) AcceptsImageInput() bool {
+	return m != nil && m.loaded != nil && m.loaded.AcceptsImageInput()
+}
+
+func (m *hipTokenModel) ImagePlaceholderTokenID() int32 {
+	if !m.AcceptsImageInput() {
+		return 0
+	}
+	if m.loaded.unifiedVision != nil {
+		return m.loaded.unifiedVision.loaded.Cfg.ImageTokenID
+	}
+	return m.loaded.vision.loaded.Cfg.ImageTokenID
+}
+
+func (m *hipTokenModel) ImagePlaceholderBlock(softTokens int) string {
+	if !m.AcceptsImageInput() {
+		return ""
+	}
+	if m.loaded.unifiedVision != nil {
+		cfg := m.loaded.unifiedVision.loaded.Cfg
+		return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
+	}
+	cfg := m.loaded.vision.loaded.Cfg
+	return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
+}
+
+func (m *hipTokenModel) ProjectImage(payload []byte) ([]byte, int, error) {
+	if !m.AcceptsImageInput() {
+		return nil, 0, core.NewError("hip.TokenModel.ProjectImage: loaded model has no vision tower")
+	}
+	var embeddings []float32
+	var softTokens int
+	var err error
+	if m.loaded.unifiedVision != nil {
+		embeddings, softTokens, err = m.loaded.unifiedVision.ProjectImage(payload)
+	} else {
+		embeddings, softTokens, err = m.loaded.vision.ProjectImage(payload)
+	}
+	if err != nil {
+		return nil, 0, core.E("hip.TokenModel.ProjectImage", "project image", err)
+	}
+	features, err := hipFloat32Payload(embeddings)
+	if err != nil {
+		return nil, 0, core.E("hip.TokenModel.ProjectImage", "encode projected embeddings", err)
+	}
+	return features, softTokens, nil
+}
+
+func (m *hipTokenModel) VideoPlaceholderTokenID() int32 {
+	if !m.AcceptsImageInput() {
+		return 0
+	}
+	if m.loaded.unifiedVision != nil {
+		return m.loaded.unifiedVision.loaded.Cfg.VideoTokenID
+	}
+	return m.loaded.vision.loaded.Cfg.VideoTokenID
+}
+
+func (m *hipTokenModel) VideoPlaceholderBlock(softTokens int) string {
+	if !m.AcceptsImageInput() {
+		return ""
+	}
+	if m.loaded.unifiedVision != nil {
+		cfg := m.loaded.unifiedVision.loaded.Cfg
+		return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.VideoToken, cfg.ImageEndToken, softTokens)
+	}
+	cfg := m.loaded.vision.loaded.Cfg
+	return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.VideoToken, cfg.ImageEndToken, softTokens)
+}
+
+func (m *hipTokenModel) AcceptsAudioInput() bool {
+	return m != nil && m.loaded != nil && m.loaded.AcceptsAudioInput()
+}
+
+func (m *hipTokenModel) AudioPlaceholderTokenID() int32 {
+	if !m.AcceptsAudioInput() {
+		return 0
+	}
+	if m.loaded.unifiedVision != nil && m.loaded.unifiedVision.AcceptsAudio() {
+		return m.loaded.unifiedVision.loaded.Cfg.AudioTokenID
+	}
+	return int32(m.loaded.audio.loaded.Cfg.AudioTokenID)
+}
+
+func (m *hipTokenModel) AudioPlaceholderBlock(softTokens int) string {
+	if !m.AcceptsAudioInput() || softTokens <= 0 {
+		return ""
+	}
+	if m.loaded.unifiedVision != nil && m.loaded.unifiedVision.AcceptsAudio() {
+		cfg := m.loaded.unifiedVision.loaded.Cfg
+		return hipMultimodalPlaceholderBlock(cfg.AudioBeginToken, cfg.AudioToken, cfg.AudioEndToken, softTokens)
+	}
+	cfg := m.loaded.audio.loaded.Cfg
+	return hipMultimodalPlaceholderBlock(cfg.AudioBeginToken, cfg.AudioToken, cfg.AudioEndToken, softTokens)
+}
+
+func (m *hipTokenModel) ProjectAudio(payload []byte) ([]byte, int, error) {
+	if !m.AcceptsAudioInput() {
+		return nil, 0, core.NewError("hip.TokenModel.ProjectAudio: loaded model has no audio tower")
+	}
+	waveform, err := hipDecodeWAVMono16k(payload)
+	if err != nil {
+		return nil, 0, core.E("hip.TokenModel.ProjectAudio", "decode WAV", err)
+	}
+	if m.loaded.unifiedVision != nil && m.loaded.unifiedVision.AcceptsAudio() {
+		embeddings, softTokens, err := m.loaded.unifiedVision.ProjectAudioSamples(waveform)
+		if err != nil {
+			return nil, 0, core.E("hip.TokenModel.ProjectAudio", "project unified audio", err)
+		}
+		features, err := hipFloat32Payload(embeddings)
+		if err != nil {
+			return nil, 0, core.E("hip.TokenModel.ProjectAudio", "encode projected embeddings", err)
+		}
+		return features, softTokens, nil
+	}
+	embeddings, softTokens, err := m.loaded.audio.ProjectEmbeddings(waveform)
+	if err != nil {
+		return nil, 0, core.E("hip.TokenModel.ProjectAudio", "project audio", err)
+	}
+	hidden := m.loaded.modelInfo.HiddenSize
+	if hidden <= 0 || softTokens <= 0 || len(embeddings) != softTokens*hidden {
+		return nil, 0, core.NewError("hip.TokenModel.ProjectAudio: projected embedding geometry does not match text hidden size")
+	}
+	features, err := hipFloat32Payload(embeddings)
+	if err != nil {
+		return nil, 0, core.E("hip.TokenModel.ProjectAudio", "encode projected embeddings", err)
+	}
+	return features, softTokens, nil
+}
+
+func (m *hipTokenModel) TokenEmbeddingsWithFeatures(ids []int32, imageFeatures, audioFeatures, videoFeatures []byte) ([][]byte, error) {
+	if m == nil || m.loaded == nil {
+		return nil, core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: model is not initialised")
+	}
+	if len(ids) == 0 {
+		return nil, core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: empty token ids")
+	}
+	if m.loaded.modelInfo.NumLayers <= 0 {
+		return nil, core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: loaded model layer count is required")
+	}
+	cfg, err := m.loaded.cachedGemma4Q4ForwardConfig(m.loaded.modelInfo.NumLayers)
+	if err != nil {
+		return nil, err
+	}
+	hidden := cfg.Layers[0].HiddenSize
+	if hidden <= 0 {
+		return nil, core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: invalid embedding width")
+	}
+	device, err := hipRunGemma4Q4PrefillEmbeddingBatch(context.Background(), m.loaded.driver, cfg.Layers[0], ids)
+	if err != nil {
+		return nil, core.E("hip.TokenModel.TokenEmbeddingsWithFeatures", "gather token embeddings", err)
+	}
+	defer func() { _ = device.Close() }()
+	rowBytes := hidden * 4
+	stream := make([]byte, len(ids)*rowBytes)
+	if err := m.loaded.driver.CopyDeviceToHost(device.Pointer(), stream); err != nil {
+		return nil, core.E("hip.TokenModel.TokenEmbeddingsWithFeatures", "copy token embeddings", err)
+	}
+	if len(imageFeatures) > 0 {
+		if err := m.spliceTokenFeaturesInto(stream, ids, imageFeatures, rowBytes, m.ImagePlaceholderTokenID(), "image"); err != nil {
+			return nil, err
+		}
+	}
+	if len(audioFeatures) > 0 {
+		if err := m.spliceTokenFeaturesInto(stream, ids, audioFeatures, rowBytes, m.AudioPlaceholderTokenID(), "audio"); err != nil {
+			return nil, err
+		}
+	}
+	if len(videoFeatures) > 0 {
+		if err := m.spliceTokenFeaturesInto(stream, ids, videoFeatures, rowBytes, m.VideoPlaceholderTokenID(), "video"); err != nil {
+			return nil, err
+		}
+	}
+	rows := make([][]byte, len(ids))
+	for index := range ids {
+		rows[index] = stream[index*rowBytes : (index+1)*rowBytes]
+	}
+	return rows, nil
+}
+
+func (m *hipTokenModel) spliceTokenFeaturesInto(stream []byte, ids []int32, features []byte, rowBytes int, tokenID int32, label string) error {
+	if tokenID == 0 {
+		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: " + label + " token id is not configured")
+	}
+	if rowBytes <= 0 || len(stream) != len(ids)*rowBytes || len(features)%rowBytes != 0 {
+		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: invalid " + label + " feature geometry")
+	}
+	slots := 0
+	for _, id := range ids {
+		if id == tokenID {
+			slots++
+		}
+	}
+	if slots != len(features)/rowBytes {
+		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: " + label + " feature count must equal token slots")
+	}
+	featureIndex := 0
+	for position, id := range ids {
+		if id != tokenID {
+			continue
+		}
+		copy(stream[position*rowBytes:(position+1)*rowBytes], features[featureIndex*rowBytes:(featureIndex+1)*rowBytes])
+		featureIndex++
+	}
+	return nil
+}
+
+func hipMultimodalPlaceholderBlock(begin, token, end string, softTokens int) string {
+	if token == "" || softTokens <= 0 {
+		return ""
+	}
+	var block core.Builder
+	block.Grow(len(begin) + len(end) + softTokens*len(token))
+	block.WriteString(begin)
+	for range softTokens {
+		block.WriteString(token)
+	}
+	block.WriteString(end)
+	return block.String()
+}
 
 // newHipEngineTextModel assembles a loaded Gemma4-Q4 hip model as the shared
 // engine.TextModel (inference.TextModel + inference.SessionFactory). The
@@ -144,6 +411,24 @@ func (m *rocmModel) NewSession() inference.SessionHandle {
 	return m.engineModel.NewSession()
 }
 
+// FormatChatPrompt exposes the shared model-declared template to serving,
+// continuous batching, state continuity, and training callers.
+func (m *rocmModel) FormatChatPrompt(messages []inference.Message) string {
+	if m == nil || m.engineModel == nil {
+		return ""
+	}
+	return m.engineModel.FormatChatPrompt(messages)
+}
+
+// FormatChatContinuation renders only the appended turns for a retained
+// conversation, preserving the shared engine's exact boundary framing.
+func (m *rocmModel) FormatChatContinuation(messages []inference.Message) string {
+	if m == nil || m.engineModel == nil {
+		return ""
+	}
+	return m.engineModel.FormatChatContinuation(messages)
+}
+
 func (m *rocmModel) FormatChatPromptWithThinking(messages []inference.Message, enableThinking *bool) string {
 	if m == nil || m.engineModel == nil {
 		return ""
@@ -165,6 +450,18 @@ func (m *rocmModel) SetChatInterceptor(fn func(context.Context, []inference.Mess
 	m.stateMutex.Lock()
 	m.chatIntercept = fn
 	m.stateMutex.Unlock()
+}
+
+// ChatInterceptorInstalled lets the scheduler hand continuation-shaped chats
+// back to the retained-state continuity owner instead of opening a fresh lane.
+func (m *rocmModel) ChatInterceptorInstalled() bool {
+	if m == nil {
+		return false
+	}
+	m.stateMutex.Lock()
+	installed := m.chatIntercept != nil
+	m.stateMutex.Unlock()
+	return installed
 }
 
 func (m *rocmModel) interceptChat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) (iter.Seq[inference.Token], bool) {

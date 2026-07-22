@@ -24,10 +24,15 @@ type WeightNames struct {
 	LayerPrefix                                                                               string // "model.layers.%d" — the %d carrier
 	AttnNorm, PostAttnNorm, QNorm, KNorm, LayerScalar                                         string // per-layer norms (suffixes)
 	Q, K, V, O                                                                                string // attention projections (suffixes)
-	MLPNorm, Gate, Up, Down, PostFFNorm                                                       string // dense MLP (suffixes)
-	PerLayerGate, PerLayerProjection                                                          string // PLE per-layer (suffixes)
-	PostPerLayerInputNorm                                                                     string
-	MoE                                                                                       MoEWeightNames
+	// Sinks is the per-layer attention-sink tensor suffix (gpt_oss ".self_attn.sinks" — a learned
+	// [heads] logit vector that joins each head's softmax denominator; see LoadedLayer.Sinks). "" (the
+	// StandardWeightNames default, and every non-sink arch) loads nil — byte-identical to before the
+	// field existed. Loaded RAW (never through the NormBiasOne fold: a sink is a logit, not a norm).
+	Sinks                               string
+	MLPNorm, Gate, Up, Down, PostFFNorm string // dense MLP (suffixes)
+	PerLayerGate, PerLayerProjection    string // PLE per-layer (suffixes)
+	PostPerLayerInputNorm               string
+	MoE                                 MoEWeightNames
 	// NormBiasOne folds the gemma "(1 + weight)" RMSNorm convention into every norm weight at load
 	// (see norm_bias.go), so the plain RMSNorm kernel reproduces gemma's (1+w)·rms(x). gemma/gemma2/
 	// gemma3/gemma4 set it; mistral and non-gemma arches leave it false.
@@ -39,6 +44,11 @@ type MoEWeightNames struct {
 	PreFFNorm, PreFFNorm2, PostFFNorm1, PostFFNorm2, PostFFNorm               string
 	RouterScale, PerExpertScale                                               string
 	LocalGate, LocalUp, LocalDown, Router, ExpGate, ExpUp, ExpGateUp, ExpDown string
+	// Shared expert (qwen3_5_moe): an always-on dense SwiGLU added to the routed output, optionally
+	// scaled by a sigmoid gate — out += σ(SharedSigmoid·x) · SwiGLU(x). SharedGate/Up/Down are the
+	// shared_expert.{gate,up,down}_proj SwiGLU trio; SharedSigmoid is shared_expert_gate.weight (the
+	// [hidden]→1 σ gate; "" ⇒ the shared expert is added ungated). gemma has no shared expert → all "".
+	SharedGate, SharedUp, SharedDown, SharedSigmoid string
 }
 
 // StandardWeightNames returns the canonical HF weight layout — the full superset. An arch with that
@@ -96,6 +106,36 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		return x.Data
 	}
 
+	// raw fetches a tensor's bytes verbatim — no NormBiasOne fold, no Linear probing. The fetch for
+	// per-layer parameter VECTORS that are neither norms nor projections (the attention sinks).
+	raw := func(name string) []byte {
+		x, ok := t[name]
+		if !ok {
+			return nil
+		}
+		return x.Data
+	}
+
+	// shapeErr latches the FIRST QK-norm shape mismatch (mirrors foldErr's one-shot pattern): the loop
+	// keeps running so every layer still assembles (cheap), but Assemble refuses once it exits.
+	var shapeErr error
+	// qkNorm is norm() plus a geometry check the generic norm() closure cannot make (it serves every
+	// norm on the model, most of which have nothing to do with attention heads): a q_norm/k_norm
+	// tensor's element count must be PER-HEAD (== headDim, gemma4/mixtral's shared-per-head weight) or
+	// WHOLE-VECTOR (== heads*headDim, OLMoE's norm-before-reshape convention — engine/metal's
+	// qkNormGranularity classifies the same two shapes at bind time). Any other length disagrees with
+	// the config's declared head geometry, so this refuses at LOAD, before a downstream per-head
+	// kernel can silently read a truncated prefix of a wider weight.
+	qkNorm := func(name string, heads, headDim int) []byte {
+		b := norm(name)
+		if x, ok := t[name]; ok && shapeErr == nil {
+			if n, valid := qkNormShapeOK(x.Shape, heads, headDim); !valid {
+				shapeErr = core.NewError(core.Sprintf("model.Assemble: %s length %d matches neither per-head (%d) nor whole-vector (%d)", name, n, headDim, heads*headDim))
+			}
+		}
+		return b
+	}
+
 	m := &LoadedModel{Arch: arch, EmbedNorm: norm(names.EmbedNorm), FinalNorm: norm(names.FinalNorm)}
 	embedDim := arch.EmbeddingDim
 	if embedDim == 0 {
@@ -133,26 +173,40 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		L := &m.Layers[i]
 		L.AttnNorm = norm(p + names.AttnNorm)
 		L.PostAttnNorm = norm(p + names.PostAttnNorm)
-		L.QNorm = norm(p + names.QNorm)
-		L.KNorm = norm(p + names.KNorm)
 		L.LayerScalar = norm(p + names.LayerScalar)
-		L.Q = lin(p+names.Q, d)
-		if spec.OwnsCache() { // KV-shared layers carry no own k/v; v is also absent on K==V layers (lin → nil)
-			L.K = lin(p+names.K, d)
-			L.V = lin(p+names.V, d)
+		if spec.Mixer == MixerGatedDelta {
+			// A gated-delta (linear-attention recurrence) layer carries no q/k/v/o — its projections +
+			// conv + recurrence load through assembleGatedDelta. This is the named-kind branch the
+			// composed lane forked an entire parallel engine to avoid (#18); gemma4 never takes it.
+			gd, cfg, gerr := assembleGatedDelta(t, p+".linear_attn.", d, kind)
+			if gerr != nil {
+				return nil, gerr
+			}
+			L.GatedDelta, L.GatedDeltaCfg = gd, cfg
+		} else {
+			L.QNorm = qkNorm(p+names.QNorm, arch.Heads, spec.HeadDim)
+			L.KNorm = qkNorm(p+names.KNorm, spec.KVHeads, spec.HeadDim)
+			if names.Sinks != "" { // attention sinks (gpt_oss): a raw [heads] logit vector, not a norm
+				L.Sinks = raw(p + names.Sinks)
+			}
+			L.Q = lin(p+names.Q, d)
+			if spec.OwnsCache() { // KV-shared layers carry no own k/v; v is also absent on K==V layers (lin → nil)
+				L.K = lin(p+names.K, d)
+				L.V = lin(p+names.V, d)
+			}
+			// Declare the per-layer K==V op selection from the checkpoint: a layer with no value weight
+			// (a K==V layer, or a KV-shared layer that attends the owner's cache) has its value produced
+			// by the KEY projection. Resolving it here, once, is the DECLARES discipline — backends read
+			// this per-layer selection instead of re-inferring "V rides the k-proj" from v_proj absence.
+			m.Arch.Layer[i].AttentionKEqV = L.V == nil
+			// Declare the norm-op selections the same way (#57 slice 3): resolved once from
+			// checkpoint weight presence, bound by backends instead of re-probed per buffer.
+			m.Arch.Layer[i].AttentionQNorm = len(L.QNorm) > 0
+			m.Arch.Layer[i].AttentionKNorm = len(L.KNorm) > 0
+			L.O = lin(p+names.O, qDim)
 		}
-		// Declare the per-layer K==V op selection from the checkpoint: a layer with no value weight
-		// (a K==V layer, or a KV-shared layer that attends the owner's cache) has its value produced
-		// by the KEY projection. Resolving it here, once, is the DECLARES discipline — backends read
-		// this per-layer selection instead of re-inferring "V rides the k-proj" from v_proj absence.
-		m.Arch.Layer[i].AttentionKEqV = L.V == nil
-		// Declare the norm-op selections the same way (#57 slice 3): resolved once from
-		// checkpoint weight presence, bound by backends instead of re-probed per buffer.
-		m.Arch.Layer[i].AttentionQNorm = len(L.QNorm) > 0
-		m.Arch.Layer[i].AttentionKNorm = len(L.KNorm) > 0
 		m.Arch.Layer[i].PostAttnNorm = len(L.PostAttnNorm) > 0
 		m.Arch.Layer[i].LayerScalar = len(L.LayerScalar) > 0
-		L.O = lin(p+names.O, qDim)
 
 		if spec.MoE {
 			L.MoE = assembleMoE(t, p, arch, names.MoE, lin, norm, kind)
@@ -178,6 +232,9 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 	if foldErr != nil {
 		return nil, foldErr
 	}
+	if shapeErr != nil {
+		return nil, shapeErr
+	}
 	if err := m.ValidateRequired(arch); err != nil {
 		return nil, err
 	}
@@ -189,6 +246,17 @@ func assembleMoE(t map[string]safetensors.Tensor, p string, arch Arch, names MoE
 	d := arch.Hidden
 	expGate := lin(p+names.ExpGate, d)
 	expUp := lin(p+names.ExpUp, d)
+	// sharedFF is the shared expert's OWN intermediate size (#57): arch.SharedExpertFF when the arch
+	// declares one (qwenmoe's shared_expert_intermediate_size, distinct from the routed experts' width),
+	// else arch.ExpertFF — the pre-#57 assumption, kept as the fallback so every arch that doesn't
+	// declare a distinct shared width (every arch but qwenmoe's shared-expert family, today) derives the
+	// SAME SharedDown InDim as before this field existed. Only SharedDown needs it: SharedGate/SharedUp
+	// project FROM hidden (InDim == d regardless of the expert FF width), only Down projects FROM the FF
+	// width back to hidden.
+	sharedFF := arch.SharedExpertFF
+	if sharedFF == 0 {
+		sharedFF = arch.ExpertFF
+	}
 	return &LoadedMoE{
 		PreFFNorm:      norm(p + names.PreFFNorm),
 		PreFFNorm2:     norm(p + names.PreFFNorm2),
@@ -205,5 +273,21 @@ func assembleMoE(t map[string]safetensors.Tensor, p string, arch Arch, names MoE
 		ExpUp:          expUp,
 		ExpGateUp:      lin(p+names.ExpGateUp, d),
 		ExpDown:        lin(p+names.ExpDown, arch.ExpertFF),
+		SharedGate:     lin(p+names.SharedGate, d),
+		SharedUp:       lin(p+names.SharedUp, d),
+		SharedDown:     lin(p+names.SharedDown, sharedFF),
+		SharedSigmoid:  lin(p+names.SharedSigmoid, d),
 	}
+}
+
+// qkNormShapeOK reports a tensor shape's total element count and whether it is one of the two
+// attention QK-norm geometries this engine's kernels understand: PER-HEAD (== headDim) or
+// WHOLE-VECTOR (== heads*headDim). Dtype-agnostic (reads Shape, not a byte length divided by an
+// assumed element width) so it is correct whatever precision the checkpoint stores the tensor in.
+func qkNormShapeOK(shape []int, heads, headDim int) (n int, ok bool) {
+	n = 1
+	for _, s := range shape {
+		n *= s
+	}
+	return n, n == headDim || n == heads*headDim
 }

@@ -41,6 +41,7 @@
       [(ngModel)]="draft"
       [disabled]="reply.isLoading()"
       placeholder="Ask the local model…"
+      aria-label="Ask the local model"
       autocomplete="off"
     />
     <button type="submit" class="nbtn" [disabled]="reply.isLoading()">

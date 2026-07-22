@@ -6,9 +6,10 @@ package native
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/decode/dflash"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/composed"
-	"dappco.re/go/inference/model/mamba2"
+	"dappco.re/go/inference/model/arch/mamba2"
+	"dappco.re/go/inference/model/arch/rwkv7"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -85,6 +86,12 @@ type TokenModelLoadConfig struct {
 	// adapter_config.json) applied at load so `serve --adapter <path>` generates through the adapted
 	// model. Honoured for the bf16 head adapter (LoRATrainer.Save); see lora_apply.go.
 	AdapterPath string
+	// KVCacheMode is the requested LIVE cache mode ("" / "native" = the built-in
+	// bf16 cache; "turboquant[:N]" = TurboQuant codes on qualifying GLOBAL
+	// attention owners — #41 S3). Unknown modes and unservable combinations
+	// (paged KV, MoE/sinks archs, hybrid/recurrent archs) refuse at load rather
+	// than running silently native.
+	KVCacheMode string
 }
 
 // LoadTokenModelDir loads any registered architecture's checkpoint directory as a model.TokenModel —
@@ -119,6 +126,16 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	if loadCfg.PagedKVPageSize < 0 {
 		return nil, core.NewError("native.LoadTokenModelDir: paged KV page size must be >= 0")
 	}
+	// TurboQuant live KV (#41 S3): parse the requested mode up front — an
+	// unknown string refuses here — and refuse the combinations the v1 lane
+	// declares out of scope, loudly, before any weights load.
+	tqMode, tqErr := parseTurboQuantCacheMode(loadCfg.KVCacheMode)
+	if tqErr != nil {
+		return nil, tqErr
+	}
+	if tqMode != nil && loadCfg.PagedKVPageSize != 0 {
+		return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines paged KV (v1) — drop one of the two")
+	}
 	usedDefaultContext := maxLen <= 0
 	if usedDefaultContext {
 		// Serve/generate without -context used to cap every session at 4096 —
@@ -126,31 +143,48 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		// Default to the checkpoint's trained window instead, capped.
 		maxLen = resolveDefaultContext(model.ProbeDirContextWindow(dir))
 	}
-	// SSM / hybrid families don't fit the reactive transformer Assemble — route them to their own loader
-	// before the registered path. mamba2 is a standalone recurrent SSM; qwen3_5/3.6 is a config-composed
-	// hybrid (linear_attention gated-delta + full attention) built by the composed loader.
-	// (They keep the plain window-capped default: their state geometry isn't the
-	// transformer KV plan the RAM-aware clamp below budgets.)
+	// Standalone recurrent SSMs don't fit the reactive transformer Assemble — route them to their
+	// own loaders before the registered path. (They keep the plain window-capped default: their
+	// state geometry isn't the transformer KV plan the RAM-aware clamp below budgets.)
 	if mt, cfg, perr := model.ProbeDirArch(dir); perr == nil {
 		if mt == "mamba2" {
+			if tqMode != nil {
+				return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines recurrent archs (mamba2 holds SSM state, not a KV cache) — reload without -kv-cache")
+			}
 			// mamba2 is a standalone recurrent SSM with its own loader — it registers no
-			// ArchSpec, so it is reached by name here rather than through the composed registry.
+			// ArchSpec, so it is reached by name here.
 			return loadMamba2TokenModel(dir, cfg)
 		}
-		// Composed/hybrid archs route through the neutral registry: each registers an
-		// ArchSpec.Composed hook, and model.LoadComposedDir looks it up and builds the
-		// serve-ready TokenModel. A future qwenX checkpoint therefore loads with ZERO edits
-		// here — it is a new model-package init(), not an engine change. ok=false means the
-		// model_type is a plain transformer (no composed arch registered for it): fall through.
-		if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
-			return nil, cerr
-		} else if ok {
-			return tm, nil
+		if mt == "rwkv7" {
+			if tqMode != nil {
+				return nil, core.NewError("native.LoadTokenModelDir: -kv-cache turboquant declines recurrent archs (rwkv7 carries per-layer state, not a KV cache) — reload without -kv-cache")
+			}
+			// rwkv7 is a standalone recurrent SSM (token-shift + WKV7 time-mix +
+			// channel-mix, no attention) with its own loader — see model/arch/rwkv7.
+			// It registers no ArchSpec, so it is reached by name here.
+			return loadRWKV7TokenModel(dir, cfg)
 		}
+		// Every registered arch loads through the ONE factory route below (model.Load: parse →
+		// infer → derive → assemble). The retired composed engine's registry detour
+		// (model.LoadComposedDir) is gone (#50): qwen3_5/3.6 hybrids ride the factory's fused
+		// whole-token chain (#18 — faster than the composed lane was on both released hybrids),
+		// and a checkpoint the factory cannot serve fails HERE with a named error instead of
+		// falling back silently. Sub-2-bit packs (Bonsai 1-bit) serve through the LoadLinear
+		// b1→b2 exact repack + the owned-weight resident binding (#60) — the up-front decline
+		// they used to hit is gone. The qwen vision tower gap is closed too (#59 item 1): a
+		// vision-towered qwen checkpoint attaches its factory tower at the vision seam below
+		// (loadQwenVisionTower) and serves image turns; only a TEXT-ONLY checkpoint keeps the
+		// engine's clean not-a-vision-model refusal.
 	}
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
 		return nil, err
+	}
+	if tqMode != nil {
+		if terr := tqKVArchServable(lm.Arch, lm.Layers, tqMode); terr != nil {
+			_ = dm.Close()
+			return nil, terr
+		}
 	}
 	sb, err := buildShardBuffers(dm)
 	if err != nil {
@@ -187,6 +221,17 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		tm.headEnc = he
 		tm.vision = lm.Vision
 		tm.unifiedVision = lm.UnifiedVision
+		if lm.Vision == nil && lm.UnifiedVision == nil {
+			// The qwen35 factory vision tower (#59 item 1): assembled by the arch package from the
+			// mapped tensors when this is a vision-towered qwen hybrid; nil (no error) for every
+			// other checkpoint. A PRESENT but malformed tower fails the load loudly.
+			qv, qerr := loadQwenVisionTower(dir, dm)
+			if qerr != nil {
+				_ = sb.Close()
+				return nil, qerr
+			}
+			tm.qwenVision = qv
+		}
 		if lm.Vision != nil || lm.UnifiedVision != nil {
 			// Best-effort: absent/malformed processor config leaves the cfg nil and
 			// ProjectImage falls back to HF defaults, so it never fails the load.
@@ -222,6 +267,16 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	tm.headEnc = he
 	tm.vision = lm.Vision
 	tm.unifiedVision = lm.UnifiedVision
+	if lm.Vision == nil && lm.UnifiedVision == nil {
+		// The qwen35 factory vision tower (#59 item 1) — the bf16 arm's mirror of the quant arm's
+		// attach above.
+		qv, qerr := loadQwenVisionTower(dir, dm)
+		if qerr != nil {
+			_ = sb.Close()
+			return nil, qerr
+		}
+		tm.qwenVision = qv
+	}
 	if lm.Vision != nil || lm.UnifiedVision != nil {
 		// Best-effort: absent/malformed processor config leaves the cfg nil and
 		// ProjectImage falls back to HF defaults, so it never fails the load.
@@ -261,6 +316,9 @@ func nativeTokenModelBackendOptions(cfg TokenModelLoadConfig) []BackendOption {
 	if cfg.PagedKVPrealloc {
 		opts = append(opts, withPagedKVPrealloc(true))
 	}
+	if core.Trim(cfg.KVCacheMode) != "" {
+		opts = append(opts, withKVCacheMode(cfg.KVCacheMode))
+	}
 	return opts
 }
 
@@ -280,6 +338,23 @@ func loadMamba2TokenModel(dir string, cfg []byte) (model.TokenModel, error) {
 		return nil, err
 	}
 	return mamba2.NewTokenModel(mm), nil
+}
+
+// loadRWKV7TokenModel loads an rwkv7 checkpoint into the host-f32 recurrent RWKV7Model and wraps it as a
+// model.SessionModel — the mamba2 shape exactly: weights widen to owned f32 at load, the shard mmap is
+// unmapped before return. Dense/LoRA projections ride rwkv7.ProjMatMul, already wired to the steel GEMM
+// (rwkv7_backend.go), so the host chain gets device matmuls with no further engine wiring.
+func loadRWKV7TokenModel(dir string, cfg []byte) (model.TokenModel, error) {
+	dm, err := safetensors.LoadDirMmap(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dm.Close() }()
+	rm, err := rwkv7.LoadRWKV7Model(dm.Tensors, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return rwkv7.NewTokenModel(rm), nil
 }
 
 // mamba2EpsFromConfig reads rms_norm_eps from the checkpoint config (top-level or nested text_config),
@@ -302,34 +377,24 @@ func mamba2EpsFromConfig(cfg []byte) float32 {
 	}
 }
 
-// loadComposedTokenModel loads a config-composed hybrid checkpoint (Qwen 3.6) into the host-f32
-// ComposedModel and wraps it as a model.SessionModel. LoadComposed widens every weight to f32, so the
-// shard mmap is unmapped before return. Host f32 today (correct, the orchestration scaffold); a device
-// path (the projections already have a GEMM seam; attention is a later device kernel) is the perf follow-up.
-//
-// NOT called from LoadTokenModelDirWithConfig any more: every model_type this once served as the switch's
-// fallback arm (qwen3_6/qwen3_6_moe/composed/hybrid) now registers a Composed hook in model/composed, so
-// model.LoadComposedDir reaches the identical LoadComposed+NewTokenModel pair through the registry. Kept for
-// TestNativeTokenModelSpecialLoaderErrors, which exercises it directly.
-func loadComposedTokenModel(dir string, cfg []byte) (model.TokenModel, error) {
-	dm, err := safetensors.LoadDirMmap(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = dm.Close() }()
-	cm, err := composed.LoadComposed(dm.Tensors, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return composed.NewTokenModel(cm), nil
-}
-
 // loadRegistered delegates to the reactive engine loader (model.Load): probe model_type → the registered
 // ArchSpec → parse / infer-from-weights / derive Arch / assemble. The shared front half of every directory
 // load; returns the neutral LoadedModel + the DirMapping its byte views reference (the caller binds device
 // buffers from it, then it lives on the session/token-model via shardBuffers). The backend holds no
 // per-arch knowledge — the model package owns its config + weight-name declaration, model.Load reacts.
+//
+// One typed decline lives here rather than in a model package: a DFlash speculative DRAFTER dir
+// (architectures ["DFlashDraftModel"]) must not resolve as a primary model — its model_type is literally
+// "qwen3", so the reactive route would accept it and then fail on the missing embed_tokens (the drafter
+// borrows the target's embedding and head — model/arch/z-lab/dflash). Naming the real situation beats
+// that bewildering missing-tensor error; the assistant/-draft loaders do not route through here, so the
+// drafter paths are unaffected.
 func loadRegistered(dir string) (*model.LoadedModel, *safetensors.DirMapping, error) {
+	if _, cfg, err := model.ProbeDirArch(dir); err == nil {
+		if _, isDrafter := dflash.ParseConfig(cfg); isDrafter {
+			return nil, nil, core.NewError("native: " + dir + " is a DFlash speculative drafter (architectures [\"DFlashDraftModel\"]), not a standalone model — pass it as -draft beside its verifier target (serving is pending the DFlash glue lane; see docs/design-dflash-forward.md)")
+		}
+	}
 	return model.Load(dir)
 }
 

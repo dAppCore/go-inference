@@ -2,11 +2,7 @@
 
 package tui
 
-import (
-	"strings"
-
-	core "dappco.re/go"
-)
+import core "dappco.re/go"
 
 // The Settings tab: a cursor list of knobs adjusted with ←/→ (or h/l). Values
 // apply to the NEXT load (context) or the next turn (the rest) — the honest
@@ -27,6 +23,30 @@ var (
 
 func newSettings() settings {
 	return settings{maxTokIdx: 3} // 4096 — thinking spends from the budget
+}
+
+func (s settings) withPreferenceValues(values preferenceValues) settings {
+	for index, value := range ctxSteps {
+		if value == values.ContextLength {
+			s.ctxIdx = index
+			break
+		}
+	}
+	for index, value := range maxTokSteps {
+		if value == values.MaxTokens {
+			s.maxTokIdx = index
+			break
+		}
+	}
+	switch values.Thinking {
+	case "on":
+		s.thinkIdx = 1
+	case "off":
+		s.thinkIdx = 2
+	default:
+		s.thinkIdx = 0
+	}
+	return s
 }
 
 func (s settings) contextLen() int { return ctxSteps[s.ctxIdx] }
@@ -83,19 +103,19 @@ func (s settings) move(delta int) settings {
 	return s
 }
 
-func (s settings) view(width int) string {
-	var b strings.Builder
-	b.WriteString(styleTitle.Render("settings") + "\n\n")
+func (s settings) view(width int, styles uiStyles) string {
+	var b core.Builder
+	b.WriteString(styles.title.Render("settings") + "\n\n")
 	for i, row := range s.rows() {
 		cursor := "  "
-		name := styleAnswer.Render(row.name)
+		name := styles.answer.Render(row.name)
 		if i == s.cursor {
-			cursor = styleAccent.Render("› ")
-			name = styleAccent.Render(row.name)
+			cursor = styles.accent.Render("› ")
+			name = styles.accent.Render(row.name)
 		}
-		b.WriteString(cursor + name + "  " + styleTitle.Render("‹ "+row.value+" ›") + "\n")
-		b.WriteString("    " + styleThought.Render(row.hint) + "\n\n")
+		b.WriteString(cursor + name + "  " + styles.title.Render("‹ "+row.value+" ›") + "\n")
+		b.WriteString("    " + styles.thought.Render(row.hint) + "\n\n")
 	}
-	b.WriteString(styleStatus.Render("↑/↓ select · ←/→ change · values apply as hinted"))
+	b.WriteString(styles.status.Render("↑/↓ select · ←/→ change · values apply as hinted"))
 	return b.String()
 }

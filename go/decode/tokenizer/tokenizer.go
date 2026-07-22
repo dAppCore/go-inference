@@ -248,7 +248,7 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 			return nil, core.E("tokenizer.LoadTokenizer", "re-encode vocab", nil)
 		}
 		var vocab map[string]int32
-		if r := core.JSONUnmarshal(vocabBytes.Value.([]byte), &vocab); !r.OK {
+		if r := core.JSONUnmarshal(vocabBytes.Bytes(), &vocab); !r.OK {
 			return nil, core.E("tokenizer.LoadTokenizer", "parse vocab", nil)
 		}
 		tokenizer.vocab = vocab
@@ -261,7 +261,7 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 	if tj.Model.Merges != nil {
 		mergeBytes := core.JSONMarshal(tj.Model.Merges)
 		if mergeBytes.OK {
-			raw := mergeBytes.Value.([]byte)
+			raw := mergeBytes.Bytes()
 			var stringMerges []string
 			if r := core.JSONUnmarshal(raw, &stringMerges); r.OK {
 				for rank, merge := range stringMerges {
@@ -1206,22 +1206,35 @@ func utf8EncodeRune(p []byte, r rune) int {
 	}
 }
 
-// BOSToken returns the beginning-of-sequence token ID.
+// BOSToken returns the beginning-of-sequence token ID. It carries the SAME
+// undeclared-fallback contract as EOSToken below — see that doc comment.
 func (t *Tokenizer) BOSToken() int32 { return t.bosToken }
 
-// EOSToken returns the end-of-sequence (generation stop) token ID.
+// EOSToken returns the end-of-sequence (generation stop) token ID. When the
+// loaded tokenizer.json never declared <eos>/<end_of_turn>/<|im_end|>/
+// <|eot_id|>/<turn|>, this returns the Go zero value, int32(0) — NOT a "no
+// EOS" sentinel, and possibly a real vocabulary id. Callers that arm this id
+// as a stop/termination condition MUST gate on HasEOSToken() first (#64: an
+// undeclared-EOS checkpoint that greedily emitted id 0 had Generate silently
+// truncated to one token before engine.TextModel's buildStopTokens picked up
+// that gate). Callers that only display or report the id may use it as-is.
 func (t *Tokenizer) EOSToken() int32 { return t.eosToken }
 
 // HasBOSToken reports whether the tokenizer explicitly defines a BOS token.
 func (t *Tokenizer) HasBOSToken() bool { return t != nil && t.hasBOS }
 
-// HasEOSToken reports whether the tokenizer explicitly defines an EOS/stop token.
+// HasEOSToken reports whether the tokenizer explicitly defines an EOS/stop
+// token — the gate EOSToken/EOS's doc comments require before arming their
+// return value as a stop condition.
 func (t *Tokenizer) HasEOSToken() bool { return t != nil && t.hasEOS }
 
-// BOS returns the beginning-of-sequence token ID.
+// BOS returns the beginning-of-sequence token ID. See BOSToken's doc comment
+// for the undeclared-fallback contract this delegates verbatim.
 func (t *Tokenizer) BOS() int32 { return t.BOSToken() }
 
-// EOS returns the end-of-sequence (generation stop) token ID.
+// EOS returns the end-of-sequence (generation stop) token ID. See EOSToken's
+// doc comment for the undeclared-fallback contract this delegates verbatim —
+// gate on HasEOSToken() before treating the result as a real stop id.
 func (t *Tokenizer) EOS() int32 { return t.EOSToken() }
 
 // TokenID looks up a token string in the vocabulary.

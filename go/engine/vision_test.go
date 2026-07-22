@@ -87,6 +87,44 @@ var (
 	_ Session       = (*fakeVisionSession)(nil)
 )
 
+// fakeVisionBudgetTokenModel layers the OPTIONAL [VisionBudgetTokenModel]
+// capability over fakeVisionTokenModel — ProjectImageAt records every budget
+// it was called with and returns its OWN canned features/softTokens, distinct
+// from the embedded fakeVisionTokenModel's plain ProjectImage canned values
+// (which ProjectImage here also counts separately), so a test can tell which
+// of the two methods actually ran.
+type fakeVisionBudgetTokenModel struct {
+	fakeVisionTokenModel
+
+	budgetFeatures   []byte
+	budgetSoftTokens int
+	budgetErr        error
+
+	projectImageAtCalls []int // budgets passed, in call order
+	projectImageCalls   int   // plain ProjectImage call count
+}
+
+func (f *fakeVisionBudgetTokenModel) ProjectImageAt(image []byte, budget int) ([]byte, int, error) {
+	f.projectImageAtCalls = append(f.projectImageAtCalls, budget)
+	if f.budgetErr != nil {
+		return nil, 0, f.budgetErr
+	}
+	return f.budgetFeatures, f.budgetSoftTokens, nil
+}
+
+// ProjectImage shadows the embedded fakeVisionTokenModel's method purely to
+// count calls through the PLAIN (non-budget) path separately from
+// ProjectImageAt — the embedded method still supplies the canned return value.
+func (f *fakeVisionBudgetTokenModel) ProjectImage(image []byte) ([]byte, int, error) {
+	f.projectImageCalls++
+	return f.fakeVisionTokenModel.ProjectImage(image)
+}
+
+var (
+	_ VisionTokenModel       = (*fakeVisionBudgetTokenModel)(nil)
+	_ VisionBudgetTokenModel = (*fakeVisionBudgetTokenModel)(nil)
+)
+
 // --- AcceptsImages -----------------------------------------------------
 
 // TestVision_TextModel_AcceptsImages_Good pins the positive probe: an engine
@@ -214,6 +252,46 @@ func TestChatMultimodal_Good(t *testing.T) {
 	// placeholder count survives tokenisation exactly, independent of noise.
 	if len(visionSess.embedIDs) != 4 {
 		t.Fatalf("prefilled %d ids, want 4 (1 BOS + 3 placeholder tokens)", len(visionSess.embedIDs))
+	}
+}
+
+// TestChatMultimodal_Good_ProjectImageAtBudget walks the image-turn path with
+// an explicit inference.WithVisionBudget: the loaded checkpoint implements
+// VisionBudgetTokenModel, so the spliced features/soft-token count come from
+// ProjectImageAt (never the plain ProjectImage) and the exact requested
+// budget reaches the engine call — proving the request-level seam OpenAI's
+// mm_processor_kwargs.max_soft_tokens / image_url.detail resolve onto in the
+// serving layer actually reaches the vision tower.
+func TestChatMultimodal_Good_ProjectImageAtBudget(t *testing.T) {
+	tok := newFixtureTokenizer(t)
+	visionSess := &fakeVisionSession{fakeSession: fakeSession{genIDs: []int32{10, 11}}}
+	fake := &fakeVisionBudgetTokenModel{
+		fakeVisionTokenModel: fakeVisionTokenModel{
+			accepts:          true,
+			placeholderID:    42, // the fixture tokenizer's "z" vocab entry
+			placeholderBlock: "zz",
+			embedRows:        [][]byte{{0}, {1}, {2}},
+			session:          visionSess,
+		},
+		budgetFeatures:   []byte{5, 5},
+		budgetSoftTokens: 2,
+	}
+	m := NewTextModel(fake, tok, "gemma-test", inference.ModelInfo{}, 4096)
+	messages := []inference.Message{{Role: "user", Content: "hi", Images: [][]byte{{1, 2, 3}}}}
+
+	for range m.Chat(context.Background(), messages, inference.WithMaxTokens(2), inference.WithVisionBudget(1120)) {
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("Chat over an image turn with an explicit vision budget failed: %+v", r)
+	}
+	if len(fake.projectImageAtCalls) != 1 || fake.projectImageAtCalls[0] != 1120 {
+		t.Fatalf("ProjectImageAt calls = %v, want exactly one call with budget 1120", fake.projectImageAtCalls)
+	}
+	if fake.projectImageCalls != 0 {
+		t.Fatalf("plain ProjectImage called %d times, want 0 (ProjectImageAt should have been preferred)", fake.projectImageCalls)
+	}
+	if !visionSess.prefillEmbedCalled {
+		t.Fatal("chatMultimodal did not prefill token embeddings")
 	}
 }
 
@@ -527,6 +605,65 @@ func TestCountTokenID(t *testing.T) {
 	}
 	if got := countTokenID(nil, 42); got != 0 {
 		t.Fatalf("countTokenID(nil, ...) = %d, want 0", got)
+	}
+}
+
+// TestProjectImageAtBudget_Good pins the budget-aware preference: a model
+// implementing VisionBudgetTokenModel with an explicit budget (>0) is
+// projected via ProjectImageAt, not the plain ProjectImage.
+func TestProjectImageAtBudget_Good(t *testing.T) {
+	fake := &fakeVisionBudgetTokenModel{budgetFeatures: []byte{9, 9, 9}, budgetSoftTokens: 5}
+	features, softTokens, err := projectImageAtBudget(fake, []byte{1}, 1120)
+	if err != nil {
+		t.Fatalf("projectImageAtBudget: %v", err)
+	}
+	if string(features) != string([]byte{9, 9, 9}) || softTokens != 5 {
+		t.Fatalf("projectImageAtBudget = %v, %d, want the ProjectImageAt canned values", features, softTokens)
+	}
+	if len(fake.projectImageAtCalls) != 1 || fake.projectImageAtCalls[0] != 1120 {
+		t.Fatalf("ProjectImageAt calls = %v, want exactly one call with budget 1120", fake.projectImageAtCalls)
+	}
+	if fake.projectImageCalls != 0 {
+		t.Fatalf("ProjectImage called %d times, want 0 (ProjectImageAt should have been preferred)", fake.projectImageCalls)
+	}
+}
+
+// TestProjectImageAtBudget_Bad pins the no-explicit-request fallback: budget
+// <= 0 always projects through the plain ProjectImage, even when the model
+// implements VisionBudgetTokenModel.
+func TestProjectImageAtBudget_Bad(t *testing.T) {
+	fake := &fakeVisionBudgetTokenModel{
+		fakeVisionTokenModel: fakeVisionTokenModel{projectFeatures: []byte{1}, projectSoftTokens: 3},
+	}
+	for _, budget := range []int{0, -1} {
+		features, softTokens, err := projectImageAtBudget(fake, []byte{1}, budget)
+		if err != nil {
+			t.Fatalf("projectImageAtBudget(budget=%d): %v", budget, err)
+		}
+		if string(features) != string([]byte{1}) || softTokens != 3 {
+			t.Fatalf("projectImageAtBudget(budget=%d) = %v, %d, want the ProjectImage canned values", budget, features, softTokens)
+		}
+	}
+	if len(fake.projectImageAtCalls) != 0 {
+		t.Fatalf("ProjectImageAt called %v times, want none (budget <= 0 must never call it)", fake.projectImageAtCalls)
+	}
+	if fake.projectImageCalls != 2 {
+		t.Fatalf("ProjectImage called %d times, want 2", fake.projectImageCalls)
+	}
+}
+
+// TestProjectImageAtBudget_Ugly pins the capability-absent fallback: an
+// explicit budget against a model that does NOT implement
+// VisionBudgetTokenModel falls back to ProjectImage cleanly rather than
+// panicking on the failed type assertion.
+func TestProjectImageAtBudget_Ugly(t *testing.T) {
+	fake := &fakeVisionTokenModel{projectFeatures: []byte{7}, projectSoftTokens: 2}
+	features, softTokens, err := projectImageAtBudget(fake, []byte{1}, 1120)
+	if err != nil {
+		t.Fatalf("projectImageAtBudget: %v", err)
+	}
+	if string(features) != string([]byte{7}) || softTokens != 2 {
+		t.Fatalf("projectImageAtBudget = %v, %d, want the ProjectImage canned values (no budget seam on this model)", features, softTokens)
 	}
 }
 

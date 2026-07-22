@@ -53,7 +53,7 @@ func init() {
 	n := int64(2)
 	if v := os.Getenv("LTHN_GPU_CAPTURE_CBS"); v != "" {
 		if r := core.Atoi(v); r.OK {
-			if c, ok := r.Value.(int); ok && c > 0 {
+			if c := r.Int(); c > 0 {
 				n = int64(c)
 			}
 		}

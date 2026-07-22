@@ -12,6 +12,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv/budget"
 	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
@@ -147,6 +148,12 @@ func (m *NativeTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.L
 	if m == nil {
 		return nil, core.NewError("native.OpenLaneSet: nil model")
 	}
+	// TurboQuant live KV declines the batch/interleave lanes (v1): the laneSet's
+	// interleaved landings and GEMM folds read/write bf16 cache rows. Refuse
+	// loudly — the per-session decode lane carries TQ.
+	if tqMode, _ := parseTurboQuantCacheMode(m.kvCacheMode); tqMode != nil {
+		return nil, core.NewError("native.OpenLaneSet: -kv-cache turboquant declines the continuous-batching laneSet (v1) — serve per-session or drop -kv-cache")
+	}
 	maxLanes := cfg.MaxLanes
 	if maxLanes <= 0 {
 		maxLanes = defaultLaneSetMaxLanes
@@ -161,9 +168,70 @@ func (m *NativeTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.L
 
 // defaultLaneSetMaxLanes bounds concurrent lanes when the caller gives no cap.
 // Conservative: KV co-residency for several long-context sessions is a real
-// device-memory user (docs/design-continuous-batching.md §c), and slice 1 does
-// not yet gate admission through kv/budget.FitsMemory.
+// device-memory user (docs/design-continuous-batching.md §c). This count alone
+// does not know a lane's KV cost, so admission additionally gates through
+// kv/budget.FitsMemory (admitMemoryBudget) — a full-but-tiny MaxLanes cap must
+// not let K long-context lanes OOM a box this count alone would have allowed.
 const defaultLaneSetMaxLanes = 8
+
+// admitLaneMemoryBudget is the pure decision behind admitMemoryBudget: does
+// admitting the liveLanes-th lane (this candidate included) keep the model's
+// total resident KV bytes within the device memory budget? Every lane opened
+// from the same laneSet shares one fixed context length and architecture
+// (NativeBackend.arch/maxLen, captured once at load and closed over by
+// NativeTokenModel.openSession — every ArchSession a laneSet opens reuses
+// them), so one lane's footprint (sessionKVBytesAt) times the lane count IS
+// the set's exact KV total.
+//
+// It reuses kv/budget.FitsMemory — the same fits-a-budget primitive the
+// single-session load path's RAM guard is built from (clampContextToRAM,
+// same file) — handing it the admission's total byte requirement as ONE
+// "token" of that many "bytes": FitsMemory's
+// workingTokens*bytesPerToken<=deviceBudget then performs the exact
+// comparison, rather than a second hand-rolled <=.
+//
+// ramBytes/weightsBytes are passed in (rather than read here) so this stays a
+// pure function of its inputs — admitMemoryBudget is the thin wrapper that
+// gathers them from the live model/box, exactly as clampContextToRAM /
+// clampDefaultContextToRAM split the same way. Fails OPEN (nil error) when
+// ramBytes is unmeasured (0), liveLanes is non-positive (nothing admitted
+// yet), or the model prices out to zero KV bytes (no cache-owning layers) —
+// never a silent admit beyond that: a measured, over-budget admission returns
+// a clean, non-nil error.
+func admitLaneMemoryBudget(arch model.Arch, ctxLen int, weightsBytes, ramBytes uint64, liveLanes int64) error {
+	if ramBytes == 0 || liveLanes <= 0 {
+		return nil
+	}
+	perLane := sessionKVBytesAt(arch, ctxLen)
+	if perLane == 0 {
+		return nil
+	}
+	deviceBudget, ok := sessionMemoryBudgetBytes(weightsBytes, ramBytes)
+	working := uint64(liveLanes) * perLane
+	if !ok || !budget.FitsMemory(1, intFromBytes(working), intFromBytes(deviceBudget)) {
+		return core.NewError(core.Sprintf(
+			"native.laneSet: admitting lane %d needs %d MiB of KV cache against a %d MiB device memory budget (weights %d MiB, RAM %d MiB) — declined",
+			liveLanes, working>>20, deviceBudget>>20, weightsBytes>>20, ramBytes>>20))
+	}
+	return nil
+}
+
+// admitMemoryBudget is admitLaneMemoryBudget's live wrapper: it gathers this
+// laneSet's model geometry, resident weight bytes, and the box's physical RAM,
+// then defers the actual fits-or-declines call to the pure function. liveLanes
+// is the lane count AFTER this admission (existing lanes + the candidate),
+// supplied by the caller because it is read differently depending on which
+// goroutine is asking — see the two call sites in BeginPrepare/CommitPrepare.
+//
+// Fails OPEN (never declines) when the RAM guard is disabled
+// (LTHN_CONTEXT_RAM_GUARD=0) — the same kill switch clampContextToRAM honours,
+// so both admission paths share one lever.
+func (ls *laneSet) admitMemoryBudget(liveLanes int64) error {
+	if !contextRAMGuardEnabled || ls == nil || ls.model == nil || ls.model.NativeBackend == nil {
+		return nil
+	}
+	return admitLaneMemoryBudget(ls.model.arch, ls.model.maxLen, ls.model.shards.totalMappedBytes(), physicalRAMBytes(), liveLanes)
+}
 
 // Prepare admits a new lane: it opens a fresh session sharing the model weights,
 // prefills the prompt through the session's production prefill route (so the
@@ -222,6 +290,16 @@ func (ls *laneSet) BeginPrepare(ctx context.Context, spec inference.LaneSpec) (i
 		return nil, core.NewError("native.laneSet.Prepare: MaxNew must be > 0")
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Advisory fail-fast: liveLanes is the ONE laneSet datum safe to read from
+	// an off-goroutine BeginPrepare (overlapped admission, struct doc above) —
+	// a concurrent BeginPrepare racing this one can still slip past both
+	// checks, but CommitPrepare's raceless recheck is the authoritative gate
+	// (same shape as the MaxLanes bound this comment already describes), so a
+	// slip here only costs a wasted prefill, never a bad admission. Checked
+	// before openLaneSession so a doomed admission doesn't even pay for that.
+	if err := ls.admitMemoryBudget(ls.liveLanes.Load() + 1); err != nil {
 		return nil, err
 	}
 
@@ -291,6 +369,15 @@ func (ls *laneSet) CommitPrepare(p inference.PendingLane) (inference.LaneHandle,
 		pl.Discard()
 		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: lane set is at MaxLanes")
 	}
+	// Authoritative recheck: CommitPrepare owns the goroutine and ls.lanes is
+	// raceless here, so this is the real gate — BeginPrepare's own check above
+	// is only an advisory fail-fast that a concurrent overlapped admission can
+	// race past. A candidate that no longer fits is declined and discarded
+	// (its session closes; nothing was spliced in, nothing to unwind).
+	if err := ls.admitMemoryBudget(int64(len(ls.lanes)) + 1); err != nil {
+		pl.Discard()
+		return inference.LaneHandle{}, err
+	}
 	if ls.dModel == 0 {
 		ls.dModel = pl.dModel
 	}
@@ -319,7 +406,7 @@ const laneOverlapPrefillChunkRows = 512
 // original one-token-at-a-time stepBody loop: byte-compatible (the sampled
 // and E2B oracle receipts compare lanes against classic sessions prefilled by
 // exactly this route) but ~40× cheaper on admission — the serial loop paid
-// one commit+wait per prompt token (measured live 2026-07-13: 4 concurrent
+// one commit+wait per prompt token (measured live: 4 concurrent
 // 1161-token chat admissions took 29.8s serial vs 0.6s on this route).
 func (ls *laneSet) prefillLane(lane *decodeLane, promptIDs []int32) error {
 	hidden, err := lane.sess.prefillRetainedTokens(promptIDs, "native.laneSet.Prepare")

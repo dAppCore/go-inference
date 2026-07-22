@@ -19,6 +19,21 @@ const (
 	SlidingAttention                      // sliding_attention — windowed
 )
 
+// MixerKind is a layer's SEQUENCE-MIXER family — the named algorithm that mixes across positions.
+// It is orthogonal to AttentionType (which is only a SPAN within the attention family). A layer
+// declares exactly one: standard multi-head attention (q/k/v/o projections over a KV cache), or a
+// linear-attention recurrence (gated-delta: a recurrent state, no KV cache). Adding a mixer family
+// is a new named kind here + its build branch in model.Assemble + its decode in the backend — the
+// registry/factory extension the reactive loader was built for, NOT a parallel load path. The zero
+// value is MixerAttention, so every arch that declares nothing (gemma4, llama, qwen2, …) is
+// byte-identical — this field only shifts a layer that a config explicitly maps to a recurrence.
+type MixerKind uint8
+
+const (
+	MixerAttention  MixerKind = iota // multi-head attention (q/k/v/o + KV cache) — the default
+	MixerGatedDelta                  // gated-delta linear-attention recurrence (recurrent state, no KV cache)
+)
+
 // QKNormalization declares the per-head operation applied to projected queries
 // and keys before rotary position encoding. It is an architecture property, not
 // inferred from the presence of weights: Cohere's LayerNorm may be enabled by a
@@ -35,10 +50,11 @@ const (
 // LayerSpec declares one decode layer's structure, backend-agnostic.
 type LayerSpec struct {
 	Attention     AttentionType
-	DisableRotary bool // skip the architecture's RoPE declaration for an explicit NoPE layer
-	KVShareFrom   int  // index of the layer whose KV cache this layer reads (== own index if it owns its cache)
-	CacheIndex    int  // cache slot for an owner; -1 if this layer shares another's cache
-	MoE           bool // sparse-expert MLP instead of dense (derivation: a later slice)
+	Mixer         MixerKind // the sequence-mixer family (default MixerAttention); a config maps a recurrence layer to MixerGatedDelta
+	DisableRotary bool      // skip the architecture's RoPE declaration for an explicit NoPE layer
+	KVShareFrom   int       // index of the layer whose KV cache this layer reads (== own index if it owns its cache)
+	CacheIndex    int       // cache slot for an owner; -1 if this layer shares another's cache
+	MoE           bool      // sparse-expert MLP instead of dense (derived from the checkpoint's expert tensors — #18)
 	// HeadDim / KVHeads are this layer's RESOLVED attention geometry. Some archs use a
 	// LARGER head_dim on full_attention layers than on sliding (e.g. sliding head_dim
 	// 256, full global_head_dim 512), and may carry a different KV head count on full
@@ -105,7 +121,7 @@ func (a Arch) HasMoE() bool {
 // as Arch.AttnScale / EmbedScale). Today the metal router ships softmax top-k; sigmoid
 // gating, top-k weight renormalisation (norm_topk_prob), routed-scaling, and always-on
 // shared experts — the deepseek / qwen3 / composed variants — each earn a value plus a
-// router branch as they land (model/composed/moe.go already implements softmax +
+// router branch as they land (the retired composed engine's moe.go already implemented softmax +
 // norm-topk + shared expert on the reference path).
 type MoEGating string
 
@@ -163,26 +179,35 @@ type Arch struct {
 	RopeOriginalContext                                      int       // positions below this boundary use RopeShortFreqs; 0 = one static table
 	SoftCap                                                  float32   // final logit soft-cap (0 = none)
 	SlidingWindow                                            int
-	PerLayerInputVocab, PerLayerInputHidden                  int             // per-layer-input aux embedding (0 = absent)
-	AttentionKEqV                                            bool            // K == V (shared projection)
-	ValueNorm                                                bool            // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
-	ParallelResidual                                         bool            // attention and MLP consume the same normalised input, then both outputs join the residual
-	ALiBi                                                    bool            // attention uses linear position bias instead of rotary embeddings
-	TieWordEmbeddings                                        *bool           // nil = checkpoint presence decides; non-nil validates lm_head against config.json
-	LearnedAbsolutePositions                                 bool            // token embeddings are offset by a learned position table
-	PositionOffset                                           int             // learned-position table offset (OPT reserves positions 0 and 1)
-	NormaliseMoETopK                                         bool            // renormalise selected router weights to sum to one
-	SharedExperts                                            int             // always-on shared expert count; zero means routed experts only
-	LayerNormBefore                                          bool            // attention and MLP are pre-norm; false declares post-norm
-	NoFinalNorm                                              bool            // layer stack has no final norm (OPT post-norm checkpoints)
-	MultiQueryAttention                                      bool            // one K/V head is shared by every query head
-	Activation                                               string          // declared feed-forward activation (for example gelu_new)
-	QKNormalization                                          QKNormalization // per-head Q/K normalisation before position encoding
-	QKVClip                                                  float32         // symmetric clamp applied to projected Q/K/V; zero disables it
-	LayerNorm                                                bool            // centred LayerNorm for block and final norms instead of RMSNorm
-	NormPlacement                                            NormPlacement   // declared norm-placement strategy (OLMo generations differ)
-	NonParametricLayerNorm                                   bool            // LayerNorm has no learned scale or bias (OLMo 1)
-	Layer                                                    []LayerSpec
+	PerLayerInputVocab, PerLayerInputHidden                  int   // per-layer-input aux embedding (0 = absent)
+	AttentionKEqV                                            bool  // K == V (shared projection)
+	AttnOutputGate                                           bool  // Qwen3.5 attn_output_gate: full-attention layers emit [q ; gate] from q_proj and sigmoid-gate the attention output before o_proj; other arches leave it false
+	ValueNorm                                                bool  // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	ParallelResidual                                         bool  // attention and MLP consume the same normalised input, then both outputs join the residual
+	ALiBi                                                    bool  // attention uses linear position bias instead of rotary embeddings
+	TieWordEmbeddings                                        *bool // nil = checkpoint presence decides; non-nil validates lm_head against config.json
+	LearnedAbsolutePositions                                 bool  // token embeddings are offset by a learned position table
+	PositionOffset                                           int   // learned-position table offset (OPT reserves positions 0 and 1)
+	NormaliseMoETopK                                         bool  // renormalise selected router weights to sum to one
+	SharedExperts                                            int   // always-on shared expert count; zero means routed experts only
+	// SharedExpertFF is the always-on shared expert's OWN intermediate size (#57 — qwenmoe's
+	// shared_expert_intermediate_size, distinct from the routed experts' ExpertFF: real Qwen1.5-MoE-A2.7B
+	// ships moe_intermediate_size=1408 but shared_expert_intermediate_size=5632, a 4x mismatch). Zero is
+	// the "no distinct width declared" default — assembleMoE falls back to ExpertFF, so every arch that
+	// doesn't populate this field (which is every arch but qwenmoe's shared-expert family, today) is
+	// byte-identical to before this field existed.
+	SharedExpertFF         int
+	LayerNormBefore        bool            // attention and MLP are pre-norm; false declares post-norm
+	NoFinalNorm            bool            // layer stack has no final norm (OPT post-norm checkpoints)
+	MultiQueryAttention    bool            // one K/V head is shared by every query head
+	Activation             string          // declared feed-forward activation (for example gelu_new)
+	SwigluLimit            float32         // gpt_oss clamped-SwiGLU clip bound (config swiglu_limit, 7.0 on every published checkpoint); zero = activation has no clamp
+	QKNormalization        QKNormalization // per-head Q/K normalisation before position encoding
+	QKVClip                float32         // symmetric clamp applied to projected Q/K/V; zero disables it
+	LayerNorm              bool            // centred LayerNorm for block and final norms instead of RMSNorm
+	NormPlacement          NormPlacement   // declared norm-placement strategy (OLMo generations differ)
+	NonParametricLayerNorm bool            // LayerNorm has no learned scale or bias (OLMo 1)
+	Layer                  []LayerSpec
 }
 
 // MaxHeadDim is the larger of the sliding and full head_dim — the head_dim a backend
@@ -219,6 +244,13 @@ func DeriveLayers(layerTypes []string, numKVShared int) []LayerSpec {
 	latestByType := map[AttentionType]int{}
 	nextCache := 0
 	for i := range n {
+		if layerTypes[i] == "linear_attention" {
+			// A gated-delta recurrence layer (Qwen3.5 hybrid): a named MixerGatedDelta with NO KV cache
+			// (it threads a recurrent state, not attention) — CacheIndex -1, owns nothing. gemma never
+			// declares "linear_attention", so its layers are byte-identical (#18).
+			specs[i] = LayerSpec{Mixer: MixerGatedDelta, KVShareFrom: i, CacheIndex: -1}
+			continue
+		}
 		at := GlobalAttention
 		if layerTypes[i] == "sliding_attention" {
 			at = SlidingAttention

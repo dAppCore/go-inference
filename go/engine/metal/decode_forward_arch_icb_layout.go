@@ -25,6 +25,13 @@ type archICBOpCaps struct {
 	// fused per-head QK-norm+RoPE, fused input-RMSNorm+projection recording, fused
 	// residual-RMSNorm (post-norm + residual add in one op).
 	fusedGELU, fusedQKRope, fusedRMSProj, fusedResRMS bool
+	// siluMLP: the feed-forward gate is SiLU (llama/mistral/qwen SwiGLU) — silu(gate)·up
+	// as a 3-op composed chain (sigmoid + two muls), replacing the GELU gate entirely
+	// (there is no fused SiLU kernel). Mutually exclusive with the GELU op-counts.
+	siluMLP bool
+	// qkvBias: Qwen2/2.5's additive q/k/v projection bias — one bf16 vector-add after each
+	// of the Q/K/V projections (before QK-norm/RoPE), 3 ops/layer. o_proj/MLP carry none.
+	qkvBias bool
 }
 
 // archICBOpLayout is the RESOLVED per-layer ICB op layout: which optional per-layer
@@ -45,7 +52,9 @@ type archICBOpLayout struct {
 	// write: the plain rope op writes the cache at index 1; the fused kNorm+rope op
 	// writes it at index 2 (its `out`).
 	kRopeBindIdx uint
-	opsPerLayer  int // ICB command slots per layer — the replay's per-layer carve stride
+	opsPerLayer  int  // ICB command slots per layer — the replay's per-layer carve stride
+	siluMLP      bool // record silu(gate)·up instead of the GELU gate
+	qkvBias      bool // record the additive q/k/v bias-add after each projection
 }
 
 // resolveArchICBOpLayout resolves the per-layer op layout from the family-declared
@@ -58,6 +67,8 @@ func resolveArchICBOpLayout(specs []model.LayerSpec, caps archICBOpCaps) archICB
 		hasPA:        specs[0].PostAttnNorm || caps.postAttnBuf,
 		hasPF:        specs[0].PostFFNorm || caps.postFFBuf,
 		kRopeBindIdx: 1,
+		siluMLP:      caps.siluMLP,
+		qkvBias:      caps.qkvBias,
 	}
 	extra := 0
 	for _, h := range []bool{lay.hasQN, lay.hasKN, lay.hasPA, lay.hasPF} {
@@ -69,8 +80,13 @@ func resolveArchICBOpLayout(specs []model.LayerSpec, caps archICBOpCaps) archICB
 		extra++
 	}
 	ops := 24 + extra
-	if caps.fusedGELU { // fused gelu is 1 command vs the composed chain's 10
+	if caps.siluMLP {
+		ops -= 7 // silu(gate)·up is a 3-op composed chain (sigmoid + two muls), replacing the 10-op gelu
+	} else if caps.fusedGELU { // fused gelu is 1 command vs the composed chain's 10
 		ops -= 9
+	}
+	if caps.qkvBias {
+		ops += 3 // one bf16 vector-add after each of Q/K/V (Qwen2 additive bias)
 	}
 	// fused QK-norm+rope collapses (qNorm + ropeQ) and (kNorm + ropeK) from 2 ops to
 	// 1 each when the layer has QK-norm; the fused K op moves the cache-row bind to 2.
@@ -113,8 +129,10 @@ func resolveArchICBOpLayout(specs []model.LayerSpec, caps archICBOpCaps) archICB
 
 // total is the whole-stack ICB command count: the uniform per-layer stride plus the
 // stack-global additions — each GLOBAL layer recording the 2-pass SDPA costs one op
-// over the single-pass layout, and each q8 owner layer records two quantise-store
-// ops (K row, V row).
-func (l archICBOpLayout) total(nLayers, nGlobal2Pass, nQ8Store int) int {
-	return l.opsPerLayer*nLayers + nGlobal2Pass + nQ8Store
+// over the single-pass layout, each q8 owner layer records two quantise-store ops
+// (K row, V row), and the TurboQuant lane adds nTQOps (two rotate-quantise stores
+// per TQ owner + the q pre-rotation and output unrotation around each TQ-reading
+// layer's SDPA).
+func (l archICBOpLayout) total(nLayers, nGlobal2Pass, nQ8Store, nTQOps int) int {
+	return l.opsPerLayer*nLayers + nGlobal2Pass + nQ8Store + nTQOps
 }

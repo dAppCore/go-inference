@@ -14,7 +14,7 @@ import core "dappco.re/go"
 // already wires into stepToken (captureLayerHiddens), so the captured hiddens are exactly the engine's
 // real layer outputs, not a re-derivation. Single-goroutine (the ArchSession contract).
 
-// #391 (RESOLVED 2026-07-14): this capture's ICB walk used to carve the recorded stream
+// #391 (RESOLVED): this capture's ICB walk used to carve the recorded stream
 // at a uniform li·opsPerLayer stride — but global layers' 2-pass SDPA and q8 owners'
 // store ops are INLINE extras, so on any session recording them (maxLen ≥ the 2-pass
 // knee) every layer after the first extra executed a misaligned range and the stream's
@@ -46,7 +46,7 @@ func (s *ArchSession) ForwardCaptureHiddens(ids []int32) (embeds [][]byte, perLa
 	if s.pos+T > s.maxLen {
 		return nil, nil, core.NewError("native.ForwardCaptureHiddens: sequence exceeds maxLen")
 	}
-	if s.state.icb != nil {
+	if s.state.icb != nil && !icbDisabledForTest {
 		return s.forwardCaptureHiddensICB(ids, T, N)
 	}
 

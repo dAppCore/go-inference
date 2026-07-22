@@ -54,7 +54,7 @@ func TestDetect_Service_Detect_Bad(t *core.T) {
 
 func TestDetect_Service_Detect_Ugly(t *core.T) {
 	// A slur fires on a single message — bypasses the sustained-anger gate.
-	// Default()'s catalogue is Snider-curated (empty stub), so inject a test term.
+	// Default()'s catalogue is curated (empty stub), so inject a test term.
 	w := New(Config{})
 	w.matcher = slurs.New([]string{"testterm"})
 

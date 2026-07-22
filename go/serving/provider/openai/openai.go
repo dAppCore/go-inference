@@ -34,7 +34,12 @@ type ChatCompletionRequest struct {
 	User               string              `json:"user,omitempty"`
 	ReasoningEffort    string              `json:"reasoning_effort,omitempty"`
 	ChatTemplateKwargs *ChatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
-	Tools              []Tool              `json:"tools,omitempty"`
+	// MMProcessorKwargs carries multimodal image-processor parameters — a
+	// separate top-level object from ChatTemplateKwargs (the vLLM convention:
+	// chat_template_kwargs and mm_processor_kwargs are distinct request
+	// fields). See MMProcessorKwargs.
+	MMProcessorKwargs *MMProcessorKwargs `json:"mm_processor_kwargs,omitempty"`
+	Tools             []Tool             `json:"tools,omitempty"`
 	// ToolChoice controls whether/which of Tools the model is offered this turn
 	// (RFC §6.4) — see toolchoice.go.
 	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
@@ -89,6 +94,23 @@ type ChatTemplateKwargs struct {
 	// ThinkingBudget caps thought-channel tokens; the backend forces the
 	// channel close on overrun. 0/absent = unlimited.
 	ThinkingBudget *int `json:"thinking_budget,omitempty"`
+	// PreserveThinking extends reasoning preservation to tool-calling
+	// assistant turns ANYWHERE in history, not just after the last user
+	// message — the gemma4 canonical template's preserve_thinking flag.
+	PreserveThinking *bool `json:"preserve_thinking,omitempty"`
+}
+
+// MMProcessorKwargs carries multimodal image-processor parameters (the vLLM
+// convention). Only fields the runtime acts on are modelled; unknown keys in
+// the object are skipped by the decoder.
+type MMProcessorKwargs struct {
+	// MaxSoftTokens overrides the vision soft-token budget for this request
+	// (inference.GenerateConfig.VisionBudget). gemma4's model card declares
+	// 70/140/280/560/1120 as its supported set, but this adapter does not
+	// hard-code that set — engines/families clamp an out-of-range value to
+	// what they actually support. nil = no override (image_url.detail or the
+	// model's configured default applies instead).
+	MaxSoftTokens *int `json:"max_soft_tokens,omitempty"`
 }
 
 // StopList accepts OpenAI stop sequences as either a JSON string or string
@@ -120,6 +142,23 @@ type ChatMessage struct {
 	Images    [][]byte   `json:"-"`
 	Audios    [][]byte   `json:"-"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // assistant response: the model's function calls
+	// ImageDetail carries the OpenAI-native image_url.detail hint ("low" or
+	// "high") off this message's image content parts — request.go's
+	// visionBudgetOverride maps it onto inference.GenerateConfig.VisionBudget
+	// ("low"->70, "high"->1120) when mm_processor_kwargs.max_soft_tokens is
+	// absent. The last part carrying an explicit "low"/"high" wins; "auto" or
+	// an absent detail never overwrites a prior explicit value. Empty = no
+	// hint (this message's images carry no detail override).
+	ImageDetail string `json:"-"`
+	// Reasoning / ReasoningContent carry an assistant turn's thought channel
+	// echoed back by a stateless client replaying history (reasoning is the
+	// canonical spelling, reasoning_content the vLLM/DeepSeek one). The
+	// handler re-frames them into the native thought span for turns after the
+	// last user message — the gemma4 canonical-template
+	// reasoning-preservation rule — so agentic tool loops keep their chain of
+	// thought across stateless replays.
+	Reasoning        string `json:"reasoning,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // ChatCompletionResponse is the non-streaming OpenAI-compatible response body.
@@ -210,7 +249,7 @@ func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
 		if !res.OK {
 			return nil, res.Err()
 		}
-		return res.Value.([]byte), nil
+		return res.Bytes(), nil
 	}
 	// Exact upper bound on the no-escape path — both branches emit the
 	// fixed key envelope plus the raw value bytes. AppendJSONString may

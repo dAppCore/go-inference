@@ -57,7 +57,10 @@ func TestSessionKVCacheByteIdentical(t *testing.T) {
 	arch := model.Arch{
 		Hidden: dModel, Heads: nHeads, KVHeads: nKV, HeadDim: headDim, FF: dFF, Vocab: 8,
 		GlobalHeadDim: headDim, GlobalKVHeads: nKV,
-		Eps: eps, AttnScale: scale, RopeBase: base, RopeScale: 1, RopeLocalBase: base,
+		// RopeScale must equal the scale the reference DecodeForwardArch feeds RoPE (its `scale` arg):
+		// the session decouples the RoPE POSITION scale (arch.RopeScale) from the attention scale, so a
+		// synthetic arch that set them apart would (correctly) diverge from the scale-fed standalone.
+		Eps: eps, AttnScale: scale, RopeBase: base, RopeScale: scale, RopeLocalBase: base,
 		RotaryDim: headDim, RotaryDimLocal: headDim, Layer: specs,
 	}
 	sess, err := NewArchSession(g, arch, maxLen)

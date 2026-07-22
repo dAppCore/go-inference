@@ -68,7 +68,7 @@ func (ls *laneSet) gemmForwardEnabled() bool {
 // over the batched replay (TestLaneSetGEMMThroughputAB); on 4-bit quant the
 // stream is 4× thinner and the fold's re-encode tax outweighs the saving at
 // K ≤ lthnQMVRowsMaxM — live E2B K=4: fold 114.0/114.3/114.4 vs replay
-// 117.0/117.6/117.8 tok/s aggregate (2026-07-13, interleaved runs). So AUTO
+// 117.0/117.6/117.8 tok/s aggregate (interleaved runs). So AUTO
 // folds bf16/dense projectors and keeps quant on the replay; LTHN_CB_GEMM=1
 // (or gemmMode 1) forces the fold for receipts. Revisit with K>4 tiled-M.
 func (ls *laneSet) gemmProfitable(advancing []*decodeLane) bool {
@@ -92,7 +92,7 @@ func (ls *laneSet) gemmProfitable(advancing []*decodeLane) bool {
 // SplitRope,AllArms}ByteIdentity) plus full-identity on real E2B
 // (TestLaneSetGEMME2BByteIdentityHiddens; the historical fires-and-diverges was a
 // slab under-sizing on MatFormer deep layers — see gemmDims — plus the live-n SDPA
-// routing, both fixed 2026-07-13).
+// routing, both since fixed).
 func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 	if len(advancing) < 2 {
 		return false
@@ -123,8 +123,8 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 			// oracle routes fast (outDim%8==0 && inDim%512==0 — production dims);
 			// any weight off that envelope declines and the lane set keeps the
 			// byte-identical merged replay. History: the kernel's packs=1
-			// predecessor drifted ~1 ulp value-dependently vs the replay (proven
-			// 2026-07-13 — THE hd-256 fold divergence, root-caused to the
+			// predecessor drifted ~1 ulp value-dependently vs the replay (THE
+			// hd-256 fold divergence, root-caused to the
 			// projection kernel, not the q8 KV ops; 9b6b9d2 had armed it by
 			// default, a live exposure on production dense-quant). The fast-twin
 			// kernel + per-weight plan check replaced the interim blanket quant
@@ -563,7 +563,7 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 			// maxLen, not the live n. Routing by live n here (single-pass below the
 			// knee, blocks-from-n above it) changes the reduction bracketing vs the
 			// replay: value-dependent bf16 drift on global layers — THE lifted-envelope
-			// E2B divergence (2026-07-13; only shared-region globals leave no cache
+			// E2B divergence (only shared-region globals leave no cache
 			// trail, which is why caches stayed equal while hiddens diverged).
 			pso1, perr := sdpaVector2Pass1PipelineForHeadDim(lhd, int32(blocks))
 			if perr != nil {

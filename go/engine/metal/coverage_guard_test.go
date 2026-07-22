@@ -71,6 +71,12 @@ func resetNativePipelineCachesForCoverage() {
 	ropeFreqsPSOBF16Cache = map[string]metal.MTLComputePipelineState{}
 	ropeFreqsPSOBF16Mu.Unlock()
 
+	sdpaRTDimMu.Lock()
+	sdpaRTDimPSO, sdpaRTDimPSOBuilt = nil, false
+	sdpaRTDim2Pass1PSO, sdpaRTDim2Pass1PSOBuilt = nil, false
+	sdpaVectorHeadDimMissing = map[int]bool{}
+	sdpaRTDimMu.Unlock()
+
 	sdpaPSOMu.Lock()
 	sdpaPSOCache = map[string]metal.MTLComputePipelineState{}
 	sdpaVectorHeadDimPSOCache = map[int]metal.MTLComputePipelineState{}
@@ -103,6 +109,10 @@ type failingProjector struct {
 }
 
 func (p failingProjector) hasV() bool { return p.distinctV }
+
+func (p failingProjector) usesSiLU() bool { return false }
+
+func (p failingProjector) withSiLU(bool) projector { return p }
 
 func (p failingProjector) rowsCapable() bool { return true }
 
@@ -310,8 +320,11 @@ func TestNativeEnsureInitErrorPropagationCoverage(t *testing.T) {
 			_, err := PerLayerInputGateQuant(nil, QuantWeight{}, nil, QuantWeight{}, nil, 1, 1, 1, 4, 0)
 			return err
 		}},
-		{"MoERouter", func() error { _, _, err := MoERouter(nil, nil, nil, nil, 1, 1, 1, 0); return err }},
-		{"MoERouterQuant", func() error { _, _, err := MoERouterQuant(nil, nil, QuantWeight{}, nil, 1, 1, 1, 1, 4, 0); return err }},
+		{"MoERouter", func() error { _, _, err := MoERouter(nil, nil, nil, nil, 1, 1, 1, 0, true); return err }},
+		{"MoERouterQuant", func() error {
+			_, _, err := MoERouterQuant(nil, nil, QuantWeight{}, nil, 1, 1, 1, 1, 4, 0, true)
+			return err
+		}},
 		{"MoEExperts", func() error { _, err := MoEExperts(nil, nil, nil, nil, nil, nil, 1, 1, 1, 1); return err }},
 		{"MoEExpertsQuant", func() error {
 			_, err := MoEExpertsQuant(nil, nil, nil, QuantWeight{}, QuantWeight{}, QuantWeight{}, 1, 1, 1, 1, 1, 4)
@@ -627,6 +640,10 @@ func quantMoELayerWeightsGuard(t testing.TB, numExperts, topK, dModel, dFF, expe
 		LocalGate: qw(dFF, dModel, 3), LocalUp: qw(dFF, dModel, 31), LocalDown: qw(dModel, dFF, 37),
 		RouterNormWScaled: norm(41), Router: qw(numExperts, dModel, 43), PerExpertScale: toBF16Bytes(syntheticFloat32(numExperts, 47)),
 		ExpGate: batched(expertDFF, dModel, 53), ExpUp: batched(expertDFF, dModel, 101), ExpDown: batched(dModel, expertDFF, 149),
+		// gemma4-shaped (every sandwich norm populated): gemma4 always declares NormaliseMoETopK true
+		// (#65) — set it here so quantMoEDeviceRouterBuffersUsable's device-router lane keeps engaging
+		// for every one of this fixture's ~dozen callers, byte-identical to before the field existed.
+		NormaliseTopK: true,
 	}
 }
 
@@ -1447,29 +1464,29 @@ func TestNativeQuantPLEAndRouterGuardCoverage(t *testing.T) {
 	const numExperts, topK = 4, 2
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 37))
 	norm := toBF16Bytes(syntheticFloat32(dModel, 41))
-	if _, _, err := MoERouter(hidden, norm, routerW, nil, numExperts, topK, dModel, 1e-5); err != nil {
+	if _, _, err := MoERouter(hidden, norm, routerW, nil, numExperts, topK, dModel, 1e-5, true); err != nil {
 		t.Fatalf("MoERouter nil scale: %v", err)
 	}
-	_, _, err = MoERouter([]byte{1}, norm, routerW, nil, numExperts, topK, dModel, 1e-5)
+	_, _, err = MoERouter([]byte{1}, norm, routerW, nil, numExperts, topK, dModel, 1e-5, true)
 	expectErr(t, "MoERouter bad x", err)
-	_, _, err = MoERouter(hidden, []byte{1}, routerW, nil, numExperts, topK, dModel, 1e-5)
+	_, _, err = MoERouter(hidden, []byte{1}, routerW, nil, numExperts, topK, dModel, 1e-5, true)
 	expectErr(t, "MoERouter bad norm", err)
-	_, _, err = MoERouter(hidden, norm, []byte{1}, nil, numExperts, topK, dModel, 1e-5)
+	_, _, err = MoERouter(hidden, norm, []byte{1}, nil, numExperts, topK, dModel, 1e-5, true)
 	expectErr(t, "MoERouter bad router", err)
-	_, _, err = MoERouter(hidden, norm, routerW, []byte{1}, numExperts, topK, dModel, 1e-5)
+	_, _, err = MoERouter(hidden, norm, routerW, []byte{1}, numExperts, topK, dModel, 1e-5, true)
 	expectErr(t, "MoERouter bad scale", err)
-	_, _, err = MoERouter(hidden, norm, routerW, nil, numExperts, numExperts+1, dModel, 1e-5)
+	_, _, err = MoERouter(hidden, norm, routerW, nil, numExperts, numExperts+1, dModel, 1e-5, true)
 	expectErr(t, "MoERouter bad topK", err)
 
 	qRouter := quantWeightFixture(t, numExperts, dModel, 32, 4, 43)
-	if _, _, err := MoERouterQuant(hidden, norm, qRouter, nil, numExperts, topK, dModel, 32, 4, 1e-5); err != nil {
+	if _, _, err := MoERouterQuant(hidden, norm, qRouter, nil, numExperts, topK, dModel, 32, 4, 1e-5, true); err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}
-	_, _, err = MoERouterQuant(hidden, norm, qRouter, []byte{1}, numExperts, topK, dModel, 32, 4, 1e-5)
+	_, _, err = MoERouterQuant(hidden, norm, qRouter, []byte{1}, numExperts, topK, dModel, 32, 4, 1e-5, true)
 	expectErr(t, "MoERouterQuant bad scale", err)
 	qRouterFallback := qRouter
 	qRouterFallback.GroupSize, qRouterFallback.Bits = 0, 0
-	_, _, err = MoERouterQuant(hidden, norm, qRouterFallback, nil, numExperts, topK, dModel, 48, 4, 1e-5)
+	_, _, err = MoERouterQuant(hidden, norm, qRouterFallback, nil, numExperts, topK, dModel, 48, 4, 1e-5, true)
 	expectErr(t, "MoERouterQuant bad group", err)
 
 	_, err = EmbedTokensQuant(nil, nil, nil, []int32{0}, 1, dModel, 32, 0, 1)
@@ -1870,9 +1887,9 @@ func TestNativeExecutionBranchCoverage(t *testing.T) {
 	qMoE := quantMoELayerWeightsGuard(t, 4, 2, dModel, dFF, 96, 32, 4)
 	_, err = mlpTransformQuant([]byte{1}, qMoE.LocalGate, qMoE.LocalUp, qMoE.LocalDown, dModel, dFF, 32, 4)
 	expectErr(t, "mlpTransformQuant bad hidden", err)
-	_, _, err = MoERouterQuant(h, []byte{1}, qMoE.Router, nil, 4, 2, dModel, 32, 4, eps)
+	_, _, err = MoERouterQuant(h, []byte{1}, qMoE.Router, nil, 4, 2, dModel, 32, 4, eps, true)
 	expectErr(t, "MoERouterQuant bad norm", err)
-	_, _, err = MoERouterQuant(h, qMoE.RouterNormWScaled, qMoE.Router, nil, 4, 0, dModel, 32, 4, eps)
+	_, _, err = MoERouterQuant(h, qMoE.RouterNormWScaled, qMoE.Router, nil, 4, 0, dModel, 32, 4, eps, true)
 	expectErr(t, "MoERouterQuant bad topK", err)
 }
 
@@ -2549,15 +2566,15 @@ func TestNativeRemainingBranchCoverage(t *testing.T) {
 	norm := toBF16Bytes(syntheticFloat32(dModel, 19))
 	routerW := toBF16Bytes(syntheticFloat32(4*dModel, 23))
 	perExpertScale := toBF16Bytes([]float32{1, 0.75, 0.5, 0.25})
-	if idx, weights, err := MoERouter(hidden, norm, routerW, perExpertScale, 4, 2, dModel, eps); err != nil {
+	if idx, weights, err := MoERouter(hidden, norm, routerW, perExpertScale, 4, 2, dModel, eps, true); err != nil {
 		t.Fatalf("MoERouter scaled: %v", err)
 	} else if len(idx) != 2 || len(weights) != 2*bf16Size {
 		t.Fatalf("MoERouter scaled lengths = %d/%d", len(idx), len(weights))
 	}
 	qRouter := quantWeightFixture(t, 4, dModel, groupSize, bits, 29)
-	_, _, err = MoERouterQuant(hidden, norm, QuantWeight{Packed: []byte{1}}, nil, 4, 2, dModel, groupSize, bits, eps)
+	_, _, err = MoERouterQuant(hidden, norm, QuantWeight{Packed: []byte{1}}, nil, 4, 2, dModel, groupSize, bits, eps, true)
 	expectErr(t, "MoERouterQuant bad weight", err)
-	if idx, weights, err := MoERouterQuant(hidden, norm, qRouter, perExpertScale, 4, 2, dModel, groupSize, bits, eps); err != nil {
+	if idx, weights, err := MoERouterQuant(hidden, norm, qRouter, perExpertScale, 4, 2, dModel, groupSize, bits, eps, true); err != nil {
 		t.Fatalf("MoERouterQuant scaled: %v", err)
 	} else if len(idx) != 2 || len(weights) != 2*bf16Size {
 		t.Fatalf("MoERouterQuant scaled lengths = %d/%d", len(idx), len(weights))

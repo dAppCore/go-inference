@@ -1224,3 +1224,89 @@ func TestToken_GenerateSampledWithStopTokensTransformEach_Ugly(t *testing.T) {
 		t.Fatalf("GenerateSampledWithStopTokensTransformEach(yield stops early) = %v, want %v", got, want)
 	}
 }
+
+// TestGenerateSampledFromEmbeddingsEach_Good pins the multimodal prefill entry: ALREADY-COMPUTED rows
+// prefill the session in ONE PrefillBatch call and the decode walk continues exactly as the id path —
+// so a spliced prompt's rows (image features over placeholder positions) reach the stack without any
+// prompt id being re-embedded.
+func TestGenerateSampledFromEmbeddingsEach_Good(t *testing.T) {
+	var prefillCalls, stepCalls int
+	var prefillLens []int
+	m := batchSessionModel{
+		counterModel: counterModel{vocab: 16, dModel: 4},
+		prefillCalls: &prefillCalls, prefillLens: &prefillLens, stepCalls: &stepCalls,
+	}
+	ids := []int32{0, 1, 2}
+	rows := make([][]byte, len(ids))
+	for i, id := range ids {
+		row, err := m.Embed(id)
+		if err != nil {
+			t.Fatalf("Embed(%d): %v", id, err)
+		}
+		rows[i] = row
+	}
+	got, err := GenerateSampledFromEmbeddingsEach(m, NewSampler(0), SampleParams{}, ids, rows, 4, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateSampledFromEmbeddingsEach: %v", err)
+	}
+	if want := []int32{3, 4, 5, 6}; !idsEqual(got, want) {
+		t.Fatalf("rows-prefill walk = %v, want %v (identical to the id path)", got, want)
+	}
+	if prefillCalls != 1 || len(prefillLens) != 1 || prefillLens[0] != len(ids) {
+		t.Fatalf("PrefillBatch calls %d lens %v, want exactly one call of %d rows", prefillCalls, prefillLens, len(ids))
+	}
+}
+
+// TestGenerateSampledFromEmbeddingsEach_Bad pins every refusal: nil model, nil sampler, empty rows,
+// id/row count mismatch, non-positive maxNew, and a session that cannot batch-prefill rows (no
+// BatchPrefillStepper — rows cannot replay per-id, so the entry must fail rather than silently
+// re-embedding token ids).
+func TestGenerateSampledFromEmbeddingsEach_Bad(t *testing.T) {
+	m := batchSessionModel{
+		counterModel: counterModel{vocab: 16, dModel: 4},
+		prefillCalls: new(int), prefillLens: new([]int), stepCalls: new(int),
+	}
+	ids := []int32{0}
+	rows := [][]byte{{0, 0, 0, 0, 0, 0, 0, 0}}
+	if _, err := GenerateSampledFromEmbeddingsEach(nil, NewSampler(0), SampleParams{}, ids, rows, 4, nil, nil, nil); err == nil {
+		t.Fatal("nil model must refuse")
+	}
+	if _, err := GenerateSampledFromEmbeddingsEach(m, nil, SampleParams{}, ids, rows, 4, nil, nil, nil); err == nil {
+		t.Fatal("nil sampler must refuse")
+	}
+	if _, err := GenerateSampledFromEmbeddingsEach(m, NewSampler(0), SampleParams{}, nil, nil, 4, nil, nil, nil); err == nil {
+		t.Fatal("empty rows must refuse")
+	}
+	if _, err := GenerateSampledFromEmbeddingsEach(m, NewSampler(0), SampleParams{}, []int32{0, 1}, rows, 4, nil, nil, nil); err == nil {
+		t.Fatal("id/row count mismatch must refuse")
+	}
+	if _, err := GenerateSampledFromEmbeddingsEach(m, NewSampler(0), SampleParams{}, ids, rows, 0, nil, nil, nil); err == nil {
+		t.Fatal("maxNew 0 must refuse")
+	}
+	perToken := sessionCounterModel{counterModel: counterModel{vocab: 16, dModel: 4}, opened: new(int), closed: new(int)}
+	if _, err := GenerateSampledFromEmbeddingsEach(perToken, NewSampler(0), SampleParams{}, ids, rows, 4, nil, nil, nil); err == nil {
+		t.Fatal("a session without BatchPrefillStepper must refuse rows")
+	}
+}
+
+// TestGenerateSampledFromEmbeddingsEach_Ugly pins the stream-cut contract: a yield returning false after
+// the first token ends generation early with the committed prefix and no error — the same early-exit
+// shape as the id path.
+func TestGenerateSampledFromEmbeddingsEach_Ugly(t *testing.T) {
+	m := batchSessionModel{
+		counterModel: counterModel{vocab: 16, dModel: 4},
+		prefillCalls: new(int), prefillLens: new([]int), stepCalls: new(int),
+	}
+	ids := []int32{0, 1, 2}
+	rows := make([][]byte, len(ids))
+	for i, id := range ids {
+		rows[i], _ = m.Embed(id)
+	}
+	got, err := GenerateSampledFromEmbeddingsEach(m, NewSampler(0), SampleParams{}, ids, rows, 4, nil, nil, func(int32) bool { return false })
+	if err != nil {
+		t.Fatalf("early-cut generate: %v", err)
+	}
+	if want := []int32{3}; !idsEqual(got, want) {
+		t.Fatalf("early-cut walk = %v, want %v (one committed token)", got, want)
+	}
+}

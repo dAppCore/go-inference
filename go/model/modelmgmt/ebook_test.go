@@ -68,9 +68,13 @@ func TestEbook_WriteEPUB_Good(t *core.T) {
 	readZipEntry(t, zr, "OEBPS/plate0001.xhtml")
 }
 
+// TestEbook_WriteEPUB_Bad covers the no-chapters guard both with and
+// without a Title set — Title is irrelevant to this validation.
 func TestEbook_WriteEPUB_Bad(t *core.T) {
 	var buf bytes.Buffer
 	assertResultError(t, (&Book{Title: "x"}).WriteEPUB(&buf), "at least one chapter")
+	var buf2 bytes.Buffer
+	assertResultError(t, (&Book{}).WriteEPUB(&buf2), "at least one chapter")
 }
 
 // A book where every chapter is InNav:false still renders a valid (if
@@ -89,11 +93,20 @@ func TestEbook_WriteEPUB_Ugly(t *core.T) {
 	core.AssertNotContains(t, nav, "plate0001")
 }
 
+// TestEbook_xmlEscape_Good also documents that quotes are left alone —
+// xmlEscape only handles the three characters that are unsafe in XML
+// element content (&, <, >); attribute-context quoting is not its job.
 func TestEbook_xmlEscape_Good(t *core.T) {
 	core.AssertEqual(t, "a &amp; b &lt; c &gt; d", xmlEscape("a & b < c > d"))
+	core.AssertEqual(t, "plain text, no markup", xmlEscape("plain text, no markup"))
+	core.AssertEqual(t, `it's "quoted"`, xmlEscape(`it's "quoted"`))
 }
 
-// Ampersand first — no double-escaping of the entities it introduces.
+// Ampersand first — no double-escaping of the entities it introduces. A
+// literal "&lt;" in the input is itself escaped (the & is replaced first),
+// proving there is no "looks-like-an-entity-already" special case.
 func TestEbook_xmlEscape_Ugly(t *core.T) {
 	core.AssertEqual(t, "&lt;&amp;&gt;", xmlEscape("<&>"))
+	core.AssertEqual(t, "&amp;lt;", xmlEscape("&lt;"))
+	core.AssertEqual(t, "&amp;&amp;&amp;", xmlEscape("&&&"))
 }

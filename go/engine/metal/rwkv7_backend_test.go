@@ -8,7 +8,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/model/rwkv7"
+	"dappco.re/go/inference/model/arch/rwkv7"
 )
 
 func rwSyn(n, seed int) []float32 {

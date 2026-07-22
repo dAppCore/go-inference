@@ -116,10 +116,6 @@ func (m *hipTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.Lane
 	if err != nil {
 		return nil, err
 	}
-	moe := false
-	for _, layer := range forward.Layers {
-		moe = moe || layer.MoE != nil
-	}
 	engineConfig := m.loaded.gemma4Q4EngineConfig()
 	mode, err := engineConfig.deviceKVMode()
 	if err != nil {
@@ -132,7 +128,6 @@ func (m *hipTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.Lane
 		mode:       mode,
 		workspace:  hipNewAttentionHeadsChunkedWorkspace(),
 		contextLen: m.loaded.contextSize,
-		moe:        moe,
 	}
 	if executor.contextLen <= 0 {
 		executor.contextLen = defaultContextLengthCap
@@ -419,7 +414,6 @@ type hipGemma4Q4LaneExecutor struct {
 	mode       string
 	workspace  *hipAttentionHeadsChunkedWorkspace
 	contextLen int
-	moe        bool
 	closed     bool
 }
 
@@ -463,6 +457,13 @@ func (executor *hipGemma4Q4LaneExecutor) Prepare(ctx context.Context, spec infer
 			return hipPreparedLane{}, sampleErr
 		}
 		pending = picked
+	} else if executor.forward.HeadLoRA != nil {
+		picked, sampleErr := executor.greedyHeadLoRAHiddenRowWithWorkspace(ctx, prefill.Current.DeviceFinalHidden, 1, 0, workspace)
+		if sampleErr != nil {
+			_ = prefill.DeviceState.Close()
+			return hipPreparedLane{}, sampleErr
+		}
+		pending = picked
 	}
 	return hipPreparedLane{PendingToken: pending, Position: prefill.Position, DeviceState: prefill.DeviceState, Sample: sample}, nil
 }
@@ -484,9 +485,6 @@ func (executor *hipGemma4Q4LaneExecutor) Forward(ctx context.Context, inputs []h
 		tokens[index] = input.PendingToken
 		positions[index] = input.Position
 		states[index] = input.DeviceState
-	}
-	if executor.moe {
-		return executor.forwardMoE(ctx, inputs)
 	}
 	batch, err := hipRunGemma4Q4LaneForward(ctx, executor.loaded.driver, executor.forward, hipGemma4Q4LaneForwardRequest{
 		Tokens:       tokens,
@@ -520,6 +518,14 @@ func (executor *hipGemma4Q4LaneExecutor) Forward(ctx context.Context, inputs []h
 				}
 				return nil, err
 			}
+		} else if executor.forward.HeadLoRA != nil {
+			pending, err = executor.greedyHeadLoRAHiddenRow(ctx, batch.FinalHidden, len(inputs), index)
+			if err != nil {
+				for _, state := range batch.DeviceStates {
+					_ = state.Close()
+				}
+				return nil, err
+			}
 		}
 		outputs[index] = hipLaneForwardOutput{
 			PendingToken: pending,
@@ -535,6 +541,25 @@ func (executor *hipGemma4Q4LaneExecutor) sampleHiddenRow(ctx context.Context, hi
 	return executor.sampleHiddenRowWithWorkspace(ctx, hidden, rows, row, sample, executor.workspace)
 }
 
+func (executor *hipGemma4Q4LaneExecutor) greedyHeadLoRAHiddenRow(ctx context.Context, hidden *hipDeviceByteBuffer, rows, row int) (int32, error) {
+	return executor.greedyHeadLoRAHiddenRowWithWorkspace(ctx, hidden, rows, row, executor.workspace)
+}
+
+func (executor *hipGemma4Q4LaneExecutor) greedyHeadLoRAHiddenRowWithWorkspace(ctx context.Context, hidden *hipDeviceByteBuffer, rows, row int, workspace *hipAttentionHeadsChunkedWorkspace) (int32, error) {
+	if executor == nil || executor.forward.HeadLoRA == nil || workspace == nil {
+		return 0, core.NewError("hip.LaneSet.HeadLoRA: adapter and attention workspace are required")
+	}
+	last := executor.forward.Layers[len(executor.forward.Layers)-1]
+	result, err := hipGemma4Q4SampleBatchedPrefillRow(
+		ctx, executor.loaded.driver, last, executor.forward.HeadLoRA, hidden, rows, row, 1e-6,
+		inference.GenerateConfig{}, nil, nil, 0, nil, workspace, false,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return int32(result.Greedy.TokenID), nil
+}
+
 func (executor *hipGemma4Q4LaneExecutor) sampleHiddenRowWithWorkspace(ctx context.Context, hidden *hipDeviceByteBuffer, rows, row int, sample *hipLaneSampleState, workspace *hipAttentionHeadsChunkedWorkspace) (int32, error) {
 	if sample == nil || !sample.enabled {
 		return 0, core.NewError("hip.LaneSet.Sample: sampled lane state is required")
@@ -544,7 +569,7 @@ func (executor *hipGemma4Q4LaneExecutor) sampleHiddenRowWithWorkspace(ctx contex
 	}
 	last := executor.forward.Layers[len(executor.forward.Layers)-1]
 	result, err := hipGemma4Q4SampleBatchedPrefillRow(
-		ctx, executor.loaded.driver, last, hidden, rows, row, 1e-6,
+		ctx, executor.loaded.driver, last, executor.forward.HeadLoRA, hidden, rows, row, 1e-6,
 		sample.generate, nil, sample.history, sample.draw(), nil, workspace, false,
 	)
 	if err != nil {
@@ -553,56 +578,8 @@ func (executor *hipGemma4Q4LaneExecutor) sampleHiddenRowWithWorkspace(ctx contex
 	return int32(result.Greedy.TokenID), nil
 }
 
-func (executor *hipGemma4Q4LaneExecutor) forwardMoE(ctx context.Context, inputs []hipLaneForwardInput) ([]hipLaneForwardOutput, error) {
-	outputs := make([]hipLaneForwardOutput, 0, len(inputs))
-	for _, input := range inputs {
-		current, _, err := hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx, executor.loaded.driver, executor.forward, hipGemma4Q4DecodeState{}, hipGemma4Q4ForwardRequest{
-			TokenID:                 input.PendingToken,
-			Position:                input.Position,
-			Epsilon:                 1e-6,
-			DeviceKVAttention:       true,
-			DeviceKVMode:            executor.mode,
-			EngineConfig:            executor.engine,
-			PriorDeviceState:        input.DeviceState,
-			ReturnDeviceState:       true,
-			DeviceFinalSample:       true,
-			AttentionWorkspace:      executor.workspace,
-			OmitDebugTensors:        true,
-			OmitLabels:              true,
-			OmitHostState:           true,
-			ReturnDeviceFinalHidden: input.Sample.enabled,
-		}, false)
-		if err != nil {
-			for _, output := range outputs {
-				_ = output.DeviceState.Close()
-			}
-			return nil, err
-		}
-		sample := input.Sample.clone()
-		pending := int32(current.Greedy.TokenID)
-		if sample.enabled {
-			pending, err = executor.sampleHiddenRow(ctx, current.DeviceFinalHidden, 1, 0, &sample)
-		}
-		hipReleaseForwardDeviceFinalHidden(&current)
-		if err != nil {
-			_ = current.DeviceState.Close()
-			for _, output := range outputs {
-				_ = output.DeviceState.Close()
-			}
-			return nil, err
-		}
-		outputs = append(outputs, hipLaneForwardOutput{
-			PendingToken: pending,
-			Position:     input.Position + 1,
-			DeviceState:  current.DeviceState,
-			Sample:       sample,
-		})
-	}
-	return outputs, nil
-}
-
 func (executor *hipGemma4Q4LaneExecutor) UsesSharedBatchForward() bool {
-	return executor != nil && !executor.moe
+	return executor != nil
 }
 
 func (executor *hipGemma4Q4LaneExecutor) Close() error {

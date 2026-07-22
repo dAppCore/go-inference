@@ -13,7 +13,7 @@ import (
 // TestDecodeTokPerSecVsDepthRealE2B quantifies the #365 deep-context tax: decode
 // tok/s as a function of context depth. Every decoded token scans the whole KV
 // cache, so tok/s falls as context grows — this measures BY HOW MUCH on real
-// e2b-4bit, the curve Snider feels ("short ctx ~180, 8K ~120"). It's the receipt
+// e2b-4bit — the felt curve ("short ctx ~180, 8K ~120"). It's the receipt
 // that says whether the KV-bytes lever (q8/q4 KV) is worth building, and the
 // baseline any KV-quant A/B is measured against. Also logs the achieved position
 // per depth (a prior probe saw the cache cap short of the prompt length).

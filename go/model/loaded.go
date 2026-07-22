@@ -21,7 +21,18 @@ type LoadedLayer struct {
 	AttnNorm, PostAttnNorm []byte // input_layernorm, post_attention_layernorm
 	QNorm, KNorm           []byte // self_attn.q_norm / k_norm (nil without QK-norm)
 	LayerScalar            []byte // per-layer output scalar [1] (nil when absent)
-	Q, K, V, O             *Linear
+	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [heads]): a learned
+	// per-head score that joins the softmax denominator as one extra "key" contributing NO value mass
+	// (transformers modeling_gpt_oss.py eager_attention_forward: cat([attn_weights, sinks]) → softmax
+	// → drop the last column). nil for every arch whose WeightNames declares no Sinks suffix.
+	Sinks      []byte
+	Q, K, V, O *Linear
+	// GatedDelta is a MixerGatedDelta layer's linear-attention recurrence weights (non-nil ⇒ this layer
+	// is a gated-delta mixer, Q/K/V/O then unused — the mixer analogue of MoE replacing dense Gate/Up/
+	// Down). GatedDeltaCfg carries its resolved geometry. Built by assembleGatedDelta when the layer's
+	// LayerSpec.Mixer == MixerGatedDelta; nil for a standard attention layer (gemma4, llama, …).
+	GatedDelta    *GatedDeltaWeights
+	GatedDeltaCfg GatedDeltaConfig
 
 	MLPNorm, PostFFNorm []byte // pre/post feedforward norms (dense MLP)
 	Gate, Up, Down      *Linear
@@ -39,6 +50,9 @@ type LoadedMoE struct {
 	LocalGate, LocalUp, LocalDown                               *Linear
 	Router                                                      *Linear
 	ExpGate, ExpUp, ExpGateUp, ExpDown                          *Linear // experts.switch_glu.*
+	// Shared expert (qwen3_5_moe): SharedGate/Up/Down = the shared_expert SwiGLU trio (gate/up/down_proj);
+	// SharedSigmoid = the shared_expert_gate σ scalar gate ([hidden]→1). All nil ⇒ no shared expert (gemma).
+	SharedGate, SharedUp, SharedDown, SharedSigmoid *Linear
 }
 
 // LoadedAudioClipBound is one optional per-linear activation clamp.
@@ -177,7 +191,14 @@ func (m *LoadedModel) ValidateRequired(arch Arch) error {
 	}
 	for i := range m.Layers {
 		L := &m.Layers[i]
-		if L.Q == nil || L.O == nil {
+		if arch.Layer[i].Mixer == MixerGatedDelta {
+			// A gated-delta (linear_attention) layer replaces attention with a recurrence — it carries the
+			// gated-delta weights + input_layernorm + an FFN, but NO q/k/o projections (#18). It never owns a
+			// KV cache (CacheIndex -1), so the k_proj-owner check below is a no-op for it.
+			if L.GatedDelta == nil {
+				return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing gated-delta weights (linear_attention mixer)", i))
+			}
+		} else if L.Q == nil || L.O == nil {
 			return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing input_layernorm/q_proj/o_proj", i))
 		}
 		if arch.NormPlacement == NormPlacementPost {

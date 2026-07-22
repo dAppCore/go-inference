@@ -48,15 +48,16 @@ import (
 // keeps the proven live tail encodes and the mechanism stays for the
 // whole-layer follow-up.
 //
-// RECEIPT (2026-07-11, e2b 4-bit + bf16 assistant, K=6 blocks, same prompt):
+// RECEIPT (e2b 4-bit + bf16 assistant, K=6 blocks, same prompt):
 // live verify fwd 10.3-10.9ms; tail-replay 10.8-11.2ms after the declare-once
 // residency fix (12.1-12.2 before it), recording pass +2ms. The per-layer
 // executeCommands (~33/pass) + the recorded all-prior barrier drains
 // (~13/layer) cost what the recorded ops save — the chained decode lane's
 // ~3µs/op economics come from ONE execute per ~700-op token, not one per
-// 14-op layer tail. The winning shape is recording the WHOLE layer stack
-// (attention + tail, one execute per verify pass, pos/N rebinds) — blocked on
-// the staged-sliding landing's per-pass slot offsets, priced separately.
+// 14-op layer tail. The whole-layer-stack shape (attention + tail, one
+// execute per verify pass, pos/N rebinds — the staged-sliding slot offsets
+// resolved by per-pass command rebinds) is BUILT as the default-on lane in
+// decode_verify_stack_icb.go; its own receipt lives there.
 var verifyTailICBDisabled = os.Getenv("LTHN_VERIFY_ICB") != "1"
 
 // verifyTailICBDisabledForTest forces the live tail encodes — the A/B lever for
@@ -258,6 +259,16 @@ type vtRecordSink struct {
 
 func (s vtRecordSink) setPSO(pso metal.MTLComputePipelineState) { setICBPSO(s.cmd, pso) }
 func (s vtRecordSink) setBuf(buf metal.MTLBuffer, off, idx uint) {
+	if off >= 1<<32 {
+		// AGX ICB commands mis-encode bind offsets >= 2^32 (#71) — rebase
+		// onto a no-copy window or decline the recording.
+		nb, noff, ok := vsRebaseHighBind(buf, off)
+		if !ok {
+			s.rec.fail()
+			return
+		}
+		buf, off = nb, noff
+	}
 	s.rec.addResident(buf)
 	setICBKernelBuffer(s.cmd, buf, off, idx)
 }

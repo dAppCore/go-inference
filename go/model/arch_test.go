@@ -23,6 +23,47 @@ func TestArch_QKNormalization_Ugly(t *testing.T) {
 	}
 }
 
+// TestDeriveLayers_LinearAttention pins the Qwen3.5 hybrid schedule mapping: a "linear_attention" layer
+// derives to a MixerGatedDelta spec with NO KV cache (CacheIndex -1), while attention layers keep their
+// span + cache. gemma's all-attention schedules never hit the new branch.
+func TestDeriveLayers_LinearAttention(t *testing.T) {
+	specs := DeriveLayers([]string{"linear_attention", "full_attention", "linear_attention", "sliding_attention"}, 0)
+	if specs[0].Mixer != MixerGatedDelta || specs[0].CacheIndex != -1 {
+		t.Fatalf("layer 0 (linear_attention): Mixer %d CacheIndex %d, want MixerGatedDelta, -1", specs[0].Mixer, specs[0].CacheIndex)
+	}
+	if specs[2].Mixer != MixerGatedDelta {
+		t.Fatalf("layer 2 (linear_attention): Mixer %d, want MixerGatedDelta", specs[2].Mixer)
+	}
+	if specs[1].Mixer != MixerAttention || specs[1].Attention != GlobalAttention || !specs[1].OwnsCache() {
+		t.Fatalf("layer 1 (full_attention): Mixer %d attn %d owns %v, want attention/global/owner", specs[1].Mixer, specs[1].Attention, specs[1].OwnsCache())
+	}
+	if specs[3].Mixer != MixerAttention || specs[3].Attention != SlidingAttention {
+		t.Fatalf("layer 3 (sliding_attention): Mixer %d attn %d, want attention/sliding", specs[3].Mixer, specs[3].Attention)
+	}
+}
+
+func TestLayerSpec_Mixer_Good(t *testing.T) {
+	if got := (LayerSpec{Mixer: MixerGatedDelta}).Mixer; got != MixerGatedDelta {
+		t.Fatalf("declared Mixer = %d, want MixerGatedDelta (%d)", got, MixerGatedDelta)
+	}
+}
+
+// TestLayerSpec_Mixer_Bad pins the gemma-safety invariant of the named-mixer extension: the zero
+// value of LayerSpec.Mixer (a layer a config leaves unset) is MixerAttention, so every arch that
+// declares no recurrence stays byte-identical multi-head attention. Reordering the enum so a
+// recurrence became the zero value would silently reroute gemma4's decode.
+func TestLayerSpec_Mixer_Bad(t *testing.T) {
+	if MixerAttention != 0 {
+		t.Fatalf("MixerAttention = %d, want 0 (the zero value must be attention)", MixerAttention)
+	}
+	if got := (LayerSpec{}).Mixer; got != MixerAttention {
+		t.Fatalf("zero-value LayerSpec.Mixer = %d, want MixerAttention", got)
+	}
+	if MixerGatedDelta == MixerAttention {
+		t.Fatal("MixerGatedDelta must be distinct from MixerAttention")
+	}
+}
+
 func TestArch_NormPlacement_Good(t *testing.T) {
 	if NormPlacementPre != NormPlacement("pre") {
 		t.Fatalf("NormPlacementPre = %q", NormPlacementPre)

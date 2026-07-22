@@ -45,7 +45,7 @@ func TestMoERouterTopKKernelMatchesHostSelection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("routerTopKBF16: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 	if len(gotIdx) != len(wantIdx) || len(gotWeights) != len(wantWeights) {
 		t.Fatalf("routerTopKBF16 returned %d idx/%d weight bytes, want %d/%d", len(gotIdx), len(gotWeights), len(wantIdx), len(wantWeights))
 	}
@@ -94,13 +94,13 @@ func TestMoERouterDeviceTopKAllocationBudget(t *testing.T) {
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	for i := range 2 {
-		if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5); err != nil {
+		if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, true); err != nil {
 			t.Fatalf("MoERouter warm %d: %v", i, err)
 		}
 	}
 
 	allocs := testing.AllocsPerRun(50, func() {
-		idx, weights, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5)
+		idx, weights, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5, true)
 		if err != nil {
 			t.Fatalf("MoERouter: %v", err)
 		}
@@ -122,13 +122,13 @@ func TestMoERouterQuantDeviceTopKAllocationBudget(t *testing.T) {
 	routerW := quantWeightFixture(t, numExperts, dModel, groupSize, bits, 43)
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	for i := range 2 {
-		if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5); err != nil {
+		if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, true); err != nil {
 			t.Fatalf("MoERouterQuant warm %d: %v", i, err)
 		}
 	}
 
 	allocs := testing.AllocsPerRun(50, func() {
-		idx, weights, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5)
+		idx, weights, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5, true)
 		if err != nil {
 			t.Fatalf("MoERouterQuant: %v", err)
 		}
@@ -225,10 +225,16 @@ func TestRouterDeviceScratchPoolKeepsShapesResident(t *testing.T) {
 
 // routerRef independently computes the ideal routing decision from the parity-proven
 // ops: scores = MatVecBF16 on the RMS-normed input, the genuine top-k SET found by a
-// repeated max-scan with separate bookkeeping, then a float64 softmax over those
-// scores and the optional per-expert scale. Returns an expert→weight map —
-// order-invariant, so the gate never depends on the order idx is returned in.
-func routerRef(t *testing.T, x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32) map[int32]float32 {
+// repeated max-scan with separate bookkeeping, then a float64 softmax and the optional
+// per-expert scale. Returns an expert→weight map — order-invariant, so the gate never
+// depends on the order idx is returned in.
+//
+// normalise selects the combine-weight order (#65, MoERouter's own normalise parameter):
+// true softmaxes over just the selected top-K scores (gemma4/mixtral's shape, sums to
+// one); false softmaxes over EVERY expert first, then gathers the top-K WITHOUT
+// renormalising (OLMoE's shape, norm_topk_prob=false — does not sum to one). Top-k
+// SELECTION is unaffected either way (a monotonic transform of the raw scores).
+func routerRef(t *testing.T, x, normWScaled, routerW, perExpertScale []byte, numExperts, topK, dModel int, eps float32, normalise bool) map[int32]float32 {
 	t.Helper()
 	normed, err := RMSNormBF16(x, normWScaled, 1, dModel, eps)
 	if err != nil {
@@ -258,23 +264,33 @@ func routerRef(t *testing.T, x, normWScaled, routerW, perExpertScale []byte, num
 		used[best] = true
 		sel = append(sel, best)
 	}
-	// float64 softmax over the selected scores (the ideal; MoERouter does it in f32
-	// then rounds to bf16, hence the tolerance in the gate).
+	// float64 softmax (the ideal; MoERouter does it in f32 then rounds to bf16, hence the
+	// tolerance in the gate): over just `sel` when normalise (gemma4/mixtral's order, sums
+	// to one); over EVERY expert when !normalise, with the gathered top-K then NOT
+	// renormalised (OLMoE's order, #65 — softmaxAllThenGatherInto's doc has the maths).
+	softmaxOver := sel
+	if !normalise {
+		softmaxOver = make([]int, numExperts)
+		for e := range softmaxOver {
+			softmaxOver[e] = e
+		}
+	}
 	maxS := math.Inf(-1)
-	for _, e := range sel {
+	for _, e := range softmaxOver {
 		if float64(scores[e]) > maxS {
 			maxS = float64(scores[e])
 		}
 	}
-	ex := make([]float64, topK)
+	ex := make(map[int]float64, len(softmaxOver))
 	var sum float64
-	for i, e := range sel {
-		ex[i] = math.Exp(float64(scores[e]) - maxS)
-		sum += ex[i]
+	for _, e := range softmaxOver {
+		v := math.Exp(float64(scores[e]) - maxS)
+		ex[e] = v
+		sum += v
 	}
 	m := make(map[int32]float32, topK)
-	for i, e := range sel {
-		w := ex[i] / sum
+	for _, e := range sel {
+		w := ex[e] / sum
 		if perExpertScale != nil {
 			w *= float64(bf16ToF32(perExpertScale[e*bf16Size], perExpertScale[e*bf16Size+1]))
 		}
@@ -325,13 +341,13 @@ func TestMoERouter(t *testing.T) {
 	// the expert→weight maps must agree to within bf16 precision (the router rounds
 	// each weight to bf16; the reference is the ideal f64 value).
 	const tol = float32(0.02)
-	check := func(name string, topK int, scale []byte, wantSum bool) {
-		idx, weights, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps)
+	check := func(name string, topK int, scale []byte, normalise, wantSum bool) {
+		idx, weights, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, normalise)
 		if err != nil {
 			t.Fatalf("%s: MoERouter: %v", name, err)
 		}
 		got := gotMap(t, idx, weights, topK)
-		want := routerRef(t, x, normWScaled, routerW, scale, numExperts, topK, dModel, eps)
+		want := routerRef(t, x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, normalise)
 		if len(got) != len(want) {
 			t.Fatalf("%s: got %d experts, want %d", name, len(got), len(want))
 		}
@@ -352,10 +368,80 @@ func TestMoERouter(t *testing.T) {
 		t.Logf("%s (top-%d): expert set ✓ exact, weights ✓ within %.3f", name, topK, tol)
 	}
 
-	check("plain top-2", 2, nil, true)                        // softmax weights sum to 1
-	check("per-expert-scale top-2", 2, perExpertScale, false) // scaled → no unit sum
-	check("top-3", 3, nil, true)
-	check("all experts (topK==numExperts)", numExperts, nil, true)
+	check("plain top-2", 2, nil, true, true)                        // softmax weights sum to 1
+	check("per-expert-scale top-2", 2, perExpertScale, true, false) // scaled → no unit sum
+	check("top-3", 3, nil, true, true)
+	check("all experts (topK==numExperts)", numExperts, nil, true, true)
+
+	// #65: normalise=false (OLMoE's order) — softmax over every expert BEFORE the top-k gather, no
+	// renormalisation of the gathered subset. The selected expert SET still matches (top-k selection
+	// is a monotonic transform of the raw scores, independent of the softmax order); the weights do
+	// NOT sum to one in general, so wantSum is false — routerRef's own normalise=false reference is
+	// the load-bearing check, not the sum.
+	check("olmoe-order top-2 (normalise=false)", 2, nil, false, false)
+	check("olmoe-order top-3 (normalise=false)", 3, nil, false, false)
+	check("olmoe-order all experts (normalise=false)", numExperts, nil, false, false)
+}
+
+// TestMoERouterNormaliseFalseNotRenormalised proves the defining behavioural difference between the
+// two combine-weight orders (#65): renormalising normalise=false's gathered weights (dividing each by
+// their own sum) reproduces normalise=true's output exactly, within bf16 tolerance — the mathematical
+// identity router.go's softmaxAllThenGatherInto doc states (softmax-over-all-then-renormalise-the-
+// gathered-K == softmax-over-just-that-K). This is the property a broken `if normalise` branch (e.g.
+// one that took the same code path either way) could NOT satisfy by accident: the false-path weights
+// would already sum to one and this comparison would trivially pass without proving anything, so the
+// test also asserts the false-path sum is measurably below one first.
+func TestMoERouterNormaliseFalseNotRenormalised(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const numExperts, topK, dModel = 8, 2, 256
+	const eps = float32(1e-6)
+	mk := func(n, salt int) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = float32((i*salt+11)%97-48) * 0.02
+		}
+		return s
+	}
+	x := toBF16Bytes(mk(dModel, 31))
+	normWScaled := toBF16Bytes(mk(dModel, 17))
+	routerW := toBF16Bytes(mk(numExperts*dModel, 43))
+
+	idxFalse, weightsFalse, err := MoERouter(x, normWScaled, routerW, nil, numExperts, topK, dModel, eps, false)
+	if err != nil {
+		t.Fatalf("MoERouter normalise=false: %v", err)
+	}
+	idxTrue, weightsTrue, err := MoERouter(x, normWScaled, routerW, nil, numExperts, topK, dModel, eps, true)
+	if err != nil {
+		t.Fatalf("MoERouter normalise=true: %v", err)
+	}
+	gotFalse := gotMap(t, idxFalse, weightsFalse, topK)
+	gotTrue := gotMap(t, idxTrue, weightsTrue, topK)
+	if len(gotFalse) != len(gotTrue) {
+		t.Fatalf("normalise=false selected %d experts, normalise=true selected %d — top-k must be normalise-invariant", len(gotFalse), len(gotTrue))
+	}
+
+	var sumFalse float32
+	for _, w := range gotFalse {
+		sumFalse += w
+	}
+	const tol = float32(0.02)
+	if sumFalse >= 1-tol {
+		t.Fatalf("normalise=false weights sum to %.5f, want measurably < 1 (fixture too peaked to exercise the no-renormalise behaviour)", sumFalse)
+	}
+
+	for e, wf := range gotFalse {
+		wt, ok := gotTrue[e]
+		if !ok {
+			t.Fatalf("expert %d selected under normalise=false but not normalise=true — selection must not depend on the softmax order", e)
+		}
+		renormed := wf / sumFalse
+		if d := renormed - wt; d > tol || d < -tol {
+			t.Fatalf("expert %d: renormalising the normalise=false weight gives %.5f, want %.5f (normalise=true) — Δ%.5f > %.5f", e, renormed, wt, d, tol)
+		}
+	}
+	t.Logf("normalise=false sum=%.5f (<1, no renorm); renormalised weights match normalise=true within %.3f", sumFalse, tol)
 }
 
 func TestMoERouterCachesProjectionWeight(t *testing.T) {
@@ -369,7 +455,7 @@ func TestMoERouterCachesProjectionWeight(t *testing.T) {
 	normWScaled := toBF16Bytes(syntheticFloat32(dModel, 17))
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 
-	if _, _, err := MoERouter(x, normWScaled, routerW, nil, numExperts, topK, dModel, eps); err != nil {
+	if _, _, err := MoERouter(x, normWScaled, routerW, nil, numExperts, topK, dModel, eps, true); err != nil {
 		t.Fatalf("MoERouter: %v", err)
 	}
 
@@ -397,7 +483,7 @@ func TestMoERouterDeviceTopKCachesNormAndScale(t *testing.T) {
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 
-	if _, _, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps); err != nil {
+	if _, _, err := MoERouter(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, true); err != nil {
 		t.Fatalf("MoERouter: %v", err)
 	}
 
@@ -430,7 +516,7 @@ func TestMoERouterHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("matVecBF16Resident reference: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 
 	scratch, err := newRouterHostScratch(dModel, numExperts)
 	if err != nil {
@@ -443,7 +529,7 @@ func TestMoERouterHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) {
 	var weightPtr unsafe.Pointer
 
 	for i := range 2 {
-		gotIdx, gotWeights, err := moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, scratch)
+		gotIdx, gotWeights, err := moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, scratch, true)
 		if err != nil {
 			t.Fatalf("moeRouterBF16HostSelectWithScratch %d: %v", i, err)
 		}
@@ -518,7 +604,7 @@ func TestMoERouterQuantCachesProjectionWeight(t *testing.T) {
 	normWScaled := toBF16Bytes(syntheticFloat32(dModel, 17))
 	routerW := quantWeightFixture(t, numExperts, dModel, groupSize, bits, 43)
 
-	if _, _, err := MoERouterQuant(x, normWScaled, routerW, nil, numExperts, topK, dModel, groupSize, bits, eps); err != nil {
+	if _, _, err := MoERouterQuant(x, normWScaled, routerW, nil, numExperts, topK, dModel, groupSize, bits, eps, true); err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}
 
@@ -545,7 +631,7 @@ func TestMoERouterQuantHonoursWeightGeometry(t *testing.T) {
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 	routerW := quantWeightFixture(t, numExperts, dModel, routerGroupSize, bits, 43)
 
-	gotIdx, gotWeights, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, fallbackGroupSize, bits, eps)
+	gotIdx, gotWeights, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, fallbackGroupSize, bits, eps, true)
 	if err != nil {
 		t.Fatalf("MoERouterQuant with per-weight geometry: %v", err)
 	}
@@ -557,7 +643,7 @@ func TestMoERouterQuantHonoursWeightGeometry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QMVBF16 reference: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 	if len(gotIdx) != len(wantIdx) || len(gotWeights) != len(wantWeights) {
 		t.Fatalf("MoERouterQuant lengths = %d/%d, want %d/%d", len(gotIdx), len(gotWeights), len(wantIdx), len(wantWeights))
 	}
@@ -588,7 +674,7 @@ func TestMoERouterQuantHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) 
 	if err != nil {
 		t.Fatalf("qmvBF16Resident reference: %v", err)
 	}
-	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK)
+	wantIdx, wantWeights := routerSelect(scores, scale, numExperts, topK, true)
 
 	scratch, err := newRouterQuantHostScratch(dModel, numExperts)
 	if err != nil {
@@ -601,7 +687,7 @@ func TestMoERouterQuantHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) 
 	var weightPtr unsafe.Pointer
 
 	for i := range 2 {
-		gotIdx, gotWeights, err := moeRouterQuantHostSelectWithScratch(x, normWScaled, bufView{}, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps, scratch)
+		gotIdx, gotWeights, err := moeRouterQuantHostSelectWithScratch(x, normWScaled, bufView{}, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps, scratch, true)
 		if err != nil {
 			t.Fatalf("moeRouterQuantHostSelectWithScratch %d: %v", i, err)
 		}
@@ -646,7 +732,7 @@ func TestMoERouterQuantDeviceTopKCachesNormAndScale(t *testing.T) {
 	routerW := quantWeightFixture(t, numExperts, dModel, groupSize, bits, 43)
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
 
-	if _, _, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps); err != nil {
+	if _, _, err := MoERouterQuant(x, normWScaled, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps, true); err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}
 

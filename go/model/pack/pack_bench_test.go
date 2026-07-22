@@ -32,6 +32,7 @@ var (
 	packBenchSinkResult  core.Result
 	packBenchSinkErr     error
 	packBenchSinkEntries []pack.Entry
+	packBenchSinkBytes   []byte
 )
 
 // --- Hash ---
@@ -134,6 +135,32 @@ func BenchmarkPack_Pack_Typical(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		packBenchSinkResult = pack.Pack(srcDir, dest, pack.PackOptions{Manifest: m})
+	}
+}
+
+// --- ExtractVindex ---
+
+// ExtractVindex on a packed model with an embedded vindex — trix.Decode +
+// manifest decode + bounds check + copy + SHA-256 verify. New symbol
+// landing with this file per AX-11's "new hot-path functions without
+// accompanying benchmarks block merge".
+func BenchmarkPack_ExtractVindex_Typical(b *testing.B) {
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-vindex-").Value.(string)
+	defer core.RemoveAll(tempRoot)
+	srcDir := core.JoinPath(tempRoot, "src")
+	dest := core.JoinPath(tempRoot, "out.model")
+	buildFixturePack(b, srcDir)
+	blob := make([]byte, 4096) // representative small vindex fixture
+	if r := pack.Pack(srcDir, dest, pack.PackOptions{Manifest: sampleManifest(), VindexBlob: blob}); !r.OK {
+		b.Fatalf("Pack setup: %v", r.Value)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		blob, r := pack.ExtractVindex(dest)
+		packBenchSinkResult = r
+		packBenchSinkBytes = blob
 	}
 }
 

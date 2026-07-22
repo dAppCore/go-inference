@@ -100,6 +100,144 @@ func TestMoEExpertsQuant(t *testing.T) {
 	t.Logf("4-bit batched experts: topK SwiGLU over the SwitchGLU tensor ≡ composed QMV reference, selection-sensitive")
 }
 
+// TestMoEExpertsQuantSiLU gates the SwiGLU (SiLU-gated) batched experts — the composed qwen3_5_moe lane.
+// MoEExpertsQuantSiLU must equal a composed reference whose gate nonlinearity is SiLU (silu(gate)·up), the
+// same batched-expert dispatch as MoEExpertsQuant but encSiLUGateMulBF16 in place of gemma's GELU — AND must
+// DIFFER from the GELU MoEExpertsQuant on identical inputs. That inequality is the one correctness fact a
+// model-level greedy A/B cannot show: GELU≈SiLU stays below the argmax threshold on real prompts, so only a
+// byte-level assertion proves the activation branch is genuinely live (the composed lane was mis-bound to the
+// GELU kernel and produced coherent-but-wrong output until this split).
+func TestMoEExpertsQuantSiLU(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const numExperts, topK, dModel, dFF, gs, bits = 4, 2, 64, 128, 32, 4
+	mk := func(n, salt int) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = float32((i*salt+11)%89-44) * 0.02
+		}
+		return s
+	}
+	gate, up, down := quantMoEExpertsFixture(t, numExperts, dModel, dFF, gs, bits)
+	x := toBF16Bytes(mk(dModel, 5))
+	idx := []int32{2, 0}
+	weights := toBF16Bytes([]float32{0.7, 0.3})
+
+	got, err := MoEExpertsQuantSiLU(x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantSiLU: %v", err)
+	}
+
+	gp, gsz := dFF*dModel*bits/8, dFF*(dModel/gs)*bf16Size
+	dp, dsz := dModel*dFF*bits/8, dModel*(dFF/gs)*bf16Size
+	must := func(b []byte, e error) []byte {
+		t.Helper()
+		if e != nil {
+			t.Fatalf("ref op: %v", e)
+		}
+		return b
+	}
+	var acc []byte
+	for i, e := range idx {
+		ee := int(e)
+		ge := must(QMVBF16(x, gate.Packed[ee*gp:(ee+1)*gp], gate.Scales[ee*gsz:(ee+1)*gsz], gate.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
+		ue := must(QMVBF16(x, up.Packed[ee*gp:(ee+1)*gp], up.Scales[ee*gsz:(ee+1)*gsz], up.Biases[ee*gsz:(ee+1)*gsz], dFF, dModel, gs, bits))
+		gg := must(SiLUGateMulBF16(ge, ue)) // silu(gate)·up — the SwiGLU gate, same choke point as the device path
+		de := must(QMVBF16(gg, down.Packed[ee*dp:(ee+1)*dp], down.Scales[ee*dsz:(ee+1)*dsz], down.Biases[ee*dsz:(ee+1)*dsz], dModel, dFF, gs, bits))
+		scaled := must(MulBF16(de, scalarFillBF16(weights[i*bf16Size:(i+1)*bf16Size], dModel)))
+		if i == 0 {
+			acc = scaled
+		} else {
+			acc = must(AddBF16(acc, scaled))
+		}
+	}
+	if !bytes.Equal(got, acc) {
+		t.Fatal("MoEExpertsQuantSiLU != composed SiLU quant reference")
+	}
+	// the activation branch is genuinely live: the GELU sibling on identical inputs must differ.
+	gelu, err := MoEExpertsQuant(x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuant(GELU): %v", err)
+	}
+	if bytes.Equal(got, gelu) {
+		t.Fatal("SiLU and GELU MoE produced identical output — the activation branch is not engaged")
+	}
+	t.Logf("4-bit batched SwiGLU experts: silu(gate)·up ≡ composed SiLU reference, distinct from the GELU sibling")
+}
+
+// TestEncQwenMoESharedExpertMatchesDevice gates the qwen3_5_moe shared-expert FUSION in encQwenMoEHalf
+// (arch_qwen_moe.go): the always-on shared expert now rides the SAME batched MoEExpertsQuantSiLU kernel as
+// the routed experts, as a degenerate numExperts=topK=1 call whose sole combine weight IS
+// σ(x·SharedSigmoid) — fusing the gate scale into the ONE dispatch instead of a separate host multiply
+// (was 3 quant-seam round trips: gate, up, down, then a host σ multiply).
+//
+// The oracle is swigluSiLUHost×σ — the pre-fusion reference this code path replaces. The two are NOT
+// expected to be byte-identical: swigluSiLUHost's SiLU runs as one continuous host float64 expression (a
+// single bf16 rounding, at the down-projection's quant seam), while the device kernel's encSiLUGateMulBF16
+// composes σ(gate)/gate·σ(gate)/·up as three SEPARATE bf16-rounded dispatches — a different (coarser-
+// grained) rounding schedule at the same bf16 boundary the model already serves at. A handful of bf16 ULP
+// of drift from that is expected, not a defect; anything beyond it would mean the fused call is wired to
+// the wrong weight/expert/activation, which greedy decode's argmax could hide.
+func TestEncQwenMoESharedExpertMatchesDevice(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const D, sharedFF, gs, bits = 64, 32, 32, 4
+	mk := func(n, salt int) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = float32((i*salt+11)%89-44) * 0.02
+		}
+		return s
+	}
+	sGate := QuantWeight{GroupSize: gs, Bits: bits}
+	sGate.Packed, sGate.Scales, sGate.Biases = quantizeProj(t, sharedFF, D, gs, bits, 17)
+	sUp := QuantWeight{GroupSize: gs, Bits: bits}
+	sUp.Packed, sUp.Scales, sUp.Biases = quantizeProj(t, sharedFF, D, gs, bits, 29)
+	sDown := QuantWeight{GroupSize: gs, Bits: bits}
+	sDown.Packed, sDown.Scales, sDown.Biases = quantizeProj(t, D, sharedFF, gs, bits, 41)
+
+	x := mk(D, 5)
+	const sigma = 0.63 // arbitrary, non-trivial (≠0, ≠1) σ — proves the gate scale is genuinely consumed
+
+	// host reference: the pre-fusion path this replaces — swigluSiLUHost, then a host σ multiply.
+	seF32, err := swigluSiLUHost(x, sGate, sUp, sDown, D, sharedFF)
+	if err != nil {
+		t.Fatalf("swigluSiLUHost: %v", err)
+	}
+	expected := make([]float32, D)
+	for d := range expected {
+		expected[d] = seF32[d] * sigma
+	}
+	expectedBF := f32ToBf16Slice(expected)
+
+	// device: the fused degenerate 1-of-1 MoEExpertsQuantSiLU call encQwenMoEHalf now makes, weighted by σ.
+	xBF := f32ToBf16Slice(x)
+	sr := f32ToBF16(sigma)
+	gotBF, err := MoEExpertsQuantSiLU(xBF, []int32{0}, []byte{byte(sr), byte(sr >> 8)}, sGate, sUp, sDown, 1, 1, D, sharedFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantSiLU (shared 1-of-1): %v", err)
+	}
+
+	worst, at := bf16UlpDist(gotBF, expectedBF)
+	t.Logf("shared-expert fused call vs host swigluSiLUHost×σ: worst %d bf16 ULP at elem %d", worst, at)
+	if worst > 4 {
+		t.Fatalf("shared-expert fused call diverges from the host reference by %d bf16 ULP at elem %d — beyond the expected bf16-rounding-schedule tolerance, likely a wiring bug (wrong weight/expert/activation), not rounding", worst, at)
+	}
+
+	// non-vacuous: a different σ must move the output — proves the combine weight is genuinely the gate,
+	// not a hardcoded 1.0 (the bug this fusion would silently produce if the weight argument were dropped).
+	sr2 := f32ToBF16(0.2)
+	other, err := MoEExpertsQuantSiLU(xBF, []int32{0}, []byte{byte(sr2), byte(sr2 >> 8)}, sGate, sUp, sDown, 1, 1, D, sharedFF, gs, bits)
+	if err != nil {
+		t.Fatalf("MoEExpertsQuantSiLU (shared 1-of-1, σ=0.2): %v", err)
+	}
+	if bytes.Equal(gotBF, other) {
+		t.Fatal("different σ produced the same output — the combine weight is not wired to the gate")
+	}
+}
+
 func TestMoEExpertsQuantBindsWholeBatchedExpertTensors(t *testing.T) {
 	requireNativeRuntime(t)
 	resetResidentBufsForTest()
@@ -1355,7 +1493,7 @@ func TestMoEBlockQuantDeviceRouterBuffersChainWithoutHostViews(t *testing.T) {
 	h := toBF16Bytes(syntheticFloat32(dModel, 37))
 	w := quantMoELayerWeightsGuard(t, numExperts, topK, dModel, dFF, expertDFF, groupSize, bits)
 
-	idx, weights, err := moeRouterQuantWithViews(h, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	idx, weights, err := moeRouterQuantWithViews(h, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, true)
 	if err != nil {
 		t.Fatalf("moeRouterQuantWithViews: %v", err)
 	}
@@ -1364,7 +1502,7 @@ func TestMoEBlockQuantDeviceRouterBuffersChainWithoutHostViews(t *testing.T) {
 		t.Fatalf("moeBlockQuantAfterRouter host route: %v", err)
 	}
 
-	weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, nil, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	weightBuf, routerScratch, ok, err := moeRouterQuantDeviceTopKBuffersWithBufferInPool(h, nil, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps, true)
 	if err != nil {
 		t.Fatalf("moeRouterQuantDeviceTopKBuffersWithBufferInPool: %v", err)
 	}
@@ -1454,7 +1592,7 @@ func TestMoERouterQuant(t *testing.T) {
 	norm := toBF16Bytes(mk(dModel, 9))
 	scale := toBF16Bytes(mk(numExperts, 5))
 
-	idx, weights, err := MoERouterQuant(x, norm, proj, scale, numExperts, topK, dModel, gs, bits, eps)
+	idx, weights, err := MoERouterQuant(x, norm, proj, scale, numExperts, topK, dModel, gs, bits, eps, true)
 	if err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}
@@ -1471,7 +1609,7 @@ func TestMoERouterQuant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QMVBF16: %v", err)
 	}
-	wantIdx, wantW := routerSelect(scoresB, scale, numExperts, topK)
+	wantIdx, wantW := routerSelect(scoresB, scale, numExperts, topK, true)
 	if !bytes.Equal(weights, wantW) {
 		t.Fatal("MoERouterQuant weights != manual routerSelect")
 	}
@@ -1551,6 +1689,7 @@ func TestMoEBlockQuant(t *testing.T) {
 		LocalGate: qw(dFF, dModel, 3), LocalUp: qw(dFF, dModel, 31), LocalDown: qw(dModel, dFF, 37),
 		RouterNormWScaled: nrm(41), Router: qw(numExperts, dModel, 43), PerExpertScale: toBF16Bytes(mk(numExperts, 47)),
 		ExpGate: batched(expertDFF, dModel, 53), ExpUp: batched(expertDFF, dModel, 101), ExpDown: batched(dModel, expertDFF, 149),
+		NormaliseTopK: true, // gemma4-shaped; see quantMoELayerWeightsGuard's identical note
 	}
 	h := toBF16Bytes(mk(dModel, 5))
 
@@ -1566,7 +1705,7 @@ func TestMoEBlockQuant(t *testing.T) {
 		}
 		return b
 	}
-	idx, weights, err := MoERouterQuant(h, w.RouterNormWScaled, w.Router, w.PerExpertScale, numExperts, topK, dModel, gs, bits, eps)
+	idx, weights, err := MoERouterQuant(h, w.RouterNormWScaled, w.Router, w.PerExpertScale, numExperts, topK, dModel, gs, bits, eps, true)
 	if err != nil {
 		t.Fatalf("MoERouterQuant: %v", err)
 	}

@@ -27,6 +27,8 @@ Environment variables read once at process start. The load-bearing ones (non-exh
 |----------|--------|
 | `LTHN_KV_Q8=1` | int8 paged KV cache with f32 group scales, opted in per layer on gqa2 geometry (`nHeads == 2*kvHeads`, `headDim ≤ 256`) — half the KV bytes at parity tok/s. Errors loudly at load if no layer qualifies. |
 | `LTHN_MTP_REENGAGE=0` | Restores the permanent low-acceptance bail for MTP speculative decoding. The default re-engagement gate is wall-clock-adaptive (probes plain-decode economics live), so paired runs are not byte-reproducible run-to-run; this switch is the reproducibility anchor. |
+| `LTHN_MTP_VERIFY_FOLD` | MTP verify forward tier (#55). Default: the GREEDY verify runs the per-row lane (byte-identical to sequential plain decode — the exact-greedy contract) and the SAMPLED verify takes the small-K batched fold (qmm token-identity tier — weights swept once per block, batched numerics that can flip a near-tied argmax). `=1` forces the fold everywhere (the A/B lever that resurrects the pre-#55 greedy behaviour: faster, byte-inexact); `=0` forces the per-row lane everywhere. |
+| `LTHN_MTP_ROWS_HEAD=1` | Re-arms the K-row fused verify rows head (qmm_t token-identity tier) in the byte-exact greedy verify — an A/B lever (#55). The exact lane otherwise scores verify rows through the per-row canonical qmv head, the tier plain decode picks with. |
 | `LTHN_SDPA_SPLIT=N` | Overrides the paged-SDPA split-window grain (rows per pass-1 threadgroup window; default 256, halved on the GQA-shared route). A probe lever for kernel tuning, not a serving knob. |
 | `LTHN_SDPA_GEMM_MINKV=N` | Overrides the attended-length knee at which prompt-scale SDPA switches from the multiQ vector kernel to the steel-GEMM composition (compiled default 2048; `=4096` restores the previous knee). A probe/A-B lever, not a serving knob. |
 | `LTHN_FLASH_WIN=0` | Restores the multiQ ring kernel by disabling the sliding-window flash prompt-attention lane (an A/B lever). The window flash is otherwise gated by a 1024-row floor, so small chunks already stay on the ring kernel. |
@@ -44,6 +46,27 @@ Path `engine/hip`, package `hip`. The default `linux && amd64` build is native-f
 | `linux && amd64 && rocm_legacy_server` | legacy `llama-server` subprocess bridge |
 
 Registers as `"rocm"`. GGUF loading works; safetensors model-pack loading is **not yet available** in the current quarantine landing (blocked on a missing upstream package — the load fails with an explicit message rather than guessing).
+
+#### Quantisation lanes on AMD
+
+Not every quantisation format is equally "native" on ROCm, and this shapes
+what a ROCm quant contribution should target. The AMD-native lanes are:
+
+- **GGUF** (`q4_0`, `q4_K`, `q8_0`) — MLX-style group-affine quantisation;
+  `engine/hip`'s existing `rocm_mlx_q4_projection` kernel family already
+  serves this.
+- **FP8** (W8A8, via llm-compressor / AMD Quark) — 8-bit weight+activation.
+- **MXFP4** (via AMD Quark) — OCP microscaled 4-bit (`model/quant/mxfp4`),
+  hardware-accelerated from CDNA4/MI350 onward.
+
+**GPTQ, AWQ, and Marlin are unsupported on AMD** — this is not a gap to
+close by porting a kernel, it is the ecosystem's own shape: Marlin, the fast
+kernel both GPTQ and AWQ lean on, is hand-written Nvidia tensor-core PTX with
+no ROCm equivalent. Scoping ROCm quant work as "port GPTQ to HIP" swims
+against that grain; the native-feeling targets are GGUF, FP8, and MXFP4
+above. See the
+[vLLM ROCm quantization compatibility matrix](https://docs.vllm.ai/en/latest/features/quantization/)
+for the full picture.
 
 ### About `llama_cpp`
 

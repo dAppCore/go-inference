@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	g3 "dappco.re/go/inference/model/gemma3" // importing registers the gemma3 ArchSpec (NormBiasOne folding) for LoadDir
+	g3 "dappco.re/go/inference/model/arch/google/gemma3" // importing registers the gemma3 ArchSpec (NormBiasOne folding) for LoadDir
 	coreio "dappco.re/go/io"
 )
 

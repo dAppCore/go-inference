@@ -220,6 +220,73 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 			return nil, core.E("rocm.hip.LoadModel", "bind sequence mixer plan", err)
 		}
 	}
+	if cfg.VisionModelPath != "" {
+		gemm := newHIPAudioGEMM(runtime.driver)
+		tower, err := loadUnifiedVisionTowerWithGEMM(cfg.VisionModelPath, gemm)
+		if err != nil {
+			model.Close()
+			return nil, core.E("rocm.hip.LoadModel", "load Gemma 4 unified vision tower", err)
+		}
+		visionRuntime := "gemma4_unified"
+		if tower != nil {
+			if cfg.ModelInfo.HiddenSize <= 0 || tower.loaded.Cfg.TextHidden != cfg.ModelInfo.HiddenSize {
+				_ = tower.Close()
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "vision projector output does not match text hidden size", nil)
+			}
+			model.unifiedVision = tower
+			if tower.loaded.Cfg.BidirectionalImages {
+				model.gemma4Q4Config.BidirectionalSpanTokens = [2]int32{
+					tower.loaded.Cfg.ImageTokenID,
+					tower.loaded.Cfg.VideoTokenID,
+				}
+			}
+		} else {
+			encoder, err := loadHIPVisionEncoderTowerWithGEMM(cfg.VisionModelPath, gemm)
+			if err != nil {
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "load Gemma 4 encoder vision tower", err)
+			}
+			if encoder == nil {
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "vision model path has no supported Gemma 4 vision tower", nil)
+			}
+			if cfg.ModelInfo.HiddenSize <= 0 || encoder.outputDim() != cfg.ModelInfo.HiddenSize {
+				_ = encoder.Close()
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "vision projector output does not match text hidden size", nil)
+			}
+			model.vision = encoder
+			visionRuntime = "gemma4_siglip"
+		}
+		if model.modelLabels == nil {
+			model.modelLabels = map[string]string{}
+		}
+		model.modelLabels["vision_model_path"] = cfg.VisionModelPath
+		model.modelLabels["vision_runtime"] = visionRuntime
+	}
+	if cfg.AudioModelPath != "" {
+		tower, err := loadAudioTowerWithGEMM(cfg.AudioModelPath, newHIPAudioGEMM(runtime.driver))
+		if err != nil {
+			model.Close()
+			return nil, core.E("rocm.hip.LoadModel", "load Gemma 4 audio tower", err)
+		}
+		if tower == nil {
+			model.Close()
+			return nil, core.E("rocm.hip.LoadModel", "audio model path has no Gemma 4 audio tower", nil)
+		}
+		if cfg.ModelInfo.HiddenSize <= 0 || tower.loaded.Projector.OutDim != cfg.ModelInfo.HiddenSize {
+			_ = tower.Close()
+			model.Close()
+			return nil, core.E("rocm.hip.LoadModel", "audio projector output does not match text hidden size", nil)
+		}
+		model.audio = tower
+		if model.modelLabels == nil {
+			model.modelLabels = map[string]string{}
+		}
+		model.modelLabels["audio_model_path"] = cfg.AudioModelPath
+		model.modelLabels["audio_runtime"] = "gemma4_conformer"
+	}
 	hipPrewarmGemma4Q4TokenFilters(model)
 	hipPrewarmGemma4Q4KernelFunctions(model.driver)
 	hipPrewarmGemma4Q4LaunchPacketPools()
@@ -236,9 +303,21 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 }
 
 func hipGemma4HostResidentExpertTensor(cfg nativeLoadConfig, tensor nativeTensorInfo) bool {
-	return isROCmGemma4Architecture(cfg.ModelInfo.Architecture) &&
-		len(tensor.Dimensions) == 3 &&
-		core.Contains(tensor.Name, "_exps.weight")
+	if len(tensor.Dimensions) != 3 {
+		return false
+	}
+	if isROCmGemma4Architecture(cfg.ModelInfo.Architecture) && core.Contains(tensor.Name, "_exps.weight") {
+		return true
+	}
+	if !isROCmGemma4BackboneArchitecture(cfg.ModelInfo.Architecture) {
+		return false
+	}
+	return core.HasSuffix(tensor.Name, ".experts.gate_up_proj.weight") ||
+		core.HasSuffix(tensor.Name, ".experts.gate_up_proj.scales") ||
+		core.HasSuffix(tensor.Name, ".experts.gate_up_proj.biases") ||
+		core.HasSuffix(tensor.Name, ".experts.down_proj.weight") ||
+		core.HasSuffix(tensor.Name, ".experts.down_proj.scales") ||
+		core.HasSuffix(tensor.Name, ".experts.down_proj.biases")
 }
 
 var hipGemma4Q4WarmKernelNames = []string{
@@ -249,11 +328,22 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameProjectionBatch,
 	hipKernelNameMLXQ4Proj,
 	hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360,
+	hipKernelNameMLXQ4ProjQ4G64Rows3840Cols15360Row16,
+	hipKernelNameMLXQ4ProjQ4G64E4BRow8,
+	hipKernelNameMLXQ4ProjQ8G64Row8,
 	hipKernelNameMLXQ4ProjCols256,
 	hipKernelNameMLXQ4ProjQ6G16Row16,
 	hipKernelNameMLXQ4ProjQ6Row16,
 	hipKernelNameMLXQ4ProjQ6Row64,
 	hipKernelNameMLXQ4ProjBatch,
+	hipKernelNameMLXQ4ProjBatchQ4G64Tokens16,
+	hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704,
+	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16,
+	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared,
+	hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared,
+	hipKernelNameMLXQ4ProjBatchQ8G64Row32Tokens64Shared,
+	hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Shared,
+	hipKernelNameMLXQ4ProjBatchQ8G64Row64Tokens64Aligned,
 	hipKernelNameMLXQ4ProjBatchQ6Row16,
 	hipKernelNameMLXQ4ProjGreedy,
 	hipKernelNameMLXQ4ProjGreedyQ6Row64,
@@ -272,10 +362,15 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16,
 	hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840,
 	hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8,
+	hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8,
+	hipKernelNameMLXQ4GELUTanhMulQ8G64Row8,
 	hipKernelNameMLXQ4GELUTanhMLPQ4G32Cols1536Persistent,
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536,
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64,
 	hipKernelNameMLXQ4GELUTanhMulBatch,
+	hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8,
+	hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16,
+	hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32,
 	hipKernelNameMLXQ4GELUTanhProj,
 	hipKernelNameMLXQ4GELUTanhProjQ6Row16,
 	hipKernelNameMLXQ4GELUTanhProjBatch,
@@ -289,6 +384,14 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameRMSNormRoPEHeadsBatch,
 	hipKernelNameRMSNormRoPEHeadsPairLaneBatch,
 	hipKernelNameMoECombineNorms,
+	hipKernelNameMoEBatchGatherRows,
+	hipKernelNameMoEBatchScatterRoutes,
+	hipKernelNameMoEBatchReduceRoutes,
+	hipKernelNameMoEMLXAffineRoutes,
+	hipKernelNameQ8_1QuantizeF32,
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8,
+	hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8,
+	hipKernelNameGGUFQ4KExpandMetadata,
 	hipKernelNameAttentionHeads,
 	hipKernelNameAttentionHeadsBatchCausal,
 	hipKernelNameAttentionHeadsLaneBatch,
@@ -297,12 +400,21 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameAttentionHeadsChunkedStage2,
 	hipKernelNameAttentionHeadsBatchChunkedStage1,
 	hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA4,
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA8,
 	hipKernelNameAttentionHeadsBatchChunkedStage2,
 	hipKernelNameVectorAddScaled,
 	hipKernelNameVectorScale,
 	hipKernelNamePerLayerInputTranspose,
 	hipKernelNameEmbedLookup,
 	hipKernelNameEmbedLookupGreedyToken,
+	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows16,
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4,
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64,
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4,
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64,
+	hipKernelNameDiffusionSampleProbabilities,
+	hipKernelNameDiffusionSampleProbabilitiesWide,
 }
 
 func hipPrewarmGemma4Q4KernelFunctions(driver nativeHIPDriver) {
@@ -345,6 +457,11 @@ var hipGemma4Q4WarmLaunchPacketSizes = []int{
 	hipRMSNormRoPEHeadsBatchLaunchArgsBytes,
 	hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes,
 	hipMoECombineNormsLaunchArgsBytes,
+	hipMoEBatchRouteRowsLaunchArgsBytes,
+	hipMoEBatchReduceLaunchArgsBytes,
+	hipQ8_1QuantizeLaunchArgsBytes,
+	hipGGUFQ4KQ8_1GateUpLaunchArgsBytes,
+	hipGGUFQ4KExpandLaunchArgsBytes,
 	hipAttentionHeadsLaunchArgsBytes,
 	hipAttentionHeadsBatchCausalLaunchArgsBytes,
 	hipAttentionHeadsLaneBatchLaunchArgsBytes,
@@ -356,6 +473,7 @@ var hipGemma4Q4WarmLaunchPacketSizes = []int{
 	hipPerLayerInputTransposeLaunchArgsBytes,
 	hipEmbeddingLookupLaunchArgsBytes,
 	hipSoftcapGreedyLaunchArgsBytes,
+	hipDiffusionSampleLaunchArgsBytes,
 }
 
 func hipPrewarmGemma4Q4LaunchPacketPools() {
@@ -628,8 +746,12 @@ type hipLoadedModel struct {
 	adapter               inference.AdapterIdentity
 	tinyLoRA              *hipLoadedTinyLoRAAdapter
 	smallLoRA             *hipLoadedSmallLoRAAdapter
+	gemma4LoRA            *hipLoadedSmallLoRAAdapter
 	classLoRA             *hipLoadedClassifierLoRAAdapter
 	tokenText             *hipTokenTextDecoder
+	audio                 *AudioTower
+	vision                *HIPVisionEncoderTower
+	unifiedVision         *UnifiedVisionTower
 	q4ConfigMu            sync.Mutex
 	q4Config              hipGemma4Q4ForwardConfig
 	q4Layers              int
@@ -648,12 +770,25 @@ type hipLoadedModel struct {
 	closed                bool
 }
 
+func (model *hipLoadedModel) AcceptsAudioInput() bool {
+	return model != nil && ((model.unifiedVision != nil && model.unifiedVision.AcceptsAudio()) ||
+		(model.audio != nil && model.audio.loaded != nil))
+}
+
+func (model *hipLoadedModel) AcceptsImageInput() bool {
+	return model != nil && ((model.unifiedVision != nil && model.unifiedVision.loaded != nil) ||
+		(model.vision != nil && model.vision.loaded != nil))
+}
+
 func (model *hipLoadedModel) gemma4Q4EngineConfig() hipGemma4Q4EngineConfig {
 	cfg := defaultHIPGemma4Q4EngineConfig()
-	if model == nil || model.gemma4Q4Config.DeviceKVMode == "" {
+	if model == nil {
 		return cfg
 	}
-	cfg.DeviceKVMode = model.gemma4Q4Config.DeviceKVMode
+	if model.gemma4Q4Config.DeviceKVMode != "" {
+		cfg.DeviceKVMode = model.gemma4Q4Config.DeviceKVMode
+	}
+	cfg.BidirectionalSpanTokens = model.gemma4Q4Config.BidirectionalSpanTokens
 	return cfg
 }
 
@@ -911,6 +1046,11 @@ func (model *hipLoadedModel) ApplyChatTemplate(messages []inference.Message) (st
 	if model != nil && isROCmGemma4Architecture(model.modelInfo.Architecture) {
 		return formatGemma4ChatTemplate(messages), nil
 	}
+	if model != nil {
+		if prompt, ok := formatHIPArchitectureChatTemplate(messages, model.modelInfo.Architecture, nil); ok {
+			return prompt, nil
+		}
+	}
 	return formatFallbackChatTemplate(messages), nil
 }
 
@@ -918,12 +1058,29 @@ func (model *hipLoadedModel) applyChatTemplateWithGenerateConfig(messages []infe
 	if model != nil && isROCmGemma4Architecture(model.modelInfo.Architecture) {
 		return formatGemma4ChatTemplateWithConfig(messages, model.gemma4ChatTemplateConfig(cfg, false)), nil
 	}
+	if model != nil {
+		if prompt, ok := formatHIPArchitectureChatTemplate(messages, model.modelInfo.Architecture, cfg.EnableThinking); ok {
+			return prompt, nil
+		}
+	}
 	return formatFallbackChatTemplate(messages), nil
 }
 
 func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity, error) {
 	if core.Trim(path) == "" {
 		return inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "adapter path is required", nil)
+	}
+	if model != nil && hipLoadedGemma4Q4GenerateLinked(model) && isROCmGemma4Architecture(model.modelInfo.Architecture) {
+		adapter, identity, err := model.loadGemma4HeadLoRAAdapter(path)
+		if err != nil {
+			return inference.AdapterIdentity{}, err
+		}
+		model.gemma4LoRA = adapter
+		model.smallLoRA = nil
+		model.tinyLoRA = nil
+		model.classLoRA = nil
+		model.adapter = cloneAdapterIdentity(identity)
+		return cloneAdapterIdentity(identity), nil
 	}
 	if model == nil || normalizeHIPKernelStatus(model.KernelStatus()).LoRA != hipKernelStatusLinked {
 		return inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "native LoRA adapter application is not linked yet: "+path, nil)
@@ -934,6 +1091,7 @@ func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity
 			return inference.AdapterIdentity{}, err
 		}
 		model.smallLoRA = adapter
+		model.gemma4LoRA = nil
 		model.tinyLoRA = nil
 		model.classLoRA = nil
 		model.adapter = cloneAdapterIdentity(identity)
@@ -946,6 +1104,7 @@ func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity
 		}
 		model.tinyLoRA = adapter
 		model.smallLoRA = nil
+		model.gemma4LoRA = nil
 		model.classLoRA = nil
 		model.adapter = cloneAdapterIdentity(identity)
 		return cloneAdapterIdentity(identity), nil
@@ -962,6 +1121,7 @@ func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity
 		model.classLoRA = adapter
 		model.tinyLoRA = nil
 		model.smallLoRA = nil
+		model.gemma4LoRA = nil
 		model.adapter = cloneAdapterIdentity(identity)
 		return cloneAdapterIdentity(identity), nil
 	}
@@ -972,6 +1132,7 @@ func (model *hipLoadedModel) UnloadAdapter() error {
 	model.adapter = inference.AdapterIdentity{}
 	model.tinyLoRA = nil
 	model.smallLoRA = nil
+	model.gemma4LoRA = nil
 	model.classLoRA = nil
 	return nil
 }
@@ -1244,9 +1405,11 @@ func hipTensorDimensionsContainLogical(tensor nativeTensorInfo, value uint64, in
 			if dimension > uint64(int(^uint(0)>>1)) {
 				continue
 			}
-			cols, err := hipMLXAffineColsFromPackedCols(int(dimension), info.QuantBits)
-			if err == nil && uint64(cols) == value {
-				return true
+			for _, bits := range hipMLXAffineCandidateBits(info.QuantBits) {
+				cols, err := hipMLXAffineColsFromPackedCols(int(dimension), bits)
+				if err == nil && uint64(cols) == value {
+					return true
+				}
 			}
 		}
 	}
@@ -1315,6 +1478,18 @@ func (model *hipLoadedModel) Close() error {
 		return nil
 	}
 	var lastErr error
+	if err := model.audio.Close(); err != nil {
+		lastErr = core.E("rocm.hip.Close", "close audio tower", err)
+	}
+	model.audio = nil
+	if err := model.vision.Close(); err != nil {
+		lastErr = core.E("rocm.hip.Close", "close vision encoder tower", err)
+	}
+	model.vision = nil
+	if err := model.unifiedVision.Close(); err != nil {
+		lastErr = core.E("rocm.hip.Close", "close unified vision tower", err)
+	}
+	model.unifiedVision = nil
 	model.expertCacheMu.Lock()
 	if err := model.expertCache.Close(); err != nil {
 		lastErr = core.E("rocm.hip.Close", "close expert cache", err)
@@ -1333,6 +1508,7 @@ func (model *hipLoadedModel) Close() error {
 	model.adapter = inference.AdapterIdentity{}
 	model.tinyLoRA = nil
 	model.smallLoRA = nil
+	model.gemma4LoRA = nil
 	model.classLoRA = nil
 	model.storeAttachedDrafterRuntime(nil)
 	model.closed = true

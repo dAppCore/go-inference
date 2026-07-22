@@ -90,12 +90,12 @@ func Inspect(path string, identityPath string) (AdapterInfo, error) {
 	if !read.OK {
 		return AdapterInfo{}, core.E("lora.Inspect", "read adapter_config.json", read.Err())
 	}
-	// Cache the type assertion: read.Value is consumed once by the JSON
-	// unmarshal and once by hashAdapter — both expect []byte. The
-	// compiler treats each .([]byte) as an independent type-assert call,
-	// so caching saves the second assertion and its associated iface-table
-	// probe on every successful Inspect.
-	configBytes := read.Value.([]byte)
+	// Cache the typed read: configBytes is consumed once by the JSON
+	// unmarshal and once by hashAdapter — both expect []byte. Each call to
+	// .Bytes() is an independent type-assert under the hood, so caching
+	// saves the second assertion and its associated iface-table probe on
+	// every successful Inspect.
+	configBytes := read.Bytes()
 	cfg, err := ParseAdapterConfig(configBytes)
 	if err != nil {
 		return AdapterInfo{}, core.E("lora.Inspect", "parse adapter_config.json", err)
@@ -285,7 +285,7 @@ func hashWeightFile(path string, hasher *hashWriter) ([32]byte, bool) {
 	if !read.OK {
 		return [32]byte{}, false
 	}
-	return core.SHA256(read.Value.([]byte)), true
+	return core.SHA256(read.Bytes()), true
 }
 
 // streamHashWeightFile hashes the file at path by copying it through the

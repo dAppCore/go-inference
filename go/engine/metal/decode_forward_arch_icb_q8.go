@@ -15,17 +15,23 @@ import (
 )
 
 // decode_forward_arch_icb_q8.go — q8 KV on the recorded-ICB lane (#367 slice
-// B, OPT-IN via LTHN_KV_Q8_ICB=1): the GLOBAL owner layers' caches store int8
-// codes + f32 group scales instead of bf16, halving the bytes of the
-// unbounded deep-context KV scan (the measured depth slope). Sliding layers
-// stay bf16 — their scan is window-capped and their ring landing untouched.
+// B, default-on, LTHN_KV_Q8_ICB=0 kills): EVERY owner layer's cache stores
+// int8 codes + f32 group scales instead of bf16 — global owners halve the
+// bytes of the unbounded deep-context KV scan (the measured depth slope),
+// sliding owners halve their bounded ring (#69: the cache is uniform, not a
+// per-attention-class split).
 //
-// The recorded shape per q8 global layer: the K rope/norm and the V
-// projection land into FIXED bf16 staging rows (no per-token rebind), then
-// one lthn_kv_q8_store_bf16 op each quantises staging → the int8 cache row +
-// scale row (those two ops' output offsets are what prepareStepRebind now
-// rebinds), and the layer's SDPA reads through the q8 kernel pair
-// (lthn_sdpa_vector_q8 / _2pass_1_q8) with the scale planes bound.
+// The recorded shape per q8 owner: the K rope/norm and the V projection land
+// into FIXED bf16 staging rows (no per-token rebind), then one
+// lthn_kv_q8_store_bf16 op each quantises staging → the int8 cache row +
+// scale row (those two ops' output offsets are what prepareStepRebind
+// rebinds — pos%cacheRows on BOTH planes, which on a sliding owner's bounded
+// allocation IS the ring write), and the layer's SDPA reads through the q8
+// kernel pair (lthn_sdpa_vector_q8 / _2pass_1_q8) with the scale planes
+// bound. A sliding reader scans [0, nSliding) of the ring — row order is not
+// chronological, which is sound for the same reason the bf16 ring is: softmax
+// is permutation-invariant and every cached row carries its absolute-position
+// RoPE baked in at write time.
 //
 // V1 coherence: lanes that would write bf16 into (or read bf16 from) the q8
 // caches DECLINE — the batched dense pass falls back to the per-token replay
@@ -42,6 +48,10 @@ var (
 	kvQ8ICBEnabled    = os.Getenv("LTHN_KV_Q8_ICB") != "0"
 	kvQ8ICBForTest    bool
 	kvQ8ICBOffForTest bool
+
+	// q8DeclineLogged de-duplicates the geometry-decline trace lines — one
+	// line per distinct reason per process, not one per layer per session.
+	q8DeclineLogged = map[string]bool{}
 )
 
 func kvQ8ICBOn() bool { return (kvQ8ICBEnabled || kvQ8ICBForTest) && !kvQ8ICBOffForTest }
@@ -77,6 +87,7 @@ func (r *archICBReplay) releaseKVCaches() {
 		}
 		r.releaseQ8Mirrors()
 	}
+	r.releaseTQPlanes() // TurboQuant γ planes (#41 S3) — the code caches are kCaches/vCaches above
 }
 
 // archICBKVQ8 carries the per-layer q8 KV state threaded from the session
@@ -113,9 +124,11 @@ func (q *archICBKVQ8) any() bool {
 // allocArchICBCaches allocates the recorded replay's per-owner KV caches —
 // the ONE allocation loop both session constructors share. Sliding owners
 // get the bounded ring (SlidingWindow rows); global owners get maxLen rows.
-// Under the q8 opt-in, qualifying GLOBAL owners (q8 SDPA instantiations
-// exist for hd 256/512; kvDim must be whole 64-groups) allocate int8 caches
-// + f32 scale planes instead of bf16, and the returned carrier marks them.
+// Under q8 (default-on), qualifying owners of EITHER attention class (q8
+// SDPA instantiations exist for hd 256/512; kvDim must be whole 64-groups)
+// allocate int8 caches + f32 scale planes instead of bf16, and the returned
+// carrier marks them. A geometry that misses the gate stays bf16 — #70
+// widens the instantiation set.
 func allocArchICBCaches(specs []model.LayerSpec, nKVHeads, headDim, maxLen, slidingWindow int) (kCaches, vCaches []metal.MTLBuffer, kvQ8 *archICBKVQ8) {
 	kCaches = make([]metal.MTLBuffer, len(specs))
 	vCaches = make([]metal.MTLBuffer, len(specs))
@@ -138,14 +151,27 @@ func allocArchICBCaches(specs []model.LayerSpec, nKVHeads, headDim, maxLen, slid
 			// smaller allocation and ring-writes pos%cacheRows.
 			cacheLen = slidingWindow
 		}
-		if kvQ8ICBOn() && specs[li].Attention == model.GlobalAttention &&
-			kvd%kvQ8GroupSize == 0 && (lhd == 256 || lhd == 512) {
+		if kvQ8ICBOn() && kvd%kvQ8GroupSize == 0 && (lhd == 128 || lhd == 256 || lhd == 512) {
 			kCaches[li] = device.NewBufferWithLengthOptions(uint(cacheLen*kvd), metal.MTLResourceStorageModeShared)
 			vCaches[li] = device.NewBufferWithLengthOptions(uint(cacheLen*kvd), metal.MTLResourceStorageModeShared)
 			q8.kScales[li] = device.NewBufferWithLengthOptions(uint(cacheLen*(kvd/kvQ8GroupSize)*4), metal.MTLResourceStorageModeShared)
 			q8.vScales[li] = device.NewBufferWithLengthOptions(uint(cacheLen*(kvd/kvQ8GroupSize)*4), metal.MTLResourceStorageModeShared)
 			q8.enabled[li] = true
 			continue
+		}
+		if kvQ8ICBOn() {
+			// a q8-armed session leaving an owner bf16 is a GEOMETRY decline —
+			// name it once per reason so the plan line's native count is never
+			// a silent narrowing (#70; the cache-plan line shows the outcome,
+			// this names the cause).
+			reason := core.Sprintf("headDim %d has no q8 SDPA instantiation (128/256/512)", lhd)
+			if kvd%kvQ8GroupSize != 0 {
+				reason = core.Sprintf("kvDim %d not a whole %d-group", kvd, kvQ8GroupSize)
+			}
+			if !q8DeclineLogged[reason] {
+				q8DeclineLogged[reason] = true
+				nativeTraceLog(core.Sprintf("native: kv-q8 decline: layer %d stays bf16 — %s\n", li, reason))
+			}
 		}
 		cacheBytes := uint(cacheLen * kvd * bf16Size)
 		kCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)

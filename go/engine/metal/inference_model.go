@@ -49,18 +49,26 @@ func (m *NativeTokenModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	if tok == nil {
 		return engine.ChatTemplate{}, false
 	}
-	return engine.GemmaChatTemplate(engine.DetectTurnTokens(tok), m.NeedsThoughtChannelSuppressor()), true
+	// ChatML for a <|im_start|> vocab (Qwen/Yi/Mistral), else the gemma dialect in the tokenizer's
+	// marker flavour — a gemma checkpoint declares exactly what it did before, while a Qwen2 pack
+	// stops being mis-framed as gemma (whose <start_of_turn> markers it echoes instead of answering).
+	tmpl := engine.DetectChatTemplate(tok, engine.DetectTurnTokens(tok), m.NeedsThoughtChannelSuppressor())
+	// The checkpoint's own default system prompt (Qwen2.5 injects one; gemma and
+	// Qwen3.5/3.6 leave this ""), so a no-system chat frames the vendor default
+	// exactly rather than omitting it. Empty is a no-op in the render loop.
+	tmpl.DefaultSystem = m.defaultSystem
+	return tmpl, true
 }
 
-// SupportedCacheModes reports the one KV cache mode this no-cgo engine runs: its
-// own built-in cache, selected automatically (engine.CacheModeReporter). It
-// exposes no runtime selector for the go-mlx-era alternatives (fp16 / q8 /
-// kq8vq4 / turboquant) — those were pkg/metal load options that did not port —
-// so a -kv-cache override naming any other mode is not honoured. Reporting the
-// single real mode lets callers print an accurate note, and future engines that
-// do honour a selector list theirs here through the same seam.
+// SupportedCacheModes reports the KV cache modes this no-cgo engine honours
+// through the load seam (engine.CacheModeReporter): its built-in bf16 cache
+// ("native", the default) and the TurboQuant live-code cache family
+// ("turboquant" — bare = 3.5; ":4", ":3.5", ":3", ":2" select the bit widths,
+// K/V 4/3 for the mixed 3.5). TurboQuant engages on qualifying dense
+// global-attention layers via WithCacheMode / -kv-cache (#41 S3); the
+// go-mlx-era fp16 / q8 / kq8vq4 selectors did not port and remain unhonoured.
 func (m *NativeTokenModel) SupportedCacheModes() []string {
-	return []string{"native"}
+	return []string{"native", tqCacheModeName}
 }
 
 // newNativeTextModel wraps a loaded no-cgo token model as the shared
@@ -113,7 +121,8 @@ func (m *NativeTokenModel) OpenEngineSession() (engine.Session, error) {
 
 // OpenTrainer opens a retained head-LoRA SFT trainer over this loaded model — the metal half of the
 // engine.TrainerModel seam. The returned engine.Trainer (a *LoRATrainer) owns a fresh frozen base
-// session and a zero-initialised head adapter; cfg supplies the LoRA rank/alpha and learning rate.
+// session and a zero-initialised head adapter; cfg supplies the LoRA rank/alpha and learning rate. A
+// cfg.LoRA.TargetKeys naming per-layer projections is refused loudly (head-only trainer, #31).
 func (m *NativeTokenModel) OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error) {
 	return NewLoRATrainer(m, cfg)
 }

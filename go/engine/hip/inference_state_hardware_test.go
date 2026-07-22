@@ -55,6 +55,46 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 
 	ctx := context.Background()
 	prompt := "Answer with one word: what color is a clear daytime sky?"
+	snapshotter, ok := any(model).(inference.KVSnapshotter)
+	if !ok {
+		t.Fatal("production ROCm model does not expose model-level KV capture")
+	}
+	modelSnapshot, err := snapshotter.CaptureKV(ctx, prompt, inference.KVSnapshotCaptureOptions{RawKVOnly: true})
+	if err != nil {
+		t.Fatalf("model CaptureKV: %v", err)
+	}
+	if len(modelSnapshot.Tokens) == 0 || len(modelSnapshot.Layers) == 0 {
+		t.Fatalf("model CaptureKV produced incomplete retained state: %+v", modelSnapshot)
+	}
+	modelRestored := model.NewSession()
+	coldPrefill := model.NewSession()
+	if modelRestored == nil || coldPrefill == nil {
+		t.Fatal("production ROCm model returned nil model-capture receipt sessions")
+	}
+	defer func() { _ = modelRestored.Close() }()
+	defer func() { _ = coldPrefill.Close() }()
+	modelRestorer, ok := modelRestored.(inference.KVRestorer)
+	if !ok {
+		t.Fatal("model-capture receipt session does not implement KV restore")
+	}
+	if err := modelRestorer.RestoreFromKV(ctx, modelSnapshot); err != nil {
+		t.Fatalf("restore model-level KV capture: %v", err)
+	}
+	if err := coldPrefill.Prefill(ctx, prompt); err != nil {
+		t.Fatalf("cold receipt Prefill: %v", err)
+	}
+	modelCaptureTokens := collectHIPHardwareTokens(modelRestored.Generate(ctx, inference.GenerateConfig{MaxTokens: 2}))
+	coldTokens := collectHIPHardwareTokens(coldPrefill.Generate(ctx, inference.GenerateConfig{MaxTokens: 2}))
+	if err := modelRestored.Err(); err != nil {
+		t.Fatalf("model-capture receipt Generate: %v", err)
+	}
+	if err := coldPrefill.Err(); err != nil {
+		t.Fatalf("cold receipt Generate: %v", err)
+	}
+	if len(modelCaptureTokens) == 0 || !slices.Equal(modelCaptureTokens, coldTokens) {
+		t.Fatalf("model-level KV continuation = %v, want cold prefill %v", modelCaptureTokens, coldTokens)
+	}
+
 	appendPrompt := "\nNow answer with one word: what follows Monday?"
 	appendIDs, err := model.Tokenize(appendPrompt)
 	if err != nil {
@@ -102,7 +142,8 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 		t.Fatalf("CaptureKV produced incomplete state: %+v", snapshot)
 	}
 	var rangedTokens int
-	if err := source.RangeKVBlocks(ctx, 2, kv.CaptureOptions{}, func(block kv.Block) (bool, error) {
+	var rangedBlocks []kv.Block
+	if err := source.RangeKVBlocks(ctx, 2, kv.CaptureOptions{RawKVOnly: true}, func(block kv.Block) (bool, error) {
 		if block.TokenCount <= 0 || block.Snapshot == nil {
 			t.Fatalf("RangeKVBlocks produced invalid block: %+v", block)
 		}
@@ -110,13 +151,38 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 			t.Fatalf("RangeKVBlocks block start = %d, want contiguous %d", block.TokenStart, rangedTokens)
 		}
 		rangedTokens += block.TokenCount
+		rangedBlocks = append(rangedBlocks, block)
 		return true, nil
 	}); err != nil {
 		t.Fatalf("RangeKVBlocks: %v", err)
 	}
-	if rangedTokens != snapshot.SeqLen {
-		t.Fatalf("RangeKVBlocks covered %d KV tokens, CaptureKV exported %d", rangedTokens, snapshot.SeqLen)
+	if rangedTokens != len(snapshot.Tokens) {
+		t.Fatalf("RangeKVBlocks covered %d retained tokens, CaptureKV exported %d", rangedTokens, len(snapshot.Tokens))
 	}
+	assembled, err := kv.AssembleBlocks(rangedBlocks)
+	if err != nil {
+		t.Fatalf("AssembleBlocks: %v", err)
+	}
+	if assembled.SeqLen != snapshot.SeqLen {
+		t.Fatalf("assembled native blocks contain %d KV rows, want %d", assembled.SeqLen, snapshot.SeqLen)
+	}
+	blockRestored := model.NewSession()
+	if blockRestored == nil {
+		t.Fatal("NewSession for native block state returned nil")
+	}
+	defer func() { _ = blockRestored.Close() }()
+	blockRestorer, ok := blockRestored.(inference.KVRestorer)
+	if !ok {
+		t.Fatal("shared engine session does not restore assembled native blocks")
+	}
+	if err := blockRestorer.RestoreFromKV(ctx, assembled); err != nil {
+		t.Fatalf("RestoreFromKV assembled native blocks: %v", err)
+	}
+	blockRestoredSnapshot, err := blockRestored.CaptureKV(ctx)
+	if err != nil {
+		t.Fatalf("CaptureKV after native block restore: %v", err)
+	}
+	assertHIPHardwareSnapshotEqual(t, assembled, blockRestoredSnapshot)
 
 	restored := model.NewSession()
 	if restored == nil {
@@ -143,6 +209,9 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 	if err := restored.AppendPrompt(ctx, continuation); err != nil {
 		t.Fatalf("restored AppendPrompt continuation: %v", err)
 	}
+	if err := blockRestored.AppendPrompt(ctx, continuation); err != nil {
+		t.Fatalf("block-restored AppendPrompt continuation: %v", err)
+	}
 	want := collectHIPHardwareTokens(source.Generate(ctx, inference.GenerateConfig{MaxTokens: 4}))
 	if err := source.Err(); err != nil {
 		t.Fatalf("source continuation Generate: %v", err)
@@ -158,6 +227,13 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("continuation token %d after restore = %d, want %d", index, got[index], want[index])
 		}
+	}
+	got = collectHIPHardwareTokens(blockRestored.Generate(ctx, inference.GenerateConfig{MaxTokens: 4}))
+	if err := blockRestored.Err(); err != nil {
+		t.Fatalf("block-restored continuation Generate: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("continuation after native block restore = %v, want %v", got, want)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)
@@ -261,6 +337,96 @@ func TestHIPGemma4SeededSamplingHardware_Good(t *testing.T) {
 	}
 	if len(want) == 0 || !slices.Equal(got, want) {
 		t.Fatalf("restored same-seed sampled tokens = %v, want %v", got, want)
+	}
+}
+
+func TestHIPGemma4DeepStateContinuityHardware_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_DEEP_STATE_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_DEEP_STATE_TESTS=1 to run the HIP Gemma-4 8K state receipt")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_MODEL_PATH"))
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_MODEL_PATH to a linked Gemma-4 Q4 model")
+	}
+	if strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to the linked ROCm kernels HSACO")
+	}
+	if !ROCmAvailable() {
+		t.Skip("ROCm runtime is not available on this host")
+	}
+
+	const (
+		contextTokens      = 8 * 1024
+		continuationTokens = 8
+	)
+	loaded := (&rocmBackend{}).LoadModel(modelPath, inference.WithContextLen(contextTokens))
+	if !loaded.OK {
+		t.Fatalf("production ROCm LoadModel(%q): %v", modelPath, loaded.Value)
+	}
+	model, ok := loaded.Value.(*rocmModel)
+	if !ok {
+		t.Fatalf("production ROCm LoadModel returned %T, want *rocmModel", loaded.Value)
+	}
+	defer func() {
+		if result := model.Close(); !result.OK {
+			t.Errorf("Close model: %v", result.Value)
+		}
+	}()
+
+	cold, err := inferenceBenchmarkGemma4SweepSession(model)
+	if err != nil {
+		t.Fatalf("NewSession(cold): %v", err)
+	}
+	reused, err := inferenceBenchmarkGemma4SweepSession(model)
+	if err != nil {
+		t.Fatalf("NewSession(reused): %v", err)
+	}
+	defer func() { _ = cold.Close() }()
+	defer func() { _ = reused.Close() }()
+
+	ctx := context.Background()
+	prompt := inferenceBenchmarkTokenPrompt(contextTokens-continuationTokens-1, []int{2, 10979})
+	if err := cold.Prefill(ctx, prompt); err != nil {
+		t.Fatalf("cold Prefill: %v", err)
+	}
+	warmed := collectHIPHardwareTokens(cold.Generate(ctx, inference.GenerateConfig{MaxTokens: 1}))
+	if err := cold.Err(); err != nil {
+		t.Fatalf("cold state materialization: %v", err)
+	}
+	if len(warmed) != 1 {
+		t.Fatalf("cold state materialization generated %d tokens, want 1", len(warmed))
+	}
+
+	snapshot, err := cold.CaptureKV(ctx)
+	if err != nil {
+		t.Fatalf("CaptureKV: %v", err)
+	}
+	restorer, ok := reused.(inference.KVRestorer)
+	if !ok {
+		t.Fatalf("reused session %T does not implement inference.KVRestorer", reused)
+	}
+	if err := restorer.RestoreFromKV(ctx, snapshot); err != nil {
+		t.Fatalf("RestoreFromKV: %v", err)
+	}
+	roundTrip, err := reused.CaptureKV(ctx)
+	if err != nil {
+		t.Fatalf("CaptureKV after restore: %v", err)
+	}
+	assertHIPHardwareSnapshotEqual(t, snapshot, roundTrip)
+	if !slices.Equal(snapshot.Generated, roundTrip.Generated) {
+		t.Fatalf("restored generated tokens = %v, want %v", roundTrip.Generated, snapshot.Generated)
+	}
+
+	want := collectHIPHardwareTokens(cold.Generate(ctx, inference.GenerateConfig{MaxTokens: continuationTokens}))
+	if err := cold.Err(); err != nil {
+		t.Fatalf("cold continuation: %v", err)
+	}
+	got := collectHIPHardwareTokens(reused.Generate(ctx, inference.GenerateConfig{MaxTokens: continuationTokens}))
+	if err := reused.Err(); err != nil {
+		t.Fatalf("restored continuation: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("restored 8K continuation = %v, want %v", got, want)
 	}
 }
 

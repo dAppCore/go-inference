@@ -4,7 +4,7 @@ import (
 	"database/sql"
 
 	"dappco.re/go"
-	_ "github.com/marcboeker/go-duckdb/v2"
+	_ "github.com/duckdb/duckdb-go/v2"
 )
 
 // DB wraps a DuckDB connection.
@@ -136,7 +136,7 @@ func (db *DB) QueryGoldenSet(minChars int) core.Result {
 //
 //	r := db.CountGoldenSet()
 //	if !r.OK { return r }
-//	count := r.Value.(int)
+//	count := r.Int()
 func (db *DB) CountGoldenSet() core.Result {
 	var count int
 	err := db.conn.QueryRow("SELECT COUNT(*) FROM golden_set").Scan(&count)

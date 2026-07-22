@@ -100,7 +100,9 @@ func hipRunGemma4Q4LaneForward(ctx context.Context, driver nativeHIPDriver, cfg 
 
 		var query *hipDeviceByteBuffer
 		if sharedSources[layerIndex] == layerIndex {
-			qkv, runErr := hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransient(ctx, driver, layerCfg, inputNorm, laneCount, workspace, true)
+			qkv, runErr := hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransientForced(
+				ctx, driver, layerCfg, inputNorm, laneCount, workspace, true, hipGemma4Q4LaneForceBatchedQKV(layerCfg),
+			)
 			if runErr != nil {
 				return nil, runErr
 			}
@@ -215,6 +217,12 @@ func hipRunGemma4Q4LaneForward(ctx context.Context, driver nativeHIPDriver, cfg 
 	return &hipGemma4Q4LaneForwardBatch{Greedy: greedy, DeviceStates: nextStates, FinalHidden: &finalHidden}, nil
 }
 
+func hipGemma4Q4LaneForceBatchedQKV(cfg hipGemma4Q4Layer0Config) bool {
+	// Sparse decode amplifies the fused-single versus batched QKV rounding delta
+	// into different expert histories. Dense models retain their proven K=1 path.
+	return cfg.MoE != nil
+}
+
 func hipValidateGemma4Q4LaneForward(driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, req hipGemma4Q4LaneForwardRequest) error {
 	if driver == nil || !driver.Available() {
 		return core.E(hipGemma4Q4LaneForwardOperation, "HIP driver is not available", nil)
@@ -229,9 +237,6 @@ func hipValidateGemma4Q4LaneForward(driver nativeHIPDriver, cfg hipGemma4Q4Forwa
 		return core.E(hipGemma4Q4LaneForwardOperation, "epsilon must be non-negative and finite", nil)
 	}
 	for _, layer := range cfg.Layers {
-		if layer.MoE != nil {
-			return core.E(hipGemma4Q4LaneForwardOperation, "MoE lane forwarding is not implemented", nil)
-		}
 		if layer.PerLayerInput.hasLayerApply() && !cfg.Layers[0].PerLayerInput.hasGlobalPrecompute() {
 			return core.E(hipGemma4Q4LaneForwardOperation, "lane forwarding requires global per-layer input precompute", nil)
 		}

@@ -174,7 +174,7 @@ func TestMultiModelResolver_New_DuplicateID_Bad(t *testing.T) {
 
 // TestMultiModelResolver_Route_ExactAndAlias_Good proves an exact id and an
 // alias both route to the same model, and the load is lazy + once.
-func TestMultiModelResolver_Route_ExactAndAlias_Good(t *testing.T) {
+func TestMultiModelResolver_Route_ExactAndAlias_ResolveModel_Good(t *testing.T) {
 	loader, loads, _ := countingLoader()
 	r := mustResolver(t, []ModelSpec{
 		{ID: "qwen3", Path: "/m/qwen3", Aliases: []string{"qwen"}},
@@ -204,7 +204,7 @@ func TestMultiModelResolver_Route_ExactAndAlias_Good(t *testing.T) {
 // TestMultiModelResolver_Route_UnknownToDefault_Good proves an unrecognised name
 // falls back to the default model (first pinned) — the single-model UX where a
 // client echoing an arbitrary name is still served.
-func TestMultiModelResolver_Route_UnknownToDefault_Good(t *testing.T) {
+func TestMultiModelResolver_Route_UnknownToDefault_ResolveModel_Good(t *testing.T) {
 	loader, _, _ := countingLoader()
 	r := mustResolver(t, []ModelSpec{
 		{ID: "small", Path: "/m/small"},
@@ -255,7 +255,7 @@ func TestMultiModelResolver_Route_Profile_Good(t *testing.T) {
 // TestMultiModelResolver_Route_UnknownProfile_Bad proves a profile named against
 // a known model that does not define it is an error — a real client mistake the
 // resolver must surface rather than silently ignore.
-func TestMultiModelResolver_Route_UnknownProfile_Bad(t *testing.T) {
+func TestMultiModelResolver_Route_UnknownProfile_ResolveModel_Bad(t *testing.T) {
 	loader, _, _ := countingLoader()
 	r := mustResolver(t, []ModelSpec{{ID: "qwen3", Path: "/m/qwen3"}}, MultiModelOptions{})
 	r.setLoader(loader)
@@ -344,7 +344,7 @@ func TestMultiModelResolver_Evict_PinExemption_Good(t *testing.T) {
 
 // TestMultiModelResolver_Budget_RefuseTooBig_Bad proves a model larger than the
 // whole ceiling is refused rather than loaded over budget.
-func TestMultiModelResolver_Budget_RefuseTooBig_Bad(t *testing.T) {
+func TestMultiModelResolver_Budget_RefuseTooBig_ResolveModel_Bad(t *testing.T) {
 	loader, loads, _ := countingLoader()
 	r := mustResolver(t, []ModelSpec{{ID: "big", Path: "/m/big", EstBytes: 200}}, MultiModelOptions{MemoryCeiling: 100})
 	r.setLoader(loader)
@@ -360,7 +360,7 @@ func TestMultiModelResolver_Budget_RefuseTooBig_Bad(t *testing.T) {
 // TestMultiModelResolver_Budget_RefuseAllPinned_Bad proves that when the only
 // resident is pinned and there is no room, a new load is refused rather than
 // breaking the ceiling or evicting a pinned model.
-func TestMultiModelResolver_Budget_RefuseAllPinned_Bad(t *testing.T) {
+func TestMultiModelResolver_Budget_RefuseAllPinned_ResolveModel_Bad(t *testing.T) {
 	loader, loads, _ := countingLoader()
 	r := mustResolver(t, []ModelSpec{
 		{ID: "pinned", Path: "/m/pinned", EstBytes: 60, Pinned: true},

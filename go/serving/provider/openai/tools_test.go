@@ -3,9 +3,11 @@
 package openai
 
 import (
+	"strings"
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/decode/parser"
 )
 
 // TestRenderOpenAITools pins that OpenAI function declarations convert to the
@@ -180,5 +182,61 @@ func TestChatResponseHasToolCalls(t *testing.T) {
 	}
 	if chatResponseHasToolCalls(ChatCompletionResponse{Choices: []ChatChoice{{Message: ChatMessage{Content: "hi"}}}}) {
 		t.Fatal("plain text response should use the fast path")
+	}
+}
+
+// TestRequestMessages_ReasoningPreservation_Good pins the gemma4
+// canonical-template gate: an assistant turn AFTER the last user message
+// re-frames its echoed reasoning into the native thought span ahead of the
+// visible content, so a stateless replay keeps the live exchange's chain of
+// thought.
+func TestRequestMessages_ReasoningPreservation_Good(t *testing.T) {
+	msgs := requestMessages([]ChatMessage{
+		{Role: "user", Content: "start"},
+		{Role: "assistant", Content: "visible", Reasoning: "chain"},
+	}, nil, false)
+	want := parser.ChannelOpenMarker + "thought\nchain\n" + parser.ChannelCloseMarker + "visible"
+	if len(msgs) != 2 || msgs[1].Content != want {
+		t.Fatalf("post-last-user reasoning render = %+v, want content %q", msgs, want)
+	}
+}
+
+// TestRequestMessages_ReasoningPreservation_Bad pins the drop side of the
+// gate: an assistant turn BEFORE the last user message replays clean — its
+// echoed reasoning never reaches the prompt.
+func TestRequestMessages_ReasoningPreservation_Bad(t *testing.T) {
+	msgs := requestMessages([]ChatMessage{
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1", Reasoning: "old chain"},
+		{Role: "user", Content: "q2"},
+	}, nil, false)
+	if len(msgs) != 3 || msgs[1].Content != "a1" {
+		t.Fatalf("pre-last-user reasoning render = %+v, want clean %q", msgs, "a1")
+	}
+}
+
+// TestRequestMessages_ReasoningPreservation_Ugly pins the preserve_thinking
+// extension: a TOOL-CALLING assistant turn before the last user message keeps
+// its thought (the reasoning_content spelling also resolves), while a plain
+// assistant turn in the same history still drops its reasoning, and a user
+// turn never grows a thought span.
+func TestRequestMessages_ReasoningPreservation_Ugly(t *testing.T) {
+	calls := []ToolCall{{ID: "1", Type: "function", Function: ToolCallFunction{Name: "f", Arguments: `{"x":1}`}}}
+	msgs := requestMessages([]ChatMessage{
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", ReasoningContent: "tool chain", ToolCalls: calls},
+		{Role: "tool", Content: "result"},
+		{Role: "assistant", Content: "answer1", Reasoning: "plain chain"},
+		{Role: "user", Content: "q2"},
+	}, nil, true)
+	span := parser.ChannelOpenMarker + "thought\ntool chain\n" + parser.ChannelCloseMarker
+	if !strings.HasPrefix(msgs[1].Content, span) || !strings.Contains(msgs[1].Content, parser.ToolCallOpenMarker) {
+		t.Fatalf("preserve_thinking tool turn = %q, want %q + re-rendered call", msgs[1].Content, span)
+	}
+	if msgs[3].Content != "answer1" {
+		t.Fatalf("plain pre-last-user turn = %q, want clean %q", msgs[3].Content, "answer1")
+	}
+	if strings.Contains(msgs[0].Content, parser.ChannelOpenMarker) {
+		t.Fatalf("user turn grew a thought span: %q", msgs[0].Content)
 	}
 }

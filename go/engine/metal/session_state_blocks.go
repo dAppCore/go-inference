@@ -9,14 +9,41 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 )
 
 const nativeStateCacheModeFixed = "fixed"
+
+// nativeStateCacheModeGatedDeltaState marks a block-codec layer whose payload is a MixerGatedDelta
+// layer's HOST recurrent state (conv ring + delta, gatedDeltaLayer.conv/delta) — NOT a KV cache of
+// any kind (#62, docs/design-gd-state-blocks.md). The layer owns no cache (CacheIndex -1 by
+// construction, model/arch.go) and never appears via the owner-layer walk; this kind is how its
+// recurrence rides the same block stream anyway.
+const nativeStateCacheModeGatedDeltaState = "gated-delta-state"
 
 // SessionStateLayerBlock is one layer's K/V cache bytes for a contiguous token
 // range. KeyBytes and ValueBytes are views into the session's resident Metal
 // buffers when produced by StateBlockSource or RangeStateBlocks; callers must
 // consume or copy them before mutating/closing the source session.
+//
+// A TurboQuant layer (CacheMode nativeStateCacheModeTurboQuantCodes,
+// session_state_tq.go) carries its RAW packed code rows in KeyBytes/ValueBytes
+// — at DIFFERENT per-side strides (RowBytes / ValueRowBytes) — plus the two γ
+// planes and the bit widths. Bytes are preserved exactly, never dequantised in
+// transit; the kind is validated per layer on restore, so reinterpreting
+// bytes across kinds is structurally impossible. Every TQ-only field is zero
+// for native layers — their wire shape is byte-identical to before.
+//
+// A MixerGatedDelta layer (CacheMode nativeStateCacheModeGatedDeltaState,
+// #62, docs/design-gd-state-blocks.md) carries its HOST recurrent state in
+// KeyBytes (conv ring) / ValueBytes (delta) — not KV rows at all, so
+// RowBytes/ValueRowBytes/KVHeads/HeadDim/MaxSize stay zero for this kind too.
+// The recurrence is a single running total, not a per-token row: only the
+// block whose span reaches the stream's captured position carries it
+// (HostStatePresent true); every earlier block declares the layer explicitly
+// ABSENT (HostStatePresent false, nil bytes) rather than resending or
+// omitting it, so "absent from this block" is never confused with a
+// genuinely empty (zero-length) state.
 type SessionStateLayerBlock struct {
 	Layer      int
 	CacheIndex int
@@ -27,6 +54,14 @@ type SessionStateLayerBlock struct {
 	RowBytes   int
 	KeyBytes   []byte
 	ValueBytes []byte
+	// TurboQuant kind only (zero for native layers):
+	ValueRowBytes   int    // V code row stride (K's is RowBytes — they differ under turboquant:3.5)
+	GammaRowBytes   int    // γ plane row stride (kvHeads·4)
+	KBits, VBits    int    // the codec bit widths the codes were stored at
+	KeyGammaBytes   []byte // per-row K norms (f32 bytes), row stride GammaRowBytes
+	ValueGammaBytes []byte // per-row V norms
+	// MixerGatedDelta host-state kind only (zero/false for every other kind):
+	HostStatePresent bool // true only on the block that carries the real conv/delta bytes
 }
 
 // SessionStateBlock is a contiguous token range from the native session state.
@@ -132,6 +167,17 @@ type sessionStateLayerView struct {
 	keyBytes   []byte
 	valueBytes []byte
 	paged      *devicePagedKVCache
+	// TurboQuant kind only (session_state_tq.go; zero for native views):
+	vRowBytes     int
+	gammaRowBytes int
+	kBits, vBits  int
+	kGammaBytes   []byte
+	vGammaBytes   []byte
+	// MixerGatedDelta host-state kind only (#62; nil for every KV view): the bound recurrence
+	// holder, read live at fill time — never snapshotted into the view up front, so it needs no
+	// refresh path on the cache-hit fast path (unlike the paged-KV views' buffer pointers, a
+	// pointer to the holder itself is never stale).
+	gd *gatedDeltaLayer
 }
 
 // StateBlockSource returns a block loader over the current resident K/V cache.
@@ -244,7 +290,11 @@ func (s *ArchSession) RestoreStateBlocks(source SessionStateBlockSource) error {
 	if source.BlockCount == 0 {
 		return s.restoreStateBlockMetadata(source)
 	}
-	targetViews, err := s.stateLayerViews()
+	// kind-aware target views: a TurboQuant target accepts turboquant-codes
+	// blocks (validated per layer — kind, bits, strides) beside native ones,
+	// and a MixerGatedDelta layer's own gated-delta-state view accepts its
+	// host recurrence beside both KV kinds (#62).
+	targetViews, err := s.stateLayerViewsRefreshingKinds(nil, true)
 	if err != nil {
 		return err
 	}
@@ -380,6 +430,22 @@ func fillStateBlockSpan(index, start, end, position int, views []sessionStateLay
 		return SessionStateBlock{}, core.NewError("native.StateBlockSource.Load: layer descriptor size mismatch")
 	}
 	for i, view := range views {
+		if view.cacheMode == nativeStateCacheModeTurboQuantCodes {
+			tqLayer, tqErr := tqFillStateBlockLayer(view, start, tokenCount, position)
+			if tqErr != nil {
+				return SessionStateBlock{}, tqErr
+			}
+			layers[i] = tqLayer
+			continue
+		}
+		if view.cacheMode == nativeStateCacheModeGatedDeltaState {
+			gdLayer, gdErr := gdFillStateBlockLayer(view, end, position)
+			if gdErr != nil {
+				return SessionStateBlock{}, gdErr
+			}
+			layers[i] = gdLayer
+			continue
+		}
 		keyBytes, valueBytes, err := stateBlockLayerBytes(view, start, tokenCount, position)
 		if err != nil {
 			return SessionStateBlock{}, err
@@ -480,6 +546,25 @@ func restoreStateBlock(index, expectedStart, position, ownerCount int, targetVie
 		}
 		seen[viewIndex] = true
 		view := targetViews[viewIndex]
+		if layer.CacheMode == nativeStateCacheModeTurboQuantCodes || view.cacheMode == nativeStateCacheModeTurboQuantCodes {
+			// TurboQuant kind: validated + restored entirely by the kind-aware
+			// path — BEFORE the generic checks, whose legacy cross-engine
+			// cache-mode allowlist must never wave raw code bytes into a bf16
+			// cache (or bf16 rows into a codes cache).
+			if err := tqRestoreStateBlockLayer(view, block.TokenStart, block.TokenCount, position, layer); err != nil {
+				return err
+			}
+			continue
+		}
+		if layer.CacheMode == nativeStateCacheModeGatedDeltaState || view.cacheMode == nativeStateCacheModeGatedDeltaState {
+			// MixerGatedDelta host-state kind (#62): same reasoning as TQ above — validated +
+			// restored entirely here, BEFORE the generic KV checks below, which are meaningless
+			// for a payload that is not KV-shaped at all (no kv-heads, no head-dim, no ring).
+			if err := gdRestoreStateBlockLayer(view, layer); err != nil {
+				return err
+			}
+			continue
+		}
 		if layer.KVHeads > 0 && layer.KVHeads != view.kvHeads {
 			return core.NewError("native.RestoreStateBlocks: kv-head count mismatch")
 		}
@@ -551,6 +636,138 @@ func restoreStateBlockLayer(view sessionStateLayerView, start, tokenCount, posit
 	return nil
 }
 
+// --- MixerGatedDelta host-state kind (#62, docs/design-gd-state-blocks.md) ---
+//
+// A gated-delta layer's recurrent state (conv ring + delta, gatedDeltaLayer.conv/delta,
+// arch_gated_delta.go) is a single running total, not a per-token row — unlike every KV kind above,
+// it cannot be sliced by [start,end) token range. It rides the SAME block stream under its own kind
+// (nativeStateCacheModeGatedDeltaState) but only the block whose span reaches the stream's captured
+// position carries the real bytes; every other block declares it explicitly absent.
+
+// gatedDeltaStateLayerView builds the host-state view for a bound MixerGatedDelta layer. ok=false
+// only when the arch declares the layer MixerGatedDelta but no holder is bound (bindGatedDeltaQuant/
+// BF16 never ran, or the checkpoint's own weights didn't bind) — a construction-time gap elsewhere,
+// not a normal runtime state; the caller treats false as "nothing to snapshot for this layer" rather
+// than failing the whole codec call, and both save and restore derive this the same way from the
+// same model, so a broken-model session stays internally consistent either way.
+func (s *ArchSession) gatedDeltaStateLayerView(li int, spec model.LayerSpec) (sessionStateLayerView, bool) {
+	if li >= len(s.state.gatedDelta) || s.state.gatedDelta[li] == nil {
+		return sessionStateLayerView{}, false
+	}
+	return sessionStateLayerView{
+		layer:      li,
+		cacheIndex: spec.CacheIndex, // -1 by construction: OwnsCache() stays false, nothing else reads this as a KV slot
+		cacheMode:  nativeStateCacheModeGatedDeltaState,
+		gd:         s.state.gatedDelta[li],
+	}, true
+}
+
+// gatedDeltaOwnerLayers counts the arch's MixerGatedDelta layers that carry a bound recurrence
+// holder — the block codec's host-state view count, additive to ownedStateCacheLayers' KV-owner
+// count when mixedKinds views are requested (stateLayerViewsRefreshingKinds's cache-freshness check).
+func (s *ArchSession) gatedDeltaOwnerLayers() int {
+	n := 0
+	for li, spec := range s.state.specs {
+		if spec.Mixer == model.MixerGatedDelta && li < len(s.state.gatedDelta) && s.state.gatedDelta[li] != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// snapshotState returns gd's CURRENT effective recurrent state. A fused/chain-eligible layer's
+// authoritative state can live on a device-resident handle (gd.sc.Device, primed by the qwen fused
+// lane, lthn_gated_delta.go) rather than on gd.conv/gd.delta directly; attn.GatedDeltaDeviceStateExport
+// (wired at engine init, the snapshot/clone seam lthn_gated_delta.go documents — independently covered
+// by TestGatedDeltaBlockDeviceRun_*'s export/prime round trip, orphaned as a live caller since #50
+// retired model/composed's CloneState) reads it back when present; ok=false from the hook means the
+// same thing its own doc says: "the caller's host slices stand". Every hybrid fixture this package's
+// tests build decodes via stepToken with no device handle ever bound (icbEligible() declines any
+// MixerGatedDelta arch outright, and the state-carrier TQ hybrid path is stepToken by construction —
+// TestArchQuantSessionTurboQuantHybrid_Good), so this fallback is defensive: a thin pass-through over
+// an independently-tested primitive, not exercised end-to-end by this package's own tests.
+func (gd *gatedDeltaLayer) snapshotState() (conv, delta []float32) {
+	if gd.sc != nil && gd.sc.Device != nil && attn.GatedDeltaDeviceStateExport != nil {
+		if c, d, ok := attn.GatedDeltaDeviceStateExport(gd.sc.Device); ok {
+			return c, d
+		}
+	}
+	return gd.conv, gd.delta
+}
+
+// stateLengths returns gd's canonical conv-ring and delta element counts from its bound geometry
+// (gd.cfg) — computable before any decode ever runs, so restore can validate a snapshot's size even
+// onto a session that has not stepped yet. Matches GatedDeltaForwardScratchF32's own documented
+// shapes: conv [(K-1),ConvDim], delta [ValueHeads,HeadDim,HeadDim] (model/attn/gated_delta.go).
+func (gd *gatedDeltaLayer) stateLengths() (convLen, deltaLen int) {
+	k := gd.cfg.ConvKernel - 1
+	if k < 0 {
+		k = 0
+	}
+	return k * gd.cfg.ConvDim(), gd.cfg.ValueHeads * gd.cfg.HeadDim * gd.cfg.HeadDim
+}
+
+// gdFillStateBlockLayer assembles one gated-delta host-state layer's block entry. Only the span
+// reaching the stream's captured position (end == position) carries the real bytes
+// (HostStatePresent true) — robust regardless of RangeStateBlocksFrom's startToken trimming or the
+// sliding-window boundary insertions, because position (the source session's s.pos at capture time)
+// is always the LAST boundary in the stream (stateBlockBoundaries appends it last, unconditionally).
+// Every earlier span declares the layer explicitly absent (HostStatePresent false, nil bytes).
+func gdFillStateBlockLayer(view sessionStateLayerView, end, position int) (SessionStateLayerBlock, error) {
+	if view.gd == nil {
+		return SessionStateLayerBlock{}, core.NewError("native.StateBlockSource.Load: gated-delta view has no bound layer")
+	}
+	layer := SessionStateLayerBlock{Layer: view.layer, CacheIndex: view.cacheIndex, CacheMode: nativeStateCacheModeGatedDeltaState}
+	if end != position {
+		return layer, nil // absent from this block — HostStatePresent stays false, bytes stay nil
+	}
+	conv, delta := view.gd.snapshotState()
+	layer.HostStatePresent = true
+	layer.KeyBytes = float32Bytes(conv)
+	layer.ValueBytes = float32Bytes(delta)
+	return layer, nil
+}
+
+// gdRestoreStateBlockLayer validates and lands one gated-delta host-state layer block. KIND EQUALITY
+// IS ABSOLUTE, exactly like TurboQuant's tqRestoreStateBlockLayer: a gated-delta-state block restores
+// only onto a gated-delta-state view, checked before any generic KV check ever runs (restoreStateBlock
+// dispatches here first). A block declaring itself absent (HostStatePresent false) is a no-op UNLESS
+// it still carries bytes anyway — a shape that can only come from a malformed or hand-corrupted
+// stream, refused rather than silently ignored.
+func gdRestoreStateBlockLayer(view sessionStateLayerView, layer SessionStateLayerBlock) error {
+	if layer.CacheMode != nativeStateCacheModeGatedDeltaState || view.cacheMode != nativeStateCacheModeGatedDeltaState {
+		return core.NewError("native.RestoreStateBlocks: gated-delta cache-kind mismatch (a gated-delta-state block restores only onto a gated-delta-state layer)")
+	}
+	if view.gd == nil {
+		return core.NewError("native.RestoreStateBlocks: gated-delta-state view has no bound layer")
+	}
+	if !layer.HostStatePresent {
+		if len(layer.KeyBytes) != 0 || len(layer.ValueBytes) != 0 {
+			return core.NewError("native.RestoreStateBlocks: gated-delta block declares absent but carries bytes")
+		}
+		return nil
+	}
+	convLen, deltaLen := view.gd.stateLengths()
+	if len(layer.KeyBytes) != convLen*4 || len(layer.ValueBytes) != deltaLen*4 {
+		return core.NewError("native.RestoreStateBlocks: gated-delta state size mismatch")
+	}
+	view.gd.conv = bytesFloat32(layer.KeyBytes)
+	view.gd.delta = bytesFloat32(layer.ValueBytes)
+	return nil
+}
+
+// bytesFloat32 reinterprets b (len a multiple of 4) as a FRESH []float32 copy — the mirror of
+// float32Bytes, but a copy rather than a view: b is a transient wire payload here (a restore's
+// incoming layer bytes), never a live session buffer, so aliasing it would be wrong.
+func bytesFloat32(b []byte) []float32 {
+	if len(b) == 0 {
+		return nil
+	}
+	out := make([]float32, len(b)/4)
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(&out[0])), len(out)*4), b)
+	return out
+}
+
 func (s *ArchSession) restoreStateBlockMetadata(source SessionStateBlockSource) error {
 	if len(source.CachedPromptHidden) > 0 && len(source.CachedPromptHidden) != s.arch.Hidden*bf16Size {
 		return core.NewError("native.RestoreStateBlocks: prompt hidden size mismatch")
@@ -596,7 +813,32 @@ func (s *ArchSession) stateLayerViews() ([]sessionStateLayerView, error) {
 // leave other views' snapshot bytes stale, which is safe because every reader
 // refreshes through this entry first.
 func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionStateLayerView, error) {
+	return s.stateLayerViewsRefreshingKinds(needed, false)
+}
+
+// stateLayerViewsRefreshingKinds is stateLayerViewsRefreshing with the cache
+// KIND surface controlled. mixedKinds=false is every legacy caller: a TurboQuant
+// session (EITHER carrier — recorded-ICB or state-lane, tq_kv_state.go)
+// declines wholesale, because those callers (the monolithic SerializeState /
+// CaptureKV codecs, the MTP drafter export) read bf16-SHAPED cache bytes the
+// packed code caches do not hold — and a MixerGatedDelta layer's host state
+// never appears at all (exactly as it does not today: the owner-layer walk
+// below always skips it). mixedKinds=true is the kind-aware BLOCK codec
+// only (StateBlockSource / RangeStateBlocks / RestoreStateBlocks): TQ owner
+// layers yield turboquant-codes views (raw codes + γ, session_state_tq.go)
+// beside untouched native views, AND MixerGatedDelta layers yield their own
+// gated-delta-state host views (#62, docs/design-gd-state-blocks.md) — the
+// mixed-kind snapshot surface. The decline sits BEFORE the cached-views fast
+// path, so a legacy caller can never receive a cached TQ (or gated-delta)
+// view either.
+func (s *ArchSession) stateLayerViewsRefreshingKinds(needed map[int]bool, mixedKinds bool) ([]sessionStateLayerView, error) {
+	if s.hasKVTQAny() && !mixedKinds {
+		return nil, core.NewError("native.ArchSession: -kv-cache turboquant declines KV snapshot / conversation-state sleep (v1) — serve stateless or drop -kv-cache")
+	}
 	ownerCount := s.ownedStateCacheLayers()
+	if mixedKinds {
+		ownerCount += s.gatedDeltaOwnerLayers()
+	}
 	icb := s.state.icb != nil
 	if len(s.stateBlockViews) == ownerCount && s.stateBlockViewsICB == icb {
 		// Only a paged-KV session needs its materialised snapshot re-copied — that
@@ -626,7 +868,28 @@ func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionS
 		views = views[:0]
 	}
 	for li, spec := range s.state.specs {
+		if spec.Mixer == model.MixerGatedDelta {
+			// Never an owner (CacheIndex -1 by construction) — the OwnsCache() skip below would
+			// otherwise swallow it unconditionally, exactly as it does today. Only the block
+			// codec (mixedKinds) gets its host-state view; every legacy caller's surface is
+			// byte-identical to before this branch existed.
+			if mixedKinds {
+				if view, ok := s.gatedDeltaStateLayerView(li, spec); ok {
+					views = append(views, view)
+				}
+			}
+			continue
+		}
 		if !spec.OwnsCache() {
+			continue
+		}
+		if tqView, isTQ, tqErr := s.tqStateLayerView(li, spec); tqErr != nil {
+			return nil, tqErr
+		} else if isTQ {
+			// TurboQuant owner (either carrier): the view IS the raw code+γ
+			// surface — never a bf16 shape, never snapshotCacheViews (whose lb
+			// branch would materialise a dead bf16 cache beside the codes).
+			views = append(views, tqView)
 			continue
 		}
 		paged := s.state.layerPagedKV(li)
@@ -747,7 +1010,9 @@ func (s *ArchSession) stateBlockPlan(startToken, blockSize int) (int, int, int, 
 	if s.pos < 0 || s.pos > s.maxLen {
 		return 0, 0, 0, nil, nil, core.NewError("native.StateBlockSource: position outside maxLen")
 	}
-	views, err := s.stateLayerViews()
+	// the block codec is the KIND-AWARE snapshot surface: TurboQuant layers
+	// yield turboquant-codes views beside native ones (session_state_tq.go).
+	views, err := s.stateLayerViewsRefreshingKinds(nil, true)
 	if err != nil {
 		return 0, 0, 0, nil, nil, err
 	}

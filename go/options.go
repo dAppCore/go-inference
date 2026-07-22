@@ -52,6 +52,14 @@ type GenerateConfig struct {
 	// intent; serving layers resolve it into this policy for the engine. The
 	// zero value leaves the engine's default handling in place.
 	Thinking ThinkingConfig
+	// VisionBudget requests a specific vision soft-token budget for image/video
+	// attachments — the request-level override of a vision model's configured
+	// load-time default (gemma4's processor_config.json declares 280; the model
+	// card's supported set is 70/140/280/560/1120, 1120 being the OCR budget).
+	// 0 = model default. This seam does not hard-code any family's supported
+	// set — engines/families clamp an out-of-range request to what they
+	// actually support. Ignored by architectures with no vision tower.
+	VisionBudget int
 	// Engine trace + cache-hygiene knobs (engine-neutral operational
 	// controls; a backend without the facility ignores them).
 	TraceTokenPhases             bool // per-token coarse phase timing to the engine trace log
@@ -71,6 +79,18 @@ type GenerateConfig struct {
 	// embedded in marshalled reports (train's SSD eval), and encoding/json
 	// rejects func fields it is asked to encode.
 	MetricsSink func(GenerateMetrics) `json:"-"`
+	// DisablePromptReuse skips the backend's resident-session prompt cache
+	// (engine's #377 stateless lane) for this call, opening a fresh session
+	// instead. false (default) preserves every existing caller's behaviour.
+	// A caller that KNOWS its calls never share a prefix — a one-shot bench/
+	// CLI run, or any driver making exactly one request per loaded model —
+	// should set this: on a q8-KV-capable model the reuse lane arms
+	// position-invariant landing on its resident session BEFORE the first
+	// prefill so a later reused prefix is byte-stable (#1846), which taxes
+	// every prefilled token at per-token (host-synced) speed even when reuse
+	// never happens. A caller with genuine multi-turn traffic should leave
+	// this false so reuse — and the q8 byte-stability it depends on — engages.
+	DisablePromptReuse bool
 }
 
 // cfg := inference.DefaultGenerateConfig() // Temperature=0.0 (greedy), RepeatPenalty=1.0
@@ -210,6 +230,29 @@ func WithThinking(cfg ThinkingConfig) GenerateOption {
 	return func(c *GenerateConfig) { c.Thinking = cfg }
 }
 
+// WithVisionBudget requests a specific vision soft-token budget for image/video
+// attachments. 0 = model default. Engines/families clamp an out-of-range value
+// to what they actually support — this seam does not hard-code any family's
+// budget set.
+//
+//	m.Chat(ctx, msgs, inference.WithVisionBudget(1120)) // gemma4's OCR budget
+func WithVisionBudget(n int) GenerateOption {
+	return func(c *GenerateConfig) { c.VisionBudget = n }
+}
+
+// WithDisablePromptReuse skips the resident-session prompt cache for this
+// call — every call opens (and pays for) a fresh session. Set it for a
+// caller that never sends two calls sharing a prefix (a one-shot bench/CLI
+// run): on a q8-KV-capable model the reuse lane otherwise arms position-
+// invariant per-token landing on its resident session ahead of every
+// prefill regardless of length (#1846's byte-stability guard), taxing a
+// prefill that will never actually get reused.
+//
+//	inference.WithDisablePromptReuse() // one-shot bench/CLI generation
+func WithDisablePromptReuse() GenerateOption {
+	return func(c *GenerateConfig) { c.DisablePromptReuse = true }
+}
+
 // WithMetricsSink registers a request-scoped receiver for this generation's
 // final GenerateMetrics, delivered as the stream completes. Unlike the global
 // Metrics() read — which under concurrent generations is last-writer-wins —
@@ -241,6 +284,7 @@ type LoadConfig struct {
 	GPULayers     int    // Number of layers to offload to GPU (-1 = all, 0 = none)
 	ParallelSlots int    // Number of concurrent inference slots (0 = server default)
 	AdapterPath   string // Path to LoRA adapter directory (empty = no adapter)
+	CacheMode     string // Live KV cache mode ("" or "native" = engine default; e.g. "turboquant:4") — engines report theirs via CapabilityReport.CacheModes
 }
 
 // Used by LoadModel and LoadTrainable.
@@ -287,6 +331,17 @@ func WithParallelSlots(n int) LoadOption {
 //	inference.WithAdapterPath("/models/lora/domain-v2") // load fine-tuned adapter
 func WithAdapterPath(path string) LoadOption {
 	return func(c *LoadConfig) { c.AdapterPath = path }
+}
+
+// WithCacheMode selects the engine's LIVE KV cache mode for this load. "" (and
+// "native") keep the engine default; other values are engine-defined — the
+// metal engine serves the TurboQuant family ("turboquant", "turboquant:4",
+// "turboquant:3.5", "turboquant:3", "turboquant:2") and refuses unknown modes
+// at load rather than running silently native.
+//
+//	inference.WithCacheMode("turboquant:3.5") // K 4-bit / V 3-bit live KV codes
+func WithCacheMode(mode string) LoadOption {
+	return func(c *LoadConfig) { c.CacheMode = mode }
 }
 
 // cfg := inference.ApplyLoadOpts(opts) // used internally by LoadModel

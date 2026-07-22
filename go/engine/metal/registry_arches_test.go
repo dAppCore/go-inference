@@ -9,6 +9,6 @@ package native
 // serve cmd blank-import the loaders they need. Replaces the registration the deleted per-arch
 // loaders used to pull in transitively.
 import (
+	_ "dappco.re/go/inference/model/arch/mistralai/mistral"
 	_ "dappco.re/go/inference/model/gemma4"
-	_ "dappco.re/go/inference/model/mistral"
 )

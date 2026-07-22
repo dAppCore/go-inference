@@ -61,10 +61,15 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 		if L.V != nil {
 			ql.BV = L.V.Bias
 		}
+		if L.O != nil {
+			ql.BO = L.O.Bias // gpt_oss o_proj bias (attention_bias=true reaches o_proj); nil otherwise
+		}
+		ql.Sinks = L.Sinks // gpt_oss attention sinks (bf16 [nHeads]); nil for every sink-free arch
 		ql.PerLayerGate, ql.PerLayerProjection = qw(L.PerLayerGate), qw(L.PerLayerProjection)
 		ql.PostPerLayerInputNormW = L.PostPerLayerInputNorm
+		ql.GatedDelta, ql.GatedDeltaCfg = L.GatedDelta, L.GatedDeltaCfg // MixerGatedDelta recurrence (#18); nil for attention layers
 		if L.MoE != nil {
-			ql.MoE = moeToQuant(L.MoE, m.Arch.Experts, m.Arch.TopK, m.Arch.ExpertFF, m.Arch.Hidden, m.Arch.FuseExpertGateUp)
+			ql.MoE = moeToQuant(L.MoE, m.Arch)
 		} else {
 			ql.MLPNormW, ql.PostFFNormW = L.MLPNorm, L.PostFFNorm
 			ql.Gate, ql.Up, ql.Down = qw(L.Gate), qw(L.Up), qw(L.Down)
@@ -79,10 +84,40 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 // moeToQuant maps the shared loader's MoE block onto the native MoEQuantLayerWeights. The
 // per-component quant geometry (experts vs local MLP vs router) is read from each weight's own
 // shape — gemma4 26B-A4B keeps the experts 4-bit while the local MLP + router are 8-bit — and the
-// router norm is pre-folded by RootSize (matching metal's cached Router.ScaleScaled).
-func moeToQuant(e *model.LoadedMoE, experts, topK, expertFF, dModel int, fuseGateUp bool) *MoEQuantLayerWeights {
+// router norm is pre-folded by RootSize (matching metal's cached Router.ScaleScaled). A gpt_oss
+// arch (Activation "gpt_oss_clamped_swiglu") additionally carries the ClampedSwiGLU marker +
+// SwigluLimit and the additive router/expert biases the checkpoint ships (each already captured on
+// its Linear.Bias by the shared loader; nil for every other arch — byte-identical mapping).
+//
+// #57 VERIFIED (no change needed here): SharedGate/SharedUp/SharedDown's GroupSize/Bits below come
+// from qw(), which reads each model.Linear's OWN geometry verbatim — never re-derived from arch.ExpertFF
+// or any other arch-wide value. The pre-#57 bug (SharedDown's affine geometry silently wrong for a
+// shared expert whose width differs from the routed experts') lived entirely upstream, in
+// model.assembleMoE's SharedDown InDim (fixed via the new arch.SharedExpertFF field); this mapping was
+// always geometry-agnostic pass-through, so it inherits the fix with zero lines changed. See
+// TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good for the pinning proof.
+//
+// #61 CLOSED (was STILL OPEN here): ExpertDFF below is, and remains, the ROUTED width only —
+// MoEQuantLayerWeights now carries a SEPARATE SharedDFF (moe_block.go), resolved below from
+// arch.SharedExpertFF with an arch.ExpertFF fallback (mirroring model.assembleMoE's SharedDown InDim
+// fallback, #57), so arch_qwen_moe.go's non-fused decode dispatch (encQwenMoEHalf) can size its
+// shared-expert matvec off the shared expert's OWN width instead of borrowing ExpertDFF. See
+// TestMoeToQuant_SharedExpertGeometryIsPassThrough_Good (distinct widths) and
+// TestMoeToQuant_SharedDFFFallsBackToExpertDFF_Ugly (no distinct width declared) for the pinning
+// proofs, and qwenmoe/weights.go's doc for the full historical trace.
+func moeToQuant(e *model.LoadedMoE, arch model.Arch) *MoEQuantLayerWeights {
+	experts, topK, expertFF, dModel, fuseGateUp := arch.Experts, arch.TopK, arch.ExpertFF, arch.Hidden, arch.FuseExpertGateUp
+	// sharedFF (#61): the shared expert's OWN intermediate size — arch.SharedExpertFF when the arch
+	// declares one (real llama4 Scout: 16384 shared vs 8192 routed; Qwen1.5-MoE-A2.7B: 5632 vs 1408),
+	// else expertFF — so an arch that doesn't declare a distinct shared width (every arch but qwen's
+	// shared-expert family and llama4, today) derives the SAME SharedDFF as ExpertDFF, byte-identical
+	// to before this field existed.
+	sharedFF := arch.SharedExpertFF
+	if sharedFF == 0 {
+		sharedFF = expertFF
+	}
 	q := &MoEQuantLayerWeights{
-		NumExperts: experts, TopK: topK, ExpertDFF: expertFF,
+		NumExperts: experts, TopK: topK, ExpertDFF: expertFF, SharedDFF: sharedFF,
 		PreFFNormW: e.PreFFNorm, PreFFNorm2W: e.PreFFNorm2,
 		PostFFNorm1W: e.PostFFNorm1, PostFFNorm2W: e.PostFFNorm2, PostFFNormW: e.PostFFNorm,
 		LocalGate:         qw(e.LocalGate),
@@ -95,6 +130,16 @@ func moeToQuant(e *model.LoadedMoE, experts, topK, expertFF, dModel int, fuseGat
 		ExpUp:             qw(e.ExpUp),
 		ExpGateUp:         qw(e.ExpGateUp),
 		ExpDown:           qw(e.ExpDown),
+		SharedGate:        qw(e.SharedGate),
+		SharedUp:          qw(e.SharedUp),
+		SharedDown:        qw(e.SharedDown),
+		SharedSigmoid:     qw(e.SharedSigmoid),
+		// #63: the expert combine's gate nonlinearity, resolved the same way moeLoadedToBF16 resolves
+		// its bf16 sibling's UsesSiLU (engine/metal/moe_block.go) — ffnUsesSiLU(arch.Activation).
+		// gemma4 never sets Activation, so this stays false (GELU) for every existing gemma4 load.
+		UsesSiLU: ffnUsesSiLU(arch.Activation),
+		// #65: gemma4 always declares NormaliseMoETopK true, so this is byte-unchanged for it.
+		NormaliseTopK: arch.NormaliseMoETopK,
 	}
 	if e.ExpGate != nil {
 		q.ExpertGroupSize, q.ExpertBits = e.ExpGate.GroupSize, e.ExpGate.Bits
@@ -106,6 +151,26 @@ func moeToQuant(e *model.LoadedMoE, experts, topK, expertFF, dModel int, fuseGat
 	}
 	if e.Router != nil {
 		q.RouterGroupSize, q.RouterBits = e.Router.GroupSize, e.Router.Bits
+	}
+	// gpt_oss (#37): the clamped-SwiGLU marker + limit route this layer to encGptOssMoEHalf, and the
+	// additive biases (router before top-k; per-expert gate/up/down after each expert matvec) come off
+	// the Linears' own .bias captures. Every other arch leaves Activation ≠ the marker string → the
+	// fields stay zero/nil and the gemma/qwen decode paths are untouched.
+	if ffnUsesClampedSwiGLU(arch.Activation) {
+		q.ClampedSwiGLU = true
+		q.SwigluLimit = arch.SwigluLimit
+		if e.Router != nil {
+			q.RouterBias = e.Router.Bias
+		}
+		if e.ExpGate != nil {
+			q.ExpGateBias = e.ExpGate.Bias
+		}
+		if e.ExpUp != nil {
+			q.ExpUpBias = e.ExpUp.Bias
+		}
+		if e.ExpDown != nil {
+			q.ExpDownBias = e.ExpDown.Bias
+		}
 	}
 	// Engage the fused gate+up expert path when the model DECLARES it (Arch.FuseExpertGateUp,
 	// e.g. gemma4): a checkpoint that ships SEPARATE gate_proj/up_proj (gemma4 26B-A4B does)
@@ -201,12 +266,21 @@ func loadedToBF16(m *model.LoadedModel) *BF16Model {
 		l.MLPNormW, l.PostFFNormW = L.MLPNorm, L.PostFFNorm
 		l.WQ, l.WK, l.WV, l.WO = bw(L.Q), bw(L.K), bw(L.V), bw(L.O)
 		l.BQ, l.BK, l.BV = bb(L.Q), bb(L.K), bb(L.V) // Qwen2/2.5 additive QKV bias (nil otherwise)
+		l.BO = bb(L.O)                               // gpt_oss o_proj bias (nil otherwise)
+		l.Sinks = L.Sinks                            // gpt_oss attention sinks (bf16 [nHeads]); nil otherwise
 		l.WGate, l.WUp, l.WDown = bw(L.Gate), bw(L.Up), bw(L.Down)
 		if L.Gate != nil { // per-layer MatFormer FFN width, read from the gate's output rows
 			l.DFF = L.Gate.OutDim
 		}
 		l.PerLayerGate, l.PerLayerProjection = bw(L.PerLayerGate), bw(L.PerLayerProjection)
 		l.PostPerLayerInputNormW = L.PostPerLayerInputNorm
+		l.GatedDelta, l.GatedDeltaCfg = L.GatedDelta, L.GatedDeltaCfg // MixerGatedDelta recurrence (#18); nil for attention layers
+		if L.MoE != nil {
+			// The bf16 sibling of moeToQuant (line ~71): without this every bf16 factory
+			// MoE layer silently dropped its expert weights before decode — unhit in
+			// production only because MoE serving is quant (#59 zooserve find).
+			l.MoE = moeLoadedToBF16(L.MoE, m.Arch)
+		}
 	}
 	return g
 }

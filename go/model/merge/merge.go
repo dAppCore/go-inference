@@ -11,11 +11,17 @@
 // new safetensors pack plus a provenance record. ComparePacks diffs a base
 // pack against a fine-tuned pack tensor-by-tensor (see compare.go).
 //
-// Every source weight file is read fully into memory (via modelmgmt.
-// ReadSafetensors) rather than streamed — the right tradeoff for the pack
-// sizes go-inference callers merge today (LoRA adapters, small-to-mid
-// safetensors exports); a chunked/streaming variant for multi-GB sharded
-// checkpoints is future work, not ported here.
+// Every source weight file (a single model.safetensors, or the N shards of
+// a model.safetensors.index.json checkpoint) is resolved to a tensor→shard-
+// offset index via safetensors.IndexFiles — a header-only walk, no tensor
+// payload read — and each tensor's payload is then streamed from its
+// owning shard on demand through a safetensors.ShardCache, so a multi-GB
+// sharded source is never resident beyond the one tensor currently being
+// merged/compared. The merged OUTPUT tensor set is still assembled in
+// memory before the single safetensors write (merge output is always one
+// file, regardless of how many shards a source contributed — see
+// outputWeightsFile), so peak memory is bounded by one copy of the output
+// pack, not the input shard set(s).
 //
 //	result, err := merge.Packs(ctx, merge.Options{
 //	    Sources: []merge.Source{
@@ -242,7 +248,7 @@ func prepare(ctx context.Context, opts Options) (prepared, error) {
 
 	output := opts.OutputPath
 	if abs := core.PathAbs(output); abs.OK {
-		output = abs.Value.(string)
+		output = abs.String()
 	}
 	if err := ensureEmptyDestination(output); err != nil {
 		return prepared{}, err

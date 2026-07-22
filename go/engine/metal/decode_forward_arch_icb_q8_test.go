@@ -9,9 +9,11 @@ import (
 	"math"
 	"os"
 	"testing"
+	"unsafe"
 
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"github.com/tmc/apple/metal"
 )
 
 // newKVQ8ICBFixture builds a GLOBAL-attention quant session at a q8-qualifying
@@ -29,6 +31,49 @@ func newKVQ8ICBFixtureLen(t testing.TB, maxLen int) *ArchSession {
 		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
 		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
 		Quantization: &model.QuantConfig{GroupSize: gs, Bits: bits},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	lm, err := model.Assemble(quantGemma4Tensors(t, arch, gs, bits), arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	sess, err := NewArchQuantSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchQuantSession: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	return sess
+}
+
+// newKVQ8ICBSharedFixture is newKVQ8ICBFixture with numShared TRAILING
+// shared-KV layers (gemma3n E2B/E4B's own tail-sharing shape, #53/#54's
+// sharer branch — encAttnHalfSharedKVQ8At): the plain fixture has no sharers
+// at all (NumKVSharedLayers defaults to 0), so it never exercises a layer
+// reading a q8 OWNER's cache through KVShareFrom.
+// maxLen=512 keeps archQ8ICBBlocks at 0 (single-pass q8 SDPA) — below
+// sdpa2PassMinKV(1024), so this fixture and TestKVQ8ICBVerifyInterleaveDeepByteExact's
+// (maxLen=4096, forced 2-pass from position 0) exercise the two DISTINCT
+// branches encSDPADecodeQ8ForcedBlocksAt can take, not the same one twice.
+func newKVQ8ICBSharedFixture(t testing.TB, numShared int) *ArchSession {
+	return newKVQ8ICBSharedFixtureLen(t, numShared, 512)
+}
+
+func newKVQ8ICBSharedFixtureLen(t testing.TB, numShared, maxLen int) *ArchSession {
+	t.Helper()
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 256, 256, 64
+	const numLayers, gs, bits = 3, 64, 4
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		NumKVSharedLayers: numShared,
+		Quantization:      &model.QuantConfig{GroupSize: gs, Bits: bits},
 	}
 	arch, err := cfg.Arch()
 	if err != nil {
@@ -600,7 +645,7 @@ func TestKVQ8PrefillReleasesGEMMMirrors(t *testing.T) {
 // TestArchSessionCloseReleasesICBKVCaches pins the session KV lifecycle:
 // model.Generate opens and closes a session per call, and Close used to drop
 // the archICBReplay without releasing its per-owner KV set — every generate
-// leaked a complete cache set (10.7GB q8 per close on 31B@256K; the 2026-07-11
+// leaked a complete cache set (10.7GB q8 per close on 31B@256K; the
 // receipt run carried a full dead set from the CLI's first session). Three
 // open+step+close cycles must return the device allocation to baseline.
 func TestArchSessionCloseReleasesICBKVCaches(t *testing.T) {
@@ -725,6 +770,735 @@ func TestQ8StagePromptMatchesMirrorLane(t *testing.T) {
 	for i := range stage {
 		if !bytes.Equal(stage[i], mirror[i]) {
 			t.Fatalf("step %d: staging lane diverged from the mirror lane (want byte-identical)", i)
+		}
+	}
+}
+
+// newKVQ8BidirFixture builds the q8-ICB (or, with q8 false, the bf16-KV
+// reference) quant session for the bidirectional-span prefill receipts and
+// marks spanTok as the session's bidirectional span token when spans is true —
+// the same in-package seam TestArchSessionPrefillTokenEmbeddingsBidirSpanEngages
+// uses (token_model.go wires bidirSpanTokens from a real unified-vision config).
+func newKVQ8BidirFixture(t testing.TB, q8, spans bool, spanTok int32) *ArchSession {
+	t.Helper()
+	if q8 {
+		kvQ8ICBForTest = true
+	} else {
+		kvQ8ICBOffForTest = true
+	}
+	sess := newKVQ8ICBFixture(t)
+	kvQ8ICBForTest, kvQ8ICBOffForTest = false, false
+	if sess.state.icb == nil {
+		t.Fatal("fixture must record an ICB")
+	}
+	if got := sess.state.icb.hasKVQ8(); got != q8 {
+		t.Fatalf("hasKVQ8 = %v, want %v", got, q8)
+	}
+	if spans {
+		sess.bidirSpanTokens = [2]int32{spanTok, 0}
+	}
+	return sess
+}
+
+// kvQ8BidirPrefill embeds ids on the session's own table, runs the retained
+// embeddings prefill, and returns a copy of the boundary hidden after the
+// position and shape receipts.
+func kvQ8BidirPrefill(t testing.TB, sess *ArchSession, ids []int32) []byte {
+	t.Helper()
+	embeddings := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := sess.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID(%d): %v", id, err)
+		}
+		embeddings[i] = append([]byte(nil), emb...)
+	}
+	if err := sess.PrefillTokenEmbeddings(ids, embeddings); err != nil {
+		t.Fatalf("PrefillTokenEmbeddings: %v", err)
+	}
+	if sess.Pos() != len(ids) {
+		t.Fatalf("Pos = %d, want %d", sess.Pos(), len(ids))
+	}
+	if len(sess.retainedHidden) != sess.arch.Hidden*bf16Size {
+		t.Fatalf("retained hidden len = %d, want %d", len(sess.retainedHidden), sess.arch.Hidden*bf16Size)
+	}
+	return append([]byte(nil), sess.retainedHidden...)
+}
+
+// kvQ8BidirSpanIDs builds a prompt of preamble + span + tail: two text ids,
+// spanRows contiguous span tokens, two text ids.
+func kvQ8BidirSpanIDs(spanTok int32, spanRows int) []int32 {
+	ids := make([]int32, 0, spanRows+4)
+	ids = append(ids, 1, 2)
+	for range spanRows {
+		ids = append(ids, spanTok)
+	}
+	return append(ids, 3, 4)
+}
+
+// TestKVQ8ICBBidirSpanPrefillEngages pins #15: a bidirectional image/video
+// span chunk ENGAGES the batched dense fold on q8 ICB caches — the chunk-wide
+// rows-store landing satisfies the span's land-before-read rule and every row
+// reads the per-row q8 ladder (encSDPADecodeQ8At) with its cap. Before the fix
+// the q8 gate declined ANY rowAttnCaps batch, and the bidir lane's
+// no-causal-fallback rule (correct: a sequential span evaluation misreads the
+// image) turned the decline into a hard error on every 12B unified image
+// request. Three receipts: the prefill succeeds, the caps ENGAGED (a causal q8
+// twin of the same ids lands a different boundary hidden), and the q8 hidden
+// tracks the bf16-KV bidir lane within quantisation distance (structural
+// failures are orders of magnitude outside it).
+func TestKVQ8ICBBidirSpanPrefillEngages(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const spanTok = 7
+	ids := kvQ8BidirSpanIDs(spanTok, 20) // 24 ids: one span past batchedDenseICBMaxRows, one chunk
+
+	q8Bidir := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, true, true, spanTok), ids)
+	q8Causal := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, true, false, spanTok), ids)
+	if bytes.Equal(q8Bidir, q8Causal) {
+		t.Fatal("q8 bidirectional-span prefill produced the SAME boundary hidden as the causal q8 lane — the span caps had no effect")
+	}
+
+	bfBidir := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, false, true, spanTok), ids)
+	worst, scale := 0.0, 0.0
+	for j := 0; j+1 < len(bfBidir); j += 2 {
+		a := float64(bf16ToF32(q8Bidir[j], q8Bidir[j+1]))
+		b := float64(bf16ToF32(bfBidir[j], bfBidir[j+1]))
+		if d := math.Abs(a - b); d > worst {
+			worst = d
+		}
+		if m := math.Abs(b); m > scale {
+			scale = m
+		}
+	}
+	if worst > 0.05*math.Max(scale, 1) {
+		t.Fatalf("q8 bidir boundary hidden diverges structurally from bf16: worst |Δ|=%g (scale %g)", worst, scale)
+	}
+	t.Logf("q8 bidir tracked bf16 bidir: worst |Δ| = %.5g (scale %.5g)", worst, scale)
+}
+
+// TestKVQ8ICBBidirSpanChunkSplitRoutesCausalRuns pins the #15 companion fix:
+// when the bidirectional cutter splits a prefill around a span, the span-FREE
+// runs it produces (the preamble a span start shrank a chunk to, the tail
+// after the span end) are plain causal chunks and route through the causal
+// embedding lanes — including their sequential per-token fallback for the
+// small runs the q8 gate declines — instead of dying on the caps lane's
+// no-fallback rule. prefillChunkRowsCap forces the split (the 34-id prompt
+// exceeds cap+slack, then the span edges shrink the first chunk to 2 rows and
+// leave a 2-row tail); the split run's boundary hidden must track the
+// single-chunk run within quantisation distance (the fold and the per-token
+// replay trade at the token-identity tier, so bytes may differ; structure may
+// not).
+func TestKVQ8ICBBidirSpanChunkSplitRoutesCausalRuns(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const spanTok = 7
+	ids := kvQ8BidirSpanIDs(spanTok, 30) // 34 ids: past prefillChunkRowsCap+slack at cap 8
+
+	one := kvQ8BidirPrefill(t, newKVQ8BidirFixture(t, true, true, spanTok), ids)
+
+	split := newKVQ8BidirFixture(t, true, true, spanTok)
+	split.prefillChunkRowsCap = 8
+	splitHidden := kvQ8BidirPrefill(t, split, ids)
+
+	worst, scale := 0.0, 0.0
+	for j := 0; j+1 < len(one); j += 2 {
+		a := float64(bf16ToF32(splitHidden[j], splitHidden[j+1]))
+		b := float64(bf16ToF32(one[j], one[j+1]))
+		if d := math.Abs(a - b); d > worst {
+			worst = d
+		}
+		if m := math.Abs(b); m > scale {
+			scale = m
+		}
+	}
+	if worst > 0.05*math.Max(scale, 1) {
+		t.Fatalf("split bidir prefill diverges structurally from the single-chunk run: worst |Δ|=%g (scale %g)", worst, scale)
+	}
+	t.Logf("split bidir tracked single-chunk: worst |Δ| = %.5g (scale %.5g)", worst, scale)
+}
+
+// TestKVQ8ICBVerifyInterleaveByteExact pins #53/#54: the byte-exact MTP verify
+// (exact=true — verifyAssistantDraftHiddens never arms verifyFoldSmallK unless
+// LTHN_MTP_VERIFY_FOLD=1 forces it, TestMtpVerifyFoldArmed_Good) used to
+// decline WHOLESALE under q8 ICB caches at K<=batchedDenseICBMaxRows ("q8 icb
+// caches: batch below the fold gate"), paying K sequential stepID rounds
+// instead of the one-command-buffer interleave every other cache format gets
+// (mtp-diag: "verifyBatchedHiddens: state declined the batched dense lane").
+// The interleave now lands q8 rows itself (encAttnHalfKVQ8InputAt / the
+// sharer twin encAttnHalfSharedKVQ8At) with encKVQ8StoreRows at rows=1 (the
+// fold's own K-row store, at N=1) and encSDPADecodeQ8ForcedBlocksAt keyed on
+// archQ8ICBBlocks (the SAME session-maxLen-derived 2-pass choice the recorded
+// ICB replay bakes at construction, not the live n — #53/#54's real bug: an
+// n-keyed 2-pass choice agrees with the replay only once n itself crosses
+// sdpa2PassMinKV, diverging by ~1 ULP below that even though both sides read
+// the identical landed q8 bytes) — the SAME per-row kernels sequential stepID
+// uses for every other op, so unlike the fold's qmm_t token-identity tier
+// (quantisation distance only, #55 — see
+// TestKVQ8ICBBatchedPrefillMatchesSequential's verify block, which arms
+// verifyFoldSmallK and compares by tolerance), this lane must be
+// BYTE-IDENTICAL to sequential stepID. The fixture carries a trailing SHARED
+// layer (gemma3n E2B/E4B's own shape) so both new branches — the q8 OWNER row
+// and the sharer-of-a-q8-owner row — run in one receipt.
+func TestKVQ8ICBVerifyInterleaveByteExact(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	batched := newKVQ8ICBSharedFixture(t, 1)
+	seq := newKVQ8ICBSharedFixture(t, 1)
+	if !batched.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+	sharerLayer, ownerQ8Layer := -1, -1
+	for li := range batched.state.specs {
+		if !batched.state.specs[li].OwnsCache() {
+			sharerLayer = li
+		} else if batched.state.icb.kvQ8.on(li) {
+			ownerQ8Layer = li
+		}
+	}
+	if sharerLayer < 0 {
+		t.Fatal("fixture must carry a shared-KV layer (gemma3n E2B/E4B shape) — NumKVSharedLayers did not take")
+	}
+	if ownerQ8Layer < 0 {
+		t.Fatal("fixture must carry a q8-armed owner layer")
+	}
+	if !batched.state.icb.kvQ8.on(batched.state.specs[sharerLayer].KVShareFrom) {
+		t.Fatal("fixture's shared layer must point at a q8-armed owner — the sharer branch (encAttnHalfSharedKVQ8At) would go untested otherwise")
+	}
+
+	// warm both sessions identically, well clear of position 0 (a realistic
+	// mid-conversation MTP verify, not a boundary case at pos 0).
+	warm := []int32{1, 5, 3, 9, 7, 2, 4, 8, 6, 1}
+	for _, id := range warm {
+		if _, err := batched.stepID(id); err != nil {
+			t.Fatalf("batched warm stepID: %v", err)
+		}
+		if _, err := seq.stepID(id); err != nil {
+			t.Fatalf("seq warm stepID: %v", err)
+		}
+	}
+
+	// the byte-exact verify lane: verifyFoldSmallK is NEVER armed here — pin
+	// that first, so an engagement below can only be the interleave, never the
+	// (non-byte-identical) fold silently substituting for it.
+	if batched.state.verifyFoldSmallK {
+		t.Fatal("verifyFoldSmallK must be false — this test pins the byte-exact (non-fold) lane the real MTP verify takes")
+	}
+	draft := []int32{2, 4, 6, 8, 1} // K=5, well below batchedDenseICBMaxRows(16)
+	vh, vBatched, verr := batched.verifyBatchedHiddens(draft)
+	if verr != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", verr)
+	}
+	if !vBatched {
+		t.Fatal("q8 verify must ENGAGE the interleave at K=5 without verifyFoldSmallK (#53/#54) — the vacuous-compare trap: an unengaged (declined) batch would trivially equal the sequential twin because both sides would just be running the same stepID loop")
+	}
+	if len(vh) != len(draft) {
+		t.Fatalf("verify rows = %d, want %d", len(vh), len(draft))
+	}
+	for i, id := range draft {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("seq verify stepID(%d): %v", i, serr)
+		}
+		if !bytes.Equal(vh[i], hs) {
+			worst, scale, firstAt := 0.0, 0.0, -1
+			for j := 0; j+1 < len(hs); j += 2 {
+				a := float64(bf16ToF32(vh[i][j], vh[i][j+1]))
+				b := float64(bf16ToF32(hs[j], hs[j+1]))
+				if d := math.Abs(a - b); d > worst {
+					worst = d
+				}
+				if m := math.Abs(b); m > scale {
+					scale = m
+				}
+				if a != b && firstAt < 0 {
+					firstAt = j / 2
+				}
+			}
+			t.Fatalf("row %d: q8 interleave verify diverged from sequential stepID — NOT byte-identical (worst |Δ|=%g scale=%g firstDiffElem=%d of %d)", i, worst, scale, firstAt, len(hs)/2)
+		}
+	}
+	t.Logf("q8 interleave verify byte-identical to sequential over %d rows (owner layer %d, sharer layer %d)", len(draft), ownerQ8Layer, sharerLayer)
+}
+
+// TestKVQ8ICBVerifyInterleaveDeepByteExact is TestKVQ8ICBVerifyInterleaveByteExact
+// on a session whose maxLen(4096) crosses sdpa2PassMinKV(1024) — archQ8ICBBlocks
+// forces the 2-pass q8 SDPA pair from position 0 (mirroring the recorded ICB
+// replay's OWN unconditional choice, #53/#54), so this receipt covers the
+// OTHER branch encSDPADecodeQ8ForcedBlocksAt can take — the shallow fixture
+// (maxLen=512) stays on single-pass throughout.
+func TestKVQ8ICBVerifyInterleaveDeepByteExact(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	batched := newKVQ8ICBSharedFixtureLen(t, 1, 4096)
+	seq := newKVQ8ICBSharedFixtureLen(t, 1, 4096)
+	if !batched.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+
+	warm := make([]int32, sdpa2PassMinKV+6)
+	for i := range warm {
+		warm[i] = int32((i*11 + 2) % 60)
+	}
+	for _, id := range warm {
+		if _, err := batched.stepID(id); err != nil {
+			t.Fatalf("batched warm stepID: %v", err)
+		}
+		if _, err := seq.stepID(id); err != nil {
+			t.Fatalf("seq warm stepID: %v", err)
+		}
+	}
+
+	if batched.state.verifyFoldSmallK {
+		t.Fatal("verifyFoldSmallK must be false — this test pins the byte-exact (non-fold) lane")
+	}
+	draft := []int32{3, 7, 1, 9, 5} // K=5, past the 2-pass knee via basePos
+	vh, vBatched, verr := batched.verifyBatchedHiddens(draft)
+	if verr != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", verr)
+	}
+	if !vBatched {
+		t.Fatal("deep q8 verify must ENGAGE the interleave at K=5 without verifyFoldSmallK (#53/#54)")
+	}
+	for i, id := range draft {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("seq verify stepID(%d): %v", i, serr)
+		}
+		if !bytes.Equal(vh[i], hs) {
+			t.Fatalf("deep row %d: q8 interleave verify diverged from sequential stepID — NOT byte-identical", i)
+		}
+	}
+	t.Logf("deep q8 interleave verify byte-identical to sequential over %d rows at basePos=%d", len(draft), len(warm))
+}
+
+// newKVQ8SlidingICBFixtureLen is newKVQ8ICBFixtureLen with the first two
+// layers as SLIDING owners over an 8-row window (#69): the bounded ring
+// allocation, the slot-wrapped q8 store rebinds, and the window-capped q8
+// SDPA reads all engage, alongside one global q8 layer as the control.
+func newKVQ8SlidingICBFixtureLen(t testing.TB, maxLen int) *ArchSession {
+	return newKVQ8SlidingICBFixtureWin(t, maxLen, 8)
+}
+
+func newKVQ8SlidingICBFixtureWin(t testing.TB, maxLen, window int) *ArchSession {
+	return newKVQ8SlidingICBFixtureGeom(t, maxLen, window, 256)
+}
+
+func newKVQ8SlidingICBFixtureGeom(t testing.TB, maxLen, window, headDim int) *ArchSession {
+	t.Helper()
+	const dModel, nHeads, nKV, dFF, vocab = 128, 2, 1, 256, 64
+	const numLayers, gs, bits = 5, 64, 4
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		SlidingWindow: window,
+		// E2B's shape in miniature: sliding owners, a global owner, and TRAILING
+		// sharers of BOTH attention classes — the sliding sharer reads a q8
+		// sliding owner's ring through KVShareFrom.
+		LayerTypes:        []string{"sliding_attention", "sliding_attention", "full_attention", "sliding_attention", "full_attention"},
+		NumKVSharedLayers: 2,
+		Quantization:      &model.QuantConfig{GroupSize: gs, Bits: bits},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	lm, err := model.Assemble(quantGemma4Tensors(t, arch, gs, bits), arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	sess, err := NewArchQuantSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchQuantSession: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	return sess
+}
+
+// q8CachePlanes snapshots layer li's raw int8 code rows + f32 scale rows —
+// the byte-level oracle for the "batched landing writes the same bytes as the
+// sequential per-token store" contract on the ring.
+func q8CachePlanes(t testing.TB, sess *ArchSession, li int) (kCodes, vCodes, kScales, vScales []byte) {
+	t.Helper()
+	icb := sess.state.icb
+	if icb == nil || !icb.kvQ8.on(li) {
+		t.Fatalf("layer %d is not a q8 layer", li)
+	}
+	kvd := icb.rowBytes[li] / bf16Size
+	rows := icb.cacheRows[li]
+	snap := func(buf metal.MTLBuffer, n int) []byte {
+		return append([]byte(nil), unsafe.Slice((*byte)(buf.Contents()), n)...)
+	}
+	return snap(icb.kCaches[li], rows*kvd), snap(icb.vCaches[li], rows*kvd),
+		snap(icb.kvQ8.kScales[li], rows*(kvd/kvQ8GroupSize)*4), snap(icb.kvQ8.vScales[li], rows*(kvd/kvQ8GroupSize)*4)
+}
+
+// TestKVQ8SlidingRing_BatchedMatchesSequential pins the #69 evicting-chunk
+// contract: a batched prefill that wraps the 8-row ring several times must
+// leave the SAME code + scale bytes the sequential per-token stores leave,
+// and its per-row hiddens must track the sequential session.
+func TestKVQ8SlidingRing_BatchedMatchesSequential(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	batchedSess := newKVQ8SlidingICBFixtureLen(t, 64)
+	seqSess := newKVQ8SlidingICBFixtureLen(t, 64)
+	icb := batchedSess.state.icb
+	if icb == nil || !icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+	if !icb.kvQ8.on(0) || icb.cacheRows[0] != 8 {
+		t.Fatalf("layer 0 must be a q8 SLIDING owner on the 8-row ring (on=%v rows=%d)", icb.kvQ8.on(0), icb.cacheRows[0])
+	}
+	ids := make([]int32, 40) // 5x the window: the ring wraps repeatedly
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % 60)
+	}
+	embs := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := batchedSess.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		embs[i] = append([]byte(nil), emb...)
+	}
+	var out [][]byte
+	var ok bool
+	var err error
+	withAutoreleasePool(func() {
+		out, ok, err = batchedSess.state.stepTokensBatchedDense(embs, 0)
+	})
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDense: %v", err)
+	}
+	if !ok {
+		t.Fatal("prompt-scale batch must ENGAGE the fold on a sliding q8 session (#69)")
+	}
+	worstAll := 0.0
+	for i, id := range ids {
+		hs, serr := seqSess.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(out[i][j], out[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("row %d: batched sliding-q8 prefill diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
+		}
+	}
+	t.Logf("batched sliding-q8 prefill tracked sequential over %d rows: worst |Δ| = %.5g", len(ids), worstAll)
+	// the fold is a token-identity tier (rows-batched projections accumulate in
+	// a different fp order than per-token qmv), so the resting ring is compared
+	// at quantisation grade — dequantised values within the codec's own step of
+	// the sequential ring — not byte equality. A wrong slot, a bf16-stride
+	// offset, or a stale row diverges by whole activations, far past this.
+	kvd := icb.rowBytes[0] / bf16Size
+	dequant := func(codes, scales []byte) []float64 {
+		out := make([]float64, len(codes))
+		for i, c := range codes {
+			sc := math.Float32frombits(uint32(scales[(i/kvQ8GroupSize)*4]) | uint32(scales[(i/kvQ8GroupSize)*4+1])<<8 |
+				uint32(scales[(i/kvQ8GroupSize)*4+2])<<16 | uint32(scales[(i/kvQ8GroupSize)*4+3])<<24)
+			out[i] = float64(int8(c)) * float64(sc)
+		}
+		return out
+	}
+	for li := 0; li < 2; li++ {
+		bk, bv, bks, bvs := q8CachePlanes(t, batchedSess, li)
+		sk, sv, sks, svs := q8CachePlanes(t, seqSess, li)
+		for plane, pair := range map[string][2][]float64{
+			"K": {dequant(bk, bks), dequant(sk, sks)},
+			"V": {dequant(bv, bvs), dequant(sv, svs)},
+		} {
+			worst, scale := 0.0, 0.0
+			for i := range pair[0] {
+				if d := math.Abs(pair[0][i] - pair[1][i]); d > worst {
+					worst = d
+				}
+				if m := math.Abs(pair[1][i]); m > scale {
+					scale = m
+				}
+			}
+			if worst > 0.05*math.Max(scale, 1) {
+				t.Fatalf("layer %d %s ring diverges structurally: worst |Δ|=%g (scale %g, kvd=%d)", li, plane, worst, scale, kvd)
+			}
+		}
+	}
+}
+
+// TestKVQ8SlidingRing_ChainedWrapTracksBF16 drives the CHAINED per-token lane
+// past the ring wrap: the q8 session's hiddens must stay within quantisation
+// distance of the bf16 session at every position, before and after eviction
+// begins — a wrong slot, a bf16-stride scale offset, or a stale ring row
+// produces garbage far outside the bound.
+func TestKVQ8SlidingRing_ChainedWrapTracksBF16(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBOffForTest = true
+	ref := newKVQ8SlidingICBFixtureLen(t, 64)
+	kvQ8ICBOffForTest = false
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	q8 := newKVQ8SlidingICBFixtureLen(t, 64)
+	if q8.state.icb == nil || !q8.state.icb.kvQ8.on(0) || q8.state.icb.cacheRows[0] != 8 {
+		t.Fatal("q8 session must arm the sliding ring")
+	}
+	worstAll := 0.0
+	for i := 0; i < 30; i++ { // window 8: eviction from step 9 on
+		id := int32((i*5 + 2) % 60)
+		hq, err := q8.stepID(id)
+		if err != nil {
+			t.Fatalf("q8 stepID(%d): %v", i, err)
+		}
+		hr, err := ref.stepID(id)
+		if err != nil {
+			t.Fatalf("ref stepID(%d): %v", i, err)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hr); j += 2 {
+			a := float64(bf16ToF32(hq[j], hq[j+1]))
+			b := float64(bf16ToF32(hr[j], hr[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("step %d (pos past wrap=%v): chained sliding-q8 diverges structurally: worst |Δ|=%g (scale %g)", i, i >= 8, worst, hscale)
+		}
+	}
+	t.Logf("chained sliding-q8 tracked bf16 over 30 steps (22 past wrap): worst |Δ| = %.5g", worstAll)
+}
+
+// TestKVQ8SlidingRing_ChunkedPrefillMatchesSequential replays the live
+// prefill's chunk sequence in miniature (#69): chunk 1 fills the ring
+// EXACTLY (no eviction — the bulk landing + multiQ q8 lane), chunk 2 is a
+// small evicting tail (the deferred-ring lane priming a FULL ring from the
+// chunk-1 codes). The E2B deep-prompt failure lived exactly at this seam.
+func TestKVQ8SlidingRing_ChunkedPrefillMatchesSequential(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	const win = 24
+	batchedSess := newKVQ8SlidingICBFixtureWin(t, 96, win)
+	seqSess := newKVQ8SlidingICBFixtureWin(t, 96, win)
+	icb := batchedSess.state.icb
+	if icb == nil || !icb.kvQ8.on(0) || icb.cacheRows[0] != win {
+		t.Fatal("fixture must arm the q8 sliding ring at the test window")
+	}
+	ids := make([]int32, win+40) // chunk 1 = win rows (fills the ring), chunk 2 = 40 evicting rows (>= steelGEMMMinRows: the deferred-ring lane)
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % 60)
+	}
+	embFor := func(sess *ArchSession, id int32) []byte {
+		emb, err := sess.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		return append([]byte(nil), emb...)
+	}
+	runChunk := func(from, to int) [][]byte {
+		embs := make([][]byte, 0, to-from)
+		for _, id := range ids[from:to] {
+			embs = append(embs, embFor(batchedSess, id))
+		}
+		var out [][]byte
+		var ok bool
+		var err error
+		withAutoreleasePool(func() {
+			out, ok, err = batchedSess.state.stepTokensBatchedDense(embs, from)
+		})
+		if err != nil {
+			t.Fatalf("stepTokensBatchedDense(%d..%d): %v", from, to, err)
+		}
+		if !ok {
+			t.Fatalf("chunk %d..%d must ENGAGE the fold", from, to)
+		}
+		rows := make([][]byte, len(out))
+		for i := range out {
+			rows[i] = append([]byte(nil), out[i]...)
+		}
+		return rows
+	}
+	chunk1 := runChunk(0, win)
+	chunk2 := runChunk(win, len(ids))
+	batched := append(chunk1, chunk2...)
+	// a SMALL evicting chunk (below the deferred lane's row floor) must DECLINE
+	// the fold cleanly — never serve it through a hazardous shape.
+	smallEmb := embFor(batchedSess, ids[0])
+	var declinedOK bool
+	var declineErr error
+	withAutoreleasePool(func() {
+		_, declinedOK, declineErr = batchedSess.state.stepTokensBatchedDense([][]byte{smallEmb, smallEmb, smallEmb, smallEmb,
+			smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb, smallEmb,
+			smallEmb, smallEmb, smallEmb, smallEmb, smallEmb}, len(ids))
+	})
+	if declineErr != nil {
+		t.Fatalf("small evicting chunk must decline, not error: %v", declineErr)
+	}
+	if declinedOK {
+		t.Fatal("small evicting q8 sliding chunk must DECLINE the fold (no servable landing shape)")
+	}
+	worstAll := 0.0
+	for i, id := range ids {
+		hs, serr := seqSess.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(batched[i][j], batched[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("row %d (chunk %d): chunked sliding-q8 prefill diverges structurally: worst |Δ|=%g (scale %g)", i, map[bool]int{true: 1, false: 2}[i < win], worst, hscale)
+		}
+	}
+	t.Logf("chunked sliding-q8 prefill tracked sequential over %d rows (2 chunks): worst |Δ| = %.5g", len(ids), worstAll)
+}
+
+// TestKVQ8HeadDim128_TracksBF16 pins the #70 gate widening: a headDim-128
+// arch (the Qwen3/OLMoE-class geometry the 256/512 whitelist silently
+// excluded) arms q8 on EVERY owner — global and sliding — and both decode
+// lanes track the bf16 anchor. The 128 SDPA instantiations are new; a
+// missing kernel is a hard session-open error, not a silent bf16 fallback.
+func TestKVQ8HeadDim128_TracksBF16(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBOffForTest = true
+	ref := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	kvQ8ICBOffForTest = false
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	q8 := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	icb := q8.state.icb
+	if icb == nil || !icb.hasKVQ8() {
+		t.Fatal("hd-128 fixture did not arm q8")
+	}
+	for li := 0; li < 3; li++ { // two sliding owners + the global owner
+		if !icb.kvQ8.on(li) {
+			t.Fatalf("layer %d (headDim 128) must arm q8 after #70", li)
+		}
+	}
+	worstAll := 0.0
+	for i := 0; i < 40; i++ { // past the 24-row wrap from step 25
+		id := int32((i*5 + 2) % 60)
+		hq, err := q8.stepID(id)
+		if err != nil {
+			t.Fatalf("q8 stepID(%d): %v", i, err)
+		}
+		hr, err := ref.stepID(id)
+		if err != nil {
+			t.Fatalf("ref stepID(%d): %v", i, err)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hr); j += 2 {
+			a := float64(bf16ToF32(hq[j], hq[j+1]))
+			b := float64(bf16ToF32(hr[j], hr[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("step %d: hd-128 q8 diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
+		}
+	}
+	t.Logf("hd-128 q8 tracked bf16 over 40 chained steps: worst |Δ| = %.5g", worstAll)
+
+	// batched prefill on a fresh pair — the fold + deferred-ring lanes at 128.
+	batched := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	seq := newKVQ8SlidingICBFixtureGeom(t, 96, 24, 128)
+	ids := make([]int32, 40)
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % 60)
+	}
+	embs := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := batched.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		embs[i] = append([]byte(nil), emb...)
+	}
+	var out [][]byte
+	var ok bool
+	var err error
+	withAutoreleasePool(func() {
+		out, ok, err = batched.state.stepTokensBatchedDense(embs, 0)
+	})
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDense: %v", err)
+	}
+	if !ok {
+		t.Fatal("the fold must ENGAGE on the hd-128 q8 session")
+	}
+	for i, id := range ids {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(out[i][j], out[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("row %d: hd-128 batched q8 prefill diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
 		}
 	}
 }

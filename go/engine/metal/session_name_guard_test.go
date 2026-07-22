@@ -21,8 +21,14 @@ import (
 // inference.SessionHandle adapter over ArchSession now lives in the shared
 // package engine (engine.SessionHandle), so pkg/native declares only ArchSession.
 // composedEngineSession is the registry bridge for composed (hybrid-stack) archs —
-// "composed" names an arch class, like Arch, not a model.
-var allowedSessionTypes = map[string]bool{"ArchSession": true, "composedEngineSession": true}
+// "composed" names an arch class, like Arch, not a model. composedSpeculativeEngineSession
+// is that same bridge with the greedy lane routed through the class's declared MTP pair —
+// equally arch-driven (any composed hybrid plus whatever drafter its checkpoints declare).
+var allowedSessionTypes = map[string]bool{
+	"ArchSession":                      true,
+	"composedEngineSession":            true,
+	"composedSpeculativeEngineSession": true,
+}
 
 // TestSessionTypeNeutralName locks the ArchSession name the same way pkg/model's
 // TestArchTypesNeutralHome locks the arch declaration: it fails if pkg/native declares a

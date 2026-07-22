@@ -76,6 +76,15 @@ type attachedDrafterTextModel struct {
 	mtp     *AttachedDrafterMetrics
 }
 
+var (
+	_ inference.SerialModel                = (*attachedDrafterTextModel)(nil)
+	_ inference.SpeculativeMetricsProvider = (*attachedDrafterTextModel)(nil)
+)
+
+// SerialGeneration reports the pair-level target, drafter, KV, and scratch
+// ownership shared by every request through this wrapper.
+func (*attachedDrafterTextModel) SerialGeneration() bool { return true }
+
 func (model *attachedDrafterTextModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
 	model.clearLastGenerationState()
 	cfg := inference.ApplyGenerateOpts(opts)
@@ -421,6 +430,43 @@ func (model *attachedDrafterTextModel) AttachedDrafterMetrics() *AttachedDrafter
 	}
 	metrics := *model.mtp
 	return &metrics
+}
+
+// SpeculativeMetrics exposes the last native attached-drafter operation through
+// the engine-neutral metrics contract used by serving and CLI callers.
+func (model *attachedDrafterTextModel) SpeculativeMetrics() inference.SpeculativeMetrics {
+	if model == nil {
+		return inference.SpeculativeMetrics{}
+	}
+	model.mu.Lock()
+	if model.mtp == nil {
+		model.mu.Unlock()
+		return inference.SpeculativeMetrics{}
+	}
+	mtp := *model.mtp
+	peakMemory := model.metrics.PeakMemoryBytes
+	model.mu.Unlock()
+
+	metrics := inference.SpeculativeMetrics{
+		ProposedTokens:    mtp.ProposedTokens,
+		AcceptedTokens:    mtp.AcceptedTokens,
+		RejectedTokens:    mtp.RejectedTokens,
+		TargetVerifyCalls: mtp.VerifyCalls,
+		TargetCalls:       mtp.TargetCalls,
+		DraftCalls:        mtp.DraftCalls,
+		AcceptanceRate:    mtp.AcceptanceRate,
+		WallDuration:      mtp.Duration,
+		TargetDuration:    mtp.TargetDuration,
+		DraftDuration:     mtp.DraftDuration,
+		PeakMemoryBytes:   peakMemory,
+	}
+	if metrics.AcceptanceRate == 0 && metrics.ProposedTokens > 0 {
+		metrics.AcceptanceRate = float64(metrics.AcceptedTokens) / float64(metrics.ProposedTokens)
+	}
+	if metrics.WallDuration > 0 {
+		metrics.VisibleTokensPerSec = float64(mtp.EmittedTokens) / metrics.WallDuration.Seconds()
+	}
+	return metrics
 }
 
 func (model *attachedDrafterTextModel) Err() core.Result {

@@ -325,7 +325,7 @@ func TestDecodeHelpers_Good_AttachNativeDrafterReportsAssistantVerifierTensorRea
 	core.AssertEqual(t, attachedDrafterAssistantVerifierTensorsComplete, attachment.Labels["attached_drafter_assistant_verifier_tensors"])
 	core.AssertEqual(t, "", attachment.Labels["attached_drafter_assistant_verifier_missing"])
 	core.AssertEqual(t, attachedDrafterAssistantVerifierPlanTensorBound, attachment.Labels["attached_drafter_assistant_verifier_plan"])
-	core.AssertEqual(t, "not_linked", attachment.Labels["attached_drafter_assistant_verifier_kernel"])
+	core.AssertEqual(t, hipKernelStatusLinked, attachment.Labels["attached_drafter_assistant_verifier_kernel"])
 	core.AssertEqual(t, "bf16", attachment.Labels["attached_drafter_assistant_verifier_projection_encoding"])
 	core.AssertEqual(t, "4", attachment.Labels["attached_drafter_assistant_verifier_layers"])
 	core.AssertContains(t, attachment.Labels["attached_drafter_assistant_verifier_kernel_families"], hipKernelNameEmbedLookup)
@@ -335,6 +335,17 @@ func TestDecodeHelpers_Good_AttachNativeDrafterReportsAssistantVerifierTensorRea
 	core.AssertContains(t, attachment.Labels["attached_drafter_assistant_verifier_kernel_families"], hipKernelNamePackedTopK)
 	core.AssertEqual(t, hipKernelStatusNotLinked, attachment.Labels["attached_drafter_assistant_verify"])
 	core.AssertEqual(t, hipKernelStatusNotLinked, attachment.Labels["attached_drafter_assistant_state_verify"])
+}
+
+func TestHIPAttachedDrafterVerifierPlan_Good_AdvertisesLinkedServingKernel(t *testing.T) {
+	plan := hipAttachedDrafterAssistantVerifierPlan{
+		Status: attachedDrafterAssistantVerifierPlanTensorBound,
+		Reason: "assistant verifier tensors are shaped for existing HIP launch families; execution loop is linked",
+	}
+
+	labels := plan.Labels()
+
+	core.AssertEqual(t, hipKernelStatusLinked, labels["attached_drafter_assistant_verifier_kernel"])
 }
 
 func TestDecodeHelpers_Bad_AttachNativeDrafterReportsAssistantVerifierBadShape(t *testing.T) {
@@ -456,6 +467,22 @@ func TestDecodeHelpers_Good_AttachedDrafterTextModelGenerateUsesNativeAttachedRo
 	core.AssertEqual(t, 1, mtp.RejectedTokens)
 	core.AssertEqual(t, 3, mtp.ProposedTokens)
 	core.AssertEqual(t, 1, mtp.VerifyCalls)
+	serial, ok := any(model).(inference.SerialModel)
+	if !ok || !serial.SerialGeneration() {
+		t.Fatal("attached drafter model must declare its shared generation lane serial")
+	}
+	provider, ok := any(model).(inference.SpeculativeMetricsProvider)
+	if !ok {
+		t.Fatal("attached drafter model does not expose shared speculative metrics")
+	}
+	speculative := provider.SpeculativeMetrics()
+	core.AssertEqual(t, 3, speculative.ProposedTokens)
+	core.AssertEqual(t, 2, speculative.AcceptedTokens)
+	core.AssertEqual(t, 1, speculative.RejectedTokens)
+	core.AssertEqual(t, 1, speculative.TargetVerifyCalls)
+	core.AssertEqual(t, 3, speculative.TargetCalls)
+	core.AssertEqual(t, 1, speculative.DraftCalls)
+	core.AssertEqual(t, float64(2)/3, speculative.AcceptanceRate)
 	core.AssertEqual(t, true, IsAttachedDrafterTextModel(model))
 }
 
@@ -1331,19 +1358,6 @@ func TestDecodeHelpers_Bad_PlanAttachedDrafterRejectsGemma4NonLinkedTargetPack(t
 		want   string
 	}{
 		{
-			name: "bf16_load_only",
-			target: &rocmModel{
-				modelPath: "/models/lmstudio-community-gemma-4-e2b-it-bf16",
-				modelInfo: inference.ModelInfo{
-					Architecture: "gemma4_text",
-					NumLayers:    productionLaneGemma4E2BLayers,
-					HiddenSize:   productionLaneGemma4E2BHiddenSize,
-					VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
-				},
-			},
-			want: "target Gemma4 pack is not linked for generation",
-		},
-		{
 			name: "e4b_mxfp8_planned_only",
 			target: &rocmModel{
 				modelPath: "/models/lmstudio-community-gemma-4-e4b-it-mxfp8",
@@ -1354,7 +1368,7 @@ func TestDecodeHelpers_Bad_PlanAttachedDrafterRejectsGemma4NonLinkedTargetPack(t
 					VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
 				},
 			},
-			want: "target Gemma4 pack is not linked for generation",
+			want: "target Gemma4 pack is not runnable on this card",
 		},
 		{
 			name: "31b_status_only",

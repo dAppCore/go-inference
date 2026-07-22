@@ -83,7 +83,6 @@ var (
 	errBundleNil                   = core.NewError("mlx: State KV block bundle is nil")
 	errBundleTokenCountEmpty       = core.NewError("mlx: State KV block bundle token count is empty")
 	errBundleURIRequired           = core.NewError("mlx: State KV block bundle URI is required")
-	errBlockNonByteData            = core.NewError("mlx: State KV block decoded to non-byte data")
 	errBlockHashMismatch           = core.NewError("mlx: State KV block hash mismatch")
 	errBlockPayloadLenMismatch     = core.NewError("mlx: State KV block payload length mismatch")
 	errBlockRefHashMismatch        = core.NewError("mlx: State KV block ref hash mismatch")
@@ -681,10 +680,7 @@ func decodeKVSnapshotStateBlockEnvelope(envelope kvSnapshotStateBlockEnvelope, e
 	if !decoded.OK {
 		return nil, core.E("LoadFromStateBlocks", "decode block payload", decoded.Err())
 	}
-	data, ok := decoded.Value.([]byte)
-	if !ok {
-		return nil, errBlockNonByteData
-	}
+	data := decoded.Bytes()
 	if envelope.PayloadByteCount > 0 && len(data) != envelope.PayloadByteCount {
 		return nil, errBlockPayloadLenMismatch
 	}

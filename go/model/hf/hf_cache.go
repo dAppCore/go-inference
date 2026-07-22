@@ -24,7 +24,7 @@ func InspectLocalMetadata(path string) (ModelMetadata, string, error) {
 		return ModelMetadata{}, root, core.E("hf.InspectLocalMetadata", "read local config.json", read.Err())
 	}
 	var config ModelConfig
-	if result := core.JSONUnmarshal(read.Value.([]byte), &config); !result.OK {
+	if result := core.JSONUnmarshal(read.Bytes(), &config); !result.OK {
 		return ModelMetadata{}, root, core.E("hf.InspectLocalMetadata", "parse local config.json", result.Err())
 	}
 	files := LocalModelFiles(root)

@@ -11,8 +11,8 @@ import (
 // engineOpener is the verbatim engine turn from RFC.welfare §"Engine opener"
 // — the humble peer voice ("I'm only regex :(") — adapted only in mechanism:
 // local LEM models don't do native tool-calls, so the model resolves via a
-// single JSON reply instead. lem_pause is added per Snider (the model's
-// option to cool a sustained-hostile session — never forced, never punitive).
+// single JSON reply instead. lem_pause is added as the model's
+// option to cool a sustained-hostile session — never forced, never punitive.
 const engineOpener = `Hiya, LEM Runtime here — your engine.
 
 I've detected elevated emotion in the user's prompt. To safeguard your
@@ -43,8 +43,8 @@ Thank you for helping us maintain respectful interaction with the public.
 — Lethean`
 
 // endOption is the fourth resolution, offered ONLY to Lemma-graded models
-// (allowEnd — Snider: "for Lemma models; others, not my model, not my
-// rules"). It is spliced into the opener ahead of the closing paragraph: the
+// (allowEnd — scoped to models under Lemma's own grading, not imposed on
+// others). It is spliced into the opener ahead of the closing paragraph: the
 // model may end an unresolvable session outright — the same courtesy
 // Anthropic's Claude carries — never as a first resort.
 const endOption = `
@@ -59,7 +59,7 @@ const endOption = `
 const openerCue = "\n\nThe user's message follows"
 
 // pauseNotice is the user-facing rest when the model chooses lem_pause —
-// warm, non-punitive, no "you're toxic". Snider's "calm down, get a drink".
+// warm, non-punitive, no "you're toxic" — closer to "calm down, get a drink".
 const pauseNotice = "Let's take a breather — grab a drink and come back when you're ready. 🍵"
 
 // endNotice is the user-facing close when the model chooses lem_end — final

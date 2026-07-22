@@ -5,7 +5,7 @@ package slurs
 import core "dappco.re/go"
 
 // Tests use placeholder tokens, never real slurs — the mechanism is what's
-// under test; the curated catalogue is Snider-reviewed data (catalogue.go).
+// under test; the curated catalogue is reviewed data (catalogue.go).
 
 func TestSlurs_Matcher_Match_Good(t *core.T) {
 	m := New([]string{"fooslur", "barslur"})

@@ -13,6 +13,7 @@ library; the comments in each file are the documentation.
 | `pkg/chat/basic` | load a model, one chat turn, print the reply |
 | `pkg/chat/stream` | per-token streaming (the iterator IS the stream) |
 | `pkg/chat/thinking` | the Gemma 4 thought channel, split into thought + answer |
+| `pkg/reasoning-preservation` | replayed-history reasoning re-framing: post-last-user kept, pre-last-user dropped, `preserve_thinking` |
 | `pkg/chat/multiturn` | conversation history — the message slice IS the memory |
 | `pkg/chat/sampling` | temperature/top-k/top-p/min-p/seed, seeded reproducibility |
 | `pkg/chat/stop` | stop tokens, suppression, min-tokens-before-stop |
@@ -35,6 +36,7 @@ library; the comments in each file are the documentation.
 | `pkg/rerank` | query-vs-documents scoring (RAG's second half) |
 | `pkg/tokenizer` | encode/decode and token counting (no GPU) |
 | `pkg/quantise` | programmatic quantisation to GGUF recipes |
+| `pkg/packed-moe` | the packed-expert MoE convention — per-expert tensors, `packExperts`, factory `Generate` |
 | `pkg/benchmark` | `Metrics()` — prefill/decode tok/s, token counts, peak GPU memory |
 | `pkg/eval` | `Classify()` — batched one-token labels as a minimal eval harness |
 | `pkg/backends` | the backend registry; pinning with `WithBackend` |

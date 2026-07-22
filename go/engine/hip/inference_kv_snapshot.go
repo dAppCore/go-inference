@@ -9,12 +9,9 @@
 //
 // # The two layouts (why this is a reconcile, not a rename)
 //
-// hip stores its retained KV per LAYER as a flat float32 vector, HeadDim-wide
-// per token — one KV row per token per layer (keyWidth == valueWidth ==
-// HeadDim, KeyHeads == 1 / MQA). This is exactly what the native decode driver
-// appends (hip_gemma4_q4_kv.go: len(next.Keys) == len(prev.Keys) + HeadDim per
-// token) and validates (hip_gemma4_q4_layer.go hipGemma4Q4ValidateKVState:
-// len(keys) % HeadDim == 0). The host boundary is float32 — hipGemma4Q4Device
+// hip stores its retained KV per LAYER as a flat token-major float32 vector,
+// KeyHeads*HeadDim wide per token. E2B uses one KV head; larger Gemma 4
+// variants use multiple heads. The host boundary is float32 — hipGemma4Q4Device
 // DecodeState.HostState restores the device cache to float32 via
 // rocmKVCache.Restore, so no dequant happens here.
 //
@@ -22,18 +19,12 @@
 // KeyBytes/KeyShape/KeyDType (and optional per-head float32 slices). engine/
 // metal's ArchSession produces exactly that from its multi-head native cache.
 //
-// # The mapping (layout assumed — Snider's parity test proves it end-to-end)
+// # The mapping (layout assumed — proven end-to-end by the parity test)
 //
-// Because hip's retained cache is one HeadDim-wide row per token per layer, the
-// [layer][head] mapping is a single KV head: NumHeads = 1, HeadDim =
-// cfg.Layers[i].HeadDim, and layer i's flat float32 Keys/Values are the token
-// rows in order (token t = Keys[t*HeadDim : (t+1)*HeadDim]). For a single KV
-// head the token-row order and the layer-slab order coincide, so no reshuffle
-// is needed — KeyBytes is the little-endian float32 image of Keys directly.
-// The roundtrip is therefore lossless by construction (float32 in, float32
-// out, no head reinterpretation); the HIP-gated parity test in
-// inference_conformance_test.go is the receipt that proves it against a real
-// device-produced cache.
+// kv.Snapshot stores [head][token][dim], while HIP's host state is
+// [token][head][dim]. Capture de-interleaves each layer into head-major bytes
+// and per-head slices; restore interleaves it back. For one KV head the layouts
+// coincide, preserving the original byte representation.
 package hip
 
 import (
@@ -44,9 +35,13 @@ import (
 	"dappco.re/go/inference/kv"
 )
 
-// hipKVSnapshotArchitecture tags snapshots captured from the retained Gemma4-Q4
-// engine so a restore can reject a snapshot from a different engine family.
-const hipKVSnapshotArchitecture = "gemma4-q4"
+// hipKVSnapshotArchitecture tags the Gemma4 text cache independently of weight
+// dtype. The retained runtime serves both MLX Q4 and dense BF16 models.
+const hipKVSnapshotArchitecture = "gemma4_text"
+
+// hipKVSnapshotLegacyQ4Architecture remains readable for snapshots emitted
+// before the dense BF16 retained lane was linked.
+const hipKVSnapshotLegacyQ4Architecture = "gemma4-q4"
 
 // hipKVSnapshotFloat32DType is the K/V element dtype at hip's host boundary —
 // HostState always returns float32 (the device FP16 cache is widened on copy).
@@ -55,7 +50,7 @@ const hipKVSnapshotFloat32DType = "float32"
 // hipDecodeStateToSnapshot converts hip's retained Gemma4-Q4 host decode state
 // into a portable kv.Snapshot. host is the per-layer float32 K/V read back from
 // the device (deviceState.HostState); cfg supplies each layer's HeadDim (the KV
-// row width); tokens is the full prompt+generated sequence held by the session
+// head geometry); tokens is the full prompt+generated sequence held by the session
 // (Snapshot.Tokens) and generated the generated-only suffix (Snapshot.Generated).
 // opts.RawKVOnly skips the per-head float32 side slices, keeping only the
 // KeyBytes/ValueBytes image (the restore reads either).
@@ -72,37 +67,49 @@ func hipDecodeStateToSnapshot(host hipGemma4Q4DecodeState, cfg hipGemma4Q4Forwar
 	}
 	layers := make([]kv.LayerSnapshot, len(host.Layers))
 	seqLen := 0
+	numHeads := 0
 	for index, layerState := range host.Layers {
 		layerHeadDim := cfg.Layers[index].HeadDim
-		if layerHeadDim <= 0 {
-			return nil, core.E("rocm.hip.KVSnapshot.Capture", "layer HeadDim must be positive", nil)
+		layerHeads := firstPositiveInt(cfg.Layers[index].KeyHeads, 1)
+		layerWidth := layerHeads * layerHeadDim
+		if layerHeadDim <= 0 || layerWidth <= 0 {
+			return nil, core.E("rocm.hip.KVSnapshot.Capture", "layer KV geometry must be positive", nil)
 		}
-		if len(layerState.Keys)%layerHeadDim != 0 || len(layerState.Values) != len(layerState.Keys) {
-			return nil, core.E("rocm.hip.KVSnapshot.Capture", "layer K/V lengths must align with HeadDim", nil)
+		if len(layerState.Keys)%layerWidth != 0 || len(layerState.Values) != len(layerState.Keys) {
+			return nil, core.E("rocm.hip.KVSnapshot.Capture", "layer K/V lengths must align with KV row width", nil)
 		}
-		layerTokens := len(layerState.Keys) / layerHeadDim
+		layerTokens := len(layerState.Keys) / layerWidth
 		if layerTokens > seqLen {
 			seqLen = layerTokens
 		}
-		// Shape [batch=1, kvHeads=1, tokens, headDim] — the single-KV-head form
-		// (engine/metal uses [1, kvHeads, tokens, headDim]; hip's kvHeads is 1).
-		shape := []int32{1, 1, int32(layerTokens), int32(layerHeadDim)}
+		if layerHeads > numHeads {
+			numHeads = layerHeads
+		}
+		shape := []int32{1, int32(layerHeads), int32(layerTokens), int32(layerHeadDim)}
+		keysByHead := hipKVTokenMajorToHeadMajor(layerState.Keys, layerTokens, layerHeads, layerHeadDim)
+		valuesByHead := hipKVTokenMajorToHeadMajor(layerState.Values, layerTokens, layerHeads, layerHeadDim)
 		layer := kv.LayerSnapshot{
 			Layer:      index,
 			KeyDType:   hipKVSnapshotFloat32DType,
-			KeyBytes:   hipFloat32SliceToLEBytes(layerState.Keys),
+			KeyBytes:   hipFloat32SliceToLEBytes(keysByHead),
 			KeyShape:   shape,
 			ValueDType: hipKVSnapshotFloat32DType,
-			ValueBytes: hipFloat32SliceToLEBytes(layerState.Values),
+			ValueBytes: hipFloat32SliceToLEBytes(valuesByHead),
 			ValueShape: append([]int32(nil), shape...),
 		}
 		if !opts.RawKVOnly {
-			layer.Heads = []kv.HeadSnapshot{{
-				Key:        append([]float32(nil), layerState.Keys...),
-				KeyDType:   hipKVSnapshotFloat32DType,
-				Value:      append([]float32(nil), layerState.Values...),
-				ValueDType: hipKVSnapshotFloat32DType,
-			}}
+			layer.Heads = make([]kv.HeadSnapshot, layerHeads)
+			headValues := layerTokens * layerHeadDim
+			for head := 0; head < layerHeads; head++ {
+				start := head * headValues
+				end := start + headValues
+				layer.Heads[head] = kv.HeadSnapshot{
+					Key:        append([]float32(nil), keysByHead[start:end]...),
+					KeyDType:   hipKVSnapshotFloat32DType,
+					Value:      append([]float32(nil), valuesByHead[start:end]...),
+					ValueDType: hipKVSnapshotFloat32DType,
+				}
+			}
 		}
 		layers[index] = layer
 	}
@@ -112,7 +119,7 @@ func hipDecodeStateToSnapshot(host hipGemma4Q4DecodeState, cfg hipGemma4Q4Forwar
 		Tokens:        append([]int32(nil), tokens...),
 		Generated:     append([]int32(nil), generated...),
 		NumLayers:     len(host.Layers),
-		NumHeads:      1,
+		NumHeads:      numHeads,
 		SeqLen:        seqLen,
 		HeadDim:       headDim,
 		NumQueryHeads: hipForwardConfigQueryHeads(cfg),
@@ -129,8 +136,8 @@ func hipSnapshotToDecodeState(snapshot *kv.Snapshot, cfg hipGemma4Q4ForwardConfi
 	if snapshot == nil {
 		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot is nil", nil)
 	}
-	if snapshot.Architecture != "" && snapshot.Architecture != hipKVSnapshotArchitecture {
-		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot architecture is not gemma4-q4", nil)
+	if snapshot.Architecture != "" && snapshot.Architecture != hipKVSnapshotArchitecture && snapshot.Architecture != hipKVSnapshotLegacyQ4Architecture {
+		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot architecture is not Gemma4 text", nil)
 	}
 	if len(snapshot.Layers) != len(cfg.Layers) {
 		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot layer count must match forward config", nil)
@@ -138,12 +145,17 @@ func hipSnapshotToDecodeState(snapshot *kv.Snapshot, cfg hipGemma4Q4ForwardConfi
 	layers := make([]hipGemma4Q4LayerKVState, len(snapshot.Layers))
 	for index, layerSnapshot := range snapshot.Layers {
 		layerHeadDim := cfg.Layers[index].HeadDim
-		if layerHeadDim <= 0 {
-			return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "layer HeadDim must be positive", nil)
+		layerHeads := firstPositiveInt(cfg.Layers[index].KeyHeads, 1)
+		layerWidth := layerHeads * layerHeadDim
+		if layerHeadDim <= 0 || layerWidth <= 0 {
+			return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "layer KV geometry must be positive", nil)
 		}
-		keys, values := hipLayerSnapshotKV(layerSnapshot)
-		if len(keys)%layerHeadDim != 0 || len(values) != len(keys) {
-			return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot layer K/V lengths must align with HeadDim", nil)
+		keys, values, err := hipLayerSnapshotKV(layerSnapshot, layerHeads, layerHeadDim)
+		if err != nil {
+			return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", core.Sprintf("decode layer %d", index), err)
+		}
+		if len(keys)%layerWidth != 0 || len(values) != len(keys) {
+			return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot layer K/V lengths must align with KV row width", nil)
 		}
 		layers[index] = hipGemma4Q4LayerKVState{Keys: keys, Values: values}
 	}
@@ -156,17 +168,95 @@ func hipSnapshotToDecodeState(snapshot *kv.Snapshot, cfg hipGemma4Q4ForwardConfi
 
 // hipLayerSnapshotKV reads one layer's float32 K/V, preferring the exact per-head
 // slices and falling back to the little-endian KeyBytes/ValueBytes image.
-func hipLayerSnapshotKV(layer kv.LayerSnapshot) (keys, values []float32) {
-	if len(layer.Heads) == 1 && len(layer.Heads[0].Key) > 0 {
+func hipLayerSnapshotKV(layer kv.LayerSnapshot, headCount, headDim int) (keys, values []float32, err error) {
+	rowWidth := headCount * headDim
+	if rowWidth <= 0 {
+		return nil, nil, core.NewError("snapshot KV geometry must be positive")
+	}
+	if len(layer.Heads) == headCount && len(layer.Heads) > 0 && len(layer.Heads[0].Key) > 0 {
+		headValues := len(layer.Heads[0].Key)
+		if headValues%headDim != 0 {
+			return nil, nil, core.NewError("snapshot head length must align with HeadDim")
+		}
+		keysByHead := make([]float32, 0, headCount*headValues)
+		valuesByHead := make([]float32, 0, headCount*headValues)
+		for _, head := range layer.Heads {
+			if len(head.Key) != headValues || len(head.Value) != headValues {
+				return nil, nil, core.NewError("snapshot heads must have matching K/V geometry")
+			}
+			keysByHead = append(keysByHead, head.Key...)
+			valuesByHead = append(valuesByHead, head.Value...)
+		}
+		tokens := headValues / headDim
+		return hipKVHeadMajorToTokenMajor(keysByHead, tokens, headCount, headDim), hipKVHeadMajorToTokenMajor(valuesByHead, tokens, headCount, headDim), nil
+	}
+	if len(layer.Heads) == 1 && headCount > 1 && len(layer.Heads[0].Key) > 0 {
 		keys = append([]float32(nil), layer.Heads[0].Key...)
 		values = append([]float32(nil), layer.Heads[0].Value...)
-		return keys, values
+		if len(keys)%rowWidth != 0 || len(values) != len(keys) {
+			return nil, nil, core.NewError("legacy snapshot K/V geometry is invalid")
+		}
+		return keys, values, nil
 	}
-	return hipLEBytesToFloat32Slice(layer.KeyBytes), hipLEBytesToFloat32Slice(layer.ValueBytes)
+	keys = hipLEBytesToFloat32Slice(layer.KeyBytes)
+	values = hipLEBytesToFloat32Slice(layer.ValueBytes)
+	if len(keys) != len(values) {
+		return nil, nil, core.NewError("snapshot K/V byte lengths must match")
+	}
+	if hipLayerSnapshotUsesHeadMajorLayout(layer, headCount, headDim, len(keys)) {
+		tokens := len(keys) / rowWidth
+		return hipKVHeadMajorToTokenMajor(keys, tokens, headCount, headDim), hipKVHeadMajorToTokenMajor(values, tokens, headCount, headDim), nil
+	}
+	if len(keys)%rowWidth != 0 {
+		return nil, nil, core.NewError("legacy snapshot K/V lengths must align with KV row width")
+	}
+	return keys, values, nil
+}
+
+func hipLayerSnapshotUsesHeadMajorLayout(layer kv.LayerSnapshot, headCount, headDim, valueCount int) bool {
+	if len(layer.KeyShape) != 4 || len(layer.ValueShape) != 4 || layer.KeyShape[0] != 1 || layer.ValueShape[0] != 1 {
+		return false
+	}
+	if int(layer.KeyShape[1]) != headCount || int(layer.ValueShape[1]) != headCount ||
+		int(layer.KeyShape[3]) != headDim || int(layer.ValueShape[3]) != headDim ||
+		layer.KeyShape[2] < 0 || layer.ValueShape[2] != layer.KeyShape[2] {
+		return false
+	}
+	return int(layer.KeyShape[2])*headCount*headDim == valueCount
+}
+
+func hipKVTokenMajorToHeadMajor(values []float32, tokens, heads, headDim int) []float32 {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]float32, len(values))
+	for token := 0; token < tokens; token++ {
+		for head := 0; head < heads; head++ {
+			source := (token*heads + head) * headDim
+			target := (head*tokens + token) * headDim
+			copy(out[target:target+headDim], values[source:source+headDim])
+		}
+	}
+	return out
+}
+
+func hipKVHeadMajorToTokenMajor(values []float32, tokens, heads, headDim int) []float32 {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]float32, len(values))
+	for head := 0; head < heads; head++ {
+		for token := 0; token < tokens; token++ {
+			source := (head*tokens + token) * headDim
+			target := (token*heads + head) * headDim
+			copy(out[target:target+headDim], values[source:source+headDim])
+		}
+	}
+	return out
 }
 
 // hipForwardConfigQueryHeads reports the layer-0 query-head count (informational
-// NumQueryHeads on the snapshot — the retained KV itself is single-head).
+// NumQueryHeads on the snapshot).
 func hipForwardConfigQueryHeads(cfg hipGemma4Q4ForwardConfig) int {
 	if len(cfg.Layers) == 0 {
 		return 0

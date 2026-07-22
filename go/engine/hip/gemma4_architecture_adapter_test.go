@@ -47,6 +47,33 @@ func TestResolveGemma4ArchitectureDeclaration_Good(t *testing.T) {
 	}
 }
 
+func TestResolveGemma4ArchitectureDeclaration_DiffusionGemma_Good(t *testing.T) {
+	config := []byte(`{
+		"model_type":"diffusion_gemma",
+		"architectures":["DiffusionGemmaForBlockDiffusion"],
+		"hidden_size":256,"num_hidden_layers":3,"intermediate_size":512,
+		"num_attention_heads":8,"num_key_value_heads":2,"head_dim":32,
+		"global_head_dim":32,"vocab_size":1000,"rms_norm_eps":0.00001,
+		"sliding_window":128,"max_position_embeddings":2048,
+		"num_kv_shared_layers":1,
+		"layer_types":["full_attention","sliding_attention","full_attention"]
+	}`)
+
+	declaration, err := ResolveGemma4ArchitectureDeclaration(config)
+	if err != nil {
+		t.Fatalf("ResolveGemma4ArchitectureDeclaration(diffusion_gemma): %v", err)
+	}
+	if declaration.Resolution.Architecture != "diffusion_gemma" {
+		t.Fatalf("resolved architecture = %q, want diffusion_gemma", declaration.Resolution.Architecture)
+	}
+	if declaration.Arch.Hidden != 256 || declaration.Arch.Heads != 8 || len(declaration.Arch.Layer) != 3 {
+		t.Fatalf("shared Arch = %+v, want 256 hidden / 8 heads / 3 layers", declaration.Arch)
+	}
+	if !declaration.Matched() {
+		t.Fatalf("declaration = %+v, want DiffusionGemma trunk identity and topology match", declaration)
+	}
+}
+
 func TestResolveGemma4ArchitectureDeclaration_AliasFallback(t *testing.T) {
 	config := []byte(`{
 		"architectures":["Gemma4UnifiedForConditionalGeneration"],

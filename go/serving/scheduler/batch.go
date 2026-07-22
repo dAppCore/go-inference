@@ -80,19 +80,22 @@ type batchEngine struct {
 	closeCh   chan struct{}
 	doneCh    chan struct{}
 	closeOnce sync.Once
+	requests  sync.Map // request ID -> *batchReq; permits cancellation under output backpressure
 
 	submitted, admitted, completed, cancelled, active, queued, maxRunning atomic.Int64
 }
 
 // newBatchEngine builds a live batch engine from cfg and starts its loop.
 func newBatchEngine(_ *Model, cfg Config) *batchEngine {
+	concurrency := maxOrDefault(cfg.MaxConcurrent, 1)
+	queueDepth := maxOrDefault(cfg.MaxQueue, 1)
 	e := &batchEngine{
-		cap:          maxOrDefault(cfg.MaxConcurrent, 1),
-		maxQueue:     maxOrDefault(cfg.MaxQueue, 1),
+		cap:          concurrency,
+		maxQueue:     queueDepth,
 		maxTokens:    cfg.MaxBatchTokens,
 		streamBuffer: max(cfg.StreamBuffer, 0),
 		submitCh:     make(chan *batchReq),
-		cancelCh:     make(chan string),
+		cancelCh:     make(chan string, concurrency+queueDepth),
 		closeCh:      make(chan struct{}),
 		doneCh:       make(chan struct{}),
 	}
@@ -192,14 +195,17 @@ func (e *batchEngine) submit(ctx context.Context, br *batchReq) (<-chan inferenc
 	br.ctx = reqCtx
 	br.cancel = cancel
 	br.out = make(chan inference.ScheduledToken, e.streamBuffer)
+	e.requests.Store(br.id, br)
 	select {
 	case e.submitCh <- br:
 		e.submitted.Add(1)
 		return br.out, nil
 	case <-ctx.Done():
+		e.requests.Delete(br.id)
 		cancel()
 		return nil, ctx.Err()
 	case <-e.closeCh:
+		e.requests.Delete(br.id)
 		cancel()
 		return nil, core.E("scheduler.batch.submit", "engine is closed", nil)
 	}
@@ -209,9 +215,18 @@ func (e *batchEngine) submit(ctx context.Context, br *batchReq) (<-chan inferenc
 // channel closes with zero tokens), an active one observes ctx.Done() at its
 // next round. Unknown/finished ids are harmless no-ops.
 func (e *batchEngine) cancel(id string) inference.RequestCancelResult {
+	// The coordinator may be blocked delivering any request's next token to a
+	// full output channel. Cancel the target context directly, then notify the
+	// coordinator without waiting for its control loop. The bounded notification
+	// is only a prompt queue-removal hint: the cancelled context remains the
+	// source of truth if duplicate notifications fill the buffer.
+	if value, ok := e.requests.Load(id); ok {
+		value.(*batchReq).cancel()
+	}
 	select {
 	case e.cancelCh <- id:
 	case <-e.doneCh:
+	default:
 	}
 	return inference.RequestCancelResult{ID: id, Cancelled: true, Reason: "cancelled"}
 }
@@ -249,6 +264,7 @@ func (e *batchEngine) run() {
 	)
 
 	retire := func(req *batchReq, cancelled bool) {
+		e.requests.Delete(req.id)
 		req.cancel()
 		if req.stop != nil {
 			req.stop()
@@ -268,6 +284,7 @@ func (e *batchEngine) run() {
 			// Already cancelled while queued → retire without ever running it.
 			if req.ctx.Err() != nil {
 				queue = queue[1:]
+				e.requests.Delete(req.id)
 				req.cancel()
 				close(req.out)
 				e.cancelled.Add(1)
@@ -277,6 +294,7 @@ func (e *batchEngine) run() {
 			// (closed channel, no tokens) rather than wedge the queue head.
 			if e.maxTokens > 0 && req.promptTokens > e.maxTokens {
 				queue = queue[1:]
+				e.requests.Delete(req.id)
 				req.cancel()
 				close(req.out)
 				e.cancelled.Add(1)
@@ -306,6 +324,7 @@ func (e *batchEngine) run() {
 			if req.id == id {
 				req.cancel()
 				queue = append(queue[:i], queue[i+1:]...)
+				e.requests.Delete(req.id)
 				close(req.out)
 				e.cancelled.Add(1)
 				e.queued.Store(int64(len(queue)))
@@ -330,6 +349,7 @@ func (e *batchEngine) run() {
 			}
 		}
 		for _, req := range queue {
+			e.requests.Delete(req.id)
 			req.cancel()
 			close(req.out)
 			e.cancelled.Add(1)

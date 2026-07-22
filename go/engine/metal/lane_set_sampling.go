@@ -52,15 +52,23 @@ func laneSampleParams(cfg inference.SamplerConfig) model.SampleParams {
 // appends the picked token itself.
 func (s *ArchSession) sampledNextFromHiddenInPool(hidden []byte, sampler *model.Sampler, params model.SampleParams, history []int32) (int32, error) {
 	if sampledGreedyParamsEligible(params) {
-		return s.headGreedyOrLogits(hidden, params.SuppressTokens, nil, nil, false)
+		spT := ptStart()
+		next, err := s.headGreedyOrLogits(hidden, params.SuppressTokens, nil, nil, false)
+		spEnd(4, spT)
+		return next, err
 	}
 	if sampledTopOneGreedyParamsEligible(params, history) {
 		sampler.Draw()
-		return s.headGreedyOrLogits(hidden, params.SuppressTokens, nil, nil, false)
+		spT := ptStart()
+		next, err := s.headGreedyOrLogits(hidden, params.SuppressTokens, nil, nil, false)
+		spEnd(4, spT)
+		return next, err
 	}
 	if s.sampleTopKTokenParamsEligible(params) {
 		draw := sampler.Draw()
+		spT := ptStart()
 		next, ok, err := s.sampleTopKTokenFromHiddenInPool(hidden, params, draw, history)
+		spEnd(0, spT)
 		if err != nil {
 			return 0, err
 		}
@@ -71,7 +79,9 @@ func (s *ArchSession) sampledNextFromHiddenInPool(hidden []byte, sampler *model.
 	}
 	if s.sampleLogitsTokenParamsEligible(params) && !sampleLogitsTokenCPUPreferred(params, s.arch.Vocab) {
 		draw := sampler.Draw()
+		spT := ptStart()
 		next, ok, err := s.sampleLogitsTokenFromHiddenInPool(hidden, params, draw, history)
+		spEnd(1, spT)
 		if err != nil {
 			return 0, err
 		}
@@ -80,10 +90,13 @@ func (s *ArchSession) sampledNextFromHiddenInPool(hidden []byte, sampler *model.
 		}
 		return next, nil
 	}
-	if candidateLogits, candidateIDs, ok, err := s.sampleTopKCandidatesFromHiddenWithHistoryInPool(hidden, params, history); err != nil {
+	if candidateLogits, candidateIDs, ok, err := s.sampleTopKCandidatesFromHiddenWithHistoryInPoolTimed(hidden, params, history); err != nil {
 		return 0, err
 	} else if ok {
-		return sampler.SampleCandidates(candidateLogits, candidateIDs, params)
+		spT := ptStart()
+		next, serr := sampler.SampleCandidates(candidateLogits, candidateIDs, params)
+		spEnd(3, spT)
+		return next, serr
 	}
 	logits, err := s.headLogitsScratch(hidden, false)
 	if err != nil {

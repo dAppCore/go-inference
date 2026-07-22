@@ -30,11 +30,6 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 	if !ok {
 		return nil, nil, core.NewError("model.Load: no architecture registered for model_type " + mt)
 	}
-	if spec.Composed != nil {
-		// A composed/hybrid arch is not the reactive transformer Assemble path (its linear_attention
-		// layers have no q/k/v to assemble) — route it through LoadComposedDir, not here.
-		return nil, nil, core.NewError("model.Load: " + mt + " is a composed/hybrid arch — load via LoadComposedDir")
-	}
 	ac, err := spec.Parse(cfg)
 	if err != nil {
 		return nil, nil, err
@@ -52,7 +47,20 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 		tensors = spec.NormalizeConfig(tensors, ac)
 		dm.Tensors = tensors
 	}
-	ac.InferFromWeights(NormalizeWrapperNames(tensors)) // resolve omitted dims from the shapes (don't-guess)
+	// Widen any F16 float tensors to BF16 before the assembler binds them: many MLX community packs
+	// ship the un-quantised floats (norms, affine scales/biases, q/k/v biases, dense weights) as IEEE
+	// half, which the byte-native engine's bf16 kernels would misread bit-for-bit. Byte length and
+	// shape are unchanged, so InferFromWeights/Assemble below read identical geometry; a bf16 pack has
+	// nothing to widen and stays byte-identical + zero-copy. tensors aliases dm.Tensors, so the
+	// in-place widen is visible to Assemble.
+	dm.WidenF16TensorsToBF16()
+	// Alias the multimodal wrapper names INTO the mapping's own tensor map (not a transient copy):
+	// Assemble's NormalizeWrapperNames then passes this SAME map through, so LoadLinear's b1→b2
+	// repack writeback stays visible to the owned-tensor adoption below. Aliased after the widen so
+	// alias and original share one (possibly widened) Data buffer. (#60 — the Bonsai wrapper miss.)
+	tensors = NormalizeWrapperNames(tensors)
+	dm.Tensors = tensors
+	ac.InferFromWeights(tensors) // resolve omitted dims from the shapes (don't-guess)
 	arch, err := ac.Arch()
 	if err != nil {
 		_ = dm.Close()
@@ -91,42 +99,12 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 			return nil, nil, err
 		}
 	}
+	// Register every load-time synthesised tensor (a packExperts MoE pack, a b1→b2-repacked
+	// weight — any normaliser/assembler output whose Data is fresh heap, not a shard view) with
+	// the mapping, so a zero-copy binder binds them resident instead of failing its wrong-mapping
+	// guard, and evicts their device buffers with the session. See safetensors owned.go.
+	dm.AdoptOwnedTensors()
 	return m, dm, nil
-}
-
-// LoadComposedDir reads dir and builds the hybrid (non-Assemble) TokenModel through the model_type's
-// registered Composed hook — the neutral, backend-agnostic routing for a config-composed stack (Qwen 3.6
-// gated-delta + full attention) whose weights the reactive transformer Assemble does not describe. It is
-// the registry-driven replacement for a backend's hardcoded model_type switch: probe model_type (with the
-// text_config fallback for the multimodal wrapper), look up the ArchSpec, and when it carries a Composed
-// hook, map the safetensors and call it. ok=false means the model_type is a standard transformer (or is
-// unregistered) — load it via Load instead. The DirMapping is closed before returning: the composed loader
-// widens every weight to its own f32 buffers during the build (the same lifetime the backend seam uses), so
-// the mmap is not held past it.
-func LoadComposedDir(dir string) (TokenModel, bool, error) {
-	cfgStr, err := coreio.Local.Read(core.PathJoin(dir, "config.json"))
-	if err != nil {
-		return nil, false, core.E("model.LoadComposedDir", "read config.json", err)
-	}
-	cfg := []byte(cfgStr)
-	mt, textMT := probeModelTypes(cfg)
-	spec, ok := LookupArch(mt)
-	if !ok && textMT != "" {
-		spec, ok = LookupArch(textMT)
-	}
-	if !ok || spec.Composed == nil {
-		return nil, false, nil
-	}
-	dm, err := safetensors.LoadDirMmap(dir)
-	if err != nil {
-		return nil, false, err
-	}
-	defer func() { _ = dm.Close() }()
-	tm, err := spec.Composed(dm.Tensors, cfg)
-	if err != nil {
-		return nil, false, err
-	}
-	return tm, true, nil
 }
 
 // ProbeDirArch reads dir/config.json and returns its top-level model_type plus the raw config bytes —

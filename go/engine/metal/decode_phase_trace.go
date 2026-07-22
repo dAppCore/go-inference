@@ -27,6 +27,7 @@ import (
 // generation would corrupt the split; `generate -trace` runs one at a time.
 func (s *ArchSession) BeginDecodePhaseTrace() func() inference.DecodePhaseBudget {
 	pieceNs = [3]int64{}
+	sampledPickNs = [5]int64{}
 	icbGPUNs = 0
 	chainedGPUSpanNs = 0
 	pieceTimingOn = true
@@ -42,7 +43,7 @@ func (s *ArchSession) BeginDecodePhaseTrace() func() inference.DecodePhaseBudget
 		if s != nil {
 			tokens = s.pos - startPos
 		}
-		return buildDecodePhaseBudget(wall, tokens, pieceNs, chainedGPUSpanNs)
+		return buildDecodePhaseBudget(wall, tokens, pieceNs, sampledPickNs, chainedGPUSpanNs)
 	}
 }
 
@@ -54,7 +55,7 @@ func (s *ArchSession) BeginDecodePhaseTrace() func() inference.DecodePhaseBudget
 // stack, head). GPU-busy time is taken from whichever is present; each non-zero
 // piece is reported as its own phase so the caller can see the split when it
 // exists. A zero token count yields an empty budget (nothing was measured).
-func buildDecodePhaseBudget(wall time.Duration, tokens int, pieces [3]int64, chainedSpanNs int64) inference.DecodePhaseBudget {
+func buildDecodePhaseBudget(wall time.Duration, tokens int, pieces [3]int64, sampledPick [5]int64, chainedSpanNs int64) inference.DecodePhaseBudget {
 	if tokens <= 0 {
 		return inference.DecodePhaseBudget{}
 	}
@@ -78,5 +79,19 @@ func buildDecodePhaseBudget(wall time.Duration, tokens int, pieces [3]int64, cha
 	add("layer stack (ICB)", pieces[1])
 	add("head — norm + lm_head", pieces[2])
 	add("chained GPU span", chainedSpanNs)
+	// The sampled pick lanes (#23): host-observed walls — each FromHidden lane pays its own head
+	// encode + completion wait + selection inside one call, so these are GPU:false (the trace's
+	// host-serial bucket) and name where the sampled loop's wall actually lives.
+	addHost := func(name string, ns int64) {
+		if ns <= 0 {
+			return
+		}
+		budget.Phases = append(budget.Phases, inference.DecodePhaseShare{Name: name, PerToken: perToken(ns), GPU: false})
+	}
+	addHost("pick: topK-token lane", sampledPick[0])
+	addHost("pick: logits-token lane", sampledPick[1])
+	addHost("pick: candidates lane (head+select)", sampledPick[2])
+	addHost("pick: candidate sample", sampledPick[3])
+	addHost("pick: greedy head", sampledPick[4])
 	return budget
 }

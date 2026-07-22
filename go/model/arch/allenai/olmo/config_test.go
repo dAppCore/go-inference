@@ -1,0 +1,155 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+package olmo
+
+import (
+	"testing"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference/model"
+)
+
+func fixture(t *testing.T, name string) []byte {
+	t.Helper()
+	r := core.ReadFile(core.PathJoin("testdata", name))
+	if !r.OK {
+		t.Fatalf("read %s: %v", name, r.Error())
+	}
+	return r.Value.([]byte)
+}
+
+// TestConfig_ParseConfig_Good parses the unmodified allenai/OLMo-1B-hf config.
+// Source: https://huggingface.co/allenai/OLMo-1B-hf/blob/main/config.json
+func TestConfig_ParseConfig_Good(t *testing.T) {
+	cfg, err := ParseConfig(fixture(t, "allenai-olmo-1b-hf-config.json"))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	a, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	if cfg.ModelType != "olmo" || a.Hidden != 2048 || a.FF != 8192 || a.HeadDim != 128 || a.Vocab != 50304 {
+		t.Fatalf("OLMo arch = %+v", a)
+	}
+	if a.NormPlacement != model.NormPlacementPre || !a.NonParametricLayerNorm || a.Activation != "silu" {
+		t.Fatalf("OLMo strategy = placement %q non-parametric %v activation %q", a.NormPlacement, a.NonParametricLayerNorm, a.Activation)
+	}
+}
+
+// TestParseConfig_OLMo2_Good parses the unmodified allenai/OLMo-2-0425-1B config.
+// Source: https://huggingface.co/allenai/OLMo-2-0425-1B/blob/main/config.json
+func TestParseConfig_OLMo2_Good(t *testing.T) {
+	cfg, err := ParseConfig(fixture(t, "allenai-olmo-2-0425-1b-config.json"))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	a, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	if cfg.ModelType != "olmo2" || a.RopeBase != 500000 || a.Eps != 1e-6 || a.TieWordEmbeddings == nil || *a.TieWordEmbeddings {
+		t.Fatalf("OLMo2 arch = %+v", a)
+	}
+	if a.NormPlacement != model.NormPlacementPost || a.NonParametricLayerNorm {
+		t.Fatalf("OLMo2 strategy = placement %q non-parametric %v", a.NormPlacement, a.NonParametricLayerNorm)
+	}
+}
+
+func TestConfig_ParseConfig_Bad(t *testing.T) {
+	if _, err := ParseConfig([]byte(`{"model_type":`)); err == nil {
+		t.Fatal("ParseConfig accepted malformed JSON")
+	}
+}
+
+// TestConfig_ParseConfig_Ugly proves ParseConfig itself never validates
+// geometry — a syntactically valid document with no dimensions parses fine;
+// the rejection only surfaces later, at Arch. Distinct from _Bad's syntax
+// error.
+func TestConfig_ParseConfig_Ugly(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{"model_type":"olmo2"}`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("Arch accepted empty geometry")
+	}
+}
+
+// TestConfig_Arch_Good constructs a Config directly (bypassing ParseConfig)
+// and pins the OLMo2 generation strategy: post-placement, parametric
+// (non-nonparametric) LayerNorm.
+func TestConfig_Arch_Good(t *testing.T) {
+	cfg := Config{
+		ModelType: "olmo2", HiddenSize: 2048, IntermediateSize: 8192,
+		NumHiddenLayers: 16, NumAttentionHeads: 16, NumKeyValueHeads: 16,
+		VocabSize: 50304, RMSNormEps: 1e-6, RopeTheta: 500000,
+	}
+	a, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	if a.Hidden != 2048 || a.HeadDim != 128 || a.Vocab != 50304 {
+		t.Fatalf("OLMo2 dims = %+v", a)
+	}
+	if a.NormPlacement != model.NormPlacementPost || a.NonParametricLayerNorm {
+		t.Fatalf("OLMo2 strategy = placement %q non-parametric %v", a.NormPlacement, a.NonParametricLayerNorm)
+	}
+}
+
+func TestConfig_Arch_Bad(t *testing.T) {
+	valid := Config{ModelType: "olmo2", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, NumKeyValueHeads: 1, VocabSize: 32}
+	cases := []Config{
+		{ModelType: "unknown", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 32},
+		{ModelType: "olmo2", HiddenSize: 7, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 32},
+		{ModelType: "olmo2", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 4, NumKeyValueHeads: 3, VocabSize: 32},
+	}
+	negativeEps := valid
+	negativeEps.RMSNormEps = -1
+	cases = append(cases, negativeEps)
+	negativeRope := valid
+	negativeRope.RopeTheta = -1
+	cases = append(cases, negativeRope)
+	for i := range cases {
+		if _, err := cases[i].Arch(); err == nil {
+			t.Fatalf("invalid config %d accepted", i)
+		}
+	}
+}
+
+func TestConfig_Arch_Ugly(t *testing.T) {
+	cfg := Config{ModelType: "olmo", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 32}
+	a, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch defaults: %v", err)
+	}
+	if a.KVHeads != 2 || a.Eps != defaultLayerNormEps || a.RopeBase != defaultRopeTheta || a.Activation != "silu" {
+		t.Fatalf("Arch defaults = %+v", a)
+	}
+}
+
+func TestConfig_InferFromWeights_Good(t *testing.T) {
+	cfg := Config{ModelType: "olmo", HiddenSize: 8}
+	cfg.InferFromWeights(nil)
+	if cfg.HiddenSize != 8 {
+		t.Fatalf("InferFromWeights changed config: %+v", cfg)
+	}
+}
+
+func TestConfig_InferFromWeights_Bad(t *testing.T) {
+	cfg := Config{}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("empty config became valid after InferFromWeights")
+	}
+}
+
+// TestConfig_InferFromWeights_Ugly proves the no-op does not paper over the
+// unsupported-model_type gate — distinct from _Bad's all-zero rejection.
+func TestConfig_InferFromWeights_Ugly(t *testing.T) {
+	cfg := Config{ModelType: "unknown", HiddenSize: 8, IntermediateSize: 16, NumHiddenLayers: 1, NumAttentionHeads: 2, VocabSize: 32}
+	cfg.InferFromWeights(nil)
+	if _, err := cfg.Arch(); err == nil {
+		t.Fatal("unsupported model_type became valid after InferFromWeights")
+	}
+}

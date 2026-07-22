@@ -14,7 +14,7 @@ import (
 // time comes from the span and the single reported phase is the chained span.
 func TestBuildDecodePhaseBudget_ChainedSpan_Good(t *testing.T) {
 	wall := 20 * time.Millisecond // 10 tokens → 2ms/token wall
-	budget := buildDecodePhaseBudget(wall, 10, [3]int64{}, int64(10*time.Millisecond))
+	budget := buildDecodePhaseBudget(wall, 10, [3]int64{}, [5]int64{}, int64(10*time.Millisecond))
 	if budget.Tokens != 10 {
 		t.Fatalf("Tokens = %d, want 10", budget.Tokens)
 	}
@@ -35,7 +35,7 @@ func TestBuildDecodePhaseBudget_ChainedSpan_Good(t *testing.T) {
 func TestBuildDecodePhaseBudget_Pieces_Bad(t *testing.T) {
 	// 4 tokens; pieces total 8ms → GPU 2ms/token.
 	pieces := [3]int64{int64(2 * time.Millisecond), int64(4 * time.Millisecond), int64(2 * time.Millisecond)}
-	budget := buildDecodePhaseBudget(12*time.Millisecond, 4, pieces, 0)
+	budget := buildDecodePhaseBudget(12*time.Millisecond, 4, pieces, [5]int64{}, 0)
 	if budget.GPUPerToken != 2*time.Millisecond {
 		t.Fatalf("GPUPerToken = %v, want 2ms (piece sum/tokens)", budget.GPUPerToken)
 	}
@@ -53,7 +53,7 @@ func TestBuildDecodePhaseBudget_Pieces_Bad(t *testing.T) {
 // TestBuildDecodePhaseBudget_ZeroTokens_Ugly pins the guard: nothing decoded
 // yields an empty budget (no divide-by-zero, no phantom phases).
 func TestBuildDecodePhaseBudget_ZeroTokens_Ugly(t *testing.T) {
-	budget := buildDecodePhaseBudget(time.Second, 0, [3]int64{1, 2, 3}, 4)
+	budget := buildDecodePhaseBudget(time.Second, 0, [3]int64{1, 2, 3}, [5]int64{}, 4)
 	if budget.Tokens != 0 || budget.TotalPerToken != 0 || len(budget.Phases) != 0 {
 		t.Fatalf("zero-token budget = %+v, want empty", budget)
 	}
@@ -99,11 +99,12 @@ func TestBeginDecodePhaseTrace_NilSessionSafe(t *testing.T) {
 }
 
 // TestSupportedCacheModes pins the capability seam's honest answer: the no-cgo
-// engine reports its single native cache mode (no go-mlx-era selector).
+// engine reports its built-in native cache and the TurboQuant live-code family
+// (#41 S3) — nothing else (the go-mlx-era fp16/q8/kq8vq4 selectors never ported).
 func TestSupportedCacheModes(t *testing.T) {
 	m := &NativeTokenModel{}
 	modes := m.SupportedCacheModes()
-	if len(modes) != 1 || modes[0] != "native" {
-		t.Fatalf("SupportedCacheModes = %v, want [native]", modes)
+	if len(modes) != 2 || modes[0] != "native" || modes[1] != "turboquant" {
+		t.Fatalf("SupportedCacheModes = %v, want [native turboquant]", modes)
 	}
 }

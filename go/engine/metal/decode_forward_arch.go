@@ -6,7 +6,11 @@ package native
 
 import (
 	"math"
+	"os"
 	"runtime"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -68,8 +72,8 @@ func encAttnHalfShared(
 	x, attendK, attendV, offBuf, h metal.MTLBuffer,
 	attnNormW, postAttnNorm, qNorm bufView,
 	sc attnScratch, proj projector,
-	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, eps float32,
-	ropeFreqs metal.MTLBuffer,
+	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
+	ropeFreqs metal.MTLBuffer, sinks bufView,
 ) error {
 	kvDim := nKVHeads * headDim
 	if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
@@ -80,7 +84,7 @@ func encAttnHalfShared(
 	}
 	if gpuHasGeluKernel() && qNorm.buf != nil {
 		// fused: sc.q = RoPE(RMSNorm(sc.q, qNorm)) in one op — lockstep with the ICB setQKNormRope
-		if err := encQKNormRope(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRope(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
 			return err
 		}
 	} else {
@@ -90,7 +94,7 @@ func encAttnHalfShared(
 			}
 		}
 		// RoPE Q in place so partial rotary's untouched tail keeps the projected value.
-		if err := encRopeDecode(enc, sc.q, sc.q, 0, 0, offBuf, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecode(enc, sc.q, sc.q, 0, 0, offBuf, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale); err != nil {
 			return err
 		}
 	}
@@ -100,7 +104,9 @@ func encAttnHalfShared(
 	if slideW > 0 && n > slideW {
 		n = slideW
 	}
-	if err := encSDPADecode(enc, sc, sc.q, attendK, attendV, sc.attn,
+	// sinks are the SHARER layer's own per-head logits (a per-layer weight even when the KV is an
+	// owner's); the zero bufView keeps the plain pipelines — byte-identical for every sink-free arch.
+	if err := encSDPADecodeSinksAt(enc, sc, sinks, sc.q, 0, attendK, attendV, sc.attn, 0,
 		nHeads, nKVHeads, headDim, n,
 		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale, 0); err != nil {
 		return err
@@ -122,8 +128,8 @@ func encAttnHalfSharedInputAt(
 	x metal.MTLBuffer, xOff uint, attendK, attendV, offBuf, h metal.MTLBuffer, hOff, offOff uint,
 	attnNormW, postAttnNorm, qNorm bufView,
 	sc attnScratch, proj projector,
-	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, eps float32,
-	ropeFreqs metal.MTLBuffer,
+	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
+	ropeFreqs metal.MTLBuffer, sinks bufView,
 ) error {
 	kvDim := nKVHeads * headDim
 	// entry rms via the size-specialised single-row kernel at the row's offset — the batched
@@ -137,7 +143,7 @@ func encAttnHalfSharedInputAt(
 	}
 	if gpuHasGeluKernel() && qNorm.buf != nil {
 		// fused: sc.q = RoPE(RMSNorm(sc.q, qNorm)) in one op — lockstep with the ICB setQKNormRope
-		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
 			return err
 		}
 	} else {
@@ -146,7 +152,7 @@ func encAttnHalfSharedInputAt(
 				return err
 			}
 		}
-		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale); err != nil {
 			return err
 		}
 	}
@@ -155,7 +161,7 @@ func encAttnHalfSharedInputAt(
 	if slideW > 0 && n > slideW {
 		n = slideW
 	}
-	if err := encSDPADecode(enc, sc, sc.q, attendK, attendV, sc.attn,
+	if err := encSDPADecodeSinksAt(enc, sc, sinks, sc.q, 0, attendK, attendV, sc.attn, 0,
 		nHeads, nKVHeads, headDim, n,
 		int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale, 0); err != nil {
 		return err
@@ -173,13 +179,38 @@ func encAttnHalfSharedInputAt(
 type archLayerBufs struct {
 	anw, mnw                 bufView
 	postAttnNorm, postFFNorm bufView         // gemma4 post-attn/post-FF norms (nil buf = skip)
-	qNorm, kNorm             bufView         // gemma4 per-head QK-norm (nil buf = skip)
+	qNorm, kNorm             bufView         // gemma4-style PER-HEAD QK-norm (nil buf = skip OR a whole-vector norm, see qNormWide/kNormWide — the loader binds one or the other, never both)
+	qNormWide, kNormWide     bool            // #65: the loaded q_norm/k_norm weight is whole-vector (heads*headDim), already folded into proj's qkNormWideProjector wrap — set for bookkeeping/icbEligible only, no consumer branches on it directly
+	sinks                    bufView         // gpt_oss attention sinks (bf16 [nHeads] logits; nil buf = plain softmax)
 	layerScalar              metal.MTLBuffer // gemma4 per-layer output scalar, broadcast to dModel (synthesised, nil = skip)
 	kCache, vCache           metal.MTLBuffer
 	kCachePtr, vCachePtr     *byte
 	kvCacheBytes             uint // owner's linear KV size; caches allocate lazily on first lane touch (ensureLBKVCaches)
 	proj                     projector
 	dFF                      int // this layer's FFN width (gemma4 E2B/E4B vary it per layer)
+}
+
+// archRopeScale is the model's RoPE position scale (arch.RopeScale), defaulting to 1.0 (standard
+// rope) when the arch leaves it unset — NEVER the attention scale. See archDecodeState.ropeScale.
+func archRopeScale(arch model.Arch) float32 {
+	if arch.RopeScale == 0 {
+		return 1
+	}
+	return arch.RopeScale
+}
+
+// stampArchProjectorsSiLU sets every layer projector's feed-forward activation to SiLU (SwiGLU) —
+// the session constructor's one-shot stamp from Arch.Activation, off the activation-agnostic shared
+// builder. useSiLU=false is a no-op (the projectors keep the gemma-family GELU gate, byte-identical).
+func stampArchProjectorsSiLU(lb []archLayerBufs, useSiLU bool) {
+	if !useSiLU {
+		return
+	}
+	for li := range lb {
+		if lb[li].proj != nil {
+			lb[li].proj = lb[li].proj.withSiLU(true)
+		}
+	}
 }
 
 func (lb *archLayerBufs) cacheKVContents() {
@@ -201,18 +232,38 @@ func (lb *archLayerBufs) cacheKVContents() {
 // stepToken per token; the caches in lb persist across calls within that pool, which is
 // what turns the O(N²) re-decode into O(1)/token incremental decode.
 type archDecodeState struct {
-	specs        []model.LayerSpec
-	lb           []archLayerBufs
-	lbKVReady    bool // ensureLBKVCaches ran (session builds defer the linear KV allocation)
-	moeWeights   []*MoELayerWeights
-	pagedKV      []*devicePagedKVCache
-	asc          attnScratch
-	msc          mlpScratch
-	coreScratch  *archDecodeCoreScratch
-	hBuf, xA, xB metal.MTLBuffer
-	denseBatch   denseBatchScratch
-	offBuf       metal.MTLBuffer
-	offPtr       *int32
+	specs          []model.LayerSpec
+	lb             []archLayerBufs
+	lbKVReady      bool               // ensureLBKVCaches ran (session builds defer the linear KV allocation)
+	gatedDelta     []*gatedDeltaLayer // MixerGatedDelta layers' recurrence weights + state (nil for attention layers) — #18
+	gatedAttn      []*gatedAttnLayer  // gated full-attention layers' weights + host KV (Qwen3.5 attn_output_gate); nil for a plain-attention/gemma session — #18
+	attnOutputGate bool               // the Arch declares attn_output_gate → attention layers gate their output on the host path
+	// qwenChainChecked/qwenChainAll: the whole-token chain-walk latch (arch_qwen_fused.go) — every
+	// layer fused-eligible AND device-servable, pre-flighted once before the first walk.
+	// qwenChainRec/qwenChainRecFailed: the walk's recorded command stream (replayed per token) and
+	// its don't-retry latch, mirroring composed's chainRec/chainRecFailed.
+	qwenChainChecked, qwenChainAll bool
+	qwenChainRec                   any
+	qwenChainRecFailed             bool
+	moeWeights                     []*MoELayerWeights
+	pagedKV                        []*devicePagedKVCache
+	asc                            attnScratch
+	msc                            mlpScratch
+	coreScratch                    *archDecodeCoreScratch
+	hBuf, xA, xB                   metal.MTLBuffer
+	denseBatch                     denseBatchScratch
+	// tqPrefill holds the batched TurboQuant prefill's per-layer bf16 read
+	// scratch (#48, decode_batched_tq.go) — the reconstructed code history the
+	// chunk-attention SDPA scores against. nil until a TQ session first prefills
+	// batched; freed at the prefill→decode transition.
+	tqPrefill *tqPrefillScratch
+	// kvTQState is the STATE-lane TurboQuant carrier (tq_kv_state.go): the
+	// codes+γ caches for sessions the arch ICB cannot record (MoE / hybrid
+	// stacks decoding via stepToken). nil on every native and recorded-TQ
+	// session — the off-path is untouched.
+	kvTQState *archStateKVTQ
+	offBuf    metal.MTLBuffer
+	offPtr    *int32
 	// offRing rotates the position buffer across step encodes. offBuf holds
 	// ONE int32 the kernels read at EXECUTION time (RoPE position, KV append
 	// row); the submit-ahead chained decode keeps a committed-not-waited link
@@ -247,6 +298,14 @@ type archDecodeState struct {
 	verifyTail      map[int]*verifyTailICB
 	verifyTailRec   *verifyTailRecorder
 	verifyTailTried map[int]bool
+	// verifyStack holds the recorded WHOLE-layer-stack verify ICBs
+	// (decode_verify_stack_icb.go), keyed by the batch width K like verifyTail.
+	// verifyStackRec is live only during a recording pass; verifyStackTried
+	// remembers the key a width last attempted so a failed recording re-arms
+	// only when the buffer world or shape phase changes.
+	verifyStack      map[int]*verifyStackICB
+	verifyStackRec   *verifyStackRecorder
+	verifyStackTried map[int]verifyStackKey
 	// rowAttnCaps, when non-nil, overrides each batch row's visible attention
 	// length (absolute kv rows) — the bidirectional image-span prefill
 	// (gemma4_unified): span rows see through to their span end. Legal only on
@@ -286,6 +345,12 @@ type archDecodeState struct {
 	dModel, nHeads, nKVHeads, headDim, dFF, slidingWindow, maxLen int
 	rotaryDim, rotaryDimLocal                                     int     // partial-rotary dims (global / sliding); == headDim is full
 	base, localBase, scale, eps                                   float32 // localBase = sliding-layer RoPE theta
+	// ropeScale is the RoPE POSITION scale (arch.RopeScale — 1.0 for standard rope, <1 for linear
+	// context extension). It is DISTINCT from scale (the SDPA 1/√headDim attention scale): the rope
+	// kernel computes angle = ropeScale·pos·inv_freq. Conflating the two is
+	// invisible on gemma (attnScale==1.0==RopeScale) but corrupts every rope on qwen/llama/mistral
+	// (attnScale 1/√headDim ≠ 1.0). Defaulted to 1.0 by newArchDecodeState; the session sets it.
+	ropeScale float32
 
 	// gemma4 per-layer-input tower (E2B/E4B): when ple is non-nil, each layer's output is gated
 	// by PerLayerInputGateQuant before layer_scalar, fed its pliDim slice of perLayerInput (the
@@ -495,6 +560,26 @@ func (s *archDecodeState) pleSlabBuffer(slab []byte) (metal.MTLBuffer, error) {
 	if len(slab) == 0 {
 		return nil, core.NewError("native.archDecodeState.pleSlabBuffer: empty PLE slab")
 	}
+	if verifyStackPLEPad {
+		// #71 identity-replay probe: grow-only slab so a K change never swaps
+		// the buffer identity under a verify-stack recording.
+		if s.pleSlabScratch != nil && len(s.pleSlabScratch.bytes) < len(slab) {
+			s.pleSlabScratch.Close()
+			s.pleSlabScratch = nil
+		}
+		if s.pleSlabScratch == nil {
+			n := len(slab)
+			if n < 1<<20 {
+				n = 1 << 20
+			}
+			scratch, err := newPinnedNoCopyBytes(n)
+			if err != nil {
+				return nil, err
+			}
+			s.pleSlabScratch = scratch
+		}
+		return s.pleSlabScratch.copyPrefixBuffer(slab)
+	}
 	if s.pleSlabScratch != nil && len(s.pleSlabScratch.bytes) != len(slab) {
 		s.pleSlabScratch.Close()
 		s.pleSlabScratch = nil
@@ -530,6 +615,10 @@ func (s *archDecodeState) Close() {
 		s.inputEmbScratch = nil
 	}
 	s.denseBatch.Close()
+	s.releaseTQPrefillScratch()
+	s.tqPrefill = nil
+	s.kvTQState.release()
+	s.kvTQState = nil
 	for _, cache := range s.pagedKV {
 		if cache != nil {
 			cache.Close()
@@ -586,6 +675,13 @@ func (s *archDecodeState) ensureLBKVCaches() error {
 		if lb.kvCacheBytes == 0 || (lb.kCache != nil && lb.vCache != nil) {
 			continue
 		}
+		if s.kvTQState.on(li) {
+			// state-lane TurboQuant owner (tq_kv_state.go): its cache IS the
+			// carrier's code+γ set — a bf16 twin here would be a dead duplicate
+			// at the full KV footprint, and any lane that wrote it would be
+			// writing bytes the decode never reads.
+			continue
+		}
 		lb.kCache = device.NewBufferWithLengthOptions(lb.kvCacheBytes, metal.MTLResourceStorageModeShared)
 		lb.vCache = device.NewBufferWithLengthOptions(lb.kvCacheBytes, metal.MTLResourceStorageModeShared)
 		if lb.kCache == nil || lb.vCache == nil {
@@ -604,6 +700,25 @@ func (s *archDecodeState) initDevicePagedKV(pageSize int) error {
 func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc bool) error {
 	if s == nil {
 		return core.NewError("native.archDecodeState.initDevicePagedKV: nil state")
+	}
+	// State-lane TurboQuant (tq_kv_state.go): the paged pool is declined
+	// wholesale — the paged kernels have no code-addressing lane, so a TQ
+	// session decodes over the LINEAR caches (the attention-sinks precedent
+	// below). Declining here forces every stepToken onto that lane.
+	if s.tqStateArmed() {
+		s.pagedKV = nil
+		return nil
+	}
+	// Attention sinks (gpt_oss): the paged-attention kernels (lthn_paged_* — sdpa_paged.go) have no
+	// has_sinks lane, so a sinks session must decode over the LINEAR lb caches, where encAttnHalfKV
+	// routes through the sinks-enabled MLX sdpa_vector variants. Declining the pool here forces every
+	// stepToken onto that lane (stepTokenEncode binds the deferred linear caches when no pool exists).
+	// Paged support for sinks is a named perf follow-up, not a silent wrong answer.
+	for li := range s.lb {
+		if s.lb[li].sinks.buf != nil {
+			s.pagedKV = nil
+			return nil
+		}
 	}
 	for _, cache := range s.pagedKV {
 		if cache != nil {
@@ -725,6 +840,168 @@ func (s *archDecodeState) resetDevicePagedAttentionScratch() {
 	}
 }
 
+// kvSyncDeltaDisabled restores the O(position) full-snapshot sync/reload at the
+// batched-verify seam (LTHN_KV_SYNC_DELTA=0) — the repro anchor for the #372
+// delta paths. The full paths also remain the in-code fallback for any layer
+// geometry the delta helpers decline.
+var kvSyncDeltaDisabled = os.Getenv("LTHN_KV_SYNC_DELTA") == "0"
+
+// syncLinearKVDeltaLayer copies ONLY the paged rows the linear twin is missing
+// — [watermark, position) — instead of snapshotting the whole prefix. The MTP
+// verify seam calls sync+reload EVERY round; at 26B geometry the full snapshot
+// cost 5-12ms (sync) + 25-42ms (reload) per round, growing with position — the
+// #372 whale: the pair decoded 50 tok/s against 138 plain WITH 64% acceptance.
+// handled=false defers to the full path (identical behaviour) for any geometry
+// this helper does not model.
+func (s *archDecodeState) syncLinearKVDeltaLayer(li int, cache *devicePagedKVCache, position int) (bool, error) {
+	if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
+		return false, nil // full path raises the canonical missing-cache error
+	}
+	spec := s.specs[li]
+	lkv, lhd := kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim)
+	rowBytes := lkv * lhd * bf16Size
+	if rowBytes <= 0 {
+		return false, nil
+	}
+	cacheBytes := int(bufferLengthFast(s.lb[li].kCache))
+	if cacheBytes%rowBytes != 0 || int(bufferLengthFast(s.lb[li].vCache)) != cacheBytes {
+		return false, nil
+	}
+	lbRows := cacheBytes / rowBytes
+	var from int
+	if cache.ring {
+		if position > cache.offset {
+			return false, nil // rows beyond the pool's high-water: full path semantics
+		}
+		from = max(cache.linearSyncedAbs, position-cache.maxSize, 0)
+	} else {
+		if position > cache.length {
+			return false, nil // full path raises the canonical shorter-than-position error
+		}
+		from = min(cache.linearSynced, position)
+	}
+	if from >= position {
+		return true, nil
+	}
+	if position > lbRows && !cache.ring {
+		return false, nil
+	}
+	s.lb[li].cacheKVContents()
+	if err := cache.syncRowsToLinear(unsafe.Slice(s.lb[li].kCachePtr, cacheBytes), unsafe.Slice(s.lb[li].vCachePtr, cacheBytes), lbRows, from, position); err != nil {
+		return false, err
+	}
+	if cache.ring {
+		cache.linearSyncedAbs = position
+	} else {
+		cache.linearSynced = position
+	}
+	return true, nil
+}
+
+// reloadDevicePagedKVDeltaLayer pushes ONLY the batch's landed rows — [pool
+// high-water, position) — back into the pages, instead of rebuilding every
+// page from row zero. Valid at the batched-verify seam by construction: sync
+// ran at basePos (linear == paged through basePos), the batch landed
+// [basePos, position) into the linear twin, and nothing else touched the pool.
+// handled=false defers to the full rebuild.
+func (s *archDecodeState) reloadDevicePagedKVDeltaLayer(li int, cache *devicePagedKVCache, position int) (bool, error) {
+	if li >= len(s.lb) || s.lb[li].kCache == nil || s.lb[li].vCache == nil {
+		return false, nil
+	}
+	spec := s.specs[li]
+	lkv, lhd := kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim)
+	rowBytes := lkv * lhd * bf16Size
+	if rowBytes <= 0 {
+		return false, nil
+	}
+	cacheBytes := int(bufferLengthFast(s.lb[li].kCache))
+	if cacheBytes%rowBytes != 0 || int(bufferLengthFast(s.lb[li].vCache)) != cacheBytes {
+		return false, nil
+	}
+	lbRows := cacheBytes / rowBytes
+	from := cache.length
+	if cache.ring {
+		from = cache.offset
+	} else if position > lbRows || (cache.maxSize > 0 && position > cache.maxSize) {
+		return false, nil // full path clamps; keep its semantics
+	}
+	to := position
+	if from > to {
+		return false, nil // pool ahead of the target position: full rebuild truncates
+	}
+	if cache.ring && cache.maxSize > 0 && to-from > cache.maxSize {
+		from = to - cache.maxSize // only the surviving window's rows exist to load
+	}
+	if from < to {
+		s.lb[li].cacheKVContents()
+		if err := cache.loadRowsFromLinear(unsafe.Slice(s.lb[li].kCachePtr, cacheBytes), unsafe.Slice(s.lb[li].vCachePtr, cacheBytes), lbRows, from, to); err != nil {
+			return false, err
+		}
+	}
+	if cache.ring {
+		cache.offset = position // slot() advanced to the last written row; a truncated tail keeps the caller's position
+		cache.linearSyncedAbs = position
+	} else {
+		cache.linearSynced = position
+	}
+	return true, nil
+}
+
+// forEachPagedOwnerLayerDelta fans deltaFn over every owner layer's paged
+// cache in parallel — each layer's cache, lb twin, and scratch are
+// independent, and the per-layer work is host memcpy/quantise (the q8 26B
+// pays ~30 layers × K rows of scalar quant per verify round; serial it was
+// ~3-4ms of the round, #53). Layers deltaFn declines (handled=false) are
+// returned for the caller's serial full-path pass. Metal calls inside
+// (bufferLength / Contents / page allocation) are device-level thread-safe.
+func (s *archDecodeState) forEachPagedOwnerLayerDelta(deltaFn func(li int, cache *devicePagedKVCache) (bool, error)) (unhandled []int, err error) {
+	type layerRef struct {
+		li    int
+		cache *devicePagedKVCache
+	}
+	var refs []layerRef
+	for li, spec := range s.specs {
+		cache := s.layerPagedKV(li)
+		if cache == nil || !spec.OwnsCache() {
+			continue
+		}
+		refs = append(refs, layerRef{li, cache})
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	handled := make([]bool, len(refs))
+	errs := make([]error, len(refs))
+	// stride-1 fan-out: parallelRows' 64-wide batches would hand all ~30
+	// layers to one worker; here each unit is a whole layer's copy loop.
+	workers := min(runtime.GOMAXPROCS(0), len(refs))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(refs) {
+					return
+				}
+				handled[i], errs[i] = deltaFn(refs[i].li, refs[i].cache)
+			}
+		}()
+	}
+	wg.Wait()
+	for i, e := range errs {
+		if e != nil {
+			return nil, e
+		}
+		if !handled[i] {
+			unhandled = append(unhandled, refs[i].li)
+		}
+	}
+	return unhandled, nil
+}
+
 func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if s == nil || !s.hasDevicePagedKV() {
 		return nil
@@ -732,7 +1009,23 @@ func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy source
 		return err
 	}
+	var deltaUnhandled []int
+	if !kvSyncDeltaDisabled {
+		unhandled, err := s.forEachPagedOwnerLayerDelta(func(li int, cache *devicePagedKVCache) (bool, error) {
+			return s.reloadDevicePagedKVDeltaLayer(li, cache, position)
+		})
+		if err != nil {
+			return err
+		}
+		if unhandled == nil {
+			return nil
+		}
+		deltaUnhandled = unhandled
+	}
 	for li, spec := range s.specs {
+		if deltaUnhandled != nil && !slices.Contains(deltaUnhandled, li) {
+			continue
+		}
 		cache := s.layerPagedKV(li)
 		if cache == nil || !spec.OwnsCache() {
 			continue
@@ -774,7 +1067,28 @@ func (s *archDecodeState) syncLinearKVFromDevicePaged(position int) error {
 	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy target
 		return err
 	}
+	var deltaUnhandled []int
+	if !kvSyncDeltaDisabled {
+		unhandled, err := s.forEachPagedOwnerLayerDelta(func(li int, cache *devicePagedKVCache) (bool, error) {
+			if position < cache.length {
+				if terr := cache.truncate(position); terr != nil {
+					return false, terr
+				}
+			}
+			return s.syncLinearKVDeltaLayer(li, cache, position)
+		})
+		if err != nil {
+			return err
+		}
+		if unhandled == nil {
+			return nil
+		}
+		deltaUnhandled = unhandled
+	}
 	for li, spec := range s.specs {
+		if deltaUnhandled != nil && !slices.Contains(deltaUnhandled, li) {
+			continue
+		}
 		cache := s.layerPagedKV(li)
 		if cache == nil || !spec.OwnsCache() {
 			continue
@@ -1260,7 +1574,11 @@ func newArchDecodeState(specs []model.LayerSpec, lb []archLayerBufs, moeWeights 
 		rotaryDim:      rotaryDim,
 		rotaryDimLocal: rotaryDimLocal,
 		base:           base, localBase: localBase, scale: scale, eps: eps,
-		trace: nativeTraceEnabled(),
+		// Default ropeScale to the attention scale — the pre-fix behaviour the standalone forwards
+		// (and their ICB byte-identity tests) rely on; the SESSION overrides it to arch.RopeScale
+		// (the correct RoPE position scale, distinct from attnScale — see archDecodeState.ropeScale).
+		ropeScale: scale,
+		trace:     nativeTraceEnabled(),
 	}
 }
 
@@ -1272,6 +1590,8 @@ func bufMaxAbsNaN(buf metal.MTLBuffer, dModel int) (maxAbs float32, bad int) {
 	b := unsafe.Slice((*byte)(buf.Contents()), dModel*bf16Size)
 	for i := range dModel {
 		v := bf16ToF32(b[i*bf16Size], b[i*bf16Size+1])
+		// v != v is the branch-free NaN test (IEEE 754: NaN != NaN — the same identity
+		// math.IsNaN is defined by); an intentional self-compare, not a copy-paste slip.
 		if v != v || v > 3.0e38 || v < -3.0e38 { // NaN or Inf-scale
 			bad++
 			continue
@@ -1290,14 +1610,19 @@ func bufMaxAbsNaN(buf metal.MTLBuffer, dModel int) (maxAbs float32, bad int) {
 // layer's output hidden (dModel bf16 bytes) to capturedLayerHiddens — the native half of
 // the per-layer cross-engine diff. Reset capturedLayerHiddens to nil before the step.
 var (
-	captureLayerHiddens  bool
-	capturedLayerHiddens [][]byte
-	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
-	capturedLayer5MLP    []capturedMLPInternal
+	captureLayerHiddens   bool
+	capturedLayerHiddens  [][]byte
+	capturedAttnHiddens   [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
+	capturedMLPResHiddens [][]byte // post-MLP hidden (attn_res + FFN) per layer — isolates the MLP from the PLE gate + scalar
+	capturedLayer5MLP     []capturedMLPInternal
+	// capturedMLPProbeLayer selects which layer capturedLayer5MLP records
+	// (default 5, the gemma4-31b diag's layer; the qwen3 #67 op bisection
+	// points it at the massive-activation onset).
+	capturedMLPProbeLayer = 5
 )
 
 type capturedMLPInternal struct {
-	gate, up, product, down []byte
+	normed, gate, up, product, down []byte
 }
 
 // stepToken decodes ONE token (its embedding) at sequence position pos, writing this
@@ -1348,6 +1673,12 @@ func (s *archDecodeState) sharedEncodeEligible() bool {
 		if moeQ == nil || !s.moeScratchOwnable ||
 			!quantMoEDeviceRouterBuffersUsable(*moeQ, s.dModel) ||
 			!routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
+			return false
+		}
+		if moeQ.ClampedSwiGLU || len(moeQ.SharedGate.Packed) > 0 {
+			// gpt_oss (clamped host half) and qwen (shared-expert host half) both break the command
+			// buffer mid-token — a shared submission cannot absorb either, even when the gemma
+			// device-router predicates above would otherwise pass on their expert geometry.
 			return false
 		}
 	}
@@ -1464,6 +1795,11 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 	var trWorstAbs float32
 	trWorstLayer, trFirstBad, trBadLayers := -1, -1, 0
 	cbBroken := false // a mid-token cb swap (MoE break-out / test probes) invalidates chainTail
+	// prevQwenFused: the previous layer ran entirely on a fused Qwen seam (its own command buffer,
+	// committed + waited inside) and nothing has been encoded into the loop's cb since — so a
+	// consecutive fused layer can skip the empty flush/commit/reopen dance (the dominant loop
+	// overhead when every layer is fused, e.g. the dense 0.8B hybrid).
+	prevQwenFused := false
 	// encConc: enc is an OPEN CONCURRENT encoder carried between passes (#341
 	// phase 1.5) — the attn pass, the MoE block and the per-layer scalar ride ONE
 	// encoder per layer stack with barriers at the true edges instead of paying
@@ -1477,7 +1813,20 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		enc = computeCommandEncoderFast(cb)
 		encConc = false
 	}
-	for li := 0; li < len(s.specs); li++ {
+	// Whole-token chain walk (arch_qwen_fused.go): a pure Qwen hybrid stack encodes EVERY layer into
+	// one command buffer with resident state — the per-layer loop is skipped wholesale. The loop's cb
+	// stays empty and open; the head encodes into it below as usual.
+	startLayer := 0
+	if sink == nil && layerSpanProbeForTest == nil && !s.trace && s.qwenChainReady() {
+		fin, cerr := s.stepTokenQwenChain(inputBuf, out, pos)
+		if cerr != nil {
+			endEncodingFast(enc)
+			return nil, cerr
+		}
+		in = fin
+		startLayer = len(s.specs)
+	}
+	for li := startLayer; li < len(s.specs); li++ {
 		if li > 0 {
 			enc = s.profSeam(cb, enc, "attn")
 		}
@@ -1495,16 +1844,81 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		} else if s.globalRopeFreqs != nil {
 			layerRopeFreqs, rotDim = s.globalRopeFreqs, lhd
 		}
-		if s.specs[li].OwnsCache() {
-			if cache := s.layerPagedKV(li); cache != nil {
+		// qwenWholeLayer: a fused Qwen device lane ran the ENTIRE layer (mixer + FFN tail) into `out`
+		// in one command buffer — the loop's FFN half is skipped for this layer.
+		qwenWholeLayer := false
+		if s.specs[li].Mixer == model.MixerGatedDelta {
+			// MixerGatedDelta: flush the device work into `in`, then the fused device lane
+			// (gatedDeltaQuantLayerRun — the whole layer, state resident, one command buffer) or the
+			// host recurrence fallback into hBuf. When the previous layer already ran fused, the
+			// loop's cb is empty and the flush/reopen dance is skipped. Attention layers below are
+			// untouched, so gemma4 is byte-identical (#18).
+			fused := s.gatedDeltaFusedReady(li)
+			skipFlush := fused && prevQwenFused
+			if !skipFlush {
+				endEncodingFast(enc)
+				encConc = false
+				commitCommandBufferFast(cb)
+				waitUntilCompletedFast(cb)
+			}
+			if fused {
+				if err := s.encGatedDeltaFusedLayer(li, in, out); err != nil {
+					return nil, err
+				}
+				qwenWholeLayer = true
+			} else if err := s.encGatedDeltaHalf(li, in); err != nil {
+				return nil, err
+			}
+			if !skipFlush {
+				cb = commandBufferFast(queue)
+				enc = computeCommandEncoderFast(cb)
+				cbBroken = true
+			}
+		} else if s.gatedAttn != nil && s.gatedAttn[li] != nil {
+			// Gated full-attention (Qwen3.5 attn_output_gate) — the fused device lane
+			// (AttnQuantFullLayerDevice: resident device KV, σ gate, one command buffer) or the host
+			// fallback, same flush/resume shape as the gated-delta mixer. A plain attention layer
+			// (gemma4, dense qwen) keeps the device path below, byte-identical (#18).
+			fused := s.gatedAttnFusedReady(li, s.nHeads, lkv, lhd, rotDim)
+			skipFlush := fused && prevQwenFused
+			if !skipFlush {
+				endEncodingFast(enc)
+				encConc = false
+				commitCommandBufferFast(cb)
+				waitUntilCompletedFast(cb)
+			}
+			if fused {
+				if err := s.encGatedAttnFusedLayer(li, pos, s.nHeads, lkv, lhd, rotDim, rbase, slideW, in, out); err != nil {
+					return nil, err
+				}
+				qwenWholeLayer = true
+			} else if err := s.encGatedAttnHalf(li, pos, s.nHeads, lkv, lhd, rotDim, rbase, slideW, in); err != nil {
+				return nil, err
+			}
+			if !skipFlush {
+				cb = commandBufferFast(queue)
+				enc = computeCommandEncoderFast(cb)
+				cbBroken = true
+			}
+		} else if s.specs[li].OwnsCache() {
+			if s.kvTQState.on(li) {
+				// state-lane TurboQuant owner (tq_kv_state.go): staging store →
+				// code cache + γ at pos, SDPA over codes — the recorded lane's
+				// TQ block driven per token. Serial emitter, like the plain half.
+				toSerial()
+				if err := s.encAttnHalfKVTQ(enc, li, in, pos, rotDim, rbase, layerRopeFreqs); err != nil {
+					endEncodingFast(enc)
+					return nil, err
+				}
+			} else if cache := s.layerPagedKV(li); cache != nil {
 				var aerr error
-				if enc, encConc, aerr = encAttnHalfKVPaged(enc, cb, s.gpuProf, encConc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); aerr != nil {
+				if enc, encConc, aerr = encAttnHalfKVPaged(enc, cb, s.gpuProf, encConc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); aerr != nil {
 					endEncodingFast(enc)
 					return nil, aerr
 				}
 			} else {
 				toSerial() // the plain KV attention half is a serial emitter
-				if err := encAttnHalfKV(enc, in, s.lb[li].kCache, s.lb[li].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
+				if err := encAttnHalfKV(enc, in, s.lb[li].kCache, s.lb[li].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 					endEncodingFast(enc)
 					return nil, err
 				}
@@ -1512,12 +1926,19 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		} else {
 			toSerial() // the shared-KV attention halves are serial emitters
 			own := s.specs[li].KVShareFrom
-			if cache := s.layerPagedKV(own); cache != nil {
-				if err := encAttnHalfSharedPaged(enc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
+			if s.kvTQState.on(own) {
+				// sharer of a state-lane TurboQuant owner (tq_kv_state.go):
+				// q-only leg + SDPA over the owner's codes — no store.
+				if err := s.encAttnHalfSharedKVTQ(enc, li, own, in, pos, rotDim, rbase, layerRopeFreqs); err != nil {
 					endEncodingFast(enc)
 					return nil, err
 				}
-			} else if err := encAttnHalfShared(enc, in, s.lb[own].kCache, s.lb[own].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
+			} else if cache := s.layerPagedKV(own); cache != nil {
+				if err := encAttnHalfSharedPaged(enc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs); err != nil {
+					endEncodingFast(enc)
+					return nil, err
+				}
+			} else if err := encAttnHalfShared(enc, in, s.lb[own].kCache, s.lb[own].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.ropeScale, s.eps, layerRopeFreqs, s.lb[li].sinks); err != nil {
 				endEncodingFast(enc)
 				return nil, err
 			}
@@ -1536,7 +1957,40 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 		if li < len(s.moeQuant) {
 			moeQ = s.moeQuant[li]
 		}
-		if moeW := s.moeWeights[li]; moeQ != nil || moeW != nil {
+		if qwenWholeLayer {
+			// the fused Qwen device lane already applied the FFN tail and wrote the layer output to
+			// `out` — no FFN half runs for this layer.
+		} else if moeQ != nil && moeQ.ClampedSwiGLU {
+			// gpt_oss — host MoE forward (clamped-SwiGLU experts + router/expert biases), same
+			// flush/resume shape as the qwen half below. Neither existing lane can serve it: the
+			// gemma device MoE assumes a local MLP + sandwich norms + router norm gpt_oss lacks, and
+			// the qwen half runs plain SiLU. Marked by ClampedSwiGLU, so both stay untouched.
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			if err := s.encGptOssMoEHalf(li, moeQ, out); err != nil {
+				return nil, err
+			}
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
+		} else if moeQ != nil && len(moeQ.SharedGate.Packed) > 0 {
+			// qwen3_5_moe — host MoE forward (SiLU switch-MLP experts + the always-on shared expert),
+			// correctness-first, same flush/resume shape as the gated mixer. The gemma device MoE below
+			// assumes gemma's five sandwich norms / GELU / router.scale, none of which qwen has, so a qwen
+			// MoE layer (marked by a bound shared expert) intercepts here and writes the layer output to out.
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			if err := s.encQwenMoEHalf(li, moeQ, out); err != nil {
+				return nil, err
+			}
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
+		} else if moeW := s.moeWeights[li]; moeQ != nil || moeW != nil {
 			enc = s.profSeam(cb, enc, "moe.router")
 			// Fully-encoded lane first (session-owned scratches, device router + gathered
 			// experts): the WHOLE block encodes into the LIVE encoder — no command-buffer
@@ -1618,6 +2072,16 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 				endEncodingFast(enc)
 				return nil, err
 			}
+		}
+		if captureLayerHiddens { // post-MLP hidden (attn_res + FFN) — isolates the MLP from the PLE gate + scalar
+			endEncodingFast(enc)
+			encConc = false
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			capturedMLPResHiddens = append(capturedMLPResHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
+			cb = commandBufferFast(queue)
+			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
 		}
 		// gemma4 per-layer-input gate (E2B/E4B): keep the gate chain in the live command buffer.
 		// The per-token PLE tensor is pinned once at step entry, and each layer binds its pliDim row
@@ -1706,12 +2170,13 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
-			if li == 5 {
+			if li == capturedMLPProbeLayer {
 				captureFF := s.dFF
 				if s.lb[li].dFF > 0 {
 					captureFF = s.lb[li].dFF
 				}
 				capturedLayer5MLP = append(capturedLayer5MLP, capturedMLPInternal{
+					normed:  append([]byte(nil), s.bufferBytes(s.msc.mlpNormed, s.dModel*bf16Size)...),
 					gate:    append([]byte(nil), s.bufferBytes(s.msc.gate, captureFF*bf16Size)...),
 					up:      append([]byte(nil), s.bufferBytes(s.msc.up, captureFF*bf16Size)...),
 					product: append([]byte(nil), s.bufferBytes(s.msc.gated, captureFF*bf16Size)...),
@@ -1722,6 +2187,7 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 			enc = computeCommandEncoderFast(cb)
 			cbBroken = true
 		}
+		prevQwenFused = qwenWholeLayer // a fused whole-layer leaves the loop's cb empty for the next layer
 		if in == inputBuf && inputBuf != s.xA {
 			in, out = out, s.xB
 		} else {
@@ -1964,7 +2430,7 @@ func decodeForwardArchInto(
 	setup := getArchBF16LayerBufScratch(nLayers)
 	defer putArchBF16LayerBufScratch(setup)
 	withAutoreleasePool(func() {
-		lb, moeWeights, berr := buildBF16ArchLayerBufsIntoScratch(setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil)
+		lb, moeWeights, berr := buildBF16ArchLayerBufsIntoScratch(setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, nil, eps)
 		if berr != nil {
 			err = berr
 			return
@@ -1995,26 +2461,37 @@ func decodeForwardArchInto(
 // is uploaded into a fresh owned buffer at offset 0 — byte-identical, just a heap+GPU copy. A
 // non-nil sb errors if a weight is not a view into its mapping (a programming error). MUST be
 // called inside a withAutoreleasePool.
-func buildBF16ArchLayerBufs(layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+// epsArgOr defaults a variadic trailing eps to 0 when the caller omits it — the QK-norm-granularity
+// wrap (#65) is the only consumer, and it never reads eps unless a WIDE (whole-vector) q_norm/k_norm
+// is actually present, which no pre-#65 caller's fixtures carry — so every existing call site (this
+// package's ~20 test callers included) stays source-compatible with no eps of its own to give.
+func epsArgOr(eps []float32) float32 {
+	if len(eps) > 0 {
+		return eps[0]
+	}
+	return 0
+}
+
+func buildBF16ArchLayerBufs(layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoELayerWeights, error) {
 	nLayers := len(layers)
 	lb := make([]archLayerBufs, nLayers)
 	moeWeights := make([]*MoELayerWeights, nLayers)
-	return buildBF16ArchLayerBufsInto(lb, moeWeights, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+	return buildBF16ArchLayerBufsInto(lb, moeWeights, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildBF16ArchLayerBufsInto(lb []archLayerBufs, moeWeights []*MoELayerWeights, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
-	return buildBF16ArchLayerBufsInternal(lb, moeWeights, nil, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+func buildBF16ArchLayerBufsInto(lb []archLayerBufs, moeWeights []*MoELayerWeights, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, eps float32, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+	return buildBF16ArchLayerBufsInternal(lb, moeWeights, nil, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, eps, sb)
 }
 
-func buildBF16ArchLayerBufsIntoScratch(setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+func buildBF16ArchLayerBufsIntoScratch(setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers, eps ...float32) ([]archLayerBufs, []*MoELayerWeights, error) {
 	if setup == nil {
-		return buildBF16ArchLayerBufs(layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+		return buildBF16ArchLayerBufs(layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb, eps...)
 	}
 	setup.reset(len(layers))
-	return buildBF16ArchLayerBufsInternal(setup.lb, setup.moeWeights, setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, sb)
+	return buildBF16ArchLayerBufsInternal(setup.lb, setup.moeWeights, setup, layers, specs, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, epsArgOr(eps), sb)
 }
 
-func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWeights, setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
+func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWeights, setup *archBF16LayerBufScratch, layers []DecodeLayerWeights, specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int, eps float32, sb *shardBuffers) ([]archLayerBufs, []*MoELayerWeights, error) {
 	nLayers := len(layers)
 	if cap(lb) < nLayers {
 		lb = make([]archLayerBufs, nLayers)
@@ -2073,8 +2550,26 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		lb[li].anw = normView(w.AttnNormW)
 		lb[li].postAttnNorm = normView(w.PostAttnNormW)
 		lb[li].postFFNorm = normView(w.PostFFNormW)
-		lb[li].qNorm = normView(w.QNormW)
-		lb[li].kNorm = normView(w.KNormW)
+		// #65: a q_norm/k_norm weight is either PER-HEAD (length lhd, the gemma4/mixtral shape —
+		// lb[li].qNorm/kNorm bind it directly, unchanged) or WHOLE-VECTOR (length nHeads*lhd /
+		// lkv*lhd, OLMoE's shape — left the zero bufView here and bound into a qkNormWideProjector
+		// wrap below instead, so every per-head consumer's existing nil-buf skip fires correctly).
+		qWide, qgErr := qkNormGranularity("q_norm", w.QNormW, nHeads, lhd)
+		if qgErr != nil && ferr == nil {
+			ferr = qgErr
+		}
+		kWide, kgErr := qkNormGranularity("k_norm", w.KNormW, lkv, lhd)
+		if kgErr != nil && ferr == nil {
+			ferr = kgErr
+		}
+		lb[li].qNormWide, lb[li].kNormWide = qWide, kWide
+		if !qWide {
+			lb[li].qNorm = normView(w.QNormW)
+		}
+		if !kWide {
+			lb[li].kNorm = normView(w.KNormW)
+		}
+		lb[li].sinks = normView(w.Sinks)                            // gpt_oss attention sinks (zero bufView otherwise)
 		lb[li].layerScalar = layerScalarBuf(w.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
 			if setup != nil {
@@ -2104,6 +2599,7 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		p := bf16Projector{
 			wQ: view(w.WQ), wK: wK, wV: wV, wO: view(w.WO),
 			bQ: normView(w.BQ), bK: normView(w.BK), bV: normView(w.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
+			bO:     normView(w.BO), // gpt_oss o_proj bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 		}
 		if layers[li].MoE == nil {
@@ -2114,7 +2610,18 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		} else {
 			moeWeights[li] = layers[li].MoE
 		}
-		lb[li].proj = p
+		if qWide || kWide {
+			wrap := qkNormWideProjector{projector: p, nHeads: nHeads, nKVHeads: lkv, headDim: lhd, eps: eps}
+			if qWide {
+				wrap.qNorm = normView(w.QNormW)
+			}
+			if kWide {
+				wrap.kNorm = normView(w.KNormW)
+			}
+			lb[li].proj = wrap
+		} else {
+			lb[li].proj = p
+		}
 	}
 	return lb, moeWeights, ferr
 }

@@ -137,7 +137,7 @@ func (c *scoreCascade) appendSidecar(step int) {
 		if !encoded.OK {
 			continue
 		}
-		out = append(out, encoded.Value.([]byte)...)
+		out = append(out, encoded.Bytes()...)
 		out = append(out, '\n')
 	}
 	if len(out) == 0 {

@@ -20,7 +20,7 @@ import (
 // TestDiagQMMTvsSteelGatherAtPromptShape times the prompt fold's projection
 // tier (the simple affine_qmm_t) against MLX's steel gather_qmm_rhs_nt driven
 // with identity indices — SAME transposed weight layout, same math, steel
-// simdgroup-mma tiles. The 2026-07-13 prefill hunt eliminated q8, dtype,
+// simdgroup-mma tiles. The prefill hunt eliminated q8, dtype,
 // launch count and chunk width; the fold's GEMMs run at ~19% ALU while
 // mlx-lm hits 11.8K tok/s prefill on the identical snapshot. If the steel
 // tier wins big here, the fix is a routing change (the MoE lane already
@@ -484,7 +484,7 @@ func TestDiagQMMTPipelinedRotatingOutputs(t *testing.T) {
 }
 
 // TestDiagQMMTMlxWorkloadReplay prices the EXACT qmm workload a spied mlx-lm
-// 8K-prompt run dispatched (shape × count table captured 2026-07-15, 32.98
+// 8K-prompt run dispatched (shape × count table captured, 32.98
 // TFLOP total, their wall 0.74s) on OUR qmm_t pipelined dispatches — the
 // apples-to-apples that says whether the prefill gap is per-op kernel
 // efficiency (this sum >> theirs) or work outside the GEMMs (#381).

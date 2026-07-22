@@ -58,8 +58,25 @@ type devicePagedKVCache struct {
 	maxSize, length, offset            int
 	ring                               bool
 	linearSynced                       int
-	sdpaScratch                        []*sdpaPagedDecodeScratch
-	sdpaScratchCursor                  int
+	// linearSyncedAbs is the RING caches' mirror watermark in ABSOLUTE token
+	// positions: rows [0, linearSyncedAbs) hold identical content in this cache
+	// and the linear lb twin. Ring caches cannot reuse linearSynced for this —
+	// slot() maintains that field in wrapped SLOT space, which is ambiguous
+	// across ring wraps. Maintained by the batched-verify seam
+	// (syncLinearKVFromDevicePaged / reloadDevicePagedKVFromLinear); lowered by
+	// slot() overwrites and truncate(); zeroed by loadLinearSnapshot, whose
+	// callers (state restore) write page rows of unknown lb provenance.
+	linearSyncedAbs int
+	// snapshotValidRows: snapshot rows [0, n) (CACHE-POS space — slot space on
+	// rings) mirror the pages' current content, so linearSnapshot re-copies
+	// only [n, length) instead of clearing + rebuilding the whole extent. The
+	// MTP drafter export refreshes 2 winner caches per draft block (#355) —
+	// the full rebuild cost O(extent) clear + O(position) q8 dequant per
+	// block, growing with position (#53). Lowered by slot() overwrites and
+	// truncate(); zeroed when the snapshot buffers are reallocated.
+	snapshotValidRows int
+	sdpaScratch       []*sdpaPagedDecodeScratch
+	sdpaScratchCursor int
 }
 
 // kvQ8GroupSize is the q8 quantisation group: 64 elements per scale keeps the
@@ -201,6 +218,8 @@ func (c *devicePagedKVCache) Close() {
 	c.length = 0
 	c.offset = 0
 	c.linearSynced = 0
+	c.linearSyncedAbs = 0
+	c.snapshotValidRows = 0
 }
 
 func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff uint, err error) {
@@ -237,6 +256,12 @@ func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff
 	}
 	if cachePos < c.linearSynced {
 		c.linearSynced = cachePos
+	}
+	if pos < c.linearSyncedAbs { // an overwrite below the absolute mirror watermark stales the lb twin
+		c.linearSyncedAbs = pos
+	}
+	if cachePos < c.snapshotValidRows { // an overwrite stales the materialised snapshot mirror
+		c.snapshotValidRows = cachePos
 	}
 	return c.kPages[page], c.vPages[page], uint(slot * c.kvDim * c.rowElemBytes()), nil
 }
@@ -328,6 +353,7 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 	if nBytes == 0 {
 		return nil, nil, nil, nil, core.NewError("native.devicePagedKVCache.linearSnapshot: empty snapshot")
 	}
+	fresh := c.snapshotK == nil || c.snapshotV == nil || c.snapshotBytes != nBytes || c.snapshotKPtr == nil || c.snapshotVPtr == nil
 	if c.snapshotK == nil || c.snapshotBytes != nBytes {
 		c.snapshotK = device.NewBufferWithLengthOptions(uint(nBytes), metal.MTLResourceStorageModeShared)
 	}
@@ -337,17 +363,34 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 	if c.snapshotK == nil || c.snapshotK.GetID() == 0 || c.snapshotV == nil || c.snapshotV.GetID() == 0 {
 		return nil, nil, nil, nil, core.NewError("native.devicePagedKVCache.linearSnapshot: failed to allocate snapshot buffers")
 	}
-	if c.snapshotBytes != nBytes || c.snapshotKPtr == nil || c.snapshotVPtr == nil {
+	if fresh {
 		c.snapshotKPtr = (*byte)(c.snapshotK.Contents())
 		c.snapshotVPtr = (*byte)(c.snapshotV.Contents())
 		c.snapshotBytes = nBytes
+		c.snapshotValidRows = 0
 	}
 	kPtr = c.snapshotKPtr
 	vPtr = c.snapshotVPtr
 	kBytes := unsafe.Slice(kPtr, nBytes)
 	vBytes := unsafe.Slice(vPtr, nBytes)
-	clear(kBytes)
-	clear(vBytes)
+	// Incremental re-materialisation (#53): rows [0, snapshotValidRows) of the
+	// mirror already hold the pages' content — the MTP drafter export refreshes
+	// winner caches EVERY draft block, and the full clear+rebuild here cost
+	// O(extent) + an O(position) q8 dequant per block, growing with position.
+	// Fresh buffers clear once (rows beyond the populated pages stay zero for
+	// the buffer's life — truncate() re-zeroes a shrunk tail); repeat calls
+	// copy only [snapshotValidRows, length). slot() overwrites lower the
+	// watermark, so ring wraps and speculative rollbacks re-copy exactly the
+	// slots they dirtied.
+	valid := c.snapshotValidRows
+	if valid < 0 {
+		valid = 0
+	}
+	if fresh {
+		clear(kBytes)
+		clear(vBytes)
+		valid = 0
+	}
 	for pageIdx, pageLen := range c.pageLens {
 		if pageLen <= 0 {
 			continue
@@ -359,23 +402,37 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 		if start+pageLen > rows {
 			pageLen = rows - start
 		}
-		dstOff := start * rowBytes
+		if start+pageLen <= valid {
+			continue // page fully inside the valid mirror prefix
+		}
+		rowFrom := 0
+		if valid > start {
+			rowFrom = valid - start
+		}
+		dstOff := (start + rowFrom) * rowBytes
 		if c.quantQ8 {
-			elems := pageLen * c.kvDim
-			srcK := unsafe.Slice((*int8)(unsafe.Pointer(c.kPagePtrs[pageIdx])), elems)
-			srcV := unsafe.Slice((*int8)(unsafe.Pointer(c.vPagePtrs[pageIdx])), elems)
-			scales := pageLen * c.kvDim / kvQ8GroupSize
-			sK := unsafe.Slice((*float32)(unsafe.Pointer(c.kScalePtrs[pageIdx])), scales)
-			sV := unsafe.Slice((*float32)(unsafe.Pointer(c.vScalePtrs[pageIdx])), scales)
-			kvQ8DequantRows(kBytes[dstOff:dstOff+pageLen*rowBytes], srcK, sK)
-			kvQ8DequantRows(vBytes[dstOff:dstOff+pageLen*rowBytes], srcV, sV)
+			elems := (pageLen - rowFrom) * c.kvDim
+			srcK := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[pageIdx]), uintptr(rowFrom*c.kvDim))), elems)
+			srcV := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[pageIdx]), uintptr(rowFrom*c.kvDim))), elems)
+			scales := elems / kvQ8GroupSize
+			sK := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.kScalePtrs[pageIdx]), uintptr(rowFrom*c.scaleRowBytes()))), scales)
+			sV := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.vScalePtrs[pageIdx]), uintptr(rowFrom*c.scaleRowBytes()))), scales)
+			kvQ8DequantRows(kBytes[dstOff:dstOff+(pageLen-rowFrom)*rowBytes], srcK, sK)
+			kvQ8DequantRows(vBytes[dstOff:dstOff+(pageLen-rowFrom)*rowBytes], srcV, sV)
 			continue
 		}
-		copyBytes := pageLen * rowBytes
-		srcK := unsafe.Slice(c.kPagePtrs[pageIdx], copyBytes)
-		srcV := unsafe.Slice(c.vPagePtrs[pageIdx], copyBytes)
+		copyBytes := (pageLen - rowFrom) * rowBytes
+		srcK := unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[pageIdx]), uintptr(rowFrom*rowBytes))), copyBytes)
+		srcV := unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[pageIdx]), uintptr(rowFrom*rowBytes))), copyBytes)
 		copy(kBytes[dstOff:dstOff+copyBytes], srcK)
 		copy(vBytes[dstOff:dstOff+copyBytes], srcV)
+	}
+	// the mirror now covers every populated slot: length on rings counts slots,
+	// and on linear caches pageLens cover exactly [0, length).
+	if c.length > valid {
+		c.snapshotValidRows = c.length
+	} else {
+		c.snapshotValidRows = valid
 	}
 	return c.snapshotK, c.snapshotV, kPtr, vPtr, nil
 }
@@ -628,6 +685,8 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 			kvQ8QuantRows(vQ, vS, vRows[srcOff:srcOff+rowBytes])
 		})
 		c.linearSynced = tokens
+		c.linearSyncedAbs = 0 // caller-provided rows: lb-mirror provenance unknown (state restore)
+		c.snapshotValidRows = 0
 		return nil
 	}
 	for pos := range tokens {
@@ -641,6 +700,124 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), uintptr(rowOff))), rowBytes), vRows[srcOff:srcOff+rowBytes])
 	}
 	c.linearSynced = tokens
+	c.linearSyncedAbs = 0 // caller-provided rows: lb-mirror provenance unknown (state restore)
+	c.snapshotValidRows = 0
+	return nil
+}
+
+// pagedRowRef resolves an absolute position to its resident page + slot index
+// WITHOUT mutating the cache (slot() extends pageLens/length/offset — correct
+// for writes, wrong for reads). Errors when the row was never landed.
+func (c *devicePagedKVCache) pagedRowRef(pos int) (page, slotIdx int, err error) {
+	if c == nil {
+		return 0, 0, core.NewError("native.devicePagedKVCache.pagedRowRef: nil cache")
+	}
+	if pos < 0 {
+		return 0, 0, core.NewError("native.devicePagedKVCache.pagedRowRef: negative position")
+	}
+	cachePos := pos
+	if c.ring && c.maxSize > 0 {
+		cachePos = pos % c.maxSize
+	}
+	page = c.pageForPos(cachePos)
+	if page >= len(c.kPages) || page >= len(c.pageLens) {
+		return 0, 0, core.NewError("native.devicePagedKVCache.pagedRowRef: row page not resident")
+	}
+	slotIdx = cachePos - c.pageStartFor(page)
+	if slotIdx < 0 || slotIdx >= c.pageLens[page] {
+		return 0, 0, core.NewError("native.devicePagedKVCache.pagedRowRef: row slot not resident")
+	}
+	return page, slotIdx, nil
+}
+
+// syncRowsToLinear copies rows [from, to) (ABSOLUTE positions) from the pages
+// into the linear lb K/V twins, dequantising q8 pages per row — the O(delta)
+// sibling of the linearSnapshot+memcpy full path (#372: the MTP verify seam
+// paid an O(position) snapshot per round). Row addressing on both sides is
+// pos%capacity (ring slots when bounded; the modulo is the identity when the
+// twin holds every position), matching the batched pass's landing math.
+func (c *devicePagedKVCache) syncRowsToLinear(kDst, vDst []byte, lbRows, from, to int) error {
+	if c == nil {
+		return core.NewError("native.devicePagedKVCache.syncRowsToLinear: nil cache")
+	}
+	if lbRows <= 0 || from < 0 || to < from {
+		return core.NewError("native.devicePagedKVCache.syncRowsToLinear: invalid row range")
+	}
+	rowBytes := c.kvDim * bf16Size
+	if len(kDst) < lbRows*rowBytes || len(vDst) < lbRows*rowBytes {
+		return core.NewError("native.devicePagedKVCache.syncRowsToLinear: linear twin too short")
+	}
+	rowGroups := c.kvDim / kvQ8GroupSize
+	for pos := from; pos < to; pos++ {
+		page, slotIdx, err := c.pagedRowRef(pos)
+		if err != nil {
+			return err
+		}
+		dstOff := (pos % lbRows) * rowBytes
+		if c.quantQ8 {
+			qOff := uintptr(slotIdx * c.kvDim)
+			sOff := uintptr(slotIdx * c.scaleRowBytes())
+			kQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), qOff)), c.kvDim)
+			vQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), qOff)), c.kvDim)
+			kS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.kScalePtrs[page]), sOff)), rowGroups)
+			vS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.vScalePtrs[page]), sOff)), rowGroups)
+			kvQ8DequantRows(kDst[dstOff:dstOff+rowBytes], kQ, kS)
+			kvQ8DequantRows(vDst[dstOff:dstOff+rowBytes], vQ, vS)
+			continue
+		}
+		srcOff := uintptr(slotIdx * rowBytes)
+		copy(kDst[dstOff:dstOff+rowBytes], unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), srcOff)), rowBytes))
+		copy(vDst[dstOff:dstOff+rowBytes], unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), srcOff)), rowBytes))
+	}
+	return nil
+}
+
+// loadRowsFromLinear writes rows [from, to) (ABSOLUTE positions) from the
+// linear lb K/V twins into the pages via slot() — the mutating direction, so
+// pageLens/length/offset extend exactly as a landing would — quantising into
+// q8 pages per row. The O(delta) sibling of loadLinearSnapshot for the MTP
+// verify seam: only the batch's K landed rows need reloading, not the prefix.
+// Unlike the full reload's re-quantise-everything sweep, committed q8 rows are
+// never re-coded — each row is quantised once from its fresh bf16 landing, the
+// same single-coding the serial chained lane produces.
+func (c *devicePagedKVCache) loadRowsFromLinear(kSrc, vSrc []byte, lbRows, from, to int) error {
+	if c == nil {
+		return core.NewError("native.devicePagedKVCache.loadRowsFromLinear: nil cache")
+	}
+	if lbRows <= 0 || from < 0 || to < from {
+		return core.NewError("native.devicePagedKVCache.loadRowsFromLinear: invalid row range")
+	}
+	rowBytes := c.kvDim * bf16Size
+	if len(kSrc) < lbRows*rowBytes || len(vSrc) < lbRows*rowBytes {
+		return core.NewError("native.devicePagedKVCache.loadRowsFromLinear: linear twin too short")
+	}
+	rowGroups := c.kvDim / kvQ8GroupSize
+	for pos := from; pos < to; pos++ {
+		_, _, rowOff, err := c.slot(pos)
+		if err != nil {
+			return err
+		}
+		cachePos := pos
+		if c.ring && c.maxSize > 0 {
+			cachePos = pos % c.maxSize
+		}
+		page := c.pageForPos(cachePos)
+		srcOff := (pos % lbRows) * rowBytes
+		if c.quantQ8 {
+			slotIdx := int(rowOff) / (c.kvDim * c.rowElemBytes())
+			qOff := uintptr(slotIdx * c.kvDim)
+			sOff := uintptr(slotIdx * c.scaleRowBytes())
+			kQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), qOff)), c.kvDim)
+			vQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), qOff)), c.kvDim)
+			kS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.kScalePtrs[page]), sOff)), rowGroups)
+			vS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.vScalePtrs[page]), sOff)), rowGroups)
+			kvQ8QuantRows(kQ, kS, kSrc[srcOff:srcOff+rowBytes])
+			kvQ8QuantRows(vQ, vS, vSrc[srcOff:srcOff+rowBytes])
+			continue
+		}
+		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), uintptr(rowOff))), rowBytes), kSrc[srcOff:srcOff+rowBytes])
+		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), uintptr(rowOff))), rowBytes), vSrc[srcOff:srcOff+rowBytes])
+	}
 	return nil
 }
 
@@ -692,6 +869,9 @@ func (c *devicePagedKVCache) truncate(tokens int) error {
 		if c.linearSynced > c.length {
 			c.linearSynced = c.length
 		}
+		if c.linearSyncedAbs > tokens {
+			c.linearSyncedAbs = tokens
+		}
 		return nil
 	}
 	if c.maxSize > 0 && tokens > c.maxSize {
@@ -716,6 +896,22 @@ func (c *devicePagedKVCache) truncate(tokens int) error {
 	c.offset = tokens
 	if c.linearSynced > tokens {
 		c.linearSynced = tokens
+	}
+	if c.linearSyncedAbs > tokens {
+		c.linearSyncedAbs = tokens
+	}
+	if c.ring {
+		// slot-space contents shift meaning under a ring truncate — force the
+		// next linearSnapshot to re-copy the (window-bounded) mirror.
+		c.snapshotValidRows = 0
+	} else if c.snapshotValidRows > tokens {
+		// the full snapshot path cleared rows beyond the populated pages; keep
+		// that contract for the incremental mirror by zeroing the shrunk tail.
+		if rowBytes := c.kvDim * bf16Size; c.snapshotKPtr != nil && c.snapshotVPtr != nil && c.snapshotBytes >= c.snapshotValidRows*rowBytes {
+			clear(unsafe.Slice(c.snapshotKPtr, c.snapshotBytes)[tokens*rowBytes : c.snapshotValidRows*rowBytes])
+			clear(unsafe.Slice(c.snapshotVPtr, c.snapshotBytes)[tokens*rowBytes : c.snapshotValidRows*rowBytes])
+		}
+		c.snapshotValidRows = tokens
 	}
 	return nil
 }
@@ -826,14 +1022,25 @@ var concEncoderCarries atomic.Int64
 // enc is a plain serial encoder (hazard-tracked), exactly the pre-carry
 // contract.
 func encAttnHalfKVPaged(
+	enc metal.MTLComputeCommandEncoderObject, cb metal.MTLCommandBufferObject, prof *gpuCounterProfiler, encConc bool,
+	x metal.MTLBuffer, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, offOff uint,
+	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
+	sc attnScratch, proj projector,
+	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
+	ropeFreqs metal.MTLBuffer,
+) (metal.MTLComputeCommandEncoderObject, bool, error) {
+	return encAttnHalfKVPagedInputAt(enc, cb, prof, encConc, x, 0, cache, offBuf, h, 0, offOff, attnNormW, postAttnNorm, qNorm, kNorm, valueNorm, sc, proj, dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim, base, scale, ropeScale, eps, ropeFreqs)
+}
+
+func encAttnHalfKVPagedInputAt(
 	enc metal.MTLComputeCommandEncoderObject,
 	cb metal.MTLCommandBufferObject,
 	prof *gpuCounterProfiler,
 	encConc bool,
-	x metal.MTLBuffer, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, offOff uint,
+	x metal.MTLBuffer, xOff uint, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, hOff, offOff uint,
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
-	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, eps float32,
+	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
 	ropeFreqs metal.MTLBuffer,
 ) (metal.MTLComputeCommandEncoderObject, bool, error) {
 	if slideW > 0 {
@@ -916,7 +1123,7 @@ func encAttnHalfKVPaged(
 			encI = metal.MTLComputeCommandEncoder(enc)
 		}
 		// stage 1: the shared input norm
-		if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
+		if err := encRMSNormBF16At(encI, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
@@ -940,12 +1147,12 @@ func encAttnHalfKVPaged(
 		}
 		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 3: q rope ∥ k rope ∥ v norm
-		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
 		if kNorm.buf != nil {
-			if err := encQKNormRopeAt(encI, kDst, kNorm.buf, kDst, kDstOff, kNorm.off, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+			if err := encQKNormRopeAt(encI, kDst, kNorm.buf, kDst, kDstOff, kNorm.off, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
 				endEncodingFast(enc)
 				return computeCommandEncoderFast(cb), false, err
 			}
@@ -983,7 +1190,7 @@ func encAttnHalfKVPaged(
 		}
 		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 7: residual (+ post-attention norm)
-		if err := encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps); err != nil {
+		if err := encResidualMaybeNormAt(encI, x, xOff, sc.attnOut, 0, sc.normed, h, hOff, postAttnNorm, dModel, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
@@ -1014,14 +1221,14 @@ func encAttnHalfKVPaged(
 		enc = prof.encoderFor(cb, "attn.proj")
 		encI = metal.MTLComputeCommandEncoder(enc)
 	}
-	if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
+	if err := encRMSNormBF16At(encI, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
 		return enc, false, err
 	}
 	if err := proj.project(encI, sc.normed, sc.q, 0, projQ); err != nil {
 		return enc, false, err
 	}
 	if fusedQKRope {
-		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
 			return enc, false, err
 		}
 	} else {
@@ -1030,7 +1237,7 @@ func encAttnHalfKVPaged(
 				return enc, false, err
 			}
 		}
-		if err := encRopeDecodeAt(encI, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecodeAt(encI, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale); err != nil {
 			return enc, false, err
 		}
 	}
@@ -1038,7 +1245,7 @@ func encAttnHalfKVPaged(
 		return enc, false, err
 	}
 	if fusedKRope {
-		if err := encQKNormRopeAt(encI, kDst, kNorm.buf, kDst, kDstOff, kNorm.off, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(encI, kDst, kNorm.buf, kDst, kDstOff, kNorm.off, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
 			return enc, false, err
 		}
 	} else {
@@ -1047,7 +1254,7 @@ func encAttnHalfKVPaged(
 				return enc, false, err
 			}
 		}
-		if err := encRopeDecodeAt(encI, kDst, kDst, kDstOff, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecodeAt(encI, kDst, kDst, kDstOff, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, ropeScale); err != nil {
 			return enc, false, err
 		}
 	}
@@ -1088,7 +1295,7 @@ func encAttnHalfKVPaged(
 	if err := proj.project(encI, sc.attn, sc.attnOut, 0, projO); err != nil {
 		return enc, false, err
 	}
-	return enc, false, encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
+	return enc, false, encResidualMaybeNormAt(encI, x, xOff, sc.attnOut, 0, sc.normed, h, hOff, postAttnNorm, dModel, eps)
 }
 
 func encAttnHalfSharedPaged(
@@ -1096,7 +1303,7 @@ func encAttnHalfSharedPaged(
 	x metal.MTLBuffer, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, offOff uint,
 	attnNormW, postAttnNorm, qNorm bufView,
 	sc attnScratch, proj projector,
-	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, eps float32,
+	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, ropeScale, eps float32,
 	ropeFreqs metal.MTLBuffer,
 ) error {
 	if cache == nil {
@@ -1129,7 +1336,7 @@ func encAttnHalfSharedPaged(
 		return err
 	}
 	if gpuHasGeluKernel() && qNorm.buf != nil {
-		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale, eps); err != nil {
 			return err
 		}
 	} else {
@@ -1138,7 +1345,7 @@ func encAttnHalfSharedPaged(
 				return err
 			}
 		}
-		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, ropeScale); err != nil {
 			return err
 		}
 	}

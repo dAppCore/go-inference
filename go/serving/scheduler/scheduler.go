@@ -310,9 +310,9 @@ func New(model inference.TextModel, cfg Config) (*Model, error) {
 		// Schedule RE-PROBES cheaply per eligible request (ensureCBEngine) — a
 		// model resolved mid-load reports the capability unavailable at New and
 		// flips available once loaded; without the rebind that first racing
-		// probe would pin the whole server to the plain path (observed live:
-		// a cold boot whose first traffic was 4 concurrent chats served plain
-		// forever, while a warmed boot served CB — 2026-07-13).
+		// probe would pin the whole server to the plain path — a cold boot
+		// whose first traffic was 4 concurrent chats would serve plain
+		// forever, while a warmed boot serves CB.
 		m.cbCfg = cfg
 		m.ensureCBEngine()
 	default: // serial
@@ -796,6 +796,8 @@ func (m *Model) run(j *job) {
 		} else {
 			m.setErr(core.NewError(r.Error()))
 		}
+	} else {
+		m.clearErr()
 	}
 	m.completed.Add(1)
 	m.emitProbe(j, "complete", queueLatency, 0, false)
@@ -872,6 +874,15 @@ func (m *Model) setErr(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastErr = err
+}
+
+func (m *Model) clearErr() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.lastErr = nil
+	m.mu.Unlock()
 }
 
 func (m *Model) nextRequestID() string {

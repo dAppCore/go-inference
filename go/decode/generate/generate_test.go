@@ -11,7 +11,6 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/kv"
-	"dappco.re/go/inference/serving"
 )
 
 // capModel is a fake inference.TextModel that reports a chosen capability set,
@@ -43,6 +42,23 @@ func TestNoteCacheKnobs_HonouredMode_Bad(t *testing.T) {
 	noteCacheKnobs(Config{KVCacheMode: "native", Log: log}, tm)
 	if out := log.String(); out != "" {
 		t.Fatalf("honoured mode noted %q, want silence", out)
+	}
+}
+
+// TestNoteCacheKnobs_ParameterisedFamily_Good pins the family matching: a
+// parameterised mode request ("turboquant:3.5") is honoured by its declared
+// base family ("turboquant") — no false "ignored" note for the bit-width
+// spellings the engine's load seam parses itself.
+func TestNoteCacheKnobs_ParameterisedFamily_Good(t *testing.T) {
+	log := core.NewBuffer()
+	tm := capModel{report: inference.CapabilityReport{CacheModes: []string{"native", "turboquant"}}}
+	noteCacheKnobs(Config{KVCacheMode: "turboquant:3.5", Log: log}, tm)
+	if out := log.String(); out != "" {
+		t.Fatalf("parameterised family mode noted %q, want silence", out)
+	}
+	noteCacheKnobs(Config{KVCacheMode: "kq8vq4:2", Log: log}, tm)
+	if out := log.String(); out == "" {
+		t.Fatal("an unknown parameterised family must still note")
 	}
 }
 
@@ -192,22 +208,6 @@ func TestSpineModelInfo_CopiesFields_Good(t *testing.T) {
 func TestSpineModelInfo_DefaultContext_Bad(t *testing.T) {
 	if got := spineModelInfo(inference.ModelInfo{Architecture: "gemma4"}, 0); got.ContextLength != 4096 {
 		t.Fatalf("default ContextLength = %d, want 4096", got.ContextLength)
-	}
-}
-
-// TestResolvedDraftBlock_FlagWins_Good proves an explicit draft block overrides
-// the engine default.
-func TestResolvedDraftBlock_FlagWins_Good(t *testing.T) {
-	if got := resolvedDraftBlock(7); got != 7 {
-		t.Fatalf("resolvedDraftBlock(7) = %d, want 7", got)
-	}
-}
-
-// TestResolvedDraftBlock_DefaultWhenZero_Bad proves a zero flag falls back to
-// the shared MTP engine default.
-func TestResolvedDraftBlock_DefaultWhenZero_Bad(t *testing.T) {
-	if got := resolvedDraftBlock(0); got != serving.MTPDefaultDraftBlock {
-		t.Fatalf("resolvedDraftBlock(0) = %d, want %d", got, serving.MTPDefaultDraftBlock)
 	}
 }
 

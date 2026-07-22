@@ -77,16 +77,13 @@ func ResolveGemma4ArchitectureDeclaration(data []byte) (Gemma4ArchitectureDeclar
 	if !resolution.Matched() {
 		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: unknown architecture")
 	}
-	if !rocmprofile.IsGemma4TargetArchitecture(resolution.Architecture) {
+	if !isROCmGemma4BackboneArchitecture(resolution.Architecture) {
 		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: unsupported architecture " + resolution.Architecture)
 	}
 
 	spec, ok := model.LookupArch(resolution.Architecture)
 	if !ok || spec.Parse == nil {
 		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: no shared ArchSpec for " + resolution.Architecture)
-	}
-	if spec.Composed != nil {
-		return Gemma4ArchitectureDeclaration{}, core.NewError("rocm Gemma4 architecture declaration: composed execution is not supported")
 	}
 	cfg, err := spec.Parse(data)
 	if err != nil {

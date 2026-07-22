@@ -105,6 +105,37 @@ func TestModel_ChatMLTemplate_Declared(t *testing.T) {
 	}
 }
 
+// plainTokenModel is a fake engine.TokenModel that DECLARES a dialect with an EMPTY Open marker — no
+// bracket, no role label at all (engine/metal's plainCompletionChatTemplate is exactly this shape for a
+// standalone-recurrent arch, e.g. rwkv7, whose vocabulary carries no bracket-turn markup to frame turns
+// with). It proves NewTextModel/chatTemplate() honour a genuinely empty-bracket DECLARED dialect rather
+// than silently substituting the gemma fallback.
+type plainTokenModel struct {
+	TokenModel
+}
+
+func (plainTokenModel) DeclaredChatTemplate() (ChatTemplate, bool) {
+	return ChatTemplate{Open: "", Close: "", UserRole: "", AssistantRole: "", SystemRole: ""}, true
+}
+
+// TestModel_PlainCompletionTemplate_Declared is the #36 regression: chatTemplate() used to key its "was
+// a template ever resolved" test on chatTmpl.Open == "", indistinguishable from a real declaration whose
+// Open genuinely IS "" — so a checkpoint declaring the plain-completion dialect silently rendered
+// gemma's <start_of_turn>/<end_of_turn> markers instead (live-caught: an RWKV7 checkpoint fed those
+// fabricated, out-of-vocabulary markers degraded into confused, prompt-echoing continuations). The fix
+// gates on the explicit chatTmplSet flag, so an empty-Open declared template is honoured verbatim.
+func TestModel_PlainCompletionTemplate_Declared(t *testing.T) {
+	m := NewTextModel(plainTokenModel{}, nil, "plain-fake", inference.ModelInfo{}, 32)
+	msgs := []inference.Message{{Role: "user", Content: "The capital of France is"}}
+	got := m.FormatChatPrompt(msgs)
+	if strings.Contains(got, "<start_of_turn>") || strings.Contains(got, "<end_of_turn>") {
+		t.Fatalf("empty-Open declared template leaked the gemma fallback markers: %q", got)
+	}
+	if want := "\nThe capital of France is\n\n"; got != want {
+		t.Fatalf("plain-completion render = %q, want %q", got, want)
+	}
+}
+
 // TestModel_ChatMLTemplate_StopTokens proves the stop-set assembly resolves a
 // non-gemma dialect's Close marker and its template-implied stop strings to ids
 // against the model's own tokenizer, deduping the marker that both name.
@@ -229,5 +260,208 @@ func TestChatTemplate_ResolveThinking_Ugly(t *testing.T) {
 	legacy := GemmaChatTemplate(TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}, true)
 	if legacy.ResolveThinking(nil) {
 		t.Fatal("legacy dialect ResolveThinking(nil) = true, want off (no reasoning channel)")
+	}
+}
+
+// TestChatTemplate_MergeAdjacentAssistant_Good pins the gemma4 turn-tag-balance
+// rule (canonical chat_template.jinja): DIRECTLY consecutive
+// assistant messages fold into ONE model turn — opened once, contents
+// concatenated in order, closed once — instead of the unbalanced close/reopen
+// pair the pre-fix template emitted.
+func TestChatTemplate_MergeAdjacentAssistant_Good(t *testing.T) {
+	tmpl := GemmaChatTemplate(TurnTokens{Open: "<|turn>", Close: "<turn|>"}, false)
+	if !tmpl.MergeAdjacentAssistant {
+		t.Fatal("gemma4 dialect must declare MergeAdjacentAssistant")
+	}
+	got := RenderChatTurns(tmpl, []inference.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "part one, "},
+		{Role: "assistant", Content: "part two"},
+	})
+	want := "<|turn>user\nhi<turn|>\n" +
+		"<|turn>model\npart one, part two<turn|>\n" +
+		"<|turn>model\n"
+	if got != want {
+		t.Fatalf("gemma4 adjacent-assistant render = %q, want %q", got, want)
+	}
+}
+
+// TestChatTemplate_MergeAdjacentAssistant_Bad pins the contrast: ChatML
+// declares no fold, so consecutive assistant messages stay two balanced turns.
+func TestChatTemplate_MergeAdjacentAssistant_Bad(t *testing.T) {
+	got := RenderChatTurns(ChatMLChatTemplate(), []inference.Message{
+		{Role: "assistant", Content: "one"},
+		{Role: "assistant", Content: "two"},
+	})
+	want := "<|im_start|>assistant\none<|im_end|>\n" +
+		"<|im_start|>assistant\ntwo<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("ChatML adjacent-assistant render = %q, want %q", got, want)
+	}
+}
+
+// TestChatTemplate_MergeAdjacentAssistant_Ugly pins the fold's boundaries: a
+// user message between assistant turns breaks adjacency, consecutive USER
+// messages never fold (the rule is assistant-only), and the gemma3-era dialect
+// declares no fold at all.
+func TestChatTemplate_MergeAdjacentAssistant_Ugly(t *testing.T) {
+	g4 := GemmaChatTemplate(TurnTokens{Open: "<|turn>", Close: "<turn|>"}, false)
+	got := RenderChatTurns(g4, []inference.Message{
+		{Role: "assistant", Content: "a"},
+		{Role: "user", Content: "u"},
+		{Role: "user", Content: "v"},
+		{Role: "assistant", Content: "b"},
+	})
+	want := "<|turn>model\na<turn|>\n" +
+		"<|turn>user\nu<turn|>\n" +
+		"<|turn>user\nv<turn|>\n" +
+		"<|turn>model\nb<turn|>\n" +
+		"<|turn>model\n"
+	if got != want {
+		t.Fatalf("gemma4 non-adjacent render = %q, want %q", got, want)
+	}
+	if g3 := GemmaChatTemplate(TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}, false); g3.MergeAdjacentAssistant {
+		t.Fatal("gemma3-era dialect must not declare MergeAdjacentAssistant")
+	}
+}
+
+// chatMLWithDefaultSystem is the ChatML dialect carrying a DefaultSystem — the
+// Qwen2.5-Coder shape (its jinja frames "You are a helpful assistant." as a
+// leading system turn when the caller sends none).
+func chatMLWithDefaultSystem() ChatTemplate {
+	return ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+		DefaultSystem: "You are a helpful assistant.",
+	}
+}
+
+// TestRenderChatTemplate_DefaultSystem_Good: a no-system chat frames the
+// checkpoint's DefaultSystem as a leading system turn — byte-identical to
+// Qwen2.5-Coder's apply_chat_template output for the same messages.
+func TestRenderChatTemplate_DefaultSystem_Good(t *testing.T) {
+	got := renderChatTemplate(chatMLWithDefaultSystem(),
+		[]inference.Message{{Role: "user", Content: "The capital of France is"}}, nil)
+	want := "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n" +
+		"<|im_start|>user\nThe capital of France is<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("no-system render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTemplate_DefaultSystem_Bad: a caller-supplied system message
+// wins — the default is NOT injected, the provided system renders in place.
+func TestRenderChatTemplate_DefaultSystem_Bad(t *testing.T) {
+	got := renderChatTemplate(chatMLWithDefaultSystem(), []inference.Message{
+		{Role: "system", Content: "Custom system."},
+		{Role: "user", Content: "hi"},
+	}, nil)
+	want := "<|im_start|>system\nCustom system.<|im_end|>\n" +
+		"<|im_start|>user\nhi<|im_end|>\n" +
+		"<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("supplied-system render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTemplate_DefaultSystem_Ugly: an empty DefaultSystem injects
+// nothing — the Qwen3.5/3.6 rule (their jinja emits a system turn ONLY when the
+// caller provides one), so a plain ChatML render is unchanged.
+func TestRenderChatTemplate_DefaultSystem_Ugly(t *testing.T) {
+	tmpl := chatMLWithDefaultSystem()
+	tmpl.DefaultSystem = ""
+	got := renderChatTemplate(tmpl, []inference.Message{{Role: "user", Content: "hi"}}, nil)
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("empty-default render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTurns_DefaultSystem: a continuation (woken-session tail) never
+// re-injects the default system — it was emitted on the fresh prompt.
+func TestRenderChatTurns_DefaultSystem(t *testing.T) {
+	got := renderChatTurns(chatMLWithDefaultSystem(),
+		[]inference.Message{{Role: "user", Content: "hi"}})
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+	if got != want {
+		t.Fatalf("continuation re-injected the default system\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestExtractDefaultSystem_Good: a Qwen2.5-style template's hardcoded no-system
+// default is pulled verbatim — the checkpoint's exact wording, which differs
+// Coder-vs-Instruct. The "\n" is the two-character escape a JSON-decoded
+// tokenizer_config.json (and a raw chat_template.jinja) both carry.
+func TestExtractDefaultSystem_Good(t *testing.T) {
+	coder := `{%- else %}{{- '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n' }}{%- endif %}`
+	if got := ExtractDefaultSystem(coder); got != "You are a helpful assistant." {
+		t.Fatalf("Coder default = %q, want %q", got, "You are a helpful assistant.")
+	}
+	instruct := `{{- '<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n' }}`
+	want := "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+	if got := ExtractDefaultSystem(instruct); got != want {
+		t.Fatalf("Instruct default = %q, want %q", got, want)
+	}
+}
+
+// TestExtractDefaultSystem_Bad: a passthrough template — one that frames a
+// system turn only from the caller's own message (Qwen3.5/3.6) — has no
+// hardcoded default, so extraction yields "" (the interpolation's leading quote
+// is rejected, never mistaken for a literal default).
+func TestExtractDefaultSystem_Bad(t *testing.T) {
+	qwen35 := `{%- if messages[0].role == 'system' %}{{- '<|im_start|>system\n' + messages[0].content + '<|im_end|>\n' }}{%- endif %}`
+	if got := ExtractDefaultSystem(qwen35); got != "" {
+		t.Fatalf("passthrough template default = %q, want \"\"", got)
+	}
+}
+
+// TestExtractDefaultSystem_Ugly: a non-ChatML template (gemma turn markers, no
+// <|im_start|>system literal at all) yields "" — gemma checkpoints inject no
+// default and their rendering stays byte-unchanged.
+func TestExtractDefaultSystem_Ugly(t *testing.T) {
+	gemma := `{{ '<|turn>user\n' + message.content + '<turn|>\n' }}`
+	if got := ExtractDefaultSystem(gemma); got != "" {
+		t.Fatalf("gemma template default = %q, want \"\"", got)
+	}
+}
+
+// chatMLQwenThinking is the Qwen3.5/3.6 ChatML dialect: the reasoning block rides the
+// generation cue — "<think>\n" opened when thinking is on, the pre-closed empty block when
+// off. Mirrors the composed serve template (engine/metal chatMLChatTemplate).
+func chatMLQwenThinking() ChatTemplate {
+	return ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+		Thinking:      &ChatThinking{OnSuffix: "<think>\n", OffSuffix: "<think>\n\n</think>\n\n"},
+	}
+}
+
+// TestRenderChatTemplate_ThinkingOnSuffix_Good: thinking ON opens the reasoning block after
+// the generation cue — byte-identical to Qwen3.5's apply_chat_template(enable_thinking=True).
+func TestRenderChatTemplate_ThinkingOnSuffix_Good(t *testing.T) {
+	on := true
+	got := renderChatTemplate(chatMLQwenThinking(), []inference.Message{{Role: "user", Content: "hi"}}, &on)
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+	if got != want {
+		t.Fatalf("thinking-on render mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestRenderChatTemplate_ThinkingOnSuffix_Bad: thinking OFF pre-closes an empty reasoning
+// block — byte-identical to Qwen3.5's default / enable_thinking=False.
+func TestRenderChatTemplate_ThinkingOnSuffix_Bad(t *testing.T) {
+	off := false
+	got := renderChatTemplate(chatMLQwenThinking(), []inference.Message{{Role: "user", Content: "hi"}}, &off)
+	want := "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+	if got != want {
+		t.Fatalf("thinking-off render mismatch\n got: %q\nwant: %q", got, want)
 	}
 }

@@ -783,6 +783,99 @@ func (tensor rocmKVEncodedTensor) prefixRows(rowWidth, rows int) (rocmKVEncodedT
 	}
 }
 
+func (tensor rocmKVEncodedTensor) sliceRows(rowWidth, startRow, endRow int) (rocmKVEncodedTensor, error) {
+	if rowWidth <= 0 || startRow < 0 || endRow <= startRow || tensor.length <= 0 || tensor.length%rowWidth != 0 {
+		return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", "tensor row shape mismatch", nil)
+	}
+	rowCount := tensor.length / rowWidth
+	if endRow > rowCount {
+		return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", "tensor row range mismatch", nil)
+	}
+	if startRow == 0 && endRow == rowCount {
+		return tensor.clone(), nil
+	}
+	rows := endRow - startRow
+	start := startRow * rowWidth
+	end := endRow * rowWidth
+	length := end - start
+	sliced := rocmKVEncodedTensor{encoding: tensor.encoding, length: length, scale: tensor.scale}
+	switch tensor.encoding {
+	case rocmKVEncodingFP16:
+		if len(tensor.f16) < end {
+			return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", "fp16 tensor length mismatch", nil)
+		}
+		sliced.f16 = append([]uint16(nil), tensor.f16[start:end]...)
+		sliced.sizeBytes = uint64(length * 2)
+	case rocmKVEncodingQ8:
+		if len(tensor.q8) < end {
+			return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", "q8 tensor length mismatch", nil)
+		}
+		sliced.q8 = append([]int8(nil), tensor.q8[start:end]...)
+		sliced.sizeBytes = uint64(4 + length)
+	case rocmKVEncodingQ8Rows, rocmKVEncodingQ8RowsI:
+		if len(tensor.scales) < endRow || len(tensor.q8) < end {
+			return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", "q8 row tensor length mismatch", nil)
+		}
+		sliced.scales = append([]float32(nil), tensor.scales[startRow:endRow]...)
+		sliced.q8 = append([]int8(nil), tensor.q8[start:end]...)
+		sliced.sizeBytes = uint64(rows*4 + length)
+		if tensor.encoding == rocmKVEncodingQ8RowsI {
+			sliced.sizeBytes = uint64(rows * (4 + rowWidth))
+		}
+	case rocmKVEncodingQ4:
+		packed, err := rocmKVQ4Slice(tensor.packedQ4, start, length)
+		if err != nil {
+			return rocmKVEncodedTensor{}, err
+		}
+		sliced.packedQ4 = packed
+		sliced.sizeBytes = uint64(4 + len(packed))
+	case rocmKVEncodingQ4Rows:
+		if len(tensor.scales) < endRow {
+			return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", "q4 row scale length mismatch", nil)
+		}
+		packed, err := rocmKVQ4Slice(tensor.packedQ4, start, length)
+		if err != nil {
+			return rocmKVEncodedTensor{}, err
+		}
+		sliced.scales = append([]float32(nil), tensor.scales[startRow:endRow]...)
+		sliced.packedQ4 = packed
+		sliced.sizeBytes = uint64(rows*4 + len(packed))
+	case rocmKVEncodingQ4RowsI:
+		rowPacked := (rowWidth + 1) / 2
+		packedStart := startRow * rowPacked
+		packedEnd := endRow * rowPacked
+		if len(tensor.scales) < endRow || len(tensor.packedQ4) < packedEnd {
+			return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", "q4 interleaved row tensor length mismatch", nil)
+		}
+		sliced.scales = append([]float32(nil), tensor.scales[startRow:endRow]...)
+		sliced.packedQ4 = append([]byte(nil), tensor.packedQ4[packedStart:packedEnd]...)
+		sliced.sizeBytes = uint64(rows * (4 + rowPacked))
+	default:
+		return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Slice", core.Sprintf("unsupported tensor encoding %q", tensor.encoding), nil)
+	}
+	return sliced, nil
+}
+
+func rocmKVQ4Slice(packed []byte, start, length int) ([]byte, error) {
+	if start < 0 || length <= 0 || start+length > len(packed)*2 {
+		return nil, core.E("rocm.KVCache.Slice", "q4 tensor range mismatch", nil)
+	}
+	out := make([]byte, (length+1)/2)
+	for index := range length {
+		source := start + index
+		code := packed[source/2] & 0x0f
+		if source%2 != 0 {
+			code = packed[source/2] >> 4
+		}
+		if index%2 == 0 {
+			out[index/2] = code
+		} else {
+			out[index/2] |= code << 4
+		}
+	}
+	return out, nil
+}
+
 func (snapshot rocmKVEncodedTensorSnapshot) toTensor() (rocmKVEncodedTensor, error) {
 	if snapshot.Length <= 0 {
 		return rocmKVEncodedTensor{}, core.E("rocm.KVCache.Snapshot", "tensor length must be positive", nil)

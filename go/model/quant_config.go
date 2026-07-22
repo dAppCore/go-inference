@@ -10,6 +10,19 @@ import (
 // plus any per-module overrides (mixed-precision QAT packs — e.g. a pack may keep the experts
 // 4-bit but the local MLP + router 8-bit). nil for bf16. Arch() is representation-agnostic;
 // the assembler uses For(name) to get a tensor's actual (groupSize, bits).
+//
+// QuantConfig answers a different question from quantfmt.QuantInfo
+// (model/quant/quantfmt.go), and the two are intentionally NOT unified: this
+// type is THIS ENGINE'S OWN runtime dequant instructions — the MLX-native
+// "quantization" block a converted checkpoint carries, read directly by the
+// assembler via For(name) during load. quantfmt.QuantInfo instead detects
+// HOW AN EXTERNAL TOOL QUANTISED a HuggingFace checkpoint (its
+// "quantization_config" key: gptq/awq/compressed-tensors/fp8/bitsandbytes/
+// quark provenance) — that is import/interop metadata, not what the loader
+// executes. Use QuantConfig when driving this engine's own dequantisation;
+// use quantfmt.QuantInfo when detecting/importing an externally-produced
+// checkpoint. See docs/design-rocm.md §B.3 (dispatch item 11) for the full
+// reasoning.
 type QuantConfig struct {
 	GroupSize int                    `json:"group_size"` // tags drive MARSHALLING (round-trip); UnmarshalJSON reads the same keys
 	Bits      int                    `json:"bits"`

@@ -71,6 +71,7 @@ type hipAttachedDrafterTargetAdvanceOneRequest struct {
 	GreedyBuffer     *hipDeviceByteBuffer
 	Workspace        *hipAttentionHeadsChunkedWorkspace
 	ReturnHidden     bool
+	SkipGreedy       bool
 }
 
 type hipAttachedDrafterTargetAdvanceOneResult struct {
@@ -348,7 +349,11 @@ func hipRunAttachedDrafterTargetAdvanceOneBatch(ctx context.Context, driver nati
 	// batched projection path so it matches the batched prefill/verify kernels.
 	forwardEngineConfig := req.EngineConfig
 	forwardEngineConfig.ForceBatchedProjection = true
-	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, []int32{req.TokenID}, req.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptors, nil, nil, 0, greedyBuffer, req.Workspace, forwardEngineConfig)
+	outputRow := 0
+	if req.SkipGreedy {
+		outputRow = -1
+	}
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, []int32{req.TokenID}, req.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptors, nil, nil, outputRow, greedyBuffer, req.Workspace, forwardEngineConfig)
 	if err != nil {
 		return hipAttachedDrafterTargetAdvanceOneResult{}, err
 	}
@@ -358,16 +363,25 @@ func hipRunAttachedDrafterTargetAdvanceOneBatch(ctx context.Context, driver nati
 			_ = forward.Close()
 		}
 	}()
-	if len(forward.Greedy) != 1 {
-		return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "batch-one target advance did not return one greedy row", nil)
-	}
-	greedy := forward.Greedy[0].Greedy
-	if hipTokenIsSuppressed(int32(greedy.TokenID), req.SuppressTokens) {
-		last := req.TargetForward.Layers[len(req.TargetForward.Layers)-1]
-		greedy, err = hipRunGemma4Q4PrefillFinalGreedyForRowSuppressWorkspace(ctx, driver, last, forward.FinalHidden, 1, 0, req.Epsilon, greedyBuffer, req.SuppressTokens, req.Workspace)
-		if err != nil {
-			return hipAttachedDrafterTargetAdvanceOneResult{}, err
+	var greedy hipGreedySampleResult
+	var greedyDevice *hipDeviceByteBuffer
+	if req.SkipGreedy {
+		if len(forward.Greedy) != 0 {
+			return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "batch-one target advance unexpectedly returned a greedy row", nil)
 		}
+	} else {
+		if len(forward.Greedy) != 1 {
+			return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "batch-one target advance did not return one greedy row", nil)
+		}
+		greedy = forward.Greedy[0].Greedy
+		if hipTokenIsSuppressed(int32(greedy.TokenID), req.SuppressTokens) {
+			last := req.TargetForward.Layers[len(req.TargetForward.Layers)-1]
+			greedy, err = hipRunGemma4Q4PrefillFinalGreedyForRowSuppressWorkspace(ctx, driver, last, forward.FinalHidden, 1, 0, req.Epsilon, greedyBuffer, req.SuppressTokens, req.Workspace)
+			if err != nil {
+				return hipAttachedDrafterTargetAdvanceOneResult{}, err
+			}
+		}
+		greedyDevice = greedyBuffer
 	}
 	var hidden *hipDeviceByteBuffer
 	if req.ReturnHidden {
@@ -397,7 +411,7 @@ func hipRunAttachedDrafterTargetAdvanceOneBatch(ctx context.Context, driver nati
 	return hipAttachedDrafterTargetAdvanceOneResult{
 		Current: hipGemma4Q4ForwardResult{
 			Greedy:                    greedy,
-			GreedyDevice:              greedyBuffer,
+			GreedyDevice:              greedyDevice,
 			DeviceFinalHidden:         hidden,
 			DeviceFinalHiddenBorrowed: false,
 		},

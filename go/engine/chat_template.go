@@ -3,6 +3,7 @@
 package engine
 
 import (
+	"regexp"
 	"strings"
 
 	"dappco.re/go/inference"
@@ -59,6 +60,27 @@ type ChatTemplate struct {
 	// spells "system".
 	InlineSystemAsUser bool
 
+	// MergeAdjacentAssistant folds DIRECTLY consecutive assistant messages
+	// into ONE assistant turn — the first opens it, contents concatenate in
+	// order, the last closes it — the gemma4 canonical chat_template.jinja
+	// turn-tag-balance rule, which suppresses the duplicate
+	// "<|turn>model" open and the early close between adjacent assistant
+	// history entries. ChatML and the gemma3-era dialect render every message
+	// as its own turn (their templates carry no such fold).
+	MergeAdjacentAssistant bool
+
+	// DefaultSystem is the checkpoint's own default system prompt, injected as a
+	// leading system turn whenever the conversation supplies none — the Qwen2.5
+	// rule, whose chat_template.jinja emits
+	// "<|im_start|>system\n<default><|im_end|>" unless the caller sent a system
+	// message. It is the checkpoint's LITERAL string, SOURCED per checkpoint
+	// rather than declared as a dialect constant, because the text varies within
+	// one family (Qwen2.5-Instruct "You are Qwen, created by Alibaba Cloud. You
+	// are a helpful assistant."; Qwen2.5-Coder "You are a helpful assistant.").
+	// Empty means the template injects no default — gemma, and Qwen3.5/3.6, whose
+	// jinja emits a system turn only when the caller provides one.
+	DefaultSystem string
+
 	// Thinking is the reasoning-channel framing, kept as the one dialect-
 	// divergent hook. Prelude is written into the leading system turn when
 	// thinking is ON (gemma "<|think|>\n"); OffSuffix is appended after the
@@ -86,6 +108,12 @@ type ChatThinking struct {
 	Prelude string
 	// OffSuffix is appended after the generation cue when thinking is off.
 	OffSuffix string
+	// OnSuffix is appended after the generation cue when thinking is ON — the
+	// ChatML/Qwen reasoning opener "<think>\n". Unlike gemma's Prelude (a leading
+	// system-turn switch), it rides the generation cue itself, so a chat with no
+	// system message still opens the reasoning block. gemma leaves it empty (its
+	// thinking-on switch is the system-turn Prelude).
+	OnSuffix string
 	// DefaultOn is the dialect's OWN thinking default, applied when a request
 	// leaves the flag unset (nil): gemma4 declares true — the vendor family
 	// default ("thinking is on by default") — so an explicit false is what
@@ -147,9 +175,38 @@ func GemmaChatTemplate(turns TurnTokens, suppressor bool) ChatTemplate {
 			th.OffSuffix = "<|channel>thought\n<channel|>"
 		}
 		t.SystemAsLeadingTurn = true
+		t.MergeAdjacentAssistant = true
 		t.Thinking = th
 	}
 	return t
+}
+
+// ChatMLChatTemplate builds the ChatML dialect (Open "<|im_start|>", Close "<|im_end|>", roles
+// user/assistant/system, no gemma folding) — the template Qwen/Yi/Mistral-family checkpoints ship.
+// A leading system message renders in place as an ordinary "system" turn (SystemAsLeadingTurn and
+// InlineSystemAsUser both false), matching those checkpoints' chat_template.jinja. No reasoning
+// channel is framed (the base ChatML dialect ignores the thinking flag).
+func ChatMLChatTemplate() ChatTemplate {
+	return ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+	}
+}
+
+// DetectChatTemplate picks the chat dialect from the tokenizer's vocab: a checkpoint carrying the
+// ChatML boundary token <|im_start|> (Qwen/Yi/Mistral) renders ChatML; anything else keeps the
+// gemma-family default (the pre-existing behaviour, so gemma checkpoints are unchanged). A model
+// that DECLARES its template (ChatTemplateDeclarer) still overrides this in NewTextModel.
+func DetectChatTemplate(tok TextTokenizer, turns TurnTokens, suppressor bool) ChatTemplate {
+	if tok != nil {
+		if _, ok := tok.TokenID("<|im_start|>"); ok {
+			return ChatMLChatTemplate()
+		}
+	}
+	return GemmaChatTemplate(turns, suppressor)
 }
 
 // turnRole is the ordinary-turn (non-folded) role spelling for role: assistant
@@ -171,14 +228,36 @@ func (t ChatTemplate) turnRole(role string) string {
 	}
 }
 
+// assistantFamilyRole reports whether role is an assistant-authored spelling
+// (assistant or model) — the roles MergeAdjacentAssistant folds when adjacent.
+func assistantFamilyRole(role string) bool {
+	return role == "assistant" || role == "model"
+}
+
+// mergesWithPrev reports whether messages[i] continues messages[i-1]'s
+// assistant turn instead of opening its own: the template declares the fold
+// (MergeAdjacentAssistant) and both messages are assistant-authored. i may be
+// len(messages) (the lookahead from the last message), which never merges.
+func (t ChatTemplate) mergesWithPrev(messages []inference.Message, i int) bool {
+	return t.MergeAdjacentAssistant && i > 0 && i < len(messages) &&
+		assistantFamilyRole(messages[i].Role) && assistantFamilyRole(messages[i-1].Role)
+}
+
 // plainTurnsSize returns the exact rendered length of messages as plain turns
-// (Open + role + "\n" + content + Close + "\n" each) followed by the trailing
+// (Open + role + "\n" + content + Close + "\n" each, adjacent assistant
+// messages folded per MergeAdjacentAssistant) followed by the trailing
 // assistant generation cue — the pre-size for the single builder allocation
 // shared by the render loop and the woken-session continuation.
 func plainTurnsSize(t ChatTemplate, messages []inference.Message) int {
 	size := len(t.Open) + len(t.AssistantRole) + 1
-	for _, msg := range messages {
-		size += len(t.Open) + len(t.turnRole(msg.Role)) + 1 + len(msg.Content) + len(t.Close) + 1
+	for i, msg := range messages {
+		size += len(msg.Content)
+		if !t.mergesWithPrev(messages, i) {
+			size += len(t.Open) + len(t.turnRole(msg.Role)) + 1
+		}
+		if !t.mergesWithPrev(messages, i+1) {
+			size += len(t.Close) + 1
+		}
 	}
 	return size
 }
@@ -186,14 +265,21 @@ func plainTurnsSize(t ChatTemplate, messages []inference.Message) int {
 // writePlainTurns writes messages as plain turns followed by the assistant
 // generation cue into out — the one turn-writing body the render loop and the
 // continuation both drive, so plain-turn framing has a single implementation.
+// A message merging with its predecessor (mergesWithPrev) skips its own turn
+// open, and a message whose successor merges skips its close, so an adjacent
+// assistant run renders as one balanced turn.
 func writePlainTurns(out *strings.Builder, t ChatTemplate, messages []inference.Message) {
-	for _, msg := range messages {
-		out.WriteString(t.Open)
-		out.WriteString(t.turnRole(msg.Role))
-		out.WriteString("\n")
+	for i, msg := range messages {
+		if !t.mergesWithPrev(messages, i) {
+			out.WriteString(t.Open)
+			out.WriteString(t.turnRole(msg.Role))
+			out.WriteString("\n")
+		}
 		out.WriteString(msg.Content)
-		out.WriteString(t.Close)
-		out.WriteString("\n")
+		if !t.mergesWithPrev(messages, i+1) {
+			out.WriteString(t.Close)
+			out.WriteString("\n")
+		}
 	}
 	out.WriteString(t.Open)
 	out.WriteString(t.AssistantRole)
@@ -207,13 +293,22 @@ func writePlainTurns(out *strings.Builder, t ChatTemplate, messages []inference.
 // routed through here is byte-for-byte the old formatChatPrompt output.
 func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThinking *bool) string {
 	thinking := t.ResolveThinking(enableThinking)
-	prelude, offSuffix := "", ""
+	prelude, cueSuffix := "", ""
 	if t.Thinking != nil {
 		if thinking {
 			prelude = t.Thinking.Prelude
+			cueSuffix = t.Thinking.OnSuffix
 		} else {
-			offSuffix = t.Thinking.OffSuffix
+			cueSuffix = t.Thinking.OffSuffix
 		}
+	}
+	// A checkpoint carrying a DefaultSystem (Qwen2.5) frames it as a leading
+	// system turn whenever the conversation supplies none, matching the
+	// checkpoint's jinja. The synthetic turn flows through the normal render path
+	// below — ChatML spells it in place, a folding dialect folds it — so no other
+	// branch special-cases it.
+	if t.DefaultSystem != "" && (len(messages) == 0 || !chatSystemRole(messages[0].Role)) {
+		messages = append([]inference.Message{{Role: "system", Content: t.DefaultSystem}}, messages...)
 	}
 	sysFirst := t.SystemAsLeadingTurn && len(messages) > 0 && chatSystemRole(messages[0].Role)
 	rest := messages
@@ -229,7 +324,7 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 	// allocated ONCE (String() then hands it back without a copy), and write each
 	// turn's parts straight into it — the old loop concatenated a fresh per-turn
 	// string (one heap allocation per turn) only to copy it in and drop it.
-	size := plainTurnsSize(t, rest) + len(offSuffix)
+	size := plainTurnsSize(t, rest) + len(cueSuffix)
 	if leadingSystem {
 		size += len(t.Open) + len(t.SystemRole) + 1 + len(prelude) + len(sysContent) + len(t.Close) + 1
 	}
@@ -245,7 +340,7 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 		out.WriteString("\n")
 	}
 	writePlainTurns(&out, t, rest)
-	out.WriteString(offSuffix)
+	out.WriteString(cueSuffix)
 	return out.String()
 }
 
@@ -257,6 +352,10 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 func renderChatTurns(t ChatTemplate, messages []inference.Message) string {
 	t.SystemAsLeadingTurn = false
 	t.Thinking = nil
+	// A continuation frames only the new tail — the leading system turn (declared
+	// or DefaultSystem-injected) was emitted on the fresh prompt, so a woken
+	// session never re-injects it.
+	t.DefaultSystem = ""
 	return renderChatTemplate(t, messages, nil)
 }
 
@@ -265,4 +364,48 @@ func renderChatTurns(t ChatTemplate, messages []inference.Message) string {
 // there is one turn-rendering implementation rather than a private duplicate.
 func RenderChatTurns(t ChatTemplate, messages []inference.Message) string {
 	return renderChatTurns(t, messages)
+}
+
+// RenderChatPrompt is the exported full-template render (see
+// [renderChatTemplate]): the same leading-system fold, thinking-switch system
+// turn, and suppressor handling the plain engine Chat path applies. The seam
+// exists so engine/metal's speculative pair frames its chat prompt
+// byte-identically to the plain lane — pair-vs-plain greedy equality (#55)
+// starts with both lanes conditioning on the same prompt tokens.
+func RenderChatPrompt(t ChatTemplate, messages []inference.Message, enableThinking *bool) string {
+	return renderChatTemplate(t, messages, enableThinking)
+}
+
+// chatTemplateDefaultSystemRE matches a ChatML system turn whose content is a
+// pure string LITERAL — the "<|im_start|>system\n<default><|im_end|>" a
+// Qwen2.5-style jinja emits as its no-system fallback. The content class
+// excludes the quote/brace characters a jinja interpolation carries, so the
+// passthrough branch ("<|im_start|>system\n' + messages[0].content + '…", which
+// begins with a quote) never matches — only a hardcoded default does. The
+// newline alternation covers both a JSON-decoded template (a real "\n") and a
+// raw .jinja file (the two-character "\\n" escape).
+var chatTemplateDefaultSystemRE = regexp.MustCompile(`<\|im_start\|>system(?:\\n|\n)([^'"{}]+?)<\|im_end\|>`)
+
+// ExtractDefaultSystem returns a checkpoint chat_template's OWN default system
+// prompt — the literal a Qwen2.5-style template injects when the conversation
+// carries none — so a served checkpoint's [ChatTemplate.DefaultSystem] is its
+// exact text rather than a hardcoded family constant (Qwen2.5-Coder "You are a
+// helpful assistant." vs Qwen2.5-Instruct "You are Qwen, created by Alibaba
+// Cloud. You are a helpful assistant."). It returns "" when the template frames
+// a system turn only from a caller-supplied message — gemma (no ChatML system
+// literal at all) and Qwen3.5/3.6 (whose jinja emits the passthrough, never a
+// hardcoded default) — so those checkpoints inject no default.
+//
+//	sys := ExtractDefaultSystem(chatTemplateText) // "" unless the template hardcodes one
+func ExtractDefaultSystem(chatTemplate string) string {
+	m := chatTemplateDefaultSystemRE.FindStringSubmatch(chatTemplate)
+	if m == nil {
+		return ""
+	}
+	// A pathological cross-branch match (a system open far from any close) is not
+	// a real default; a genuine vendor prompt is a single short line.
+	if s := m[1]; len(s) <= 512 {
+		return s
+	}
+	return ""
 }

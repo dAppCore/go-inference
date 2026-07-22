@@ -40,7 +40,7 @@ type ContinuityEnabler func(model inference.TextModel, store state.Store) error
 // lives here in the library, not in cmd/.
 type ServeConfig struct {
 	Addr        string                 // listen address (e.g. ":36911")
-	ModelPath   string                 // model to load; "" starts model-less (reload later)
+	ModelPath   string                 // model to load; "" starts model-less (reload later); a Whisper checkpoint routes the whole process to ASR-only serving instead (see serve_transcribe.go)
 	ContextLen  int                    // context-length override (0 = model default); reported by /v1/admin/serve/status
 	LoadOptions []inference.LoadOption // adapter, slots, … forwarded to the loader (context is applied from ContextLen)
 
@@ -52,7 +52,7 @@ type ServeConfig struct {
 	ProfileDir    string // tuned-profile directory (default ~/Lethean/lem/tuning)
 	MachineHash   string // machine identity for profile matching; "" accepts hash-less profiles
 
-	KVCacheMode string // requested KV cache mode; wired when the engine exposes it
+	KVCacheMode string // requested LIVE KV cache mode, passed to the engine load (metal: native / turboquant[:N])
 	Native      bool   // no-cgo native path (the default go-inference metal engine already is)
 
 	// Scheduler routes requests through a mode-selected request scheduler
@@ -161,6 +161,19 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		return err
 	}
 
+	// Whisper checkpoints never enter the TextModel factory (model/arch/openai/whisper's own doc
+	// comment). Detected up front from --model's config.json: this v1 "honest shape" routes the WHOLE
+	// process into ASR-only serving rather than folding Whisper into the chat hot-swap/multi-model
+	// machinery below, none of which fits an encoder-decoder (see serve_transcribe.go). Any non-Whisper
+	// --model (including "") falls straight through unchanged — this only ever short-circuits a
+	// genuine Whisper directory.
+	if transcriber, isWhisper, whisperErr := detectAndLoadWhisper(cfg.ModelPath); isWhisper {
+		if whisperErr != nil {
+			return whisperErr
+		}
+		return runWhisperServe(ctx, cfg, transcriber, outboundPolicy, log)
+	}
+
 	// Multi-model serving is a separate host path built on the multiModelResolver;
 	// the single-model hot-swap below is untouched and stays the default.
 	if len(cfg.Models) > 0 {
@@ -198,6 +211,9 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	if cfg.ContextLen > 0 {
 		loadOpts = append(loadOpts, inference.WithContextLen(cfg.ContextLen))
 	}
+	if mode := core.Trim(cfg.KVCacheMode); mode != "" {
+		loadOpts = append(loadOpts, inference.WithCacheMode(mode))
+	}
 	hotSwap := newHotSwapResolver(cfg.ModelPath, draftPathForResolver, resolvedBlock, loadOpts)
 	hotSwap.setLoader(cfg.Loader) // nil-safe: keeps the registered-metal default
 	hotSwap.setSpeculativeLoader(cfg.SpeculativeLoader)
@@ -209,7 +225,7 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		printServe(log, "serve: native no-cgo engine (the default go-inference metal path)")
 	}
 	if core.Trim(cfg.KVCacheMode) != "" {
-		printServe(log, "serve: -kv-cache %s requested; the registered engine loads its default cache mode (per-engine cache-mode selection lands with the engine load-config surface)", cfg.KVCacheMode)
+		printServe(log, "serve: -kv-cache %s requested — passed to the engine load (the metal engine honours the turboquant family; an unknown or unservable mode fails the load loudly)", cfg.KVCacheMode)
 	}
 	if cfg.ModelPath == "" {
 		printServe(log, "serve: starting model-less — POST /v1/admin/serve/reload to load a model")
@@ -290,7 +306,7 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		}
 	}
 
-	return hostServe(ctx, cfg, host, outboundPolicy, log)
+	return hostServe(ctx, cfg, host, outboundPolicy, log, nil)
 }
 
 // serveHost bundles the resolver and per-mode wiring hostServe needs to stand up
@@ -327,8 +343,12 @@ func loadOutboundPolicy(cfg ServeConfig) (*policy.Policy, error) {
 
 // hostServe composes the compatibility mux, the /v1/admin control plane, the
 // welfare + outbound-policy wraps, and runs the server. It is the shared tail
-// both serve modes reach after wiring their resolver + continuity.
-func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPolicy *policy.Policy, log io.Writer) error {
+// every serve mode reaches after wiring their resolver + continuity. transcriber
+// is nil for the ordinary chat/multi-model paths — only runWhisperServe
+// (serve_transcribe.go) supplies one; POST /v1/audio/transcriptions stays
+// mounted regardless (compat.NewMuxWithAdmin), answering the capability
+// refusal when transcriber is nil.
+func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPolicy *policy.Policy, log io.Writer, transcriber inference.Transcriber) error {
 	// Embeddings/rerank model — loaded once, up front, so a bad -embed-model
 	// fails the boot before any listener binds (fail-closed, matching the
 	// outbound-policy and admin-token pattern below). Folded into /v1/models
@@ -353,7 +373,8 @@ func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPol
 		Health: func(_ context.Context) (compat.Health, error) {
 			return compat.Health{Status: "ok", Runtime: "go-inference", Models: host.healthModels(), Time: time.Now().Unix()}, nil
 		},
-		Models: host.listModels,
+		Models:      host.listModels,
+		Transcriber: transcriber,
 	}
 	adminMux := adminpkg.NewMux(adminpkg.Config{
 		Reloader:        host.reloader,
@@ -476,7 +497,7 @@ func runMultiModelServe(ctx context.Context, cfg ServeConfig, outboundPolicy *po
 			},
 		},
 	}
-	return hostServe(ctx, cfg, host, outboundPolicy, log)
+	return hostServe(ctx, cfg, host, outboundPolicy, log, nil)
 }
 
 // modelLoadOptions builds the loader options for the -model default in
@@ -485,6 +506,9 @@ func modelLoadOptions(cfg ServeConfig) []inference.LoadOption {
 	opts := append([]inference.LoadOption(nil), cfg.LoadOptions...)
 	if cfg.ContextLen > 0 {
 		opts = append(opts, inference.WithContextLen(cfg.ContextLen))
+	}
+	if mode := core.Trim(cfg.KVCacheMode); mode != "" {
+		opts = append(opts, inference.WithCacheMode(mode))
 	}
 	return opts
 }

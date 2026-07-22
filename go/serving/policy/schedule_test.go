@@ -226,7 +226,7 @@ func TestPolicy_Schedule_Rewrite_Good(t *testing.T) {
 // scheduler route: an echoing mediator (its output still hits the rule) is
 // re-enforced to redact and audited as degraded — the same fail-safe the plain
 // path holds, never leaking the span.
-func TestPolicy_Schedule_RewriteDegraded_Ugly(t *testing.T) {
+func TestPolicy_Schedule_RewriteDegraded_WrapResolverMediated_Ugly(t *testing.T) {
 	fake := &policyFakeScheduler{policyFakeModel: policyFakeModel{tokens: []string{"the PROJ", "ECT-X here"}}}
 	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
 	echo := func(_ context.Context, _ int, span string) (string, error) { return span, nil }
@@ -252,7 +252,7 @@ func TestPolicy_Schedule_RewriteDegraded_Ugly(t *testing.T) {
 // token edges: a term split so its final byte lands only in the LAST token is
 // still caught — the enforcer withholds the incomplete prefix across the
 // ScheduledToken boundary until the next token resolves it.
-func TestPolicy_Schedule_HoldBackAcrossTokens_Good(t *testing.T) {
+func TestPolicy_Schedule_HoldBackAcrossTokens_WrapSched_Good(t *testing.T) {
 	// "SECRET" arrives one byte per token — every boundary bisects the term.
 	fake := &policyFakeScheduler{policyFakeModel: policyFakeModel{tokens: []string{"S", "E", "C", "R", "E", "T", "!"}}}
 	m := wrapSched(t, `{"rules":[{"match":"term","value":"SECRET","action":"redact"}]}`, fake, nil)

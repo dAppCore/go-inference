@@ -30,10 +30,7 @@ func LoadGemma4ImageFeatureConfigs(modelPath string) (imageCfg, videoCfg *Gemma4
 	if !read.OK {
 		return nil, nil, nil
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return nil, nil, core.E("gemma4.vision", "processor_config.json read returned non-byte data", nil)
-	}
+	data := read.Bytes()
 	var processor gemma4VisionProcessorConfig
 	if r := core.JSONUnmarshal(data, &processor); !r.OK {
 		return nil, nil, core.E("gemma4.vision", "parse processor_config.json", nil)

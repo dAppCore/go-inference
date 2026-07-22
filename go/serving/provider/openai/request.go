@@ -62,6 +62,9 @@ func ValidateRequest(req ChatCompletionRequest) error {
 	if req.MaxTokens != nil && *req.MaxTokens < 0 {
 		return requestError("max_tokens must be >= 0", "max_tokens")
 	}
+	if req.MMProcessorKwargs != nil && req.MMProcessorKwargs.MaxSoftTokens != nil && *req.MMProcessorKwargs.MaxSoftTokens < 0 {
+		return requestError("mm_processor_kwargs.max_soft_tokens must be >= 0", "mm_processor_kwargs")
+	}
 	if err := validateResponseFormat(req.ResponseFormat, req.Stream); err != nil {
 		return err
 	}
@@ -130,7 +133,41 @@ func GenerateOptions(req ChatCompletionRequest) ([]inference.GenerateOption, err
 	if req.ChatTemplateKwargs != nil && req.ChatTemplateKwargs.ThinkingBudget != nil && *req.ChatTemplateKwargs.ThinkingBudget > 0 {
 		opts = append(opts, inference.WithThinkingBudget(*req.ChatTemplateKwargs.ThinkingBudget))
 	}
+	if budget, ok := req.visionBudgetOverride(); ok {
+		opts = append(opts, inference.WithVisionBudget(budget))
+	}
 	return opts, nil
+}
+
+// visionBudgetOverride resolves an explicit vision soft-token budget from the
+// request: mm_processor_kwargs.max_soft_tokens (vLLM convention) wins when
+// present — even an explicit 0, since ValidateRequest has already rejected a
+// negative one. Otherwise the last message carrying an explicit
+// image_url.detail hint applies ("low"->70, "high"->1120); "auto", an absent
+// detail, and no images at all leave ok=false. ok=false means the caller
+// appends no option, so the model's own configured default budget stands.
+func (req ChatCompletionRequest) visionBudgetOverride() (int, bool) {
+	if req.MMProcessorKwargs != nil && req.MMProcessorKwargs.MaxSoftTokens != nil {
+		return *req.MMProcessorKwargs.MaxSoftTokens, true
+	}
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		switch req.Messages[i].ImageDetail {
+		case "low":
+			return 70, true
+		case "high":
+			return 1120, true
+		}
+	}
+	return 0, false
+}
+
+// preserveThinking reports chat_template_kwargs.preserve_thinking — the
+// canonical-template flag that keeps echoed reasoning on tool-calling turns
+// anywhere in history (turns after the last user message always keep theirs).
+func (req ChatCompletionRequest) preserveThinking() bool {
+	return req.ChatTemplateKwargs != nil &&
+		req.ChatTemplateKwargs.PreserveThinking != nil &&
+		*req.ChatTemplateKwargs.PreserveThinking
 }
 
 // thinkingOverride resolves an explicit reasoning toggle from the request:

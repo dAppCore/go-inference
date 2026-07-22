@@ -38,7 +38,7 @@
 // HIP-hardware-behavioural — the driver semantics (seeding, KV append order,
 // device retention, HostState/mirror round-trip) are validated only by the
 // HIP-gated parity + conformance tests in inference_conformance_test.go, which
-// run on Snider's linux+AMD box. This file lands COMPILE-VERIFIED, not
+// run on a linux+AMD box. This file lands COMPILE-VERIFIED, not
 // behaviourally proven.
 package hip
 
@@ -53,7 +53,14 @@ import (
 	"dappco.re/go/inference/model"
 )
 
-var _ engine.Session = (*hipEngineSession)(nil)
+var (
+	_ engine.Session                 = (*hipEngineSession)(nil)
+	_ engine.ContextDecodeSession    = (*hipEngineSession)(nil)
+	_ engine.PromptReuseSession      = (*hipEngineSession)(nil)
+	_ engine.CanonicalLandingSession = (*hipEngineSession)(nil)
+	_ engine.VisionSession           = (*hipEngineSession)(nil)
+	_ inference.PromptCacheClearer   = (*hipEngineSession)(nil)
+)
 
 // hipKVSnapshotDevicePayloadMode marks the opaque per-layer payloads that
 // retain HIP's device-page encoding alongside the portable float32 snapshot.
@@ -64,18 +71,32 @@ const hipKVSnapshotDevicePayloadMode = "turboquant"
 // Session. It is single-goroutine-guarded by mu (engine.SessionHandle already
 // serialises calls; the lock guards the device/pending/tokens invariant).
 type hipEngineSession struct {
-	mu        sync.Mutex
-	loaded    *hipLoadedModel
-	cfg       hipGemma4Q4ForwardConfig
-	engine    hipGemma4Q4EngineConfig
-	mode      string
-	driver    nativeHIPDriver
-	device    *hipGemma4Q4DeviceDecodeState
-	pending   []int32
-	tokens    []int32
-	generated []int32
-	closed    bool
+	mu      sync.Mutex
+	loaded  *hipLoadedModel
+	cfg     hipGemma4Q4ForwardConfig
+	engine  hipGemma4Q4EngineConfig
+	mode    string
+	driver  nativeHIPDriver
+	device  *hipGemma4Q4DeviceDecodeState
+	pending []int32
+	// pendingEmbeddings contains one float32 hidden row per pending token when
+	// the prompt entered through the multimodal prefill contract. Nil means the
+	// ordinary token-embedding lookup path.
+	pendingEmbeddings []byte
+	tokens            []int32
+	generated         []int32
+	// boundaryLogits is the portable float32 final row restored alongside a
+	// fully materialized cache. It selects the first continuation token without
+	// replaying or truncating the retained prefix.
+	boundaryLogitShape []int32
+	boundaryLogits     []float32
+	// drive replaces the combined HIP entry point in focused session tests. A
+	// nil value always uses the native runtime path below.
+	drive  hipSessionDrive
+	closed bool
 }
+
+type hipSessionDrive func(context.Context, []int32, []byte, inference.GenerateConfig, *model.Sampler, *hipGemma4Q4DeviceDecodeState, func(int32) bool) ([]int32, *hipGemma4Q4DeviceDecodeState, error)
 
 // newHipEngineSession opens a retained Gemma4-Q4 session over a loaded model.
 // It requires a Gemma4-Q4-linked model — the retained-KV fast path is q4
@@ -128,8 +149,49 @@ func (s *hipEngineSession) PrefillTokens(ids []int32) error {
 		return err
 	}
 	s.pending = append([]int32(nil), ids...)
+	s.pendingEmbeddings = nil
 	s.tokens = append([]int32(nil), ids...)
 	s.generated = nil
+	s.clearBoundaryLogitsLocked()
+	return nil
+}
+
+// PrefillTokenEmbeddings replaces retained state with a multimodal prompt whose
+// already-spliced float32 rows must enter layer zero directly.
+func (s *hipEngineSession) PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: session is closed")
+	}
+	if len(ids) == 0 {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: empty prompt tokens")
+	}
+	if len(ids) != len(embeddings) {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: token and embedding counts differ")
+	}
+	if len(ids) > s.contextLimitLocked() {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: prompt exceeds model context window")
+	}
+	rowBytes := s.embeddingRowBytesLocked()
+	if rowBytes <= 0 {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: invalid embedding width")
+	}
+	stream := make([]byte, len(ids)*rowBytes)
+	for index, row := range embeddings {
+		if len(row) != rowBytes {
+			return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: embedding row width mismatch")
+		}
+		copy(stream[index*rowBytes:(index+1)*rowBytes], row)
+	}
+	if err := s.closeDeviceLocked(); err != nil {
+		return err
+	}
+	s.pending = append([]int32(nil), ids...)
+	s.pendingEmbeddings = stream
+	s.tokens = append([]int32(nil), ids...)
+	s.generated = nil
+	s.clearBoundaryLogitsLocked()
 	return nil
 }
 
@@ -144,11 +206,15 @@ func (s *hipEngineSession) AppendTokens(ids []int32) error {
 	if len(ids) == 0 {
 		return core.NewError("hip.EngineSession.AppendTokens: empty prompt tokens")
 	}
+	if len(s.pendingEmbeddings) > 0 {
+		return core.NewError("hip.EngineSession.AppendTokens: cannot append token ids before custom embeddings are forwarded")
+	}
 	if limit := s.contextLimitLocked(); len(s.tokens) > limit-len(ids) {
 		return core.NewError("hip.EngineSession.AppendTokens: sequence exceeds model context window")
 	}
 	s.pending = append(s.pending, ids...)
 	s.tokens = append(s.tokens, ids...)
+	s.clearBoundaryLogitsLocked()
 	return nil
 }
 
@@ -157,6 +223,18 @@ func (s *hipEngineSession) Pos() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.tokens)
+}
+
+// SetReuseCanonicalLanding makes prompt landing independent of ubatch splits.
+// The shared resident-reuse lane enables it before first prefill; quantized KV
+// restores also auto-arm it before any appended suffix is forwarded.
+func (s *hipEngineSession) SetReuseCanonicalLanding(on bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.engine.DisableBatchedPrefill = on
+	s.mu.Unlock()
 }
 
 // GenerateFromCacheEach greedily decodes up to maxNew tokens, forwarding the
@@ -214,11 +292,17 @@ func (s *hipEngineSession) generate(ctx context.Context, generate inference.Gene
 	if s.closed {
 		return nil, core.NewError("hip.EngineSession.Generate: session is closed")
 	}
-	if len(s.pending) == 0 {
-		return nil, core.NewError("hip.EngineSession.Generate: no buffered tokens to seed decode (hip decodes from a forwarded prompt, not a bare cache — append a prompt first)")
+	if generate.MaxTokens <= 0 {
+		return nil, core.NewError("hip.EngineSession.Generate: max tokens must be positive")
 	}
-	prompt := s.pending
-	s.pending = nil
+	limit := s.contextLimitLocked()
+	if len(s.tokens) > limit || generate.MaxTokens > limit-len(s.tokens) {
+		return nil, core.NewError("hip.EngineSession.Generate: sequence would exceed model context window")
+	}
+	// HIP materialises its buffered prefill inside this combined operation, so
+	// this is the operation boundary for the shared memory watermark.
+	hipMemoryWatermarkReset(s.driver)
+	defer hipMemoryWatermarkSample(s.driver)
 	emit := func(id int32) bool {
 		out := id
 		if transform != nil {
@@ -233,13 +317,110 @@ func (s *hipEngineSession) generate(ctx context.Context, generate inference.Gene
 		}
 		return keep
 	}
-	out, err := s.driveLocked(ctx, prompt, generate, sampler, emit)
+	if len(s.pending) == 0 && len(s.boundaryLogits) > 0 {
+		return s.generateFromBoundaryLogitsLocked(ctx, generate, sampler, emit)
+	}
+	if err := s.ensureDecodeSeedLocked(); err != nil {
+		return nil, err
+	}
+	prompt := s.pending
+	promptEmbeddings := s.pendingEmbeddings
+	s.pending = nil
+	s.pendingEmbeddings = nil
+	s.clearBoundaryLogitsLocked()
+	out, err := s.driveLocked(ctx, prompt, promptEmbeddings, generate, sampler, emit)
 	s.tokens = append(s.tokens, out...)
 	s.generated = append(s.generated, out...)
 	if err == nil {
 		err = s.syncPendingWithDeviceLocked()
 	}
 	return out, err
+}
+
+func (s *hipEngineSession) generateFromBoundaryLogitsLocked(ctx context.Context, generate inference.GenerateConfig, sampler *model.Sampler, emit func(int32) bool) ([]int32, error) {
+	if generate.MaxTokens <= 0 {
+		return nil, core.NewError("hip.EngineSession.Generate: max tokens must be positive")
+	}
+	if s.device == nil || s.device.maxLayerTokenCount() != len(s.tokens) {
+		return nil, core.NewError("hip.EngineSession.Generate: boundary logits require a fully materialized device cache")
+	}
+	suppressTokens := append([]int32(nil), hipGemma4Q4GenerationSuppressTokenIDs(s.loaded, generate.StopTokens)...)
+	suppressTokens = append(suppressTokens, generate.SuppressTokens...)
+	draw := 0.0
+	if hipGemma4Q4HostSamplingRequested(generate) {
+		if sampler == nil {
+			return nil, core.NewError("hip.EngineSession.Generate: sampled boundary decode requires a sampler")
+		}
+		draw = float64(sampler.Draw())
+	}
+	first, err := hipGemma4Q4HostSampleResult(s.boundaryLogits, generate, suppressTokens, s.tokens, draw)
+	if err != nil {
+		return nil, err
+	}
+	firstID := int32(first.TokenID)
+	if hipTokenIsStop(firstID, generate.StopTokens) {
+		return nil, nil
+	}
+	keep := true
+	if emit != nil {
+		keep = emit(firstID)
+	}
+	out := []int32{firstID}
+	s.tokens = append(s.tokens, firstID)
+	s.generated = append(s.generated, firstID)
+	s.clearBoundaryLogitsLocked()
+	if !keep || generate.MaxTokens == 1 {
+		return out, s.syncPendingWithDeviceLocked()
+	}
+
+	tailGenerate := generate
+	tailGenerate.MaxTokens--
+	tail, tailErr := s.driveLocked(ctx, []int32{firstID}, nil, tailGenerate, sampler, emit)
+	out = append(out, tail...)
+	s.tokens = append(s.tokens, tail...)
+	s.generated = append(s.generated, tail...)
+	if tailErr == nil {
+		tailErr = s.syncPendingWithDeviceLocked()
+	}
+	return out, tailErr
+}
+
+// ensureDecodeSeedLocked turns a fully materialized portable restore back into
+// the boundary shape expected by HIP's combined prefill/decode entry point.
+// Replaying only the final token is exact while the retained cache is still
+// addressable linearly. A wrapped sliding cache cannot be safely truncated
+// from its host image, so that rare legacy snapshot shape replays the sequence.
+func (s *hipEngineSession) ensureDecodeSeedLocked() error {
+	if len(s.pending) > 0 {
+		return nil
+	}
+	if len(s.tokens) == 0 {
+		return core.NewError("hip.EngineSession.Generate: no buffered tokens to seed decode")
+	}
+	if s.device == nil {
+		s.pending = append([]int32(nil), s.tokens...)
+		return nil
+	}
+	forwarded := s.device.maxLayerTokenCount()
+	if forwarded > len(s.tokens) {
+		return core.NewError("hip.EngineSession.Generate: retained device KV exceeds session tokens")
+	}
+	if forwarded < len(s.tokens) {
+		s.pending = append([]int32(nil), s.tokens[forwarded:]...)
+		return nil
+	}
+	if s.ringRollbackUnsafeLocked(forwarded) {
+		if err := s.closeDeviceLocked(); err != nil {
+			return err
+		}
+		s.pending = append([]int32(nil), s.tokens...)
+		return nil
+	}
+	if err := s.truncateRetainedPrefixLocked(len(s.tokens) - 1); err != nil {
+		return err
+	}
+	s.pending = append([]int32(nil), s.tokens[len(s.tokens)-1])
+	return nil
 }
 
 // syncPendingWithDeviceLocked restores the session invariant after HIP's
@@ -272,11 +453,21 @@ func (s *hipEngineSession) PrefillTokensCached(ids []int32) (int, error) {
 	if limit := s.contextLimitLocked(); len(ids) > limit {
 		return 0, core.NewError("hip.EngineSession.PrefillTokensCached: prompt exceeds model context window")
 	}
+	if len(s.pendingEmbeddings) > 0 {
+		return 0, s.prefillTokensLocked(ids)
+	}
 
 	lcp := hipTokenPrefixLen(s.tokens, ids)
 	if lcp == len(ids) {
+		if len(s.boundaryLogits) > 0 && s.device != nil && s.device.maxLayerTokenCount() == len(s.tokens) {
+			s.tokens = append([]int32(nil), ids...)
+			s.pending = nil
+			s.pendingEmbeddings = nil
+			s.generated = nil
+			return lcp, nil
+		}
 		// Keep a seed token pending even for an exact hit: HIP has no decode
-		// entry point that can start from a completely bare retained cache.
+		// entry point that can start from a bare retained cache without logits.
 		lcp--
 	}
 	forwarded := len(s.tokens) - len(s.pending)
@@ -298,6 +489,7 @@ func (s *hipEngineSession) PrefillTokensCached(ids []int32) (int, error) {
 	s.tokens = append([]int32(nil), ids...)
 	s.pending = append([]int32(nil), ids[forwarded:]...)
 	s.generated = nil
+	s.clearBoundaryLogitsLocked()
 	return forwarded, nil
 }
 
@@ -306,6 +498,16 @@ func (s *hipEngineSession) contextLimitLocked() int {
 		return s.loaded.contextSize
 	}
 	return defaultContextLengthCap
+}
+
+func (s *hipEngineSession) embeddingRowBytesLocked() int {
+	if s.loaded != nil && s.loaded.modelInfo.HiddenSize > 0 {
+		return s.loaded.modelInfo.HiddenSize * 4
+	}
+	if len(s.cfg.Layers) > 0 && s.cfg.Layers[0].HiddenSize > 0 {
+		return s.cfg.Layers[0].HiddenSize * 4
+	}
+	return 0
 }
 
 func (s *hipEngineSession) ringRollbackUnsafeLocked(forwarded int) bool {
@@ -324,8 +526,10 @@ func (s *hipEngineSession) prefillTokensLocked(ids []int32) error {
 		return err
 	}
 	s.pending = append([]int32(nil), ids...)
+	s.pendingEmbeddings = nil
 	s.tokens = append([]int32(nil), ids...)
 	s.generated = nil
+	s.clearBoundaryLogitsLocked()
 	return nil
 }
 
@@ -370,12 +574,17 @@ func hipTokenPrefixLen(a, b []int32) int {
 // continuing from the retained device state. Ownership of s.device moves into
 // the driver (which transfers/closes it) and the retain callback re-installs the
 // final state. Must be called with mu held.
-func (s *hipEngineSession) driveLocked(ctx context.Context, promptTokens []int32, generate inference.GenerateConfig, sampler *model.Sampler, emit func(int32) bool) ([]int32, error) {
+func (s *hipEngineSession) driveLocked(ctx context.Context, promptTokens []int32, promptEmbeddings []byte, generate inference.GenerateConfig, sampler *model.Sampler, emit func(int32) bool) ([]int32, error) {
 	initial := s.device
 	s.device = nil
+	if s.drive != nil {
+		out, device, err := s.drive(ctx, promptTokens, promptEmbeddings, generate, sampler, initial, emit)
+		s.device = device
+		return out, err
+	}
 	var out []int32
 	stopped := false
-	seq, errFn := hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx, s.loaded, s.cfg, promptTokens, generate, s.engine, initial, func(state *hipGemma4Q4DeviceDecodeState) error {
+	seq, errFn := hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx, s.loaded, s.cfg, promptTokens, promptEmbeddings, generate, s.engine, initial, func(state *hipGemma4Q4DeviceDecodeState) error {
 		s.device = state
 		return nil
 	}, sampler)
@@ -406,6 +615,12 @@ func (s *hipEngineSession) CaptureKVWithOptions(opts kv.CaptureOptions) (*kv.Sna
 	if s.closed {
 		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: session is closed")
 	}
+	if opts.BlockStartToken < 0 {
+		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: block start token must be non-negative")
+	}
+	if len(s.pendingEmbeddings) > 0 {
+		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: custom embeddings must be forwarded before state capture")
+	}
 	host, err := s.hostStateLocked()
 	if err != nil {
 		return nil, err
@@ -417,6 +632,7 @@ func (s *hipEngineSession) CaptureKVWithOptions(opts kv.CaptureOptions) (*kv.Sna
 	if err := hipAttachDeviceKVPayloads(snapshot, s.device); err != nil {
 		return nil, err
 	}
+	s.attachBoundaryLogitsLocked(snapshot)
 	return snapshot, nil
 }
 
@@ -448,25 +664,43 @@ func (s *hipEngineSession) RangeKVBlocks(blockSize int, opts kv.CaptureOptions, 
 	if s.closed {
 		return core.NewError("hip.EngineSession.RangeKVBlocks: session is closed")
 	}
+	if len(s.pendingEmbeddings) > 0 {
+		return core.NewError("hip.EngineSession.RangeKVBlocks: custom embeddings must be forwarded before state capture")
+	}
 	host, err := s.hostStateLocked()
 	if err != nil {
 		return err
 	}
-	total := host.tokenCountForConfig(s.cfg)
-	if total <= 0 {
-		total = len(s.tokens)
+	forwarded := host.tokenCountForConfig(s.cfg)
+	if forwarded > len(s.tokens) {
+		return core.NewError("hip.EngineSession.RangeKVBlocks: retained KV exceeds token history")
 	}
+	total := len(s.tokens)
 	firstIndex := opts.BlockStartToken / blockSize
 	for index, start := firstIndex, firstIndex*blockSize; start < total; index, start = index+1, start+blockSize {
 		count := blockSize
 		if start+count > total {
 			count = total - start
 		}
-		blockHost := hipSliceDecodeStateTokens(host, s.cfg, start, count)
+		kvCount := count
+		if start >= forwarded {
+			kvCount = 0
+		} else if start+kvCount > forwarded {
+			kvCount = forwarded - start
+		}
+		blockHost := hipSliceDecodeStateTokens(host, s.cfg, start, kvCount)
 		blockTokens := hipTokenWindow(s.tokens, start, count)
 		snapshot, err := hipDecodeStateToSnapshot(blockHost, s.cfg, blockTokens, nil, opts)
 		if err != nil {
 			return err
+		}
+		if opts.RawKVOnly && kvCount > 0 {
+			if err := hipAttachDeviceKVPayloadRange(snapshot, s.device, start, kvCount); err != nil {
+				return err
+			}
+		}
+		if start+count == total {
+			s.attachBoundaryLogitsLocked(snapshot)
 		}
 		snapshot.TokenOffset = start + count
 		cont, yieldErr := yield(kv.Block{Index: index, TokenStart: start, TokenCount: count, Snapshot: snapshot})
@@ -492,10 +726,19 @@ func (s *hipEngineSession) RestoreFromKV(ctx context.Context, snapshot *kv.Snaps
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.restoreFromKVLocked(ctx, snapshot)
+}
+
+// restoreFromKVLocked is RestoreFromKV with the session lock held.
+func (s *hipEngineSession) restoreFromKVLocked(ctx context.Context, snapshot *kv.Snapshot) error {
 	if s.closed {
 		return core.NewError("hip.EngineSession.RestoreFromKV: session is closed")
 	}
 	host, err := hipSnapshotToDecodeState(snapshot, s.cfg)
+	if err != nil {
+		return err
+	}
+	boundaryLogits, boundaryLogitShape, err := hipSnapshotBoundaryLogits(snapshot, s.cfg)
 	if err != nil {
 		return err
 	}
@@ -515,13 +758,69 @@ func (s *hipEngineSession) RestoreFromKV(ctx context.Context, snapshot *kv.Snaps
 	}
 	s.device = device
 	s.tokens = append([]int32(nil), snapshot.Tokens...)
+	s.pendingEmbeddings = nil
 	if forwarded < len(s.tokens) {
 		s.pending = append([]int32(nil), s.tokens[forwarded:]...)
 	} else {
 		s.pending = nil
 	}
-	s.generated = nil
+	s.generated = append([]int32(nil), snapshot.Generated...)
+	s.boundaryLogitShape = nil
+	s.boundaryLogits = nil
+	if forwarded == len(s.tokens) {
+		s.boundaryLogitShape = boundaryLogitShape
+		s.boundaryLogits = boundaryLogits
+	}
+	if forwarded > 0 && (s.mode == rocmKVCacheModeQ8 || s.mode == rocmKVCacheModeKQ8VQ4) && !hipSnapshotHasDeviceKVPayloads(snapshot) {
+		s.engine.DisableBatchedPrefill = true
+	}
 	return ctx.Err()
+}
+
+func hipSnapshotBoundaryLogits(snapshot *kv.Snapshot, cfg hipGemma4Q4ForwardConfig) ([]float32, []int32, error) {
+	if snapshot == nil || len(snapshot.Logits) == 0 {
+		if snapshot != nil && len(snapshot.LogitShape) > 0 {
+			return nil, nil, core.NewError("hip.EngineSession.RestoreFromKV: logit shape has no values")
+		}
+		return nil, nil, nil
+	}
+	if len(snapshot.LogitShape) > 0 {
+		total := 1
+		for _, dim := range snapshot.LogitShape {
+			if dim <= 0 || total > len(snapshot.Logits)/int(dim) {
+				return nil, nil, core.NewError("hip.EngineSession.RestoreFromKV: invalid logit shape")
+			}
+			total *= int(dim)
+		}
+		if total != len(snapshot.Logits) {
+			return nil, nil, core.NewError("hip.EngineSession.RestoreFromKV: logit shape mismatch")
+		}
+	}
+	vocab := 0
+	if len(cfg.Layers) > 0 {
+		vocab = cfg.Layers[len(cfg.Layers)-1].VocabSize
+	}
+	if vocab > 0 && len(snapshot.Logits) != vocab {
+		return nil, nil, core.NewError("hip.EngineSession.RestoreFromKV: logits size mismatch")
+	}
+	shape := append([]int32(nil), snapshot.LogitShape...)
+	if len(shape) == 0 {
+		shape = []int32{1, int32(len(snapshot.Logits))}
+	}
+	return append([]float32(nil), snapshot.Logits...), shape, nil
+}
+
+func (s *hipEngineSession) attachBoundaryLogitsLocked(snapshot *kv.Snapshot) {
+	if snapshot == nil || len(s.boundaryLogits) == 0 || len(s.pending) > 0 || s.device == nil || s.device.maxLayerTokenCount() != len(s.tokens) {
+		return
+	}
+	snapshot.LogitShape = append([]int32(nil), s.boundaryLogitShape...)
+	snapshot.Logits = append([]float32(nil), s.boundaryLogits...)
+}
+
+func (s *hipEngineSession) clearBoundaryLogitsLocked() {
+	s.boundaryLogitShape = nil
+	s.boundaryLogits = nil
 }
 
 // Close releases the retained device KV state.
@@ -533,7 +832,25 @@ func (s *hipEngineSession) Close() error {
 	}
 	s.closed = true
 	s.pending = nil
+	s.pendingEmbeddings = nil
+	s.clearBoundaryLogitsLocked()
 	return s.closeDeviceLocked()
+}
+
+// ClearPromptCache releases retained KV and forgets the buffered prompt and
+// generated continuation while leaving the session open for a cold prefill.
+func (s *hipEngineSession) ClearPromptCache() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.closeDeviceLocked()
+	s.pending = nil
+	s.pendingEmbeddings = nil
+	s.tokens = nil
+	s.generated = nil
+	s.clearBoundaryLogitsLocked()
 }
 
 func (s *hipEngineSession) closeDeviceLocked() error {
@@ -573,6 +890,32 @@ func hipAttachDeviceKVPayloads(snapshot *kv.Snapshot, device *hipGemma4Q4DeviceD
 		}
 		if len(payloads) == 0 {
 			return core.E("rocm.hip.KVSnapshot.Capture", "device layer KV cache has no pages", nil)
+		}
+		snapshot.Layers[index].CacheIndex = layer.cache.blockSize
+		snapshot.Layers[index].CacheMode = hipKVSnapshotDevicePayloadMode
+		snapshot.Layers[index].TurboQuantPayloads = payloads
+	}
+	return nil
+}
+
+func hipAttachDeviceKVPayloadRange(snapshot *kv.Snapshot, device *hipGemma4Q4DeviceDecodeState, tokenStart, tokenCount int) error {
+	if snapshot == nil || device == nil {
+		return nil
+	}
+	if len(snapshot.Layers) != len(device.layers) {
+		return core.E("rocm.hip.KVSnapshot.Range", "device state layer count must match snapshot", nil)
+	}
+	for index, layer := range device.layers {
+		if layer.cache == nil {
+			return core.E("rocm.hip.KVSnapshot.Range", "device layer KV cache is nil", nil)
+		}
+		host, err := layer.cache.hostCache()
+		if err != nil {
+			return core.E("rocm.hip.KVSnapshot.Range", core.Sprintf("copy raw device KV layer %d", index), err)
+		}
+		payloads, err := host.rawRange(tokenStart, tokenCount)
+		if err != nil {
+			return core.E("rocm.hip.KVSnapshot.Range", core.Sprintf("slice raw device KV layer %d", index), err)
 		}
 		snapshot.Layers[index].CacheIndex = layer.cache.blockSize
 		snapshot.Layers[index].CacheMode = hipKVSnapshotDevicePayloadMode
@@ -630,7 +973,8 @@ func hipSnapshotHasDeviceKVPayloads(snapshot *kv.Snapshot) bool {
 }
 
 func hipRestoreGemma4Q4DeviceLayer(snapshot *kv.Snapshot, layerSnapshot kv.LayerSnapshot, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, engineConfig hipGemma4Q4EngineConfig, mode string, index int) (hipGemma4Q4DeviceLayerKVState, error) {
-	if index >= len(snapshot.Layers) || cfg.HeadDim <= 0 {
+	kvWidth := cfg.keyValueDim()
+	if index >= len(snapshot.Layers) || kvWidth <= 0 {
 		return hipGemma4Q4DeviceLayerKVState{}, core.E("rocm.hip.KVSnapshot.Restore", "raw device KV layer configuration is invalid", nil)
 	}
 	pages := make([]rocmDeviceKVPage, 0, len(layerSnapshot.TurboQuantPayloads))
@@ -649,7 +993,7 @@ func hipRestoreGemma4Q4DeviceLayer(snapshot *kv.Snapshot, layerSnapshot kv.Layer
 		if err != nil {
 			return hipGemma4Q4DeviceLayerKVState{}, core.E("rocm.hip.KVSnapshot.Restore", core.Sprintf("restore raw device KV layer %d", index), err)
 		}
-		if page.tokenStart != nextStart || page.tokenCount <= 0 || page.keyWidth != cfg.HeadDim || page.valueWidth != cfg.HeadDim {
+		if page.tokenStart != nextStart || page.tokenCount <= 0 || page.keyWidth != kvWidth || page.valueWidth != kvWidth {
 			_ = rocmDeviceKVTensorFreePair(driver, page.key, page.value)
 			return hipGemma4Q4DeviceLayerKVState{}, core.E("rocm.hip.KVSnapshot.Restore", "raw device KV page geometry is invalid", nil)
 		}
@@ -693,19 +1037,19 @@ func hipDecodeStatesEqual(left, right hipGemma4Q4DecodeState) bool {
 }
 
 // hipSliceDecodeStateTokens returns a host decode state holding only the
-// [start, start+count) token window of each layer (float32 rows, HeadDim wide).
+// [start, start+count) token window of each layer (float32 KV rows).
 func hipSliceDecodeStateTokens(host hipGemma4Q4DecodeState, cfg hipGemma4Q4ForwardConfig, start, count int) hipGemma4Q4DecodeState {
 	sliced := hipGemma4Q4DecodeState{Layers: make([]hipGemma4Q4LayerKVState, len(host.Layers))}
 	for index, layer := range host.Layers {
-		headDim := 0
+		rowWidth := 0
 		if index < len(cfg.Layers) {
-			headDim = cfg.Layers[index].HeadDim
+			rowWidth = cfg.Layers[index].keyValueDim()
 		}
-		if headDim <= 0 {
+		if rowWidth <= 0 {
 			continue
 		}
-		from := start * headDim
-		to := (start + count) * headDim
+		from := start * rowWidth
+		to := (start + count) * rowWidth
 		if from < 0 {
 			from = 0
 		}

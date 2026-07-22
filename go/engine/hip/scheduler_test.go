@@ -8,6 +8,7 @@ import (
 	"context"
 	"iter"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -639,6 +640,40 @@ func TestScheduler_Good_CloseIsIdempotent(t *testing.T) {
 	core.AssertEqual(t, 1, fake.closeCalls)
 }
 
+func TestScheduler_Good_CloseWaitsForFallbackWorker(t *testing.T) {
+	fake := newSchedulerCloseOrderModel()
+	model, err := NewScheduledModel(fake, SchedulerConfig{QueueSize: 1})
+	core.RequireNoError(t, err)
+
+	_, stream, err := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "closing", Prompt: "hold"})
+	core.RequireNoError(t, err)
+	<-fake.started
+
+	closeDone := make(chan core.Result, 1)
+	go func() {
+		closeDone <- model.Close()
+	}()
+	<-fake.cancelled
+
+	closedBeforeWorkerExit := false
+	select {
+	case <-fake.closed:
+		closedBeforeWorkerExit = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(fake.release)
+	_ = collectScheduledTokenText(stream)
+	core.RequireNoError(t, resultError(<-closeDone))
+	if closedBeforeWorkerExit {
+		t.Fatal("scheduler closed the wrapped model while its fallback worker was still generating")
+	}
+	select {
+	case <-fake.closed:
+	default:
+		t.Fatal("scheduler did not close the wrapped model after its fallback worker exited")
+	}
+}
+
 func TestScheduler_Bad_RejectsCancelledContextBeforeEnqueue(t *testing.T) {
 	model, err := NewScheduledModel(&schedulerFakeTextModel{tokens: []inference.Token{{Text: "ok"}}}, SchedulerConfig{QueueSize: 1})
 	core.RequireNoError(t, err)
@@ -791,6 +826,92 @@ func TestScheduler_Good_EmitsProbeEvents(t *testing.T) {
 	}
 }
 
+func TestScheduler_Good_SerializesProbeSinkDelivery(t *testing.T) {
+	generationRelease := make(chan struct{})
+	model, err := NewScheduledModel(&schedulerFakeTextModel{
+		tokens: []inference.Token{{Text: "a"}},
+		wait:   generationRelease,
+	}, SchedulerConfig{QueueSize: 1})
+	core.RequireNoError(t, err)
+	defer model.Close()
+
+	sink := newSchedulerBlockingProbeSink()
+	model.SetProbeSink(sink)
+	type scheduledResult struct {
+		stream <-chan inference.ScheduledToken
+		err    error
+	}
+	scheduled := make(chan scheduledResult, 1)
+	go func() {
+		_, stream, scheduleErr := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "serialized", Prompt: "x"})
+		scheduled <- scheduledResult{stream: stream, err: scheduleErr}
+	}()
+
+	first := <-sink.events
+	secondBeforeRelease := ""
+	select {
+	case secondBeforeRelease = <-sink.events:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(sink.release)
+	close(generationRelease)
+	result := <-scheduled
+	core.RequireNoError(t, result.err)
+	_ = collectScheduledTokenText(result.stream)
+
+	if secondBeforeRelease != "" {
+		t.Fatalf("probe sink entered concurrently for %q while %q was blocked", secondBeforeRelease, first)
+	}
+	if sink.concurrent.Load() {
+		t.Fatal("probe sink observed concurrent EmitProbe calls")
+	}
+}
+
+func TestScheduler_Good_RoutesRequestsThroughHIPLaneSet(t *testing.T) {
+	release := make(chan struct{})
+	barrier := &sync.WaitGroup{}
+	barrier.Add(2)
+	executor := &schedulerContinuousLaneExecutor{
+		prepareStarted: make(chan struct{}, 2),
+		releasePrepare: release,
+		prepareBarrier: barrier,
+	}
+	fake := &schedulerFakeTextModel{
+		batchStepAvailable: true,
+		laneExecutor:       executor,
+	}
+	model, err := NewScheduledModel(fake, SchedulerConfig{QueueSize: 2, MaxConcurrent: 2})
+	core.RequireNoError(t, err)
+	defer model.Close()
+
+	_, first, err := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "first", Prompt: "a", Sampler: inference.SamplerConfig{MaxTokens: 2}})
+	core.RequireNoError(t, err)
+	_, second, err := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "second", Prompt: "b c", Sampler: inference.SamplerConfig{MaxTokens: 2}})
+	core.RequireNoError(t, err)
+	<-executor.prepareStarted
+	<-executor.prepareStarted
+
+	firstTokens := make(chan []string, 1)
+	secondTokens := make(chan []string, 1)
+	go func() { firstTokens <- collectScheduledTokenText(first) }()
+	go func() { secondTokens <- collectScheduledTokenText(second) }()
+	close(release)
+
+	core.AssertEqual(t, []string{"11", "12"}, <-firstTokens)
+	core.AssertEqual(t, []string{"12", "13"}, <-secondTokens)
+	core.AssertEqual(t, 1, fake.openLaneSets)
+	if fake.laneSet.BatchForwardCount() == 0 {
+		t.Fatal("scheduled requests did not advance through the HIP lane set")
+	}
+	forwarded := 0
+	for _, call := range executor.forwardCalls {
+		forwarded += len(call)
+	}
+	if forwarded != 2 {
+		t.Fatalf("lane forward inputs = %d, want both scheduled requests", forwarded)
+	}
+}
+
 type schedulerFakeTextModel struct {
 	architecture       string
 	identity           inference.ModelIdentity
@@ -816,6 +937,72 @@ type schedulerFakeTextModel struct {
 	batchResults       []inference.BatchResult
 	batchErr           error
 	mutatePromptInputs bool
+	batchStepAvailable bool
+	laneExecutor       hipLaneExecutor
+	laneSet            *hipLaneSet
+	openLaneSets       int
+}
+
+type schedulerCloseOrderModel struct {
+	*schedulerFakeTextModel
+	started   chan struct{}
+	cancelled chan struct{}
+	release   chan struct{}
+	exited    chan struct{}
+	closed    chan struct{}
+}
+
+func newSchedulerCloseOrderModel() *schedulerCloseOrderModel {
+	return &schedulerCloseOrderModel{
+		schedulerFakeTextModel: &schedulerFakeTextModel{},
+		started:                make(chan struct{}),
+		cancelled:              make(chan struct{}),
+		release:                make(chan struct{}),
+		exited:                 make(chan struct{}),
+		closed:                 make(chan struct{}),
+	}
+}
+
+func (m *schedulerCloseOrderModel) Generate(ctx context.Context, _ string, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		close(m.started)
+		<-ctx.Done()
+		close(m.cancelled)
+		<-m.release
+		close(m.exited)
+	}
+}
+
+func (m *schedulerCloseOrderModel) Close() core.Result {
+	close(m.closed)
+	return core.Ok(nil)
+}
+
+type schedulerBlockingProbeSink struct {
+	events     chan string
+	release    chan struct{}
+	entries    atomic.Int32
+	active     atomic.Int32
+	concurrent atomic.Bool
+}
+
+func newSchedulerBlockingProbeSink() *schedulerBlockingProbeSink {
+	return &schedulerBlockingProbeSink{
+		events:  make(chan string, 8),
+		release: make(chan struct{}),
+	}
+}
+
+func (sink *schedulerBlockingProbeSink) EmitProbe(event inference.ProbeEvent) {
+	if sink.active.Add(1) > 1 {
+		sink.concurrent.Store(true)
+	}
+	entry := sink.entries.Add(1)
+	sink.events <- event.Labels["event"]
+	if entry == 1 {
+		<-sink.release
+	}
+	sink.active.Add(-1)
 }
 
 func (m *schedulerFakeTextModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
@@ -905,6 +1092,29 @@ func (m *schedulerFakeTextModel) Encode(prompt string) []int32 {
 	}
 	return ids
 }
+func (m *schedulerFakeTextModel) Decode(ids []int32) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return core.Sprintf("%d", ids[0])
+}
+func (m *schedulerFakeTextModel) ApplyChatTemplate(messages []inference.Message) (string, error) {
+	if len(messages) == 0 {
+		return "", nil
+	}
+	return messages[len(messages)-1].Content, nil
+}
+func (m *schedulerFakeTextModel) BatchStepAvailable() bool {
+	return m.batchStepAvailable
+}
+func (m *schedulerFakeTextModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.LaneSet, error) {
+	if !m.batchStepAvailable || m.laneExecutor == nil {
+		return nil, core.NewError("fake lane set is unavailable")
+	}
+	m.openLaneSets++
+	m.laneSet = newHIPLaneSetWithExecutor(cfg.MaxLanes, m.laneExecutor)
+	return m.laneSet, nil
+}
 func (m *schedulerFakeTextModel) ContextLength() int {
 	return m.contextLength
 }
@@ -958,6 +1168,48 @@ func (m *schedulerFakeTextModel) lastEncodeInput() string {
 	}
 	return m.encodeInputs[len(m.encodeInputs)-1]
 }
+
+type schedulerContinuousLaneExecutor struct {
+	prepareStarted chan struct{}
+	releasePrepare <-chan struct{}
+	prepareBarrier *sync.WaitGroup
+	forwardCalls   [][]hipLaneForwardInput
+}
+
+func (e *schedulerContinuousLaneExecutor) Prepare(ctx context.Context, spec inference.LaneSpec) (hipPreparedLane, error) {
+	e.prepareStarted <- struct{}{}
+	select {
+	case <-e.releasePrepare:
+	case <-ctx.Done():
+		return hipPreparedLane{}, ctx.Err()
+	}
+	if e.prepareBarrier != nil {
+		e.prepareBarrier.Done()
+		e.prepareBarrier.Wait()
+	}
+	return hipPreparedLane{
+		PendingToken: spec.PromptIDs[len(spec.PromptIDs)-1] + 10,
+		Position:     len(spec.PromptIDs),
+		Sample:       hipNewLaneSampleState(spec.Sampler, spec.SampleSeed),
+	}, nil
+}
+
+func (e *schedulerContinuousLaneExecutor) Forward(_ context.Context, inputs []hipLaneForwardInput) ([]hipLaneForwardOutput, error) {
+	e.forwardCalls = append(e.forwardCalls, append([]hipLaneForwardInput(nil), inputs...))
+	outputs := make([]hipLaneForwardOutput, len(inputs))
+	for index, input := range inputs {
+		outputs[index] = hipLaneForwardOutput{
+			PendingToken: input.PendingToken + 1,
+			Position:     input.Position + 1,
+			DeviceState:  input.DeviceState,
+			Sample:       input.Sample,
+		}
+	}
+	return outputs, nil
+}
+
+func (e *schedulerContinuousLaneExecutor) UsesSharedBatchForward() bool { return true }
+func (e *schedulerContinuousLaneExecutor) Close() error                 { return nil }
 
 func collectScheduledTokenText(stream <-chan inference.ScheduledToken) []string {
 	out := []string{}

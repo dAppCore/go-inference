@@ -121,6 +121,42 @@ type AudioModel interface {
 	AcceptsAudio() bool
 }
 
+// Transcriber is the optional capability a loaded model implements when it can turn spoken audio into
+// text — automatic speech recognition, POST /v1/audio/transcriptions' capability gate. Discovered the
+// same stability-contract way as every capability in this file: type-assertion against whatever --model
+// loaded, so serving never imports a concrete model package to name it. Unlike VisionModel/AudioModel —
+// which extend a TextModel's Chat turns with attached media — a Transcriber is not required to be a
+// TextModel at all: Whisper's encoder-decoder shape has no autoregressive causal-LM contract to satisfy
+// (model/arch/openai/whisper.Model deliberately never enters the TextModel factory — see its own doc
+// comment). TranscribeAudio carries the whole request/response itself (there is no separate Chat-like
+// method to gate, unlike AcceptsImages/AcceptsAudio's simple boolean probes) because ASR is a one-shot
+// operation with nothing else in TextModel's shape for it to attach to.
+type Transcriber interface {
+	// TranscribeAudio runs ASR on one WAV clip (16-bit PCM mono 16 kHz). language forces the source
+	// language ("en" or the bracketed "<|en|>" form); "" auto-detects. Returns the transcript, the
+	// resolved language code, and any error (e.g. audio longer than the checkpoint's fixed window).
+	TranscribeAudio(wavBytes []byte, language string) (text string, detectedLanguage string, err error)
+}
+
+// OCRModel is the optional capability a loaded model implements when it can turn an image of text
+// into a plain-text transcription — optical character recognition, `lem ocr`'s capability gate.
+// Discovered the same stability-contract way as every capability in this file: type-assertion
+// against whatever --model loaded, so serving never imports a concrete model package to name it.
+// Unlike VisionModel/AudioModel — which extend a TextModel's Chat turns with attached media — an
+// OCRModel is not required to be a TextModel at all: DeepSeek-OCR's dual-tower vision-encoder +
+// MoE-decoder shape has no autoregressive causal-LM contract to satisfy
+// (model/arch/deepseek-ai/deepseekvl2.Model deliberately never enters the TextModel factory — see
+// its own doc comment, mirroring Transcriber's identical reasoning above for Whisper's
+// encoder-decoder shape). OCRImage carries the whole request/response itself (there is no
+// separate Chat-like method to gate) because OCR, like transcription, is a one-shot operation
+// with nothing else in TextModel's shape for it to attach to.
+type OCRModel interface {
+	// OCRImage runs OCR on one image (PNG/JPEG bytes) with the given prompt ("" uses the loaded
+	// checkpoint's own recommended default prompt). Returns the transcribed text and any error
+	// (e.g. an image shape this lane doesn't yet support).
+	OCRImage(imageBytes []byte, prompt string) (text string, err error)
+}
+
 // cr := m.Classify(ctx, []string{"positive", "negative"})
 // results := cr.Value.([]inference.ClassifyResult)
 // label := results[0].Token.Text  // sampled token at last position

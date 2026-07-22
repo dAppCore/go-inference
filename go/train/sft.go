@@ -11,10 +11,13 @@
 //
 // Scope note (the honest boundary, mirroring engine/metal's LoRATrainer): the
 // only Trainer an engine implements today is the HEAD LoRA, which trains
-// full-sequence causal LM (each token predicts its own next token). The
-// inference.Batch carries a LossMask for response-only masking, but the current
-// engine trainer does not yet honour it — a LAYER-projection LoRA with response
-// masking is a separate engine train-step follow-up, not this loop.
+// full-sequence causal LM (each token predicts its own next token). A
+// LoRA.TargetKeys naming per-layer projections (q_proj, v_proj, …) is REFUSED
+// at trainer open by the metal engine (#31) — never silently trained as
+// head-only; leave TargetKeys empty (or ["lm_head"]) for the head. The
+// inference.Batch LossMask IS honoured by the engine trainers (response-only
+// masking: masked positions contribute zero loss and zero gradient, and the
+// loss normaliser divides by the unmasked count).
 
 package train
 
@@ -36,7 +39,9 @@ type SFTConfig struct {
 	Config
 	// LoRA supplies the adapter rank/alpha handed to the engine trainer at
 	// open. TargetKeys/BFloat16 are honoured by engines that support them; the
-	// head-LoRA trainer reads only rank/alpha.
+	// head-LoRA trainer reads rank/alpha and REFUSES TargetKeys it will not
+	// honour (anything but "lm_head" — see engine/metal #31), so a per-layer
+	// projection request fails at open instead of silently training the head.
 	LoRA inference.LoRAConfig
 	// SavePath is the final adapter destination (an adapter package dir).
 	SavePath string

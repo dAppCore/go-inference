@@ -97,19 +97,19 @@ func schedulerModeMetricsSink(t *testing.T, mode Mode) {
 	}
 }
 
-// TestModel_Chat_MetricsSink_Serial_Good pins the serial worker pool.
-func TestModel_Chat_MetricsSink_Serial_Good(t *testing.T) {
+// TestModel_Chat_MetricsSink_ModeSerial_Good pins the serial worker pool.
+func TestModel_Chat_MetricsSink_ModeSerial_Good(t *testing.T) {
 	schedulerModeMetricsSink(t, ModeSerial)
 }
 
-// TestModel_Chat_MetricsSink_Batch_Good pins continuous in-flight batching.
-func TestModel_Chat_MetricsSink_Batch_Good(t *testing.T) {
+// TestModel_Chat_MetricsSink_ModeBatch_Good pins continuous in-flight batching.
+func TestModel_Chat_MetricsSink_ModeBatch_Good(t *testing.T) {
 	schedulerModeMetricsSink(t, ModeBatch)
 }
 
-// TestModel_Chat_MetricsSink_Interleave_Good pins the live admission-budget
+// TestModel_Chat_MetricsSink_ModeInterleave_Good pins the live admission-budget
 // path (the base here exposes no lane set, so this is plain interleave).
-func TestModel_Chat_MetricsSink_Interleave_Good(t *testing.T) {
+func TestModel_Chat_MetricsSink_ModeInterleave_Good(t *testing.T) {
 	schedulerModeMetricsSink(t, ModeInterleave)
 }
 

@@ -13,8 +13,8 @@ import (
 // package-level example because stateHash is unexported.)
 func Example_stateHash() {
 	fmt.Println(len(stateHash("hello")))
-	fmt.Println(stateHash("hello") == stateHash("hello"))
-	fmt.Println(stateHash("hello") == stateHash("world"))
+	fmt.Println(stateHash("hello") == stateHash("hello")) // same input twice — pins determinism
+	fmt.Println(stateHash("hello") == stateHash("world")) // differing input — pins discrimination
 	// Output:
 	// 64
 	// true

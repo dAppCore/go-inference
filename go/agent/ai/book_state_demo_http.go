@@ -70,7 +70,7 @@ func (h bookStateDemoHandler) serveAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request BookStateAskRequest
-	if result := core.JSONUnmarshalString(dataResult.Value.(string), &request); !result.OK {
+	if result := core.JSONUnmarshalString(dataResult.String(), &request); !result.OK {
 		writeBookStateError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}

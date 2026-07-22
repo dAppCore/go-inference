@@ -67,10 +67,7 @@ func LoadFeatureConfig(modelPath string) (*FeatureConfig, error) {
 	if !read.OK {
 		return nil, nil
 	}
-	data, ok := read.Value.([]byte)
-	if !ok {
-		return nil, core.E("audio", "processor_config.json read returned non-byte data", nil)
-	}
+	data := read.Bytes()
 	var processor processorConfig
 	if r := core.JSONUnmarshal(data, &processor); !r.OK {
 		return nil, core.E("audio", "parse processor_config.json", nil)

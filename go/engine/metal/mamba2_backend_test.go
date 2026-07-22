@@ -8,7 +8,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/model/mamba2"
+	"dappco.re/go/inference/model/arch/mamba2"
 )
 
 func mbSyn(n, seed int) []float32 {

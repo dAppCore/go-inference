@@ -155,3 +155,59 @@ func TestServing_ServeProfile_StandardTuningProfileDir_Good(t *testing.T) {
 		t.Fatalf("standardTuningProfileDir = %q, want a .../Lethean/lem/tuning path", got)
 	}
 }
+
+// TestServing_ServeProfile_WriteTunedDraftBlockProfile_Good pins the
+// write/read round trip end to end: a profile written by
+// WriteTunedDraftBlockProfile is resolved straight back by
+// loadTunedDraftBlock/resolveServeDraftBlock — the exact contract `lem tune`'s
+// MTP block sweep and a later serve boot share.
+func TestServing_ServeProfile_WriteTunedDraftBlockProfile_Good(t *testing.T) {
+	dir := t.TempDir()
+	const model = "/models/Lemma-v2-e2b"
+	measurements := inference.TuningMeasurements{DecodeTokensPerSec: 88.5, PromptTokens: 12, GeneratedTokens: 64}
+	score := inference.ScoreTuningMeasurements(inference.TuningWorkloadChat, measurements)
+
+	path, err := WriteTunedDraftBlockProfile(dir, model, "machine-1", inference.TuningWorkloadChat, 6, measurements, score, 12345)
+	if err != nil {
+		t.Fatalf("WriteTunedDraftBlockProfile: %v", err)
+	}
+	if !core.HasSuffix(path, ".json") {
+		t.Fatalf("written path = %q, want a .json file", path)
+	}
+
+	data := core.ReadFile(path)
+	if !data.OK {
+		t.Fatalf("read written profile: %v", data.Error())
+	}
+	var profile inference.TuningProfile
+	if r := core.JSONUnmarshal(data.Value.([]byte), &profile); !r.OK {
+		t.Fatalf("unmarshal written profile: %v", r.Error())
+	}
+	if profile.Key.Model.Path != model || profile.Key.MachineHash != "machine-1" {
+		t.Fatalf("profile key = %+v, want model %q machine-1", profile.Key, model)
+	}
+	if profile.Candidate.Labels[tuneDraftBlockLabel] != "6" {
+		t.Fatalf("profile block label = %q, want %q", profile.Candidate.Labels[tuneDraftBlockLabel], "6")
+	}
+
+	// The read side (matched by content, not filename) resolves the same block.
+	block, resolvedPath := loadTunedDraftBlock(dir, model, "machine-1")
+	if block != 6 || resolvedPath != path {
+		t.Fatalf("loadTunedDraftBlock = (%d, %q), want (6, %q)", block, resolvedPath, path)
+	}
+}
+
+// TestServing_ServeProfile_WriteTunedDraftBlockProfile_Bad pins the guard: an
+// out-of-range block (loadTunedDraftBlock would silently discard it) is
+// refused up front rather than written as a profile serve can never apply.
+func TestServing_ServeProfile_WriteTunedDraftBlockProfile_Bad(t *testing.T) {
+	dir := t.TempDir()
+	for _, block := range []int{0, 1, 9, -3} {
+		if _, err := WriteTunedDraftBlockProfile(dir, "/models/x", "", inference.TuningWorkloadChat, block, inference.TuningMeasurements{}, inference.TuningScore{}, 1); err == nil {
+			t.Fatalf("WriteTunedDraftBlockProfile(block=%d) = nil error, want a range refusal", block)
+		}
+	}
+	if files := core.PathGlob(core.JoinPath(dir, "*.json")); len(files) != 0 {
+		t.Fatalf("a refused write must leave no file behind, found %v", files)
+	}
+}

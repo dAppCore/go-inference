@@ -132,10 +132,112 @@ func TestHostTopKSamplePreferred(t *testing.T) {
 	if hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 32) {
 		t.Fatal("fixture vocab must not prefer host select")
 	}
-	if !hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 262144) {
-		t.Fatal("TopK=40 at 262k vocab must prefer host select")
+	if topKReduceSampleUsable(40, 262144) {
+		// #23: with the reduction-shaped device pick available, real-vocab TopK routes DEVICE —
+		// that is the flip this preference rule now encodes.
+		if hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 262144) {
+			t.Fatal("TopK=40 at 262k vocab must prefer the reduce device pick when its pipelines exist")
+		}
+	} else if !hostTopKSamplePreferred(model.SampleParams{TopK: 40}, 262144) {
+		t.Fatal("TopK=40 at 262k vocab must prefer host select when the reduce pick is unavailable")
 	}
 	if hostTopKSamplePreferred(model.SampleParams{TopK: headSampleTopKMaxK + 1}, 262144) {
 		t.Fatal("TopK beyond the max stays on the generic host sampler")
+	}
+}
+
+// TestHostTopKCandidatesBF16_KeySelectMatchesFloatSelect pins the #23 monotonic-key select against
+// the float select it replaced: over many random real-vocab fixtures (and one with negatives-only,
+// one with an odd-aligned view exercising the byte-wise fallback), both paths must select the SAME
+// candidate value multiset — the bit-space transform is order-exact for every non-NaN bf16, so any
+// divergence is a select bug, not a tie artefact (ties at the k boundary may swap IDS, so the
+// assertion compares sorted candidate VALUES).
+func TestHostTopKCandidatesBF16_KeySelectMatchesFloatSelect(t *testing.T) {
+	floatSelect := func(logits []byte, vocab, k int) []float32 {
+		var slotF [headSampleTopKMaxK]float32
+		var idsF [headSampleTopKMaxK]int32
+		n := 0
+		minVal := float32(0)
+		minIdx := 0
+		for i := range vocab {
+			v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1])
+			if n == k && v <= minVal {
+				continue
+			}
+			if n < k {
+				slotF[n] = v
+				idsF[n] = int32(i)
+				n++
+				if n == k {
+					minVal, minIdx = slotF[0], 0
+					for j := 1; j < k; j++ {
+						if slotF[j] < minVal {
+							minVal, minIdx = slotF[j], j
+						}
+					}
+				}
+				continue
+			}
+			slotF[minIdx] = v
+			idsF[minIdx] = int32(i)
+			minVal, minIdx = slotF[0], 0
+			for j := 1; j < k; j++ {
+				if slotF[j] < minVal {
+					minVal, minIdx = slotF[j], j
+				}
+			}
+		}
+		out := make([]float32, n)
+		for j := range out {
+			out[j] = slotF[j]
+		}
+		sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
+		return out
+	}
+	for seed := int64(1); seed <= 8; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		const vocab, k = 8192, 40
+		f := make([]float32, vocab)
+		for i := range f {
+			f[i] = float32(rng.NormFloat64() * 3)
+			if seed == 3 {
+				f[i] = -1 - float32(i%7)*0.25 // negatives-only fixture: the sign-flip half of the transform
+			}
+		}
+		logits := bf16FromF32s(f)
+		var vals [headSampleTopKMaxK * bf16Size]byte
+		var ids [headSampleTopKMaxK]int32
+		got, gotIDs := hostTopKCandidatesBF16(logits, vocab, k, nil, vals[:], ids[:])
+		if len(gotIDs) != k {
+			t.Fatalf("seed %d: selected %d candidates, want %d", seed, len(gotIDs), k)
+		}
+		gotVals := make([]float32, k)
+		for j := range gotVals {
+			gotVals[j] = bf16ToF32(got[j*bf16Size], got[j*bf16Size+1])
+		}
+		sort.Slice(gotVals, func(a, b int) bool { return gotVals[a] < gotVals[b] })
+		want := floatSelect(logits, vocab, k)
+		for j := range want {
+			if gotVals[j] != want[j] {
+				t.Fatalf("seed %d: candidate value %d = %g, want %g (key select diverged from float select)", seed, j, gotVals[j], want[j])
+			}
+		}
+		// Odd-aligned view: the same fixture through the byte-wise fallback must agree too.
+		padded := append(make([]byte, 1), logits...)
+		oddView := padded[1:]
+		gotOdd, oddIDs := hostTopKCandidatesBF16(oddView, vocab, k, nil, vals[:], ids[:])
+		if len(oddIDs) != k {
+			t.Fatalf("seed %d: odd-aligned selected %d, want %d", seed, len(oddIDs), k)
+		}
+		oddVals := make([]float32, k)
+		for j := range oddVals {
+			oddVals[j] = bf16ToF32(gotOdd[j*bf16Size], gotOdd[j*bf16Size+1])
+		}
+		sort.Slice(oddVals, func(a, b int) bool { return oddVals[a] < oddVals[b] })
+		for j := range want {
+			if oddVals[j] != want[j] {
+				t.Fatalf("seed %d: odd-aligned candidate %d = %g, want %g", seed, j, oddVals[j], want[j])
+			}
+		}
 	}
 }

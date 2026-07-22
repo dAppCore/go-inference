@@ -68,8 +68,14 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	switch args[0] {
 	case "serve":
 		return runServeCommand(ctx, args[1:], stdout, stderr)
+	case "bench":
+		return runBenchCommand(ctx, args[1:], stdout, stderr)
 	case "generate":
 		return runGenerateCommand(ctx, args[1:], stdout, stderr)
+	case "transcribe":
+		return runTranscribeCommand(ctx, args[1:], stdout, stderr)
+	case "ocr":
+		return runOCRCommand(ctx, args[1:], stdout, stderr)
 	case "ssd":
 		return runSSDCommand(ctx, args[1:], stdout, stderr)
 	case "sft":
@@ -80,6 +86,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runPackCommand(ctx, args[1:], stdout, stderr)
 	case "quant":
 		return runQuantCommand(ctx, args[1:], stdout, stderr)
+	case "data":
+		return runDataCommand(ctx, args[1:], stdout, stderr)
 	case "spec":
 		return runSpecCommand(ctx, args[1:], stdout, stderr)
 	case "ebook":
@@ -106,6 +114,8 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "Run inference\n")
 	core.WriteString(w, "  serve               host OpenAI/Anthropic/Ollama HTTP API for a loaded model\n")
 	core.WriteString(w, "  generate            one-shot generate + decode tok/s (no serve; like-for-like bench)\n")
+	core.WriteString(w, "  transcribe          transcribe a WAV clip through a loaded Whisper checkpoint (ASR)\n")
+	core.WriteString(w, "  ocr                 run OCR on an image through a loaded DeepSeek-OCR checkpoint\n")
 	core.WriteString(w, "  tui                 chat with a model in the terminal (picker, streaming, thinking channel)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Train\n")
@@ -120,6 +130,9 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Convert\n")
 	core.WriteString(w, "  quant               quantise a dense model dir (MLX, GPTQ, FP8, NF4, or GGUF)\n")
+	core.WriteString(w, "\n")
+	core.WriteString(w, "Data\n")
+	core.WriteString(w, "  data                the training-data loop: create/list/stats/import/score/export/archive/review\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "API\n")
 	core.WriteString(w, "  spec                export the OpenAPI document for lem's HTTP surface (feeds SDK generation)\n")

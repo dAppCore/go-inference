@@ -359,7 +359,7 @@ func validateROCmChatMessages(operation string, messages []inference.Message) er
 		default:
 			return core.E(operation, core.Sprintf("message %d role must be system, developer, user, assistant, or tool", index), nil)
 		}
-		if core.Trim(message.Content) != "" {
+		if core.Trim(message.Content) != "" || len(message.Images) > 0 || len(message.Audios) > 0 || len(message.Videos) > 0 {
 			hasContent = true
 		}
 	}

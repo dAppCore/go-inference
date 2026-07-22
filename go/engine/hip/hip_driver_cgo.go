@@ -47,6 +47,12 @@ typedef struct {
 
 typedef struct {
 	int rc;
+	void* host;
+	uintptr_t device;
+} core_rocm_hip_host_result;
+
+typedef struct {
+	int rc;
 	uint64_t value;
 } core_rocm_hip_uint64_result;
 
@@ -485,7 +491,7 @@ static int core_rocm_hip_device_synchronize() {
 	return fn();
 }
 
-static int core_rocm_hip_host_malloc_mapped(uintptr_t* host_out, uintptr_t* device_out, size_t size) {
+static int core_rocm_hip_host_malloc_mapped(void** host_out, uintptr_t* device_out, size_t size) {
 	static hipHostMalloc_t cached_malloc = NULL;
 	static hipHostGetDevicePointer_t cached_pointer = NULL;
 	static hipHostFree_t cached_free = NULL;
@@ -524,22 +530,22 @@ static int core_rocm_hip_host_malloc_mapped(uintptr_t* host_out, uintptr_t* devi
 		free_fn(host);
 		return rc;
 	}
-	*host_out = (uintptr_t)host;
+	*host_out = host;
 	*device_out = (uintptr_t)device;
 	return 0;
 }
 
-static core_rocm_hip_uintptr2_result core_rocm_hip_host_malloc_mapped_result(size_t size) {
-	core_rocm_hip_uintptr2_result result = {0, 0, 0};
-	uintptr_t host = 0;
+static core_rocm_hip_host_result core_rocm_hip_host_malloc_mapped_result(size_t size) {
+	core_rocm_hip_host_result result = {0, NULL, 0};
+	void* host = NULL;
 	uintptr_t device = 0;
 	result.rc = core_rocm_hip_host_malloc_mapped(&host, &device, size);
-	result.first = host;
-	result.second = device;
+	result.host = host;
+	result.device = device;
 	return result;
 }
 
-static int core_rocm_hip_host_free(uintptr_t host) {
+static int core_rocm_hip_host_free(void* host) {
 	static hipHostFree_t cached = NULL;
 	hipHostFree_t fn = cached;
 	if (fn == NULL) {
@@ -551,10 +557,10 @@ static int core_rocm_hip_host_free(uintptr_t host) {
 	if (fn == NULL) {
 		return -100014;
 	}
-	return fn((void*)host);
+	return fn(host);
 }
 
-static int core_rocm_hip_host_malloc_pinned(uintptr_t* host_out, size_t size) {
+static int core_rocm_hip_host_malloc_pinned(void** host_out, size_t size) {
 	static hipHostMalloc_t cached = NULL;
 	hipHostMalloc_t malloc_fn = cached;
 	if (malloc_fn == NULL) {
@@ -571,15 +577,15 @@ static int core_rocm_hip_host_malloc_pinned(uintptr_t* host_out, size_t size) {
 	if (rc != 0) {
 		return rc;
 	}
-	*host_out = (uintptr_t)host;
+	*host_out = host;
 	return 0;
 }
 
-static core_rocm_hip_uintptr2_result core_rocm_hip_host_malloc_pinned_result(size_t size) {
-	core_rocm_hip_uintptr2_result result = {0, 0, 0};
-	uintptr_t host = 0;
+static core_rocm_hip_host_result core_rocm_hip_host_malloc_pinned_result(size_t size) {
+	core_rocm_hip_host_result result = {0, NULL, 0};
+	void* host = NULL;
 	result.rc = core_rocm_hip_host_malloc_pinned(&host, size);
-	result.first = host;
+	result.host = host;
 	return result;
 }
 
@@ -689,6 +695,8 @@ const (
 	cgoHIPLaunchArgArenaBytes = cgoHIPLaunchArgRingSize * cgoHIPLaunchArgSlotBytes
 	cgoHIPAsyncCopyRingSize   = 8192
 	cgoHIPAsyncCopyMaxBytes   = 1 << 20
+	cgoHIPKernelBatchAlign    = 16
+	cgoHIPKernelBatchMinBytes = 128 << 10
 )
 
 type cgoHIPCachedModule struct {
@@ -719,6 +727,22 @@ var cgoHIPLaunchArgBuffer = struct {
 	bytes   uint64
 	mapped  bool
 }{}
+
+var cgoHIPKernelBatchBuffer = struct {
+	sync.Mutex
+	pointer         nativeDevicePointer
+	bytes           uint64
+	payload         []byte
+	offsets         []uint64
+	functions       []C.uintptr_t
+	owner           cgoHIPDriver
+	ownerModulePath string
+	ownerSet        bool
+}{}
+
+func cgoHIPKernelBatchOwnerMatches(owner cgoHIPDriver, ownerModulePath string, ownerSet bool, driver cgoHIPDriver, modulePath string) bool {
+	return ownerSet && owner == driver && ownerModulePath == modulePath
+}
 
 type cgoHIPLaunchArgSlot struct {
 	pointer  nativeDevicePointer
@@ -1110,6 +1134,153 @@ func (driver cgoHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 	return nil
 }
 
+func (driver cgoHIPDriver) LaunchKernelBatch(configs []hipKernelLaunchConfig) error {
+	if len(configs) == 0 {
+		return nil
+	}
+	if !driver.Available() {
+		return core.E("rocm.hip.LaunchKernelBatch", "HIP driver is not available", nil)
+	}
+	modulePath := driver.kernelModulePath
+	if modulePath == "" {
+		modulePath = hipKernelModulePath()
+	}
+	if modulePath == "" {
+		return core.E("rocm.hip.LaunchKernelBatch", "kernel module sidecar or "+hipKernelModuleEnv+" is not set; native HIP kernels are not linked yet", nil)
+	}
+
+	cgoHIPKernelBatchBuffer.Lock()
+	defer cgoHIPKernelBatchBuffer.Unlock()
+	if err := driver.ensureKernelBatchOwner(modulePath); err != nil {
+		return err
+	}
+	offsets, totalBytes, err := cgoHIPKernelBatchLayout(configs, cgoHIPKernelBatchBuffer.offsets[:0])
+	if err != nil {
+		return err
+	}
+	cgoHIPKernelBatchBuffer.offsets = offsets
+	if err := driver.ensureKernelBatchBuffer(totalBytes); err != nil {
+		return err
+	}
+	functions := cgoHIPKernelBatchBuffer.functions[:0]
+	for index := range configs {
+		function, err := cgoHIPCachedFunction(modulePath, configs[index].Name)
+		if err != nil {
+			return err
+		}
+		functions = append(functions, function)
+	}
+	cgoHIPKernelBatchBuffer.functions = functions
+	payload := cgoHIPKernelBatchBuffer.payload[:int(totalBytes)]
+	clear(payload)
+	for index := range configs {
+		copy(payload[int(offsets[index]):], configs[index].Args)
+	}
+	if err := driver.CopyHostToDeviceAsync(cgoHIPKernelBatchBuffer.pointer, payload); err != nil {
+		return core.E("rocm.hip.LaunchKernelBatch", "copy kernel argument batch", err)
+	}
+	for index := range configs {
+		config := configs[index]
+		packetPointer := cgoHIPKernelBatchBuffer.pointer + nativeDevicePointer(offsets[index])
+		if rc := C.core_rocm_hip_module_launch_kernel(
+			functions[index],
+			C.uint(config.GridX),
+			C.uint(config.GridY),
+			C.uint(config.GridZ),
+			C.uint(config.BlockX),
+			C.uint(config.BlockY),
+			C.uint(config.BlockZ),
+			C.uint(config.SharedMemBytes),
+			C.uintptr_t(packetPointer),
+		); rc != 0 {
+			return hipReturnError("hipModuleLaunchKernel", int(rc))
+		}
+	}
+	return nil
+}
+
+func (driver cgoHIPDriver) ensureKernelBatchOwner(modulePath string) error {
+	if cgoHIPKernelBatchOwnerMatches(cgoHIPKernelBatchBuffer.owner, cgoHIPKernelBatchBuffer.ownerModulePath, cgoHIPKernelBatchBuffer.ownerSet, driver, modulePath) {
+		return nil
+	}
+	if cgoHIPKernelBatchBuffer.ownerSet && cgoHIPKernelBatchBuffer.pointer != 0 {
+		previousOwner := cgoHIPKernelBatchBuffer.owner
+		if err := previousOwner.DeviceSynchronize(); err != nil {
+			return err
+		}
+		if err := previousOwner.Free(cgoHIPKernelBatchBuffer.pointer); err != nil {
+			return err
+		}
+		cgoHIPKernelBatchBuffer.pointer = 0
+		cgoHIPKernelBatchBuffer.bytes = 0
+	}
+	cgoHIPKernelBatchBuffer.owner = driver
+	cgoHIPKernelBatchBuffer.ownerModulePath = modulePath
+	cgoHIPKernelBatchBuffer.ownerSet = true
+	return nil
+}
+
+func cgoHIPKernelBatchLayout(configs []hipKernelLaunchConfig, offsets []uint64) ([]uint64, uint64, error) {
+	if cap(offsets) < len(configs) {
+		offsets = make([]uint64, 0, len(configs))
+	} else {
+		offsets = offsets[:0]
+	}
+	var total uint64
+	for index := range configs {
+		if err := configs[index].Validate(); err != nil {
+			return offsets, 0, err
+		}
+		if total > ^uint64(0)-(cgoHIPKernelBatchAlign-1) {
+			return offsets, 0, core.E("rocm.hip.LaunchKernelBatch", "kernel argument batch size overflow", nil)
+		}
+		total = (total + cgoHIPKernelBatchAlign - 1) &^ uint64(cgoHIPKernelBatchAlign-1)
+		offsets = append(offsets, total)
+		packetBytes := uint64(len(configs[index].Args))
+		if total > ^uint64(0)-packetBytes {
+			return offsets, 0, core.E("rocm.hip.LaunchKernelBatch", "kernel argument batch size overflow", nil)
+		}
+		total += packetBytes
+	}
+	return offsets, total, nil
+}
+
+func (driver cgoHIPDriver) ensureKernelBatchBuffer(size uint64) error {
+	if cgoHIPKernelBatchBuffer.pointer != 0 && cgoHIPKernelBatchBuffer.bytes >= size {
+		return nil
+	}
+	want := uint64(cgoHIPKernelBatchMinBytes)
+	for want < size {
+		if want > ^uint64(0)/2 {
+			want = size
+			break
+		}
+		want *= 2
+	}
+	if cgoHIPKernelBatchBuffer.pointer != 0 {
+		if rc := C.core_rocm_hip_device_synchronize(); rc != 0 {
+			return hipReturnError("hipDeviceSynchronize", int(rc))
+		}
+		if err := driver.Free(cgoHIPKernelBatchBuffer.pointer); err != nil {
+			return err
+		}
+		cgoHIPKernelBatchBuffer.pointer = 0
+		cgoHIPKernelBatchBuffer.bytes = 0
+	}
+	pointer, err := driver.Malloc(want)
+	if err != nil {
+		return core.E("rocm.hip.LaunchKernelBatch", "allocate kernel argument batch", err)
+	}
+	cgoHIPKernelBatchBuffer.pointer = pointer
+	cgoHIPKernelBatchBuffer.bytes = want
+	if uint64(cap(cgoHIPKernelBatchBuffer.payload)) < want {
+		cgoHIPKernelBatchBuffer.payload = make([]byte, want)
+	} else {
+		cgoHIPKernelBatchBuffer.payload = cgoHIPKernelBatchBuffer.payload[:want]
+	}
+	return nil
+}
+
 func (driver cgoHIPDriver) PrewarmKernelFunctions(kernelNames []string) {
 	if !driver.Available() {
 		return
@@ -1233,8 +1404,8 @@ func (driver cgoHIPDriver) useLaunchArgArenaSlot(slot *cgoHIPLaunchArgSlot, slot
 			cgoHIPLaunchArgRing.arenaUnavailable = true
 			return false, nil
 		}
-		cgoHIPLaunchArgRing.arenaHost = unsafe.Pointer(uintptr(result.first))
-		cgoHIPLaunchArgRing.arenaPointer = nativeDevicePointer(result.second)
+		cgoHIPLaunchArgRing.arenaHost = result.host
+		cgoHIPLaunchArgRing.arenaPointer = nativeDevicePointer(result.device)
 	}
 	pointer, ok := cgoHIPLaunchArgArenaSlotPointer(cgoHIPLaunchArgRing.arenaPointer, slotIndex, packetBytes)
 	if !ok {
@@ -1315,7 +1486,7 @@ func (driver cgoHIPDriver) allocateLaunchArgBuffer(size uint64) (unsafe.Pointer,
 	if cgoHIPLaunchArgModeConfig().mapped {
 		result := C.core_rocm_hip_host_malloc_mapped_result(C.size_t(size))
 		if result.rc == 0 {
-			return unsafe.Pointer(uintptr(result.first)), nativeDevicePointer(result.second), true, nil
+			return result.host, nativeDevicePointer(result.device), true, nil
 		}
 	}
 	pointer, err := driver.Malloc(size)
@@ -1345,13 +1516,13 @@ func (driver cgoHIPDriver) resizeLaunchArgSlot(slot *cgoHIPLaunchArgSlot, size u
 			if cgoHIPLaunchArgEventsEnabled() {
 				eventResult := C.core_rocm_hip_event_create_result()
 				if eventResult.rc != 0 {
-					_ = C.core_rocm_hip_host_free(result.first)
+					_ = C.core_rocm_hip_host_free(result.host)
 					return hipReturnError("hipEventCreateWithFlags", int(eventResult.rc))
 				}
 				event = eventResult.first
 			}
-			slot.host = unsafe.Pointer(uintptr(result.first))
-			slot.pointer = nativeDevicePointer(result.second)
+			slot.host = result.host
+			slot.pointer = nativeDevicePointer(result.device)
 			slot.event = event
 			slot.bytes = size
 			slot.mapped = true
@@ -1365,20 +1536,20 @@ func (driver cgoHIPDriver) resizeLaunchArgSlot(slot *cgoHIPLaunchArgSlot, size u
 	}
 	pointer, err := driver.Malloc(size)
 	if err != nil {
-		_ = C.core_rocm_hip_host_free(hostResult.first)
+		_ = C.core_rocm_hip_host_free(hostResult.host)
 		return err
 	}
 	event := C.uintptr_t(0)
 	if cgoHIPLaunchArgEventsEnabled() {
 		eventResult := C.core_rocm_hip_event_create_result()
 		if eventResult.rc != 0 {
-			_ = C.core_rocm_hip_host_free(hostResult.first)
+			_ = C.core_rocm_hip_host_free(hostResult.host)
 			_ = driver.Free(pointer)
 			return hipReturnError("hipEventCreateWithFlags", int(eventResult.rc))
 		}
 		event = eventResult.first
 	}
-	slot.host = unsafe.Pointer(uintptr(hostResult.first))
+	slot.host = hostResult.host
 	slot.pointer = pointer
 	slot.event = event
 	slot.bytes = size
@@ -1405,7 +1576,7 @@ func (driver cgoHIPDriver) freeLaunchArgSlot(slot *cgoHIPLaunchArgSlot) error {
 		slot.event = 0
 	}
 	if slot.host != nil && !slot.arena {
-		if rc := C.core_rocm_hip_host_free(C.uintptr_t(uintptr(slot.host))); rc != 0 {
+		if rc := C.core_rocm_hip_host_free(slot.host); rc != 0 {
 			lastErr = hipReturnError("hipHostFree", int(rc))
 		}
 	}
@@ -1441,10 +1612,10 @@ func (driver cgoHIPDriver) resizeAsyncCopySlot(slot *cgoHIPAsyncCopySlot, size u
 	}
 	eventResult := C.core_rocm_hip_event_create_result()
 	if eventResult.rc != 0 {
-		_ = C.core_rocm_hip_host_free(hostResult.first)
+		_ = C.core_rocm_hip_host_free(hostResult.host)
 		return hipReturnError("hipEventCreateWithFlags", int(eventResult.rc))
 	}
-	slot.host = unsafe.Pointer(uintptr(hostResult.first))
+	slot.host = hostResult.host
 	slot.event = eventResult.first
 	slot.bytes = size
 	return nil
@@ -1468,7 +1639,7 @@ func (driver cgoHIPDriver) freeAsyncCopySlot(slot *cgoHIPAsyncCopySlot) error {
 		slot.event = 0
 	}
 	if slot.host != nil {
-		if rc := C.core_rocm_hip_host_free(C.uintptr_t(uintptr(slot.host))); rc != 0 {
+		if rc := C.core_rocm_hip_host_free(slot.host); rc != 0 {
 			lastErr = hipReturnError("hipHostFree", int(rc))
 		}
 		slot.host = nil
@@ -1485,7 +1656,7 @@ func (driver cgoHIPDriver) freeLaunchArgBuffer(host unsafe.Pointer, pointer nati
 		if host == nil {
 			return nil
 		}
-		if rc := C.core_rocm_hip_host_free(C.uintptr_t(uintptr(host))); rc != 0 {
+		if rc := C.core_rocm_hip_host_free(host); rc != 0 {
 			return hipReturnError("hipHostFree", int(rc))
 		}
 		return nil

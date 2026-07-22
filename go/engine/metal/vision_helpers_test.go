@@ -4,7 +4,12 @@
 
 package native
 
-import "testing"
+import (
+	"bytes"
+	"image"
+	"image/png"
+	"testing"
+)
 
 func TestVisionGridForPatchCount(t *testing.T) {
 	tests := []struct {
@@ -492,5 +497,47 @@ func TestVisionTowerRejectsNilWeights(t *testing.T) {
 	patches := toBF16Bytes([]float32{1, 2})
 	if _, err := VisionTower(patches, nil, cfg); err == nil {
 		t.Fatal("VisionTower(nil weights) error = nil")
+	}
+}
+
+// TestVisionImagePatchesGrid_Good pins the true-grid threading: a portrait
+// image whose grid (6 rows × 3 cols) is NOT the most-square factorisation of
+// its patch count returns the REAL dims — the seam that stops VisionTower
+// re-deriving a transposed grid for every non-square image.
+func TestVisionImagePatchesGrid_Good(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 48, 96)) // W=48 H=96 → grid 6×3 at patch 16
+	for i := range img.Pix {
+		img.Pix[i] = byte(i * 7)
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode probe: %v", err)
+	}
+	cfg := &VisionImageFeatureConfig{PatchSize: 16, MaxSoftTokens: 1120, PoolingKernelSize: 3}
+	patches, gridH, gridW, softTokens, err := VisionImagePatchesGrid(buf.Bytes(), cfg)
+	if err != nil {
+		t.Fatalf("VisionImagePatchesGrid: %v", err)
+	}
+	if gridH != 6 || gridW != 3 {
+		t.Fatalf("grid = %dx%d, want 6x3 (the true portrait grid, not a transposed factorisation)", gridH, gridW)
+	}
+	if wantRows := gridH * gridW; len(patches) != wantRows*16*16*3*2 || softTokens != wantRows/9 {
+		t.Fatalf("patches %d bytes, soft %d — want %d rows and %d soft tokens", len(patches), softTokens, wantRows, wantRows/9)
+	}
+}
+
+// TestNativeTokenModel_ProjectImageFeaturesAt_Bad pins the At entry's guards:
+// nil model and non-positive grid dims refuse before any tower work.
+func TestNativeTokenModel_ProjectImageFeaturesAt_Bad(t *testing.T) {
+	var nilModel *NativeTokenModel
+	if _, err := nilModel.ProjectImageFeaturesAt(nil, 2, 3); err == nil {
+		t.Fatal("nil model must refuse")
+	}
+	m := &NativeTokenModel{}
+	if _, err := m.ProjectImageFeaturesAt([]byte{0, 0}, 0, 3); err == nil {
+		t.Fatal("zero gridH must refuse")
+	}
+	if _, err := m.ProjectImageFeaturesAt([]byte{0, 0}, 2, -1); err == nil {
+		t.Fatal("negative gridW must refuse")
 	}
 }

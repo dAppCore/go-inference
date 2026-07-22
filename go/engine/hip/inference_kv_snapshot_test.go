@@ -5,7 +5,7 @@
 // inference_kv_snapshot_test.go is the HARDWARE-FREE receipt for the structural
 // reconcile (hip host decode state <-> kv.Snapshot). It exercises the pure
 // float32 converter with synthetic per-layer K/V — no HIP device, no GPU — so
-// it runs on any linux/amd64 host (Snider's box or a linux CI), not just on the
+// it runs on any linux/amd64 host (a dev box or a linux CI), not just on the
 // AMD hardware the full engine.Session parity test needs. It proves the one
 // property the converter must have: capture -> snapshot -> restore reproduces
 // hip's per-layer float32 K/V exactly.
@@ -85,6 +85,9 @@ func TestInferenceKVSnapshot_Roundtrip_Good(t *testing.T) {
 		t.Fatalf("snapshot geometry = layers %d headDim %d seqLen %d, want %d %d %d",
 			snapshot.NumLayers, snapshot.HeadDim, snapshot.SeqLen, layers, headDim, tokens)
 	}
+	if snapshot.Architecture != "gemma4_text" {
+		t.Fatalf("snapshot Architecture = %q, want dtype-neutral gemma4_text", snapshot.Architecture)
+	}
 	if snapshot.NumHeads != 1 {
 		t.Fatalf("snapshot NumHeads = %d, want 1 (single KV row per token)", snapshot.NumHeads)
 	}
@@ -124,6 +127,66 @@ func TestInferenceKVSnapshot_Roundtrip_RawKVOnly(t *testing.T) {
 	}
 	if !hipKVStatesEqual(host, restored) {
 		t.Fatal("RawKVOnly roundtrip host decode state differs from the original")
+	}
+}
+
+func TestInferenceKVSnapshot_Roundtrip_MultiKVHead_Good(t *testing.T) {
+	const headDim, keyHeads, tokens = 4, 3, 2
+	cfg := hipKVSnapshotTestConfig(headDim)
+	cfg.Layers[0].KeyHeads = keyHeads
+	host := hipKVSnapshotTestState(headDim*keyHeads, tokens, 1)
+
+	snapshot, err := hipDecodeStateToSnapshot(host, cfg, nil, nil, kv.CaptureOptions{})
+	if err != nil {
+		t.Fatalf("hipDecodeStateToSnapshot(multi-head): %v", err)
+	}
+	if snapshot.NumHeads != keyHeads || snapshot.SeqLen != tokens {
+		t.Fatalf("snapshot geometry = heads %d seqLen %d, want %d %d", snapshot.NumHeads, snapshot.SeqLen, keyHeads, tokens)
+	}
+	wantShape := []int32{1, keyHeads, tokens, headDim}
+	if len(snapshot.Layers[0].KeyShape) != len(wantShape) {
+		t.Fatalf("KeyShape = %v, want %v", snapshot.Layers[0].KeyShape, wantShape)
+	}
+	for index := range wantShape {
+		if snapshot.Layers[0].KeyShape[index] != wantShape[index] {
+			t.Fatalf("KeyShape = %v, want %v", snapshot.Layers[0].KeyShape, wantShape)
+		}
+	}
+	if len(snapshot.Layers[0].Heads) != keyHeads {
+		t.Fatalf("snapshot heads = %d, want %d", len(snapshot.Layers[0].Heads), keyHeads)
+	}
+	wantHead0 := []float32{0, 1, 2, 3, 12, 13, 14, 15}
+	if !hipKVFloat32SlicesEqual(snapshot.Layers[0].Heads[0].Key, wantHead0) {
+		t.Fatalf("head 0 key = %v, want %v", snapshot.Layers[0].Heads[0].Key, wantHead0)
+	}
+	restored, err := hipSnapshotToDecodeState(snapshot, cfg)
+	if err != nil {
+		t.Fatalf("hipSnapshotToDecodeState(multi-head): %v", err)
+	}
+	if !hipKVStatesEqual(host, restored) {
+		t.Fatal("multi-head roundtrip host decode state differs from the original")
+	}
+}
+
+func TestInferenceKVSnapshot_Roundtrip_MultiKVHeadRawKVOnly_Good(t *testing.T) {
+	const headDim, keyHeads, tokens = 2, 4, 3
+	cfg := hipKVSnapshotTestConfig(headDim)
+	cfg.Layers[0].KeyHeads = keyHeads
+	host := hipKVSnapshotTestState(headDim*keyHeads, tokens, 1)
+
+	snapshot, err := hipDecodeStateToSnapshot(host, cfg, nil, nil, kv.CaptureOptions{RawKVOnly: true})
+	if err != nil {
+		t.Fatalf("hipDecodeStateToSnapshot(multi-head raw): %v", err)
+	}
+	if len(snapshot.Layers[0].Heads) != 0 {
+		t.Fatal("RawKVOnly multi-head snapshot must not carry per-head float32 slices")
+	}
+	restored, err := hipSnapshotToDecodeState(snapshot, cfg)
+	if err != nil {
+		t.Fatalf("hipSnapshotToDecodeState(multi-head raw): %v", err)
+	}
+	if !hipKVStatesEqual(host, restored) {
+		t.Fatal("multi-head RawKVOnly roundtrip host decode state differs from the original")
 	}
 }
 

@@ -445,6 +445,17 @@ func QKNormBackwardF32(dy, x, normW []float32, L, H, d int, eps float32) (dx, dN
 	return RMSNormBackwardF32(dy, x, normW, L*H, d, eps)
 }
 
+// qkNormWideF32 reports whether a QNormW/KNormW weight already validated by
+// RealTrainLayerF32.validate() is WHOLE-VECTOR (length heads·headDim, #65's OLMoE shape — ONE
+// reduction over the full concatenated projection) rather than PER-HEAD (length headDim, gemma4's
+// shape QKNormBackwardF32 assumes) — mirrors qkNormGranularity's identical bf16 split
+// (qknorm_rope.go). Callers use this to pick RMSNormBackwardF32 directly (rows=L, axisSize=heads·d)
+// over QKNormBackwardF32's per-head wrapper (rows=L·heads, axisSize=d); validate() has already
+// rejected any length matching neither shape, so this need not report failure.
+func qkNormWideF32(w []float32, heads, headDim int) bool {
+	return len(w) == heads*headDim
+}
+
 // gatherHeadF32 extracts head h (width d) from a head-major [L, nHeads·d] tensor into [L, d].
 func gatherHeadF32(x []float32, L, nHeads, d, h int) []float32 {
 	out := make([]float32, L*d)

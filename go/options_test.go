@@ -390,6 +390,31 @@ func TestOptions_WithBackend_Bad(t *testing.T) {
 	checkEqual(t, 0, cfg.ContextLen)
 }
 
+// --- WithCacheMode ---
+
+func TestOptions_WithCacheMode_Good(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{"turboquant", "turboquant"},
+		{"turboquant with bits", "turboquant:3.5"},
+		{"native", "native"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ApplyLoadOpts([]LoadOption{WithCacheMode(tt.mode)})
+			checkEqual(t, tt.mode, cfg.CacheMode)
+		})
+	}
+}
+
+func TestOptions_WithCacheMode_Bad(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithCacheMode("")})
+	checkEqual(t, "", cfg.CacheMode)
+	checkEqual(t, -1, cfg.GPULayers)
+}
+
 // --- WithContextLen ---
 
 func TestOptions_WithContextLen_Good(t *testing.T) {
@@ -836,6 +861,19 @@ func TestOptions_WithThinkingBudget_Good(t *testing.T) {
 	}
 }
 
+// TestOptions_WithVisionBudget_Good pins the vision soft-token budget
+// override: 0 is the model default (e.g. gemma4's processor_config.json
+// max_soft_tokens), a positive value requests one of the model's declared
+// budgets explicitly (1120 is gemma4's OCR budget).
+func TestOptions_WithVisionBudget_Good(t *testing.T) {
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithVisionBudget(0)}); cfg.VisionBudget != 0 {
+		t.Fatalf("WithVisionBudget(0) = %d, want 0 (model default)", cfg.VisionBudget)
+	}
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithVisionBudget(1120)}); cfg.VisionBudget != 1120 {
+		t.Fatalf("WithVisionBudget(1120) = %d, want 1120", cfg.VisionBudget)
+	}
+}
+
 // TestOptions_WithMetricsSink_Good pins the request-scoped metrics receiver:
 // the sink lands on the config and is invoked with exactly the metrics a
 // backend delivers at stream end.
@@ -860,5 +898,18 @@ func TestOptions_WithMetricsSink_Bad(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMetricsSink(nil)})
 	if cfg.MetricsSink != nil {
 		t.Fatalf("WithMetricsSink(nil) set a sink, want none")
+	}
+}
+
+// TestOptions_WithDisablePromptReuse_Good pins #54: the default config never
+// sets it (every existing caller keeps the resident-session reuse lane), and
+// the option flips it on for a one-shot bench/CLI caller that opts out.
+func TestOptions_WithDisablePromptReuse_Good(t *testing.T) {
+	if DefaultGenerateConfig().DisablePromptReuse {
+		t.Fatal("DefaultGenerateConfig().DisablePromptReuse = true, want false (every existing caller keeps the reuse lane)")
+	}
+	cfg := ApplyGenerateOpts([]GenerateOption{WithDisablePromptReuse()})
+	if !cfg.DisablePromptReuse {
+		t.Fatal("WithDisablePromptReuse() left DisablePromptReuse = false, want true")
 	}
 }

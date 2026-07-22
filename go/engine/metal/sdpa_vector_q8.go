@@ -411,6 +411,13 @@ func encKVQ8DequantRows(enc metal.MTLComputeCommandEncoder, cache, scales, mirro
 // prefill's landing. The cache/scale bindings carry the batch-base offsets
 // (row basePos → cache at basePos·kvDim bytes, scales at basePos·groups·4).
 func encKVQ8StoreRows(enc metal.MTLComputeCommandEncoder, stage metal.MTLBuffer, cache metal.MTLBuffer, cacheOff uint, scales metal.MTLBuffer, scaleOff uint, rows, kvDim int) error {
+	return encKVQ8StoreRowsAt(enc, stage, 0, cache, cacheOff, scales, scaleOff, rows, kvDim)
+}
+
+// encKVQ8StoreRowsAt is encKVQ8StoreRows with a byte offset into the bf16
+// source rows — the sliding ring's wrap split (#69) stores its second span
+// from the middle of the slot-ordered mirror.
+func encKVQ8StoreRowsAt(enc metal.MTLComputeCommandEncoder, stage metal.MTLBuffer, stageOff uint, cache metal.MTLBuffer, cacheOff uint, scales metal.MTLBuffer, scaleOff uint, rows, kvDim int) error {
 	pso, err := kvQ8StoreRowsPipeline()
 	if err != nil {
 		return err
@@ -420,7 +427,7 @@ func encKVQ8StoreRows(enc metal.MTLComputeCommandEncoder, stage metal.MTLBuffer,
 	}
 	sink := encSink{enc}
 	sink.setPSO(pso)
-	sink.setBuf(stage, 0, 0)
+	sink.setBuf(stage, stageOff, 0)
 	sink.setBuf(cache, cacheOff, 1)
 	sink.setBuf(scales, scaleOff, 2)
 	sink.setI32(int32(kvDim), 3)

@@ -72,6 +72,13 @@ func (s *ArchSession) PrefillTokensCached(ids []int32) (int, error) {
 	if s.state.icb.hasKVQ8() && !s.reuseCanonicalLanding {
 		return 0, s.PrefillTokens(ids)
 	}
+	// TurboQuant sessions decline prompt reuse unconditionally (v1): the reuse
+	// seam replays cached landings through byte paths the code caches do not
+	// speak. The whole-prefill fallback is TQ-aware by recording — and on the
+	// state carrier (tq_kv_state.go) by the per-token stepToken TQ branch.
+	if s.hasKVTQAny() {
+		return 0, s.PrefillTokens(ids)
+	}
 	n := s.pos
 	if len(s.cachedIDs) < n {
 		n = len(s.cachedIDs)

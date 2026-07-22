@@ -39,7 +39,7 @@ import (
 //   - the QMVRows fattening curve reads as gpu-ns/op vs M × the single-row qmv's
 //     gpu-ns/op (weight bytes are shared, so reported GB/s falls with M by construction).
 //
-// FIRST RECEIPTS (2026-07-14, M3 Ultra, -benchtime 3x):
+// FIRST RECEIPTS (M3 Ultra, -benchtime 3x):
 //   - roofline: bf16 head gemv 262k×2048 = 807 GB/s, 262k×2816 = 789 (the ~650 napkin
 //     was low). K=1 decode streams ~237 GB/s ≈ 30% of it.
 //   - the thinness curve (qmv, 4-bit): attnO 4096→2816 = 651 · attnQ = 567 · dense
@@ -60,7 +60,7 @@ import (
 //     gate/up 21.5µs @ 415 GB/s, down 23.8µs @ 378 — ~4× the naive per-expert loop and
 //     half-roofline through the route indirection. The thin single-expert rows above are
 //     the worst-case bound only; production was already right.
-//   - FFN MEGAKERNEL REFUTED (2026-07-14): at its own receipted shape (1536×6144) the
+//   - FFN MEGAKERNEL REFUTED: at its own receipted shape (1536×6144) the
 //     live lthn_ffn_megakernel runs 1330µs @ 12 GB/s vs the composed 4-dispatch chain's
 //     60µs @ 268 — 22× SLOWER. Its persistent-threadgroup grid-sync (64 tgs × 128
 //     threads) is ~5% occupancy by construction on an 80-core M3 Ultra. Production only
@@ -160,7 +160,7 @@ func BenchmarkKernelReceipt_QMV(b *testing.B) {
 // reduction sums in a different order, so adoption would be token-identity tier, not
 // byte tier. M=1 rides the nv_2 instance half-idle (nv_1 is not instantiated).
 //
-// VERDICT (2026-07-14, M3 Ultra, M=1): REFUTED — wide loses at EVERY shape, −7% to −18%
+// VERDICT (M3 Ultra, M=1): REFUTED — wide loses at EVERY shape, −7% to −18%
 // (attnQ 13.7µs/474 vs 11.2/581; expertDown 6.9/164 vs 5.8/192; pleProj a wash). Its
 // M-tiling is the whole design and M=1 burns half the nv_2 tile, so MLX's gen-15 gate
 // does not transfer to single-token decode: the engine's existing variant choice is

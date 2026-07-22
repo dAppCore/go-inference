@@ -36,14 +36,7 @@ type ArchSpec struct {
 	ModelTypes []string                         // config.json "model_type" ids (incl. multimodal wrapper aliases)
 	Parse      func([]byte) (ArchConfig, error) // the architecture's own parse: wrapper-merge / validation / defaults
 	Weights    WeightNames                      // logical weight role → tensor name; model.Assemble reacts to it
-	// Composed builds a hybrid (non-Assemble) TokenModel straight from the checkpoint tensors + config
-	// bytes — a config-composed stack (Qwen 3.6 gated-delta + full attention) whose linear_attention
-	// layers have no q/k/v for the reactive transformer Assemble to react to. When set, the arch is routed
-	// here (model.LoadComposedDir) instead of Assemble; the returned model is already serve-ready. nil for
-	// a standard transformer arch. This lets a backend reach a hybrid loader through the registry rather
-	// than a hardcoded model_type switch.
-	Composed  func(map[string]safetensors.Tensor, []byte) (TokenModel, error)
-	Normalize func(map[string]safetensors.Tensor) map[string]safetensors.Tensor
+	Normalize  func(map[string]safetensors.Tensor) map[string]safetensors.Tensor
 	// NormalizeConfig handles fused layouts whose split depends on parsed geometry.
 	NormalizeConfig func(map[string]safetensors.Tensor, ArchConfig) map[string]safetensors.Tensor
 	Vision          func(map[string]safetensors.Tensor, ArchConfig) (*vision.Loaded, error)

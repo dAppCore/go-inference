@@ -74,7 +74,7 @@ func ReadGGUFInfo(modelPath string) (GGUFInfo, error) {
 	}
 	absolutePath := ggufPath
 	if abs := core.PathAbs(ggufPath); abs.OK {
-		absolutePath = abs.Value.(string)
+		absolutePath = abs.String()
 	}
 	architecture := metadataString(metadata, "general.architecture")
 	quantBits, quantGroup, quantType, quantFamily := ggufQuantisationFromMetadata(metadata)
@@ -114,7 +114,7 @@ func ggufKeyOfInterest(key string) bool {
 func DiscoverModels(basePath string) []DiscoveredModel {
 	resolvedPath := basePath
 	if abs := core.PathAbs(basePath); abs.OK {
-		resolvedPath = abs.Value.(string)
+		resolvedPath = abs.String()
 	}
 	stat := core.Stat(resolvedPath)
 	if !stat.OK {

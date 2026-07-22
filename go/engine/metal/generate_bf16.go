@@ -45,7 +45,7 @@ func GenerateBF16(g *BF16Model, arch model.Arch, promptIDs []int32, maxNew, maxL
 	withAutoreleasePool(func() {
 		// build the resident decode state ONCE; the KV caches persist across stepToken
 		// calls within this pool, so each token costs one step (O(1)), not a re-decode.
-		lb, moeWeights, berr := buildBF16ArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, nil) // in-memory weights → upload copies
+		lb, moeWeights, berr := buildBF16ArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, nil, arch.Eps) // in-memory weights → upload copies
 		if berr != nil {
 			genErr = berr
 			return

@@ -492,7 +492,7 @@ func TestNew_InterleaveTokenBudgetRequiresTokenizer_Bad(t *testing.T) {
 	m.Close()
 }
 
-func TestModel_BatchMode_RoutesThroughBatch_Good(t *testing.T) {
+func TestModel_ModeBatch_RoutesThroughBatch_Good(t *testing.T) {
 	base := &tokenizingModel{tokens: []inference.Token{{Text: "x0"}, {Text: "x1"}}}
 	m, err := New(base, Config{Mode: ModeBatch, MaxConcurrent: 2, MaxQueue: 4, MaxBatchTokens: 1024, StreamBuffer: 8})
 	if err != nil {
@@ -515,7 +515,7 @@ func TestModel_BatchMode_RoutesThroughBatch_Good(t *testing.T) {
 	}
 }
 
-func TestModel_InterleaveMode_RoutesThroughInterleave_Good(t *testing.T) {
+func TestModel_ModeInterleave_RoutesThroughInterleave_Good(t *testing.T) {
 	base := &tokenizingModel{tokens: []inference.Token{{Text: "y0"}, {Text: "y1"}, {Text: "y2"}}}
 	m, err := New(base, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 4, StreamBuffer: 8})
 	if err != nil {

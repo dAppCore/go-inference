@@ -5,6 +5,7 @@
 package native
 
 import (
+	"bytes"
 	"math"
 	"os"
 	"reflect"
@@ -105,6 +106,15 @@ type ArchSession struct {
 	retainedLogits       []byte
 	retainedHiddenPinned *pinnedNoCopyBytes
 	retainedLogitsPinned *pinnedNoCopyBytes
+	// boundaryGreedy caches the boundary argmax the MTP verify head already
+	// computed, keyed by VALUE to the exact hidden bytes + suppress set it came
+	// from — content-keyed so no retained-state write path can leave it stale:
+	// a changed boundary misses on bytes.Equal and the caller re-derives from
+	// BoundaryLogits. Saves the next round's full-vocab head pass + host argmax
+	// rescan.
+	boundaryGreedy         int32
+	boundaryGreedyHidden   []byte
+	boundaryGreedySuppress []int32
 	// restoredKV marks a session whose K/V state came from RestoreState /
 	// RestoreStateBlocks rather than live decode. The batched dense prefill's
 	// paged→linear sync assumptions do not hold for restored state (the
@@ -681,13 +691,39 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 	var sess *ArchSession
 	var buildErr error
 	withAutoreleasePool(func() {
-		lb, moeWeights, berr := buildBF16ArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb)
+		lb, moeWeights, berr := buildBF16ArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb, arch.Eps)
 		if berr != nil {
 			buildErr = berr
 			return
 		}
+		stampArchProjectorsSiLU(lb, ffnUsesSiLU(arch.Activation)) // qwen/llama/mistral SwiGLU (gemma stays GELU)
 		state := newArchDecodeState(arch.Layer, lb, moeWeights, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, attnScale, arch.Eps, arch.ValueNorm, maxLen)
+		state.ropeScale = archRopeScale(arch)               // RoPE position scale, distinct from the attention scale
 		state.ropeFreqs = uploadRopePeriods(arch.RopeFreqs) // YaRN long-context spectrum (nil ⇒ base rope)
+		state.bindGatedDeltaBF16(g.Layers)                  // MixerGatedDelta recurrence weights (#18); no-op for an all-attention model
+		// State-lane TurboQuant arming (tq_kv_state.go): a stack the arch ICB
+		// cannot record (MoE / gated-delta — stepToken decode) arms the STATE
+		// carrier, before pool init (an armed carrier declines the paged pool).
+		// Trace sessions fall through to the ICB block's refusal below.
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && archSpecsRequireStepToken(arch.Layer) && !state.trace {
+			if serr := tqKVArchServable(arch, nil, tqMode); serr != nil {
+				buildErr = serr
+				return
+			}
+			tqState, terr := allocArchStateKVTQ(arch.Layer, lb, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.AttnOutputGate, tqMode)
+			if terr != nil {
+				buildErr = terr
+				return
+			}
+			if !tqState.any() {
+				buildErr = core.NewError("native.NewArchSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
+			state.kvTQState = tqState
+		}
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return
@@ -831,21 +867,36 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 		// recorder (recordArchICBBF16): record the decode stack once + replay it per Step/
 		// StepWithID instead of re-encoding every layer every token. The replay holds its OWN
 		// linear/ring caches; the PLE runtime wraps the session's perLayerInput closure.
-		if sess.icbEligible() {
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && !sess.icbEligible() && !sess.state.tqStateArmed() {
+			// A session neither carrier serves (trace: per-layer host reads of
+			// bf16 cache bytes) has no TurboQuant lane — refuse rather than run
+			// silently native (#41 S3). MoE/hybrid stacks armed the STATE
+			// carrier above (tq_kv_state.go) and never reach this refusal.
+			buildErr = core.NewError("native.NewArchSession: -kv-cache turboquant requires the recorded decode lane (this session cannot record the arch ICB)")
+			return
+		} else if sess.icbEligible() {
 			var pleRuntime *archDecodePLEInputs
 			if g.HasPLE() {
 				pleRuntime = &archDecodePLEInputs{compute: sess.perLayerInput}
 			}
 			// per-owner caches (sliding = bounded ring; global = maxLen rows), with the
-			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367).
-			kCaches, vCaches, icbKVQ8 := allocArchICBCaches(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow)
+			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367)
+			// and -kv-cache turboquant allocating code+γ caches instead (#41 S3).
+			kCaches, vCaches, icbKVQ8, icbKVTQ := allocArchICBCachesTQ(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow, tqMode)
+			if tqMode != nil && !icbKVTQ.any() {
+				buildErr = core.NewError("native.NewArchSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
 			rope := icbRope{
 				base: arch.RopeBase, localBase: arch.RopeLocalBase,
 				rotaryDim: arch.RotaryDim, rotaryDimLocal: arch.RotaryDimLocal,
 				globalHeadDim: state.globalHeadDim,
 				globalFreqs:   state.globalRopeFreqs, freqs: state.ropeFreqs,
 			}
-			rep, rerr := recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
+			rep, rerr := recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
 			if rerr != nil {
 				buildErr = rerr
 				return
@@ -853,8 +904,12 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 			sess.state.icb = rep
 			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
 			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
+			// TurboQuant peers record the SAME kvTQ set: both ICBs append codes+norms into the shared
+			// row-addressed caches, each rebinding its own row at replay — the peer without kvTQ would
+			// write bf16 rows into a codes cache (and serial-only TQ decode re-pays the #23 submit/wait
+			// gap per token, the −32% receipt).
 			sess.recordPeerICB = func() (*archICBReplay, error) {
-				return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
+				return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
 			}
 			if pipelinedGPUDecodeEnabled {
 				peer, perr := sess.recordPeerICB()
@@ -865,6 +920,7 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 				sess.icbPeer = peer
 			}
 		}
+		logCachePlan(arch, &sess.state, cfg.kvCacheMode)
 	})
 	if buildErr != nil {
 		return nil, buildErr
@@ -922,15 +978,44 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		// hypothesis = the packed uint32 weights bound at non-4-aligned offsets (Metal can't do a
 		// misaligned uint32 read); bufFor now copies only those (mustBufFor4), aligned stay zero-copy.
 		// If the smoke is coherent this reclaims the 4-bit 2× resident; if not, revert to nil.
-		lb, moeQuant, berr := buildQuantArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb)
+		lb, moeQuant, berr := buildQuantArchLayerBufs(g.Layers, arch.Layer, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, maxLen, arch.SlidingWindow, sb, arch.Eps)
 		if berr != nil {
 			buildErr = berr
 			return
 		}
-		moeWeights := make([]*MoELayerWeights, len(arch.Layer)) // bf16 MoE unused on the quant path
+		stampArchProjectorsSiLU(lb, ffnUsesSiLU(arch.Activation)) // qwen/llama/mistral SwiGLU (gemma stays GELU)
+		moeWeights := make([]*MoELayerWeights, len(arch.Layer))   // bf16 MoE unused on the quant path
 		state := newArchDecodeState(arch.Layer, lb, moeWeights, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, attnScale, arch.Eps, arch.ValueNorm, maxLen)
+		state.ropeScale = archRopeScale(arch) // RoPE position scale, distinct from the attention scale
 		state.moeQuant = moeQuant
-		state.moeScratchOwnable = true // long-lived session: own the MoE scratch, decode wait-free
+		state.moeScratchOwnable = true      // long-lived session: own the MoE scratch, decode wait-free
+		state.bindGatedDeltaQuant(g.Layers) // MixerGatedDelta recurrence weights (#18); no-op for an all-attention model
+		state.attnOutputGate = arch.AttnOutputGate
+		state.bindGatedAttnQuant(g.Layers) // gated full-attention layers (Qwen3.5 attn_output_gate); no-op unless the Arch declares it
+		state.bindQwenFusedDense(g.Layers) // fused device lane for the Qwen holders (whole-layer, dense FFN); no-op elsewhere
+		// State-lane TurboQuant arming (tq_kv_state.go): a stack the arch ICB
+		// cannot record (MoE / gated-delta — stepToken decode) arms the STATE
+		// carrier, before pool init (an armed carrier declines the paged pool).
+		// Trace sessions fall through to the ICB block's refusal below.
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && archSpecsRequireStepToken(arch.Layer) && !state.trace {
+			if serr := tqKVArchServable(arch, nil, tqMode); serr != nil {
+				buildErr = serr
+				return
+			}
+			tqState, terr := allocArchStateKVTQ(arch.Layer, lb, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.AttnOutputGate, tqMode)
+			if terr != nil {
+				buildErr = terr
+				return
+			}
+			if !tqState.any() {
+				buildErr = core.NewError("native.NewArchQuantSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
+			state.kvTQState = tqState
+		}
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return
@@ -1133,30 +1218,45 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		// it per Step/StepWithID instead of re-encoding every layer. The replay holds its OWN linear
 		// maxLen caches (the session's lb sliding caches are RING-sized + unused on this path); the PLE
 		// runtime wraps the session's own perLayerInput closure (the per-token tensor stays host-side).
-		if sess.icbEligible() {
+		if tqMode, tqErr := parseTurboQuantCacheMode(cfg.kvCacheMode); tqErr != nil {
+			buildErr = tqErr
+			return
+		} else if tqMode != nil && !sess.icbEligible() && !sess.state.tqStateArmed() {
+			// A session neither carrier serves (trace: per-layer host reads of
+			// bf16 cache bytes) has no TurboQuant lane — refuse rather than run
+			// silently native (#41 S3). MoE/hybrid stacks armed the STATE
+			// carrier above (tq_kv_state.go) and never reach this refusal.
+			buildErr = core.NewError("native.NewArchQuantSession: -kv-cache turboquant requires the recorded decode lane (this session cannot record the arch ICB)")
+			return
+		} else if sess.icbEligible() {
 			var pleRuntime *archDecodePLEInputs
 			if g.HasPLE() {
 				pleRuntime = &archDecodePLEInputs{compute: sess.perLayerInput}
 			}
 			// per-owner caches (sliding = bounded ring; global = maxLen rows), with the
-			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367).
-			kCaches, vCaches, icbKVQ8 := allocArchICBCaches(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow)
+			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367)
+			// and -kv-cache turboquant allocating code+γ caches instead (#41 S3).
+			kCaches, vCaches, icbKVQ8, icbKVTQ := allocArchICBCachesTQ(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow, tqMode)
+			if tqMode != nil && !icbKVTQ.any() {
+				buildErr = core.NewError("native.NewArchQuantSession: -kv-cache turboquant found no qualifying global attention layer (head dim must be 128/256/512)")
+				return
+			}
 			rope := icbRope{
 				base: arch.RopeBase, localBase: arch.RopeLocalBase,
 				rotaryDim: arch.RotaryDim, rotaryDimLocal: arch.RotaryDimLocal,
 				globalHeadDim: state.globalHeadDim,
 				globalFreqs:   state.globalRopeFreqs, freqs: state.ropeFreqs,
 			}
-			rep, rerr := recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
+			rep, rerr := recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
 			if rerr != nil {
 				buildErr = rerr
 				return
 			}
 			sess.state.icb = rep
-			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
-			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
+			// Peer ICB for the submit-ahead decode — TurboQuant peers record the SAME kvTQ set
+			// (shared row-addressed codes caches, per-replay row binds); see the BF16 recorder note.
 			sess.recordPeerICB = func() (*archICBReplay, error) {
-				return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
+				return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, archRopeScale(arch), arch.Eps, arch.ValueNorm, ffnUsesSiLU(arch.Activation), icbKVQ8, icbKVTQ)
 			}
 			if pipelinedGPUDecodeEnabled {
 				peer, perr := sess.recordPeerICB()
@@ -1167,6 +1267,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 				sess.icbPeer = peer
 			}
 		}
+		logCachePlan(arch, &sess.state, cfg.kvCacheMode)
 	})
 	if buildErr != nil {
 		return nil, buildErr
@@ -1193,6 +1294,12 @@ func (s *ArchSession) icbEligible() bool {
 		// recorder is byte-identical — it fails on uniform e2b too), not a recorder bug. So the 12B/31B
 		// MQA-global mix now takes the fast ICB path. Only MoE (host router) and trace stay re-encode.
 		if sp.MoE {
+			return false
+		}
+		if sp.Mixer == model.MixerGatedDelta {
+			// A gated-delta (linear_attention) layer is a HOST recurrence with a command-buffer break — not
+			// the uniform device attention the ICB core records/replays. A hybrid decodes via stepToken,
+			// which carries the MixerGatedDelta branch (#18).
 			return false
 		}
 	}
@@ -1823,6 +1930,37 @@ func (s *ArchSession) prefillRetainedEmbeddingsBidir(ids []int32, embeddings [][
 		if base+n > len(ids) {
 			n = len(ids) - base
 		}
+		spanInChunk := false
+		for _, sp := range spans {
+			if sp[0] < base+n && sp[1] > base {
+				spanInChunk = true
+				break
+			}
+		}
+		if !spanInChunk {
+			// Span-free chunk (a text run the span cuts produced — e.g. the
+			// preamble before a span shrank the chunk, or the tail after the
+			// last one): every row is plain causal, so the causal embedding
+			// lanes apply — including their sequential fallback, which is
+			// legal here precisely because no row looks forward. Routing these
+			// through the caps chunk instead would hard-error on shapes the
+			// batched pass declines (the q8-ICB gate declines small batches).
+			next, ok, err := s.prefillRetainedEmbeddingsBatchedDense(ids[base:base+n], embeddings[base:base+n], scope)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				for i := base; i < base+n; i++ {
+					next, err = s.StepWithID(ids[i], embeddings[i])
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+			hidden = next
+			base += n
+			continue
+		}
 		caps := make([]int32, n)
 		for i := range n {
 			caps[i] = int32(s.pos + i + 1) // causal default
@@ -1902,6 +2040,15 @@ func (s *ArchSession) prefillPromptRetainedInPool(ids []int32) ([]byte, error) {
 	}
 	if hidden, ok, err := s.prefillPromptRetainedGPUInputsInPool(ids); ok || err != nil {
 		return hidden, err
+	}
+	if gpuTraceEnabled() {
+		// #54: named so a slow prefill is diagnosable from LTHN_GPU_TRACE=host
+		// alone — both the batched-dense AND the chained GPU-inputs lane
+		// declined, so every remaining row pays a per-token host round trip
+		// (commit+wait per token; see prefillRetainedTokensBatchedDenseDeclineReason
+		// for WHY the batched lane declined).
+		nativeTraceLog(core.Sprintf("gpu-trace: host  prefill fallback ids=%d pos=%d reason=%s (per-token stepIDInPool loop)\n",
+			len(ids), s.pos, s.prefillRetainedTokensBatchedDenseDeclineReason()))
 	}
 	var err error
 	for _, id := range ids[:len(ids)-1] {
@@ -2086,6 +2233,24 @@ func (s *ArchSession) prefillRetainedTokensBatchedDense(ids []int32, scope strin
 	return s.prefillRetainedTokensBatchedDenseOne(ids, scope)
 }
 
+// prefillRetainedTokensBatchedDenseDeclineReason names WHY the batched-dense
+// prefill lane would decline for THIS session right now — a read-only mirror
+// of prefillRetainedTokensBatchedDense/DenseOne's own gates, called only from
+// the LTHN_GPU_TRACE=host fallback log (#54: a q8-ICB session that inherited
+// canonical (position-invariant, per-token) landing from the stateless
+// resident prompt-reuse lane — engine/prompt_reuse.go's acquireReuseSession —
+// pays a full per-token prefill regardless of prompt length; this is the
+// mechanism, not a length-dependent knee). Never called from a hot path.
+func (s *ArchSession) prefillRetainedTokensBatchedDenseDeclineReason() string {
+	if s.reuseCanonicalLanding && s.state.icb != nil && s.state.icb.hasKVQ8() {
+		return "reuseCanonicalLanding+hasKVQ8 (#1846 position-invariant landing armed by the resident prompt-reuse lane)"
+	}
+	if s.state.icb != nil && !gpuHasGeluKernel() {
+		return "icb without the fused gelu kernel (lthn_kernels.metallib not loaded)"
+	}
+	return "unresolved (see prefillRetainedTokensBatchedDenseOne / stepTokensBatchedDenseResultWithInputViewsPLE's own decline gates)"
+}
+
 func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope string) ([]byte, bool, error) {
 	var hidden []byte
 	chunk := 0
@@ -2150,7 +2315,7 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope
 // position is window-aligned; the per-model window divides it into whole windows.
 // Wider chunks raise every per-chunk GEMM's M (the projections, the qmm fold, the
 // prompt SDPA) and amortise the per-chunk seams — 2048 is the receipted sweet spot
-// (#367 2026-07-13, e2b depth ladder: 512-row chunks 2907/2594/2122 tok/s at
+// (#367, e2b depth ladder: 512-row chunks 2907/2594/2122 tok/s at
 // 8K/32K/62K vs 2048-row 3074/2669/2179; 4096 gave the gain back) and matches
 // mlx-lm's prefill_step_size. The deferred-ring lane handles wrap-crossing batches
 // at any basePos, so the width is an engine tuning choice, not a model contract.
@@ -2171,7 +2336,7 @@ func prefillChunkWindows() int {
 func prefillChunkWindowsFor(slidingWindow int) int {
 	if v := os.Getenv("LTHN_PREFILL_WINDOWS"); v != "" {
 		if r := core.Atoi(v); r.OK {
-			if n, ok := r.Value.(int); ok && n >= 1 && n <= 8 {
+			if n := r.Int(); n >= 1 && n <= 8 {
 				return n
 			}
 		}
@@ -2549,6 +2714,35 @@ func (s *ArchSession) resetRetainedHidden() {
 	s.retainedHidden = s.retainedHidden[:0]
 }
 
+// rememberBoundaryGreedy caches the boundary argmax the verify head already
+// produced, copying the exact hidden bytes + suppress set it was computed
+// under; cachedBoundaryGreedy validates both by value before serving it.
+func (s *ArchSession) rememberBoundaryGreedy(token int32, hidden []byte, suppress []int32) {
+	if s == nil || token < 0 || len(hidden) == 0 {
+		return
+	}
+	s.boundaryGreedy = token
+	s.boundaryGreedyHidden = append(s.boundaryGreedyHidden[:0], hidden...)
+	s.boundaryGreedySuppress = append(s.boundaryGreedySuppress[:0], suppress...)
+}
+
+// cachedBoundaryGreedy returns the cached boundary argmax when the live
+// boundary hidden and suppress set match the cached copies byte-for-byte;
+// ok=false otherwise (caller derives it from BoundaryLogits).
+func (s *ArchSession) cachedBoundaryGreedy(hidden []byte, suppress []int32) (int32, bool) {
+	if s == nil || len(s.boundaryGreedyHidden) == 0 ||
+		!bytes.Equal(s.boundaryGreedyHidden, hidden) ||
+		len(s.boundaryGreedySuppress) != len(suppress) {
+		return 0, false
+	}
+	for i, v := range suppress {
+		if s.boundaryGreedySuppress[i] != v {
+			return 0, false
+		}
+	}
+	return s.boundaryGreedy, true
+}
+
 func (s *ArchSession) rememberRetainedLogits(logits []byte) {
 	if s == nil || len(logits) != s.arch.Vocab*bf16Size {
 		s.resetRetainedLogits()
@@ -2773,6 +2967,9 @@ func (s *ArchSession) Step(emb []byte) ([]byte, error) {
 	}
 	var res []byte
 	var err error
+	if s.state.tqPrefill != nil { // prefill→decode: the codes-reading SDPA needs no bf16 scratch (#48)
+		s.state.releaseTQPrefillScratch()
+	}
 	withAutoreleasePool(func() {
 		if s.state.icb != nil && !icbDisabledForTest { // recorded encode-bypass: replay one token over the ICB's caches
 			res = s.state.icb.stepBody(emb, s.pos, nil)
@@ -2803,6 +3000,9 @@ func (s *ArchSession) StepWithID(id int32, emb []byte) ([]byte, error) {
 	}
 	var res []byte
 	var err error
+	if s.state.tqPrefill != nil { // prefill→decode: the codes-reading SDPA needs no bf16 scratch (#48)
+		s.state.releaseTQPrefillScratch()
+	}
 	withAutoreleasePool(func() {
 		var pli []byte
 		if s.perLayerInput != nil { // PLE: per-layer inputs from this token's id + embedding
@@ -3079,6 +3279,15 @@ func (s *ArchSession) generateSampledFromLogitsInPool(firstLogits []byte, maxNew
 	return gen, nil
 }
 
+// sampleTopKCandidatesFromHiddenWithHistoryInPoolTimed wraps the candidates lane in the #23
+// sampled-pick counter (head encode + wait + select together — the lane pays them as one call).
+func (s *ArchSession) sampleTopKCandidatesFromHiddenWithHistoryInPoolTimed(hidden []byte, params model.SampleParams, history []int32) ([]byte, []int32, bool, error) {
+	spT := ptStart()
+	logits, ids, ok, err := s.sampleTopKCandidatesFromHiddenWithHistoryInPool(hidden, params, history)
+	spEnd(2, spT)
+	return logits, ids, ok, err
+}
+
 func (s *ArchSession) sampleTokenFromLogits(logits []byte, sampler *model.Sampler, params model.SampleParams, history []int32) (int32, error) {
 	if sampledGreedyParamsEligible(params) {
 		return greedyBF16Suppressed(logits, s.arch.Vocab, params.SuppressTokens)
@@ -3147,11 +3356,43 @@ func (s *ArchSession) sampleTopKCandidatesFromLogits(logits []byte, params model
 	} else {
 		s.sampleCandidateIDs = s.sampleCandidateIDs[:topK]
 	}
-	var scores [headSampleTopKMaxK]float32
-	var penaltyIDs []int32
-	if params.RepeatPenalty > 1 && len(history) > 0 {
-		penaltyIDs = s.repeatPenaltyIDsScratch(vocab, history)
+	if params.RepeatPenalty <= 1 || len(history) == 0 {
+		// Fast lane (#23): with no penalty rewriting values, selection runs the shared
+		// monotonic-key pass over the raw bf16 bits (topKSelectBF16IDs — one xor + one integer
+		// compare per element, no per-element float build), then the ≤topK candidates are
+		// insertion-sorted to the exact (value desc, id asc) order the value-space scan below
+		// produces — the deterministic contract sampleSortedBF16Candidates consumes. The
+		// penalty lane keeps the value-space scan because a penalised token's SELECTION rank
+		// depends on its rewritten value.
+		count := topKSelectBF16IDs(logits, vocab, topK, params.SuppressTokens, s.sampleCandidateIDs[:topK])
+		if count == 0 {
+			return nil, nil, true, core.NewError("native.ArchSession.sampleTopKCandidatesFromLogits: all vocab ids are suppressed")
+		}
+		ids := s.sampleCandidateIDs[:count]
+		var sortVals [headSampleTopKMaxK]float32
+		for j := 0; j < count; j++ {
+			off := int(ids[j]) * bf16Size
+			sortVals[j] = bf16ToF32(logits[off], logits[off+1])
+		}
+		for j := 1; j < count; j++ { // insertion sort, ≤ headSampleTopKMaxK elements
+			v, id := sortVals[j], ids[j]
+			m := j
+			for m > 0 && (v > sortVals[m-1] || (v == sortVals[m-1] && id < ids[m-1])) {
+				sortVals[m], ids[m] = sortVals[m-1], ids[m-1]
+				m--
+			}
+			sortVals[m], ids[m] = v, id
+		}
+		for j := 0; j < count; j++ {
+			src := int(ids[j]) * bf16Size
+			dst := j * bf16Size
+			s.sampleCandidateLogits[dst] = logits[src]
+			s.sampleCandidateLogits[dst+1] = logits[src+1]
+		}
+		return s.sampleCandidateLogits[:count*bf16Size], ids, true, nil
 	}
+	var scores [headSampleTopKMaxK]float32
+	penaltyIDs := s.repeatPenaltyIDsScratch(vocab, history)
 	penaltyPos := 0
 	count := 0
 	for id := range vocab {
@@ -5052,9 +5293,11 @@ func (s *ArchSession) generateFromHiddenInPool(hidden []byte, maxNew, eosID int,
 	// re-encoded live each token. PLE archs need the per-layer tensor produced per token too
 	// (the ICB chain's plumbing), so they stay on their existing lanes.
 	if s.encNextInputsGPU != nil && s.plScratchNew != nil && s.state.icb == nil && s.headEnc != nil &&
-		s.canUseDirectHeadGreedy() && len(s.state.ple) == 0 &&
+		s.canUseDirectHeadGreedy() && len(s.state.ple) == 0 && !s.state.hasRecurrentLayers() &&
 		!stepGreedyChainDisabled && !chainedGPUInputsDisabled && transform == nil &&
 		s.state.gpuProf == nil && !s.state.trace && layerSpanProbeForTest == nil && !captureLayerHiddens {
+		// hasRecurrentLayers: a gated-delta/gated-attention session cannot unwind the speculative
+		// links the submit-ahead tail keeps in flight (the recurrence has no rollback) — serial only.
 		return s.generateChainedLiveTail(gen, maxNew, eosID, suppress, yield, stop)
 	}
 
@@ -5498,6 +5741,8 @@ func (s *ArchSession) generatePipelinedGPUTail(gen []int32, maxNew, eosID int, s
 		} else {
 			s.rememberRetainedHiddenFrom(prev.lastOut)
 		}
+		mtpBoundaryTrace("stretch-drain", s.pos, tk, s.retainedHidden)
+		mtpBoundaryTraceKV(s, "stretch-drain")
 	})
 	if rerr != nil {
 		return nil, rerr
@@ -5748,38 +5993,50 @@ func (s *ArchSession) generateSampledFromHiddenInPoolWithHistory(hidden []byte, 
 		var next int32
 		var err error
 		if sampledGreedyParamsEligible(pickParams) {
+			spT := ptStart()
 			next, err = s.headGreedyOrLogits(hidden, pickParams.SuppressTokens, nil, nil, false)
+			spEnd(4, spT)
 			readyLogits, readyIDs = nil, nil
 			readyTokenOK = false
 		} else if readyTokenOK {
 			next = readyToken
 			readyTokenOK = false
 		} else if readyIDs != nil {
+			spT := ptStart()
 			next, err = sampler.SampleCandidates(readyLogits, readyIDs, pickParams)
+			spEnd(3, spT)
 			readyLogits, readyIDs = nil, nil
 		} else if sampledTopOneGreedyParamsEligible(pickParams, history) {
 			sampler.Draw()
+			spT := ptStart()
 			next, err = s.headGreedyOrLogits(hidden, pickParams.SuppressTokens, nil, nil, false)
+			spEnd(4, spT)
 			readyLogits, readyIDs = nil, nil
 			readyTokenOK = false
 		} else if s.sampleTopKTokenParamsEligible(pickParams) {
 			draw := sampler.Draw()
 			var ok bool
+			spT := ptStart()
 			next, ok, err = s.sampleTopKTokenFromHiddenInPool(hidden, pickParams, draw, history)
+			spEnd(0, spT)
 			if !ok && err == nil {
 				err = core.NewError("native.ArchSession.generateSampledFromHiddenInPool: TopK token path declined after eligibility check")
 			}
 		} else if s.sampleLogitsTokenParamsEligible(pickParams) && !sampleLogitsTokenCPUPreferred(pickParams, s.arch.Vocab) {
 			draw := sampler.Draw()
 			var ok bool
+			spT := ptStart()
 			next, ok, err = s.sampleLogitsTokenFromHiddenInPool(hidden, pickParams, draw, history)
+			spEnd(1, spT)
 			if !ok && err == nil {
 				err = core.NewError("native.ArchSession.generateSampledFromHiddenInPool: logits token path declined after eligibility check")
 			}
-		} else if candidateLogits, candidateIDs, ok, topKErr := s.sampleTopKCandidatesFromHiddenWithHistoryInPool(hidden, pickParams, history); topKErr != nil {
+		} else if candidateLogits, candidateIDs, ok, topKErr := s.sampleTopKCandidatesFromHiddenWithHistoryInPoolTimed(hidden, pickParams, history); topKErr != nil {
 			return nil, history, topKErr
 		} else if ok {
+			spT := ptStart()
 			next, err = sampler.SampleCandidates(candidateLogits, candidateIDs, pickParams)
+			spEnd(3, spT)
 		} else {
 			logits, headErr := s.headLogitsScratch(hidden, false)
 			if headErr != nil {
@@ -5899,12 +6156,16 @@ func (s *ArchSession) sampledPipelinedGPUTailCanContinue(params model.SamplePara
 
 func (s *ArchSession) generateSampledChainedGPUTail(gen []int32, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, yield func(int32) bool, cacheFinal bool, initialGenerated int, history []int32) ([]int32, []int32, error) {
 	if s.sampledPipelinedGPUTailCanContinue(params, history, nil) {
-		if cacheFinal {
-			return s.generateSampledPipelinedGPUTail(gen, maxNew, stopTokens, sampler, params, yield, initialGenerated, history)
-		}
-		if yield == nil && len(stopTokens) == 0 {
+		if !cacheFinal && yield == nil && len(stopTokens) == 0 {
 			return s.generateSampledPipelinedGPUOneShotTail(gen, maxNew, sampler, params, initialGenerated, history)
 		}
+		// The one-ahead pipeline serves STREAMING (yield + stop tokens) too — the same shape the
+		// greedy pipelined tail ships as the serve default (#23: the chained per-token wait cost
+		// ~0.77ms/token, 143 vs 171 tok/s on E2B). Safe at a stop for the same reason greedy is:
+		// each command buffer is [step of emitted token N + pick of N+1], so the trailing in-flight
+		// buffer only wastes a PICK (and one RNG draw), never a phantom KV row — the emitted stream
+		// is draw-for-draw identical to the chained loop's.
+		return s.generateSampledPipelinedGPUTail(gen, maxNew, stopTokens, sampler, params, yield, initialGenerated, history)
 	}
 	icb := s.state.icb
 	sc := s.gpuTailPLScratchBuffer(0)

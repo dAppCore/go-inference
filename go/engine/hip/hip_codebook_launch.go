@@ -255,7 +255,7 @@ func hipRunCodebookLookupKernel(ctx context.Context, driver nativeHIPDriver, req
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	return buffers.ReadOutput()

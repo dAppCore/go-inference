@@ -132,7 +132,7 @@ func ReadConfig(root string) (*Info, error) {
 		}
 		return nil, read.Value.(error)
 	}
-	return ParseConfig(read.Value.([]byte))
+	return ParseConfig(read.Bytes())
 }
 
 // info, _ := jang.ParseConfig(data)

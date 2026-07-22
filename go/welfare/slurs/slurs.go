@@ -8,7 +8,7 @@
 // trigger, per the RFC.
 //
 // This file is the MECHANISM. The catalogue (catalogue.go) is curated data,
-// reviewed by Snider per RFC.welfare — not authored here, not community-
+// reviewed per RFC.welfare — not authored here, not community-
 // sourced, not telemetry-expanded. EN/ASCII scope for v1 (per-language is an
 // RFC "Open" item); non-ASCII input folds to word breaks rather than matching.
 package slurs
@@ -55,7 +55,7 @@ func New(terms []string) *Matcher {
 	return &Matcher{terms: norm}
 }
 
-// Default is the production matcher over the Snider-curated catalogue.
+// Default is the production matcher over the curated catalogue.
 func Default() *Matcher { return New(catalogue) }
 
 // Match reports whether text contains a catalogued slur as a whole word (after

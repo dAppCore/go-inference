@@ -340,7 +340,7 @@ func hipRunAutoRoundQuantizeKernel(ctx context.Context, driver nativeHIPDriver, 
 	if err != nil {
 		return hipAutoRoundQuantizeResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipAutoRoundQuantizeResult{}, err
 	}
 	return buffers.ReadOutput()

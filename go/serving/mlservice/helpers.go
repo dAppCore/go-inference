@@ -18,5 +18,5 @@ func readAll(r any) core.Result {
 	if !result.OK {
 		return result
 	}
-	return core.Ok(core.AsBytes(result.Value.(string)))
+	return core.Ok(core.AsBytes(result.String()))
 }

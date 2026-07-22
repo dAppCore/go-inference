@@ -176,7 +176,7 @@ func gemma4FullMetadata(root string, configJSON []byte, feedForward []int32, for
 	if !tokenizerRead.OK {
 		return nil, core.E("gemma4FullMetadata", "read tokenizer.json", tokenizerRead.Err())
 	}
-	tokenizerEntries, err := gemma4Tokenizer(tokenizerRead.Value.([]byte))
+	tokenizerEntries, err := gemma4Tokenizer(tokenizerRead.Bytes())
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +190,7 @@ func gemma4FullMetadata(root string, configJSON []byte, feedForward []int32, for
 		metadata = append(metadata, basegguf.MetadataEntry{
 			Key:       "tokenizer.chat_template",
 			ValueType: basegguf.ValueTypeString,
-			Value:     core.AsString(tmpl.Value.([]byte)),
+			Value:     core.AsString(tmpl.Bytes()),
 		})
 	}
 	return metadata, nil

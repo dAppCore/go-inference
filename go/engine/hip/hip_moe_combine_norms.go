@@ -170,5 +170,5 @@ func hipRunMoECombineNormsDeviceKernelOutputWithWorkspace(ctx context.Context, d
 		hipReleaseLaunchPacket(launchBytes)
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }

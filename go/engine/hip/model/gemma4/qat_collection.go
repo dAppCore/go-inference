@@ -118,7 +118,7 @@ func QATCollectionEntryFor(size, mode string, assistant bool) (QATCollectionEntr
 		Assistant:      assistant,
 		Runtime:        support.Runtime,
 		GenerateStatus: support.GenerateStatus,
-		RunnableOnCard: assistant || sizeSupport.RunnableOnCard,
+		RunnableOnCard: assistant || (sizeSupport.RunnableOnCard && support.GenerateStatus != GeneratePlannedOnly),
 	}, true
 }
 
@@ -131,6 +131,14 @@ func QATTargetQuantModeSupport(size, mode string) (QuantModeSupport, bool) {
 	rawMode := denormalizeStatusQuantMode(mode)
 	if _, ok := qatQuantSuffix(rawMode); !ok {
 		return QuantModeSupport{}, false
+	}
+	if size == "26B-A4B" && rawMode == "q4" {
+		return QuantModeSupport{
+			Mode:           rawMode,
+			Runtime:        RuntimeMLXAffine,
+			GenerateStatus: GenerateLinked,
+			Notes:          "Gemma-4 QAT MLX-affine host-resident expert generate path",
+		}, true
 	}
 	if size == "26B-A4B" || size == "31B" {
 		return QuantModeSupport{

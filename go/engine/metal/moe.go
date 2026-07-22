@@ -365,14 +365,22 @@ func moeExpertsInto(out []byte, x []byte, idx []int32, weights, gateW, upW, down
 // (gate/up: dModel→dFF, down: dFF→dModel) and accumulates weights[i]·downᵢ — the quant sibling
 // of MoEExperts, encQMVBF16 in place of encGemvBF16. groupSize/bits are the checkpoint's quant.
 func MoEExpertsQuant(x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, numExperts, topK, dModel, dFF, groupSize, bits int) ([]byte, error) {
-	return moeExpertsQuantInto(nil, x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, groupSize, bits, false)
+	return moeExpertsQuantInto(nil, x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, groupSize, bits, false, false)
 }
 
 func MoEExpertsQuantInto(out []byte, x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, numExperts, topK, dModel, dFF, groupSize, bits int) ([]byte, error) {
-	return moeExpertsQuantInto(out, x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, groupSize, bits, true)
+	return moeExpertsQuantInto(out, x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, groupSize, bits, true, false)
 }
 
-func moeExpertsQuantInto(out []byte, x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, numExperts, topK, dModel, dFF, groupSize, bits int, useCallerOut bool) ([]byte, error) {
+// MoEExpertsQuantSiLU is MoEExpertsQuant for a SwiGLU (SiLU-gated) MoE — llama/mistral/qwen, where the
+// expert MLP is silu(x·Gateᵀ)·(x·Upᵀ)·Downᵀ. Identical batched-expert dispatch as MoEExpertsQuant but the
+// gate nonlinearity is SiLU (encSiLUGateMulBF16) not gemma's GELU. The composed Qwen lane binds this; the
+// plain MoEExpertsQuant keeps GELU for the gemma4 26B-A4B SwitchGLU.
+func MoEExpertsQuantSiLU(x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, numExperts, topK, dModel, dFF, groupSize, bits int) ([]byte, error) {
+	return moeExpertsQuantInto(nil, x, idx, weights, gate, up, down, numExperts, topK, dModel, dFF, groupSize, bits, false, true)
+}
+
+func moeExpertsQuantInto(out []byte, x []byte, idx []int32, weights []byte, gate, up, down QuantWeight, numExperts, topK, dModel, dFF, groupSize, bits int, useCallerOut, useSiLU bool) ([]byte, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
@@ -460,7 +468,12 @@ func moeExpertsQuantInto(out []byte, x []byte, idx []int32, weights []byte, gate
 				return
 			}
 			_ = encQMVBF16(enc, upPackedBuf.buf, upScalesBuf.buf, upBiasesBuf.buf, xBuf, msc.up, upPackedBuf.off+gatePackedOff, upScalesBuf.off+gateScaleOff, upBiasesBuf.off+gateScaleOff, 0, dFF, dModel, groupSize, bits)
-			if encErr = encGeluGateMul(enc, msc.gate, msc.up, msc.gated, msc, dFF); encErr != nil {
+			if useSiLU {
+				encErr = encSiLUGateMulBF16(enc, msc.gate, msc.up, msc.gated, dFF) // SwiGLU (qwen/llama/mistral)
+			} else {
+				encErr = encGeluGateMul(enc, msc.gate, msc.up, msc.gated, msc, dFF) // gemma GELU
+			}
+			if encErr != nil {
 				endEncodingFast(enc)
 				return
 			}

@@ -172,3 +172,82 @@ overtaken by the consolidation:
 The genuinely open contract questions (streaming batch, aggregated stats) now
 follow the in-repo optional-interface pattern rather than a cross-repo rollout —
 see [architecture.md](architecture.md).
+
+## Release-day support: the gemma4 2026-07-15 update
+
+Google refreshed the gemma4 family repos on 15 July 2026 (canonical chat
+template + README/model-card). go-inference absorbed it same-day, ~12 hours
+after the upstream commits:
+
+- **Canonical chat template** (published 2026-07-09, shipped 07-15): the
+  semantics overlapping our native dialect were ported — reasoning
+  preservation on post-last-user turns (`reasoning`/`reasoning_content` now
+  parse; `chat_template_kwargs.preserve_thinking` extends it to tool-call
+  turns), adjacent-assistant turn folding (turn-tag balance), and the port
+  flushed out a live bug: inbound `tool_calls` on replayed history were
+  dropped by the hand-rolled decoder, so the stateless tool-history re-render
+  could never fire. Null tool-argument rendering already matched.
+- **OCR soft-token budget (1120)**: per-request budget override end-to-end —
+  `mm_processor_kwargs.max_soft_tokens` (vLLM convention) and OpenAI-native
+  `image_url.detail` (low→70, high→1120) → `WithVisionBudget` → the neutral
+  `VisionBudgetTokenModel.ProjectImageAt` seam → the metal binding cloning the
+  retained feature config per projection. Live receipt: the same 896×1152
+  test sheet costs 290 prompt tokens at default and 1111 at `detail:"high"`
+  on the 26B — the budget engages through every layer. The vendored reference
+  docs confirm the sizing rule (budget×9 max patches, aspect-preserving
+  resize, 3×3 mean-pool) matches the documented pipeline exactly.
+- **FA4/Blackwell**: a transformers-side CUDA kernel lane, not an attention-
+  scheme change — config.json and generation_config are byte-stable across
+  the update, so the metal kernels (already implementing the declared scheme)
+  need nothing.
+
+The live receipt also flushed out — and fixed, same day — a long-standing
+encoder-tower defect: the tower re-derived its patch grid from the flattened
+patch COUNT (most-square factorisation, h ≤ w), transposing the split-axis
+position field and the 3×3 pooling for every portrait image at every budget.
+A giant-letter bisect (square reads, portrait misreads, both budgets) cornered
+it; threading the true resize grid through VisionImagePatchesGrid →
+ProjectImageFeaturesAt → VisionTower fixed it. Post-fix, the 26B transcribes
+the same test sheet VERBATIM at 1120 — every line including the fine print —
+where pre-fix it declared the image illegible. Still open, tracked: the 12B
+unified (encoder-free) lane declines image prefill under chat's chunked
+prefill entirely.
+
+**2026-07-16 follow-up — the 12B unified decline closed (`1c60be1`).** The
+decline was not vision code at all: q8 KV on the recorded-ICB lane (#367, the
+default) declined ANY rowAttnCaps batch, and the bidirectional image-span lane
+correctly refuses a sequential fallback — so the decline surfaced as a hard
+error on every 12B image request (E2B dodged it only by geometry). The q8 gate
+now accepts caps chunks (multiQ is structurally off under caps; the reads ride
+the per-row q8 ladder against the chunk-wide rows-store landing, both
+pre-checked), and span-free chunks the span cutter produces route through the
+causal embedding lanes with their legal sequential fallback. Receipts: q8-on
+answers the giant-letter probes byte-equal to the q8-off baseline at temp 0;
+two new q8 bidir tests pin engagement and split routing; full metal suite
+green.
+
+## 2026-07-16 — Qwen MTP joins the ONE speculative route (#7)
+
+The Qwen 3.5/3.6 multi-token-prediction head now pairs with its base
+through the same declare/bind route gemma4's assistants use — four
+slices on dev: `df7f79a` (composed Snapshot/Restore), `7d64182`
+(declare + trained-shape pairing), `82d263d` (block-verify lane,
+measured), `bd5ef1cc` (the serve seam). The drafter runs the trained
+shape verified against vLLM's proposer — each head row pairs a token
+with the base hidden that PRODUCED it, in a persistent head session at
+true positions; the rejected earlier draft of the pairing had both
+wrong, and the difference is 61-65% real acceptance on the 27B versus
+the 7% a random head scores. Per-token verify is byte-identical to
+plain greedy by construction; block-verify (one batched base forward
+per round, Snapshot/Restore on reject) is mechanically proven — the
+oracle fixture commits 20 tokens in 4 forwards — but ships OFF: on the
+host lane a 4-row batched forward costs ~3x a single step, so the
+forward-count win inverts (48 tokens: 15.7s per-token vs 21.1s block).
+Its flip-levers, in order: truncate-on-restore for attention KV, #8-B
+quant tails, an MoE base, the GPU decode lane. Live serve receipt:
+`lem serve --model Qwen3.6-27B-4bit --draft Qwen3.6-27B-MTP-4bit`
+announces the lane, answers ChatML at temp 0, and LTHN_MTP_DIAG shows
+the pair carrying requests at 65.2% acceptance. Follow-ups filed in
+the task: the in-checkpoint mtp.* layout (the 35B-A3B MoE convention)
+as an auto-detect rung, and speculative continuity for BOTH pair
+families.

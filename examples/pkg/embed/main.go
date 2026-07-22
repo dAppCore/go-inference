@@ -20,7 +20,7 @@ import (
 	"os"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/model/bert"
+	"dappco.re/go/inference/model/arch/bert"
 )
 
 func main() {

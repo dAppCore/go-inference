@@ -64,7 +64,7 @@ func WriteNativePack(ctx context.Context, root string, info PackInfo, projection
 	if !encoded.OK {
 		return NativePackExportResult{}, encoded.Value.(error)
 	}
-	if result := core.WriteFile(configPath, encoded.Value.([]byte), 0o644); !result.OK {
+	if result := core.WriteFile(configPath, encoded.Bytes(), 0o644); !result.OK {
 		return NativePackExportResult{}, result.Value.(error)
 	}
 	return NativePackExportResult{
@@ -227,7 +227,7 @@ func writeAutoRoundRawSafetensors(ctx context.Context, path string, tensors []pa
 	if !encoded.OK {
 		return encoded.Value.(error)
 	}
-	headerBytes := encoded.Value.([]byte)
+	headerBytes := encoded.Bytes()
 
 	parent := core.PathDir(path)
 	if result := core.MkdirAll(parent, 0o755); !result.OK {

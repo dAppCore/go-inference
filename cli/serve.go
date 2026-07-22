@@ -30,7 +30,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	noAutoProfile := fs.Bool("no-auto-profile", false, "ignore tuned profiles from `lem tune` (run the flag/engine-default draft block)")
 	profileDir := fs.String("profile-dir", "", "tuned-profile directory (default ~/Lethean/lem/tuning)")
 	contextLen := fs.Int("context", 0, "override context length; 0 uses the model's default")
-	kvCacheMode := fs.String("kv-cache", "", "KV cache mode override (engine-reported; the no-cgo metal engine runs its built-in cache only — other values are noted and ignored)")
+	kvCacheMode := fs.String("kv-cache", "", "live KV cache mode: native (default) or turboquant[:4|:3.5|:3|:2] — TurboQuant codes on global attention layers; unknown/unservable modes fail the load loudly")
 	readTimeout := fs.Duration("read-timeout", 30*time.Second, "HTTP read header timeout")
 	writeTimeout := fs.Duration("write-timeout", 5*time.Minute, "HTTP write timeout (covers full streaming response)")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown deadline after SIGINT/SIGTERM")
@@ -49,6 +49,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	embedModel := fs.String("embed-model", "", "embeddings/rerank model: a bert/BGE-class host encoder snapshot directory (config.json + vocab.txt + model.safetensors); served at /v1/embeddings and /v1/rerank under --embed-model-id alongside (or, with --model \"\", instead of) the chat model; empty = those routes serve only what the chat model itself implements (a clean 4xx today). A load failure is fatal at boot")
 	embedModelID := fs.String("embed-model-id", "", "request name for --embed-model's `model` field; empty derives the pack's basename")
 	corsOrigins := fs.String("cors", "", "browser origins allowed via CORS: comma-separated exact origins (e.g. http://localhost:4200) or '*' for any; empty (the default) sends no CORS headers — a browser app on another origin then cannot call the serve")
+	captureSlug := fs.String("capture", "", "tee each completed (prompt, response) turn into this `lem data` dataset with the serving model's fingerprint; empty (the default) captures nothing — the approved privacy default is opt-in only")
 	fs.Usage = func() {
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s serve [--model <path>] [flags]\n", name))
@@ -65,6 +66,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		core.WriteString(stderr, "  POST /api/chat               Ollama chat\n")
 		core.WriteString(stderr, "  POST /v1/embeddings          embedding vectors (chat model or --embed-model)\n")
 		core.WriteString(stderr, "  POST /v1/rerank              document reranking (chat model or --embed-model)\n")
+		core.WriteString(stderr, "  POST /v1/audio/transcriptions  ASR (multipart or JSON data-URL) — --model a Whisper checkpoint serves this INSTEAD of chat/embeddings\n")
 		core.WriteString(stderr, "  GET  /v1/models              list loaded models\n")
 		core.WriteString(stderr, "  GET  /v1/health              process health probe\n")
 	}
@@ -137,6 +139,22 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		continuityEnabler = continuity.EnableSharing
 	}
 
+	// Dataset capture — opt-in only (buildCaptureLoader never opens the
+	// dataset store when --capture is empty, "OFF without the flag"). A
+	// --capture pointing at a dataset that doesn't exist yet fails the boot
+	// closed, before any listener binds, matching the admin-token/policy/
+	// embed-model precedent above: a deployer who asked for capture gets it
+	// or an honest refusal, never a silent no-op.
+	captureLoader, captureStore, captureErr := buildCaptureLoader(*captureSlug, stderr)
+	if captureErr != nil {
+		core.Print(stderr, "%s serve: --capture: %v", cliName(), captureErr)
+		return 1
+	}
+	if captureStore != nil {
+		defer captureStore.Close()
+		core.Print(stderr, "serve: capturing completed turns into dataset %q", core.Trim(*captureSlug))
+	}
+
 	err = serving.RunServe(ctx, serving.ServeConfig{
 		Addr:                 *addr,
 		ModelPath:            *modelPath,
@@ -148,6 +166,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		DraftPath:            *draftPath,
 		DraftDetect:          *draftDetect,
 		DraftBlock:           *draftBlock,
+		Loader:               captureLoader,
 		SpeculativeLoader:    speculativeLoader,
 		EnableContinuity:     continuityEnabler,
 		NoAutoProfile:        *noAutoProfile,

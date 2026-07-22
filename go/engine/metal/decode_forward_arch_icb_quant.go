@@ -216,8 +216,8 @@ func recordArchICBQuant(
 	kCaches, vCaches []metal.MTLBuffer,
 	pleRuntime *archDecodePLEInputs, pliDim, pleGS, pleBits int,
 	dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow int,
-	rope icbRope, scale, eps float32, valueNorm bool,
-	kvQ8 *archICBKVQ8,
+	rope icbRope, scale, ropeScale, eps float32, valueNorm, useSiLU bool,
+	kvQ8 *archICBKVQ8, kvTQ *archICBKVTQ,
 ) (*archICBReplay, error) {
 	nLayers := len(qlayers)
 	// Resolve the per-layer K==V op selection (LayerSpec.AttentionKEqV) that recordArchICB reads: a
@@ -411,6 +411,11 @@ func recordArchICBQuant(
 		lb := setup.lb
 		pleLB := setup.pleLB
 		plePostNorms := setup.plePostNorms
+		// Qwen2/2.5 additive q/k/v projection bias (bf16 vectors beside the packed weights) — resident,
+		// nil when the arch is bias-free. The record loop emits a bf16 vector-add after each of Q/K/V.
+		qBiasBufs := make([]metal.MTLBuffer, nLayers)
+		kBiasBufs := make([]metal.MTLBuffer, nLayers)
+		vBiasBufs := make([]metal.MTLBuffer, nLayers)
 		residentView := func(b []byte) bufView { return bufView{buf: residentBytes(b)} }
 		residentOrNil := func(b []byte) metal.MTLBuffer {
 			if len(b) == 0 {
@@ -476,11 +481,31 @@ func recordArchICBQuant(
 			ql := qlayers[li]
 			anwBufs[li] = residentBytes(ql.AttnNormW)
 			mnwBufs[li] = residentBytes(ql.MLPNormW)
+			// qNormBufs/kNormBufs bind PER-HEAD only (length headDim) — see recordArchICBBF16's
+			// identical note (decode_forward_arch_icb.go): the ICB recorder has no whole-vector (#65)
+			// twin; icbQKNormSupported enforces that rather than trusting it (today this path rejects
+			// every MoE layer above — line ~241 — and OLMoE, the only registered whole-vector-QK-norm
+			// arch, is entirely MoE, so it never actually fires).
+			if err := icbQKNormSupported("q_norm", ql.QNormW, nHeads, headDimOf(specs[li], headDim)); err != nil {
+				if coreErr == nil {
+					coreErr = err
+				}
+				return
+			}
+			if err := icbQKNormSupported("k_norm", ql.KNormW, kvHeadsOf(specs[li], nKVHeads), headDimOf(specs[li], headDim)); err != nil {
+				if coreErr == nil {
+					coreErr = err
+				}
+				return
+			}
 			qNormBufs[li] = residentOrNil(ql.QNormW)
 			kNormBufs[li] = residentOrNil(ql.KNormW)
 			postAttnBufs[li] = residentOrNil(ql.PostAttnNormW)
 			postFFBufs[li] = residentOrNil(ql.PostFFNormW)
 			layerScalarBufs[li] = layerScalarBuf(ql.LayerScalarW, dModel)
+			qBiasBufs[li] = residentOrNil(ql.BQ)
+			kBiasBufs[li] = residentOrNil(ql.BK)
+			vBiasBufs[li] = residentOrNil(ql.BV)
 			lb[li] = archICBQuantLayerProjBuffers{
 				mkW(ql.Q, ql.GroupSize, ql.Bits), mkW(ql.K, ql.GroupSize, ql.Bits),
 				mkW(ql.V, ql.GroupSize, ql.Bits), mkW(ql.O, ql.GroupSize, ql.Bits),
@@ -711,7 +736,7 @@ func recordArchICBQuant(
 		// recordArchICB reads the DECLARED per-layer K==V op selection (specs[li].AttentionKEqV),
 		// resolved at the top of this function (from the model.Assemble declaration, or weight presence
 		// for a hand-built caller).
-		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps, kvQ8)
+		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, ropeScale, eps, useSiLU, qBiasBufs, kBiasBufs, vBiasBufs, kvQ8, kvTQ)
 	})
 	if coreErr != nil {
 		return nil, coreErr
@@ -841,9 +866,9 @@ func decodeForwardArchICBQuantInto(
 				vCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
 			}
 		}
-		r, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm, nil)
+		r, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, scale, eps, valueNorm, false, nil, nil)
 		if coreErr == nil && pipeline {
-			r2, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm, nil)
+			r2, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, scale, eps, valueNorm, false, nil, nil)
 		}
 	})
 	if coreErr != nil {

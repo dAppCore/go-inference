@@ -604,7 +604,7 @@ func TestHeadEncoderSampleTopKCandidatesBufferWithHistoryInto_RejectsMissingHidd
 
 func TestHeadEncoderEncodeTopKCandidateRows_DeclinesUnusableHead(t *testing.T) {
 	h := &headEncoder{dModel: 4, vocab: 8}
-	scratch, candidates, ok, err := h.encodeTopKCandidateRows(nil, nil, 1, nil, nil, 1, false)
+	scratch, candidates, ok, err := h.encodeTopKCandidateRows(nil, nil, 1, nil, nil, 1, false, false)
 	if scratch != nil || candidates != 0 || ok || err != nil {
 		t.Fatalf("encodeTopKCandidateRows unusable head = scratch=%v candidates=%d ok=%v err=%v, want nil/0/false/nil", scratch, candidates, ok, err)
 	}
@@ -613,7 +613,7 @@ func TestHeadEncoderEncodeTopKCandidateRows_DeclinesUnusableHead(t *testing.T) {
 func TestHeadEncoderEncodeTopKCandidateRowsObjectAt_DeclinesInvalidTopK(t *testing.T) {
 	h := &headEncoder{vocab: 8}
 	var enc metal.MTLComputeCommandEncoderObject
-	scratch, candidates, ok, err := h.encodeTopKCandidateRowsObjectAt(enc, nil, 0, 0, nil, nil, 1, false)
+	scratch, candidates, ok, err := h.encodeTopKCandidateRowsObjectAt(enc, nil, 0, 0, nil, nil, 1, false, false)
 	if scratch != nil || candidates != 0 || ok || err != nil {
 		t.Fatalf("encodeTopKCandidateRowsObjectAt invalid topK = scratch=%v candidates=%d ok=%v err=%v, want nil/0/false/nil", scratch, candidates, ok, err)
 	}
@@ -639,7 +639,7 @@ func TestHeadEncoderEncodeTopKCandidateRows_WrongMetallibReturnsError(t *testing
 	withWrongMainLibrary(t, func() {
 		cb := queue.CommandBuffer()
 		enc := cb.ComputeCommandEncoder()
-		scratch, _, ok, err := h.encodeTopKCandidateRows(enc, sharedBytes(hidden), 1, nil, nil, 1, false)
+		scratch, _, ok, err := h.encodeTopKCandidateRows(enc, sharedBytes(hidden), 1, nil, nil, 1, false, false)
 		enc.EndEncoding()
 		if scratch != nil {
 			h.putTopKScratch(scratch)
@@ -889,6 +889,11 @@ func TestHeadEncoderTopKTokenPrefersFusedQ4Scratch(t *testing.T) {
 	}
 	if !qmvLogitsTopKUsable(dModel, vocab, groupSize, bits, topK) {
 		t.Skip("qmv logits top-k custom kernel unavailable")
+	}
+	if topKReduceSampleUsable(topK, vocab) {
+		// #23: the reduce route (qmv logits + reduction pick) outranks the fused q4 arm — the
+		// fused-scratch preference this test pins only applies when reduce is unavailable.
+		t.Skip("reduce pick preferred over the fused q4 arm on this build")
 	}
 	h, hidden := quantHeadEncoderBenchFixture(dModel, vocab, groupSize, bits)
 	params := model.SampleParams{Temperature: 1, TopK: topK}
@@ -1773,7 +1778,7 @@ func TestHeadEncoderEncodeTopKCandidateRowsMatchesFullLogits(t *testing.T) {
 	const topK = 5
 	cb := queue.CommandBuffer()
 	enc := cb.ComputeCommandEncoder()
-	scratch, candidateCount, ok, err := h.encodeTopKCandidateRows(enc, sharedBytes(hidden), topK, []int32{2, 7}, nil, 1, false)
+	scratch, candidateCount, ok, err := h.encodeTopKCandidateRows(enc, sharedBytes(hidden), topK, []int32{2, 7}, nil, 1, false, false)
 	if err != nil || !ok {
 		enc.EndEncoding()
 		if scratch != nil {

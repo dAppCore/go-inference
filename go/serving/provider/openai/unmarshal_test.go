@@ -27,6 +27,24 @@ func TestUnmarshalChatCompletionRequest_ThinkingControls(t *testing.T) {
 	}
 }
 
+// TestUnmarshalChatCompletionRequest_MMProcessorKwargs pins the hand-rolled
+// decoder for the vision-budget vLLM convention: mm_processor_kwargs is a
+// SEPARATE top-level object from chat_template_kwargs, both present on the
+// same request.
+func TestUnmarshalChatCompletionRequest_MMProcessorKwargs(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"enable_thinking":false},"mm_processor_kwargs":{"foo":"bar","max_soft_tokens":1120}}`
+	var req ChatCompletionRequest
+	if err := json.Unmarshal([]byte(in), &req); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if req.MMProcessorKwargs == nil || req.MMProcessorKwargs.MaxSoftTokens == nil || *req.MMProcessorKwargs.MaxSoftTokens != 1120 {
+		t.Fatalf("MMProcessorKwargs = %+v, want MaxSoftTokens=&1120", req.MMProcessorKwargs)
+	}
+	if req.ChatTemplateKwargs == nil || req.ChatTemplateKwargs.EnableThinking == nil || *req.ChatTemplateKwargs.EnableThinking {
+		t.Fatalf("ChatTemplateKwargs.EnableThinking = %+v, want &false (unaffected by the sibling object)", req.ChatTemplateKwargs)
+	}
+}
+
 // TestUnmarshalChatCompletionRequest_DirectShapes pins the hand-rolled
 // decoder against direct JSON literals. Locks the per-field dispatch
 // — present / absent / null variants of every pointer field, the
@@ -505,6 +523,95 @@ func TestUnmarshal_ParseChatTemplateKwargs_Good(t *testing.T) {
 	}
 	if kw.EnableThinking != nil || kw.ThinkingBudget != nil {
 		t.Fatalf("parseChatTemplateKwargs(%q) = %+v, want both nil", in, kw)
+	}
+}
+
+// TestUnmarshal_ParseChatTemplateKwargs_Good_PreserveThinking pins the
+// preserve_thinking capture (bool, null-tolerant) beside its siblings.
+func TestUnmarshal_ParseChatTemplateKwargs_Good_PreserveThinking(t *testing.T) {
+	kw, _, err := parseChatTemplateKwargs([]byte(`{"preserve_thinking":true}`), 0)
+	if err != nil || kw.PreserveThinking == nil || !*kw.PreserveThinking {
+		t.Fatalf("parseChatTemplateKwargs(preserve_thinking:true) = %+v, err %v", kw, err)
+	}
+	kw, _, err = parseChatTemplateKwargs([]byte(`{"preserve_thinking":null}`), 0)
+	if err != nil || kw.PreserveThinking != nil {
+		t.Fatalf("parseChatTemplateKwargs(preserve_thinking:null) = %+v, err %v", kw, err)
+	}
+}
+
+// TestUnmarshal_ParseMMProcessorKwargs_Bad drives parseMMProcessorKwargs's own
+// malformed-shape branches directly — mirrors
+// TestUnmarshal_ParseChatTemplateKwargs_Bad for the sibling kwargs object.
+// "max_soft_tokens-non-integer" pins that a fractional value is rejected: the
+// digit walk stops at the '.', and the enclosing object-loop's delimiter
+// check (expects ',' or '}' next) is what actually catches it — the same
+// mechanism that already rejects a fractional top_k/max_tokens on the
+// top-level request.
+func TestUnmarshal_ParseMMProcessorKwargs_Bad(t *testing.T) {
+	cases := []struct{ name, in string }{
+		{"not-an-object", `"str"`},
+		{"non-string-key", `{1:"x"}`},
+		{"unterminated-key", `{"max_soft_tokens`},
+		{"missing-colon", `{"max_soft_tokens" 70}`},
+		{"max_soft_tokens-wrong-type", `{"max_soft_tokens":"nope"}`},
+		{"max_soft_tokens-non-integer", `{"max_soft_tokens":70.5}`},
+		{"unknown-field-malformed-value", `{"extra":bogus}`},
+		{"eof-after-value", `{"max_soft_tokens":70`},
+		{"trailing-garbage", `{"max_soft_tokens":70]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := parseMMProcessorKwargs([]byte(tc.in), 0); err != jsonenc.ErrInvalidJSON {
+				t.Fatalf("parseMMProcessorKwargs(%q) error = %v, want jsonenc.ErrInvalidJSON", tc.in, err)
+			}
+		})
+	}
+}
+
+// TestUnmarshal_ParseMMProcessorKwargs_Good covers the empty-object fast
+// path, max_soft_tokens' null handling, a present value, and an unknown-field
+// skip — mirrors TestUnmarshal_ParseChatTemplateKwargs_Good.
+func TestUnmarshal_ParseMMProcessorKwargs_Good(t *testing.T) {
+	kw, next, err := parseMMProcessorKwargs([]byte(`{}`), 0)
+	if err != nil || kw == nil || *kw != (MMProcessorKwargs{}) || next != 2 {
+		t.Fatalf("parseMMProcessorKwargs(%q) = %+v, %d, %v", `{}`, kw, next, err)
+	}
+
+	in := `{"extra":"ignored","max_soft_tokens":null}`
+	kw, _, err = parseMMProcessorKwargs([]byte(in), 0)
+	if err != nil {
+		t.Fatalf("parseMMProcessorKwargs(%q) error = %v", in, err)
+	}
+	if kw.MaxSoftTokens != nil {
+		t.Fatalf("parseMMProcessorKwargs(%q) = %+v, want nil", in, kw)
+	}
+
+	kw, _, err = parseMMProcessorKwargs([]byte(`{"max_soft_tokens":1120}`), 0)
+	if err != nil || kw.MaxSoftTokens == nil || *kw.MaxSoftTokens != 1120 {
+		t.Fatalf("parseMMProcessorKwargs(max_soft_tokens:1120) = %+v, err %v", kw, err)
+	}
+}
+
+// TestUnmarshal_ParseChatMessage_Good_AssistantHistoryFields pins the
+// assistant-history fields a stateless replay carries: reasoning /
+// reasoning_content parse as strings (null-tolerant), and tool_calls decode
+// into the typed list — previously all three fell through the unknown-key
+// skip, so the tool-history re-render in openAIMessageContent could never
+// fire.
+func TestUnmarshal_ParseChatMessage_Good_AssistantHistoryFields(t *testing.T) {
+	in := `{"role":"assistant","content":"ok","reasoning":"chain","tool_calls":[{"id":"1","type":"function","function":{"name":"f","arguments":"{\"x\":1}"}}]}`
+	msg, _, err := parseChatMessage([]byte(in), 0)
+	if err != nil {
+		t.Fatalf("parseChatMessage(%q) error = %v", in, err)
+	}
+	if msg.Reasoning != "chain" || len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Function.Name != "f" {
+		t.Fatalf("parseChatMessage(assistant history) = %+v", msg)
+	}
+
+	in = `{"role":"assistant","content":"ok","reasoning":null,"reasoning_content":"alt","tool_calls":null}`
+	msg, _, err = parseChatMessage([]byte(in), 0)
+	if err != nil || msg.Reasoning != "" || msg.ReasoningContent != "alt" || msg.ToolCalls != nil {
+		t.Fatalf("parseChatMessage(null-tolerant history) = %+v, err %v", msg, err)
 	}
 }
 

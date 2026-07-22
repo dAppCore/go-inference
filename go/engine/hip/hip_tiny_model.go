@@ -462,7 +462,7 @@ func hipRunLoadedTinyPrefill(ctx context.Context, driver nativeHIPDriver, cfg hi
 	if err != nil {
 		return hipTinyPrefillResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipTinyPrefillResult{}, err
 	}
 	output, err := buffers.ReadOutput()
@@ -572,7 +572,7 @@ func hipRunLoadedTinyDecode(ctx context.Context, driver nativeHIPDriver, cfg hip
 	if err != nil {
 		return hipTinyDecodeResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipTinyDecodeResult{}, err
 	}
 	output, err := buffers.ReadOutput()
@@ -1050,6 +1050,10 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 }
 
 func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, initialDeviceState *hipGemma4Q4DeviceDecodeState, retainDeviceState func(*hipGemma4Q4DeviceDecodeState) error, sampler *sharedmodel.Sampler) (iter.Seq[inference.Token], func() error) {
+	return hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx, model, cfg, promptTokens, nil, generate, engineConfig, initialDeviceState, retainDeviceState, sampler)
+}
+
+func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, promptEmbeddings []byte, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, initialDeviceState *hipGemma4Q4DeviceDecodeState, retainDeviceState func(*hipGemma4Q4DeviceDecodeState) error, sampler *sharedmodel.Sampler) (iter.Seq[inference.Token], func() error) {
 	var runErr error
 	return func(yield func(inference.Token) bool) {
 		feedbackReceipts := hipBeginFeedbackReceipts()
@@ -1112,8 +1116,26 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 			runErr = err
 			return
 		}
+		if len(promptEmbeddings) > 0 {
+			hidden := cfg.Layers[0].HiddenSize
+			if hidden <= 0 || len(promptEmbeddings) != len(promptTokens)*hidden*4 {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "custom prefill embedding geometry mismatch", nil)
+				return
+			}
+			if !hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "custom prefill embeddings require the batched Gemma4 path", nil)
+				return
+			}
+			if engineConfig.DisableBatchedPrefill {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "custom prefill embeddings cannot use canonical serial landing", nil)
+				return
+			}
+		}
 		suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, generate.StopTokens)
-		hostSampling := hipGemma4Q4HostSamplingRequested(generate)
+		denseProjectionWeights := cfg.usesDenseProjectionWeights()
+		hostSamplingRequested := hipGemma4Q4HostSamplingRequested(generate)
+		denseDeviceGreedy := denseProjectionWeights && cfg.HeadLoRA == nil && !hostSamplingRequested
+		hostSampling := hostSamplingRequested || (denseProjectionWeights && !denseDeviceGreedy)
 		if err := req.validate(cfg); err != nil {
 			runErr = err
 			return
@@ -1123,11 +1145,42 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 			runErr = err
 			return
 		}
-		prefillPlanBatches := hipBorrowGemma4Q4PrefillUBatches(hipGemma4Q4PrefillBatchCount(len(promptTokens), ubatchTokens))
+		bidirSpans := hipGemma4Q4BidirectionalTokenSpans(promptTokens, engineConfig.BidirectionalSpanTokens)
+		if len(bidirSpans) > 0 {
+			if !hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) || engineConfig.DisableBatchedPrefill {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "bidirectional media spans require batched prefill", nil)
+				return
+			}
+			for _, layer := range cfg.Layers {
+				if layer.SlidingWindow > 0 && req.Position+len(promptTokens) > layer.SlidingWindow {
+					runErr = core.E(hipGemma4Q4Layer0Operation, "bidirectional media spans require the prompt to fit the sliding window", nil)
+					return
+				}
+			}
+		}
+		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) && !engineConfig.DisableBatchedPrefill
+		prefillSharedSuffix := -1
+		prefillSharedSuffixWindow := 0
+		if useBatchedPrefill && !engineConfig.DisablePrefillSharedSuffixSkip && len(promptEmbeddings) == 0 && len(bidirSpans) == 0 {
+			prefillSharedSuffix = hipGemma4Q4PrefillSharedSuffixStart(hipGemma4Q4SharedKVSourceByLayer(cfg))
+			prefillSharedSuffixWindow = hipGemma4Q4PrefillSharedSuffixWindow(cfg, prefillSharedSuffix)
+		}
+		prefillBatchCapacity := hipGemma4Q4PrefillBatchCount(len(promptTokens), ubatchTokens) + len(bidirSpans)
+		if prefillSharedSuffixWindow > 0 {
+			prefillBatchCapacity += 2
+		}
+		prefillPlanBatches := hipBorrowGemma4Q4PrefillUBatches(prefillBatchCapacity)
 		defer func() {
 			hipReleaseGemma4Q4PrefillUBatches(prefillPlanBatches)
 		}()
-		prefillPlan, prefillPlanBatches, err := hipGemma4Q4PlanPromptPrefillInto(promptTokens, req.Position, ubatchTokens, prefillPlanBatches)
+		var prefillPlan hipGemma4Q4PrefillPlan
+		if len(bidirSpans) > 0 {
+			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillBidirectionalInto(promptTokens, req.Position, ubatchTokens, bidirSpans, prefillPlanBatches)
+		} else if prefillSharedSuffixWindow > 0 {
+			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillSharedSuffixInto(promptTokens, req.Position, ubatchTokens, prefillSharedSuffixWindow, prefillPlanBatches)
+		} else {
+			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillInto(promptTokens, req.Position, ubatchTokens, prefillPlanBatches)
+		}
 		if err != nil {
 			runErr = err
 			return
@@ -1137,8 +1190,8 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 			runErr = err
 			return
 		}
-		deviceTopKSampling := hipGemma4Q4DeviceTopKSamplingRequested(generate)
-		deviceCandidateSampling := hipGemma4Q4DeviceCandidateSamplingRequested(generate)
+		deviceTopKSampling := !denseProjectionWeights && hipGemma4Q4DeviceTopKSamplingRequested(generate)
+		deviceCandidateSampling := !denseProjectionWeights && hipGemma4Q4DeviceCandidateSamplingRequested(generate)
 		var attentionWorkspace *hipAttentionHeadsChunkedWorkspace
 		if engineConfig.attentionWorkspaceNeeded(len(promptTokens), generate) {
 			attentionWorkspace = hipBorrowAttentionHeadsChunkedWorkspace()
@@ -1186,14 +1239,26 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 		// sampled. Sampling used to force the token-at-a-time prefill producer,
 		// flattening 12B logits while preserving many argmaxes. Batched prefill
 		// owns every compatible prompt; the selected sampler consumes its last row.
-		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg)
-		disableBatchedDecode := engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
+		disableBatchedDecode := denseProjectionWeights || engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
 		useBatchedDecode := useBatchedPrefill && !disableBatchedDecode && !deviceCandidateSampling
 		if attentionWorkspace != nil {
 			if err := hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(model.driver, attentionWorkspace, cfg, prefillPlan, useBatchedPrefill); err != nil {
 				runErr = err
 				return
 			}
+		}
+		var customEmbeddingBuffer *hipDeviceByteBuffer
+		if len(promptEmbeddings) > 0 {
+			customEmbeddingBuffer, err = hipUploadByteBuffer(model.driver, hipGemma4Q4Layer0Operation, "custom prefill embeddings", promptEmbeddings, len(promptEmbeddings)/4)
+			if err != nil {
+				runErr = err
+				return
+			}
+			defer func() {
+				if err := customEmbeddingBuffer.Close(); err != nil && runErr == nil {
+					runErr = err
+				}
+			}()
 		}
 		var priorLayerKVScratch []*rocmDeviceKVCache
 		var priorLayerDescriptorScratch []*rocmDeviceKVDescriptorTable
@@ -1276,7 +1341,40 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 				priorLayerDescriptorScratch = hipGemma4Q4DeviceLayerDescriptorTables(deviceState, priorLayerDescriptorScratch, len(cfg.Layers))
 				priorLayerDescriptorTables = priorLayerDescriptorScratch
 			}
-			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, finalGreedyBuffer, attentionWorkspace, engineConfig)
+			var initialHidden *hipDeviceByteBuffer
+			if customEmbeddingBuffer != nil {
+				hidden := cfg.Layers[0].HiddenSize
+				byteOffset := ubatch.Start * hidden * 4
+				byteCount := len(ubatch.Tokens) * hidden * 4
+				view := hipBorrowDeviceByteBufferValue(model.driver, "custom prefill embedding ubatch", customEmbeddingBuffer.Pointer()+nativeDevicePointer(byteOffset), uint64(byteCount), len(ubatch.Tokens)*hidden)
+				initialHidden = &view
+			}
+			var visibleTokenCaps *hipDeviceTokenBuffer
+			if len(ubatch.AttentionCaps) > 0 {
+				visibleTokenCaps, err = hipUploadTokenIDs(model.driver, ubatch.AttentionCaps)
+				if err != nil {
+					runErr = err
+					return
+				}
+			}
+			outputTokens := ubatch.OutputTokens
+			outputRow := ubatch.OutputRow
+			if denseProjectionWeights || hostSampling {
+				outputTokens = nil
+				outputRow = -1
+			}
+			batchEngineConfig := engineConfig
+			batchEngineConfig.prefillLayerLimit = 0
+			if prefillSharedSuffix > 0 && batchIndex+1 < prefillPlan.LenBatches() && initialHidden == nil && visibleTokenCaps == nil {
+				batchEngineConfig.prefillLayerLimit = prefillSharedSuffix
+			}
+			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, outputTokens, outputRow, finalGreedyBuffer, attentionWorkspace, batchEngineConfig, initialHidden, visibleTokenCaps)
+			if visibleTokenCaps != nil {
+				closeErr := visibleTokenCaps.Close()
+				if err == nil && closeErr != nil {
+					err = closeErr
+				}
+			}
 			if err != nil {
 				runErr = err
 				return
@@ -1297,12 +1395,12 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 				}
 				haveCurrent = true
 			}
-			if hostSampling {
+			if (hostSampling || denseDeviceGreedy) && ubatch.OutputRow >= 0 {
 				outputRow := ubatch.OutputRow
 				if outputRow < 0 {
 					outputRow = len(ubatch.Tokens) - 1
 				}
-				current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], forward.FinalHidden, len(ubatch.Tokens), outputRow, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+				current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], cfg.HeadLoRA, forward.FinalHidden, len(ubatch.Tokens), outputRow, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
 				if err != nil {
 					_ = forward.Close()
 					runErr = err
@@ -1386,6 +1484,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 					GreedyBuffer:     finalGreedyBuffer,
 					Workspace:        attentionWorkspace,
 					ReturnHidden:     hostSampling,
+					SkipGreedy:       hostSampling,
 				})
 				if err != nil {
 					runErr = err
@@ -1395,7 +1494,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 				deviceState = advanced.DeviceState
 				advanced.DeviceState = nil
 				if hostSampling {
-					current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], advanced.Current.DeviceFinalHidden, 1, 0, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+					current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], cfg.HeadLoRA, advanced.Current.DeviceFinalHidden, 1, 0, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
 					if err != nil {
 						_ = advanced.Close()
 						runErr = err
@@ -1474,7 +1573,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 	}, func() error { return runErr }
 }
 
-func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDriver, last hipGemma4Q4Layer0Config, finalHidden *hipDeviceByteBuffer, tokenCount, row int, epsilon float32, generate inference.GenerateConfig, suppressTokens, history []int32, draw float64, finalGreedyBuffer *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, deviceTopK bool) (hipGemma4Q4ForwardResult, error) {
+func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDriver, last hipGemma4Q4Layer0Config, headLoRA *hipLoadedSmallLoRAAdapter, finalHidden *hipDeviceByteBuffer, tokenCount, row int, epsilon float32, generate inference.GenerateConfig, suppressTokens, history []int32, draw float64, finalGreedyBuffer *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, deviceTopK bool) (hipGemma4Q4ForwardResult, error) {
 	if finalHidden == nil || row < 0 || row >= tokenCount || finalHidden.Count() != tokenCount*last.HiddenSize {
 		return hipGemma4Q4ForwardResult{}, core.E(hipGemma4Q4Layer0Operation, "batched prefill sample row is invalid", nil)
 	}
@@ -1486,6 +1585,10 @@ func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDri
 		return hipGemma4Q4ForwardResult{}, err
 	}
 	defer finalNorm.Close()
+	if _, dense := last.LMHeadProjection.denseWeightEncoding(); dense && headLoRA == nil && !hipGemma4Q4HostSamplingRequested(generate) {
+		greedy, err := hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(ctx, driver, finalNorm, last.LMHeadProjection, last.FinalLogitSoftcap, suppressTokens, workspace)
+		return hipGemma4Q4ForwardResult{Greedy: greedy}, err
+	}
 	if deviceTopK {
 		greedy, greedyDevice, err := hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx, driver, finalNorm, last.LMHeadProjection, last.FinalLogitSoftcap, generate.TopK, generate.Temperature, generate.TopP, draw, finalGreedyBuffer, suppressTokens, workspace)
 		return hipGemma4Q4ForwardResult{Greedy: greedy, GreedyDevice: greedyDevice}, err
@@ -1498,6 +1601,16 @@ func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDri
 	logits, err := hipReadFloat32DeviceOutput(logitsBuffer, hipGemma4Q4Layer0Operation, "batched prefill logits", last.LMHeadProjection.Rows)
 	if err != nil {
 		return hipGemma4Q4ForwardResult{}, err
+	}
+	if headLoRA != nil {
+		normed, err := hipReadFloat32DeviceOutput(finalNorm, hipGemma4Q4Layer0Operation, "batched prefill final norm", last.HiddenSize)
+		if err != nil {
+			return hipGemma4Q4ForwardResult{}, err
+		}
+		logits, err = hipApplyHeadLoRA(normed, logits, headLoRA.a, headLoRA.b, last.VocabSize, last.HiddenSize, headLoRA.rank, headLoRA.alpha)
+		if err != nil {
+			return hipGemma4Q4ForwardResult{}, err
+		}
 	}
 	logits, err = hipGemma4Q4SoftcapLogits(logits, last.FinalLogitSoftcap)
 	if err != nil {
@@ -1602,6 +1715,7 @@ func hipGemma4Q4GenerateBatchDeviceGreedyUnrolled(ctx context.Context, model *hi
 	var priorLayerKVScratch []*rocmDeviceKVCache
 	var priorLayerDescriptorScratch []*rocmDeviceKVDescriptorTable
 	tokens := []int32{0}
+	batchKernelLaunches := hipDecodeKernelBatchEnabled()
 	for generated := 1; generated < generate.MaxTokens; generated++ {
 		if err := hipContextErr(ctx); err != nil {
 			return deviceState, position, err
@@ -1619,9 +1733,21 @@ func hipGemma4Q4GenerateBatchDeviceGreedyUnrolled(ctx context.Context, model *hi
 			priorLayerDescriptorScratch = hipGemma4Q4DeviceLayerDescriptorTables(deviceState, priorLayerDescriptorScratch, len(cfg.Layers))
 			priorLayerDescriptorTables = priorLayerDescriptorScratch
 		}
-		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreedyTokenWithEngineConfig(ctx, model.driver, cfg, tokens, position, epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, nil, -1, nil, workspace, engineConfig, greedyToken)
+		forwardCtx := ctx
+		var launchBatch *hipKernelLaunchBatch
+		if batchKernelLaunches {
+			forwardCtx, launchBatch = hipBeginKernelLaunchBatch(ctx, model.driver)
+		}
+		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreedyTokenWithEngineConfig(forwardCtx, model.driver, cfg, tokens, position, epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, nil, -1, nil, workspace, engineConfig, greedyToken)
 		if err != nil {
+			launchBatch.Discard()
 			return deviceState, position, err
+		}
+		if launchBatch != nil {
+			if err := launchBatch.Flush(); err != nil {
+				_ = forward.Close()
+				return deviceState, position, err
+			}
 		}
 		nextDeviceState, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, deviceKVMode)
 		if stateErr != nil {
@@ -1874,8 +2000,8 @@ func hipGemma4Q4EnsureAttentionWorkspaceDecodeHotCapacity(driver nativeHIPDriver
 		maxHiddenRows = max(maxHiddenRows, layer.PreFeedForwardNorm.Count)
 		maxHiddenRows = max(maxHiddenRows, layer.PostFeedForwardNorm.Count)
 		maxHiddenRows = max(maxHiddenRows, layer.FinalNorm.Count)
-		if layer.PerLayerInput.hasGlobalPrecompute() && layer.PerLayerInput.ModelProjection.Rows > maxPerLayerRows {
-			maxPerLayerRows = layer.PerLayerInput.ModelProjection.Rows
+		if rows := layer.PerLayerInput.modelProjectionRows(); layer.PerLayerInput.hasGlobalPrecompute() && rows > maxPerLayerRows {
+			maxPerLayerRows = rows
 		}
 	}
 	if maxHiddenRows > 0 {
@@ -1918,6 +2044,7 @@ func hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(driver nativeHIPDriver, 
 	maxQKVRows := 0
 	maxPerLayerOutputRows := 0
 	maxVocabRows := 0
+	maxNativeQ4KCols := 0
 	for _, layer := range cfg.Layers {
 		if layer.GateProjection.Rows > maxGateRows {
 			maxGateRows = layer.GateProjection.Rows
@@ -1925,11 +2052,14 @@ func hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(driver nativeHIPDriver, 
 		if layer.VocabSize > maxVocabRows {
 			maxVocabRows = layer.VocabSize
 		}
+		if layer.GGUFQ4KGateUp.available() && layer.GGUFQ4KGateUp.Cols > maxNativeQ4KCols {
+			maxNativeQ4KCols = layer.GGUFQ4KGateUp.Cols
+		}
 		if layer.PerLayerInput.hasLayerApply() && layer.PerLayerInput.InputGate.Rows > maxGateRows {
 			maxGateRows = layer.PerLayerInput.InputGate.Rows
 		}
-		if layer.PerLayerInput.hasGlobalPrecompute() && layer.PerLayerInput.ModelProjection.Rows > maxPerLayerOutputRows {
-			maxPerLayerOutputRows = layer.PerLayerInput.ModelProjection.Rows
+		if rows := layer.PerLayerInput.modelProjectionRows(); layer.PerLayerInput.hasGlobalPrecompute() && rows > maxPerLayerOutputRows {
+			maxPerLayerOutputRows = rows
 		}
 		if layer.HiddenSize > maxHiddenRows {
 			maxHiddenRows = layer.HiddenSize
@@ -1967,6 +2097,11 @@ func hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(driver nativeHIPDriver, 
 	}
 	if _, err := workspace.EnsureActivationOutput(driver, maxTokens*maxGateRows); err != nil {
 		return err
+	}
+	if maxNativeQ4KCols > 0 {
+		if _, err := workspace.EnsureQ8_1Input(driver, maxTokens, maxNativeQ4KCols); err != nil {
+			return err
+		}
 	}
 	if maxHiddenRows > 0 {
 		hiddenCount := maxTokens * maxHiddenRows

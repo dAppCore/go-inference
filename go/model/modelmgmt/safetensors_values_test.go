@@ -28,13 +28,15 @@ func TestSafetensorsValues_DecodeFloat32_Good(t *core.T) {
 }
 
 func TestSafetensorsValues_DecodeFloat32_Bad(t *core.T) {
-	_, err := DecodeFloat32("F32", []byte{0, 0, 0}, 1)
+	values, err := DecodeFloat32("F32", []byte{0, 0, 0}, 1)
 	core.AssertError(t, err, "payload length does not match element count")
+	core.AssertNil(t, values)
 }
 
 func TestSafetensorsValues_DecodeFloat32_Ugly(t *core.T) {
-	_, err := DecodeFloat32("I64", []byte{1, 2, 3, 4}, 1)
+	values, err := DecodeFloat32("I64", []byte{1, 2, 3, 4}, 1)
 	core.AssertError(t, err, "unsupported safetensors dtype")
+	core.AssertNil(t, values)
 }
 
 func TestSafetensorsValues_EncodeFloat32_Good(t *core.T) {
@@ -46,6 +48,7 @@ func TestSafetensorsValues_EncodeFloat32_Good(t *core.T) {
 func TestSafetensorsValues_EncodeFloat32_Bad(t *core.T) {
 	got := EncodeFloat32(nil)
 	core.AssertEmpty(t, got)
+	core.AssertEmpty(t, EncodeFloat32([]float32{}))
 }
 
 func TestSafetensorsValues_EncodeFloat32_Ugly(t *core.T) {

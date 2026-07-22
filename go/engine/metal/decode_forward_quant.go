@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
 
@@ -34,8 +35,15 @@ type QuantizedLayerWeights struct {
 	// BQ/BK/BV are the ADDITIVE q/k/v projection biases (bf16, [outDim]) — the affine
 	// packs still carry Qwen2/2.5's bias=True q/k/v biases as plain (unquantised) bf16
 	// vectors beside the packed weights. Added after the qmv, before QK-norm/RoPE (see
-	// qmvProjector.project). nil for bias-free arches; o_proj/MLP carry none (no BO).
-	BQ, BK, BV      []byte
+	// qmvProjector.project). BO is o_proj's sibling (gpt_oss attention_bias=true reaches
+	// o_proj — bf16 [dModel], added after the attention output projection). All nil for
+	// bias-free arches; the MLP projections carry none in any supported arch.
+	BQ, BK, BV, BO []byte
+	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [nHeads]): a learned
+	// per-head score seeding each head's softmax denominator as one extra key with NO value mass
+	// (the sdpa_vector kernels' has_sinks lane — see sdpa.go). nil for every sink-free arch, which
+	// keeps the plain SDPA pipelines byte-identical.
+	Sinks           []byte
 	GroupSize, Bits int
 	// DFF is this layer's FFN width — gemma4 E2B/E4B (MatFormer) vary it per layer, so the decode
 	// can't assume a single arch.FF. 0 ⇒ use the arch default (uniform models).
@@ -55,6 +63,11 @@ type QuantizedLayerWeights struct {
 	// MoE, when non-nil (gemma4 26B-A4B), replaces the dense MLP half with the 4-bit dual-branch
 	// MoEBlockQuant for this layer; the dense MLPNormW/Gate/Up/Down are then unused.
 	MoE *MoEQuantLayerWeights
+	// GatedDelta, when non-nil (a MixerGatedDelta layer — Qwen3.5 hybrid), replaces the attention
+	// half with the linear-attention recurrence; Q/K/V/O are then unused. The neutral factory-root
+	// weights flow straight through the converter; the decode reads them via archDecodeState.gatedDelta (#18).
+	GatedDelta    *model.GatedDeltaWeights
+	GatedDeltaCfg model.GatedDeltaConfig
 }
 
 type decodeForwardQuantLayerBufs struct {
@@ -234,7 +247,7 @@ func DecodeForwardQuant(
 			in, out := sc.xA, sc.xB
 			for li := range nLayers {
 				l := lb[li]
-				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, eps, nil); encErr != nil {
+				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil, bufView{}); encErr != nil {
 					endEncodingFast(enc)
 					return
 				}

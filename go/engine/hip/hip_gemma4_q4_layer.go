@@ -53,9 +53,34 @@ type hipGemma4Q4Layer0Config struct {
 	OutputProjection hipMLXQ4DeviceWeightConfig
 	GateProjection   hipMLXQ4DeviceWeightConfig
 	UpProjection     hipMLXQ4DeviceWeightConfig
+	GGUFQ4KGateUp    hipGemma4Q4NativeQ4KGateUpConfig
 	DownProjection   hipMLXQ4DeviceWeightConfig
 	LMHeadProjection hipMLXQ4DeviceWeightConfig
 	MoE              *hipGemma4MoELayerConfig
+}
+
+type hipGemma4Q4NativeQ4KGateUpConfig struct {
+	GatePointer nativeDevicePointer
+	UpPointer   nativeDevicePointer
+	GateBytes   uint64
+	UpBytes     uint64
+	Rows        int
+	Cols        int
+}
+
+func (cfg hipGemma4Q4NativeQ4KGateUpConfig) available() bool {
+	return cfg.GatePointer != 0 || cfg.UpPointer != 0 || cfg.GateBytes != 0 || cfg.UpBytes != 0 || cfg.Rows != 0 || cfg.Cols != 0
+}
+
+func (cfg hipGemma4Q4NativeQ4KGateUpConfig) validate() error {
+	if cfg.GatePointer == 0 || cfg.UpPointer == 0 || cfg.Rows <= 0 || cfg.Cols <= 0 || cfg.Cols%hipGGUFQ4KBlockSize != 0 {
+		return core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up pointers and aligned dimensions are required", nil)
+	}
+	wantBytes := uint64(cfg.Rows) * uint64(cfg.Cols/hipGGUFQ4KBlockSize) * hipGGUFQ4KExpandedBlockBytes
+	if cfg.GateBytes != wantBytes || cfg.UpBytes != wantBytes {
+		return core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up byte count mismatch", nil)
+	}
+	return nil
 }
 
 type hipBF16DeviceWeightConfig struct {
@@ -71,6 +96,7 @@ type hipGemma4Q4PerLayerInputConfig struct {
 	ModelProjectionScale float32
 	Embedding            hipDeviceEmbeddingLookupConfig
 	ModelProjection      hipBF16DeviceWeightConfig
+	ModelProjectionQ4    hipMLXQ4DeviceWeightConfig
 	ProjectionNorm       hipRMSNormDeviceWeightConfig
 	InputGate            hipMLXQ4DeviceWeightConfig
 	Projection           hipMLXQ4DeviceWeightConfig
@@ -118,6 +144,33 @@ type hipGemma4Q4ForwardConfig struct {
 	Layers          []hipGemma4Q4Layer0Config
 	KVSharedLayers  int
 	SharedKVSources []int
+	HeadLoRA        *hipLoadedSmallLoRAAdapter
+}
+
+func (cfg hipGemma4Q4ForwardConfig) usesDenseProjectionWeights() bool {
+	if cfg.HeadLoRA != nil {
+		return true
+	}
+	for _, layer := range cfg.Layers {
+		projections := [...]hipMLXQ4DeviceWeightConfig{
+			layer.QueryProjection,
+			layer.KeyProjection,
+			layer.ValueProjection,
+			layer.OutputProjection,
+			layer.GateProjection,
+			layer.UpProjection,
+			layer.DownProjection,
+			layer.LMHeadProjection,
+			layer.PerLayerInput.InputGate,
+			layer.PerLayerInput.Projection,
+		}
+		for _, projection := range projections {
+			if projection.WeightEncoding != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type hipGemma4Q4ForwardRequest struct {
@@ -299,7 +352,7 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfigWithSharedKV(layer int, sh
 	if model.driver == nil || !model.driver.Available() {
 		return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "HIP driver is not available", nil)
 	}
-	if !hipLoadedGemma4Q4GenerateLinked(model) {
+	if !hipLoadedGemma4Q4GenerateLinked(model) && normalizeROCmArchitecture(model.modelIdentity().Architecture) != "diffusion_gemma" {
 		if model.gemma4TextConfig.EnableMoEBlock {
 			return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "loaded Gemma4 MoE runtime is not ready", hipLoadedGemma4MoERuntimeError(model))
 		}
@@ -361,13 +414,26 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfigWithSharedKV(layer int, sh
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	gate, gateRows, gateCols, err := model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.gate_proj", "mlp.gate_proj", groupSize)
+	nativeGateUp, nativeGateUpOK, err := model.loadedGemma4Q4NativeQ4KGateUpConfig(layerPrefix + ".mlp")
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	up, upRows, upCols, err := model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.up_proj", "mlp.up_proj", groupSize)
-	if err != nil {
-		return hipGemma4Q4Layer0Config{}, err
+	var gate, up hipMLXQ4DeviceWeightConfig
+	var gateRows, gateCols, upRows, upCols int
+	if nativeGateUpOK {
+		gateRows, gateCols = nativeGateUp.Rows, nativeGateUp.Cols
+		upRows, upCols = nativeGateUp.Rows, nativeGateUp.Cols
+		gate = hipMLXQ4DeviceWeightConfig{Rows: gateRows, Cols: gateCols, GroupSize: hipGGUFQ4KGroupSize, Bits: 4}
+		up = gate
+	} else {
+		gate, gateRows, gateCols, err = model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.gate_proj", "mlp.gate_proj", groupSize)
+		if err != nil {
+			return hipGemma4Q4Layer0Config{}, err
+		}
+		up, upRows, upCols, err = model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.up_proj", "mlp.up_proj", groupSize)
+		if err != nil {
+			return hipGemma4Q4Layer0Config{}, err
+		}
 	}
 	down, downRows, downCols, err := model.loadedGemma4Q4ProjectionConfig(layerPrefix+".mlp.down_proj", "mlp.down_proj", groupSize)
 	if err != nil {
@@ -467,6 +533,7 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfigWithSharedKV(layer int, sh
 		OutputProjection:    output,
 		GateProjection:      gate,
 		UpProjection:        up,
+		GGUFQ4KGateUp:       nativeGateUp,
 		DownProjection:      down,
 		LMHeadProjection:    lmHead,
 	}
@@ -580,7 +647,12 @@ func (model *hipLoadedModel) cachedGemma4Q4ForwardConfig(layerCount int) (hipGem
 	model.q4ConfigMu.Lock()
 	defer model.q4ConfigMu.Unlock()
 	if model.q4ConfigOK && model.q4Layers == layerCount {
-		return model.q4Config, nil
+		cfg := model.q4Config
+		cfg.HeadLoRA = model.gemma4LoRA
+		if err := cfg.validateHeadLoRA(); err != nil {
+			return hipGemma4Q4ForwardConfig{}, err
+		}
+		return cfg, nil
 	}
 	cfg, err := model.loadedGemma4Q4ForwardConfig(layerCount)
 	if err != nil {
@@ -589,6 +661,10 @@ func (model *hipLoadedModel) cachedGemma4Q4ForwardConfig(layerCount int) (hipGem
 	model.q4Config = cfg
 	model.q4Layers = layerCount
 	model.q4ConfigOK = true
+	cfg.HeadLoRA = model.gemma4LoRA
+	if err := cfg.validateHeadLoRA(); err != nil {
+		return hipGemma4Q4ForwardConfig{}, err
+	}
 	return cfg, nil
 }
 
@@ -991,7 +1067,7 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 	if req.SkipFinalSample {
 		// Prompt prefill only needs updated KV state; sampling every intermediate
 		// prompt token wastes a full LM-head projection.
-	} else if req.DeviceFinalSample || req.DeviceFinalScores || req.DeviceFinalTopKSample {
+	} else if cfg.HeadLoRA == nil && (req.DeviceFinalSample || req.DeviceFinalScores || req.DeviceFinalTopKSample) {
 		finalHiddenBuffer := hiddenBuffer
 		if finalHiddenBuffer == nil {
 			finalHiddenBuffer, err = hipUploadGemma4Q4Float32Input(driver, "Gemma4 q4 final hidden", hidden)
@@ -1023,7 +1099,15 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 			}
 			receipts.recordNext("fused-greedy", "sampler-input-pre-softcap", rawLogits)
 		}
-		if req.DeviceFinalTopKSample {
+		if _, dense := last.LMHeadProjection.denseWeightEncoding(); dense {
+			if req.DeviceFinalScores || req.DeviceFinalTopKSample || req.DeferFinalSampleRead {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, core.E(hipGemma4Q4Layer0Operation, "dense device head supports immediate greedy sampling only", nil)
+			}
+			greedy, err = hipRunDenseProjectionSoftcapGreedyWithDeviceInputSuppress(ctx, driver, finalNormBuffer, last.LMHeadProjection, last.FinalLogitSoftcap, req.SuppressTokens, req.AttentionWorkspace)
+			if err != nil {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
+			}
+		} else if req.DeviceFinalTopKSample {
 			greedy, greedyDevice, err = hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx, driver, finalNormBuffer, last.LMHeadProjection, last.FinalLogitSoftcap, req.FinalCandidateCount, req.FinalTemperature, req.FinalTopP, req.FinalDraw, req.FinalGreedyBuffer, req.SuppressTokens, req.AttentionWorkspace)
 			if err != nil {
 				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
@@ -1061,6 +1145,12 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 		logits, err = hipRunMLXQ4ProjectionKernelWithDeviceWeightConfig(ctx, driver, finalNorm, last.LMHeadProjection)
 		if err != nil {
 			return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
+		}
+		if cfg.HeadLoRA != nil {
+			logits, err = hipApplyHeadLoRA(finalNorm, logits, cfg.HeadLoRA.a, cfg.HeadLoRA.b, last.VocabSize, last.HiddenSize, cfg.HeadLoRA.rank, cfg.HeadLoRA.alpha)
+			if err != nil {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
+			}
 		}
 		logits, err = hipGemma4Q4SoftcapLogits(logits, last.FinalLogitSoftcap)
 		if err != nil {
@@ -1385,6 +1475,7 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 	projectLocalKV := req.SharedDeviceKV == nil && len(req.SharedKeys) == 0
 	if projectLocalKV &&
 		!cfg.AttentionKEqV &&
+		cfg.QueryProjection.WeightEncoding == 0 && cfg.KeyProjection.WeightEncoding == 0 && cfg.ValueProjection.WeightEncoding == 0 &&
 		cfg.QueryProjection.Cols == cfg.KeyProjection.Cols && cfg.QueryProjection.Cols == cfg.ValueProjection.Cols &&
 		cfg.QueryProjection.GroupSize == cfg.KeyProjection.GroupSize && cfg.QueryProjection.GroupSize == cfg.ValueProjection.GroupSize {
 		if req.AttentionWorkspace != nil && req.OmitDebugTensors {
@@ -1409,6 +1500,7 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 		valueBuffer = &valueBufferView
 	} else if projectLocalKV &&
 		cfg.AttentionKEqV &&
+		cfg.QueryProjection.WeightEncoding == 0 && cfg.KeyProjection.WeightEncoding == 0 &&
 		cfg.QueryProjection.Cols == cfg.KeyProjection.Cols &&
 		cfg.QueryProjection.GroupSize == cfg.KeyProjection.GroupSize {
 		if req.AttentionWorkspace != nil && req.OmitDebugTensors {
@@ -1451,13 +1543,16 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 	queryNormCfg := hipGemma4Q4RoPENormConfig(cfg.QueryNorm, req.Epsilon, cfg.HeadDim)
 	ropeFrequencyDim, ropeRotaryCount := hipGemma4Q4RoPEKernelDims(cfg)
 	ropeFrequencyScale := cfg.effectiveRoPEFrequencyScale()
+	pairLocalQKNormRoPE := projectLocalKV && req.AttentionWorkspace != nil && req.OmitDebugTensors
 	if req.AttentionWorkspace != nil && req.OmitDebugTensors {
 		ropeQueryBuffer, err = req.AttentionWorkspace.EnsureRMSRoPEOutput(driver, queryBuffer.Count())
 		if err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
-		if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, queryNormCfg, cfg.QueryHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, req.AttentionWorkspace); err != nil {
-			return hipGemma4Q4DecoderLayerResult{}, err
+		if !pairLocalQKNormRoPE {
+			if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, queryNormCfg, cfg.QueryHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, req.AttentionWorkspace); err != nil {
+				return hipGemma4Q4DecoderLayerResult{}, err
+			}
 		}
 	} else {
 		ropeQueryBuffer, err = hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, queryBuffer, queryNormCfg, cfg.QueryHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale)
@@ -1532,8 +1627,14 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
-			if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, 0, 0, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
-				return hipGemma4Q4DecoderLayerResult{}, err
+			if pairLocalQKNormRoPE {
+				if err := hipRunRMSNormRoPEHeadsPairKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, keyBuffer, queryNormCfg, keyNormCfg, cfg.QueryHeads, keyHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
+			} else {
+				if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, 0, 0, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
 			}
 		} else {
 			ropeKeyBuffer, err = hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, 0, 0, ropeFrequencyScale)
@@ -1602,8 +1703,14 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
-			if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, cfg.HeadDim, cfg.RoPERotaryDim, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
-				return hipGemma4Q4DecoderLayerResult{}, err
+			if pairLocalQKNormRoPE {
+				if err := hipRunRMSNormRoPEHeadsPairKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, keyBuffer, queryNormCfg, keyNormCfg, cfg.QueryHeads, keyHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
+			} else {
+				if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, cfg.HeadDim, cfg.RoPERotaryDim, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
 			}
 		} else {
 			ropeKeyBuffer, err = hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, cfg.HeadDim, cfg.RoPERotaryDim, ropeFrequencyScale)
@@ -1827,6 +1934,7 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 	preFeedForwardNormCfg.Epsilon = req.Epsilon
 	var attentionResidualBuffer *hipDeviceByteBuffer
 	var preFeedForwardBuffer *hipDeviceByteBuffer
+	var preFeedForwardQ8Buffer *hipDeviceByteBuffer
 	if req.AttentionWorkspace != nil && req.OmitDebugTensors {
 		attentionResidualBuffer, err = req.AttentionWorkspace.EnsureRMSResidualOutput(driver, postAttentionNormCfg.Count)
 		if err != nil {
@@ -1836,7 +1944,13 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 		if err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
-		if err := hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputWithWorkspace(ctx, driver, attentionProjectionBuffer, inputBuffer, postAttentionNormCfg, preFeedForwardNormCfg, attentionResidualBuffer, preFeedForwardBuffer, 1, req.AttentionWorkspace); err != nil {
+		if cfg.GGUFQ4KGateUp.available() {
+			preFeedForwardQ8Buffer, err = req.AttentionWorkspace.EnsureQ8_1Input(driver, 1, cfg.HiddenSize)
+			if err != nil {
+				return hipGemma4Q4DecoderLayerResult{}, err
+			}
+		}
+		if err := hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputQ8WithWorkspace(ctx, driver, attentionProjectionBuffer, inputBuffer, postAttentionNormCfg, preFeedForwardNormCfg, attentionResidualBuffer, preFeedForwardBuffer, preFeedForwardQ8Buffer, 1, req.AttentionWorkspace); err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
 	} else {
@@ -1861,6 +1975,14 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
 		defer mlpOutputBuffer.Close()
+	} else if cfg.GGUFQ4KGateUp.available() && req.AttentionWorkspace != nil && req.OmitDebugTensors {
+		mlpOutputBuffer, err = req.AttentionWorkspace.EnsureProjectionOutput(driver, cfg.DownProjection.Rows)
+		if err != nil {
+			return hipGemma4Q4DecoderLayerResult{}, err
+		}
+		if err := hipRunGemma4Q4NativeQ4KMLPWithQuantizedDeviceInputOutput(ctx, driver, preFeedForwardQ8Buffer, cfg.GGUFQ4KGateUp, cfg.DownProjection, mlpOutputBuffer, req.AttentionWorkspace); err != nil {
+			return hipGemma4Q4DecoderLayerResult{}, err
+		}
 	} else if req.AttentionWorkspace != nil && req.OmitDebugTensors {
 		mlpOutputBuffer, err = req.AttentionWorkspace.EnsureProjectionOutput(driver, cfg.DownProjection.Rows)
 		if err != nil {
@@ -1869,6 +1991,12 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 		if err := hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInputOutput(ctx, driver, preFeedForwardBuffer, cfg.GateProjection, cfg.UpProjection, cfg.DownProjection, mlpOutputBuffer, req.AttentionWorkspace); err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
+	} else if cfg.GGUFQ4KGateUp.available() {
+		mlpOutputBuffer, err = hipRunGemma4Q4NativeQ4KMLPWithDeviceInput(ctx, driver, preFeedForwardBuffer, cfg.GGUFQ4KGateUp, cfg.DownProjection)
+		if err != nil {
+			return hipGemma4Q4DecoderLayerResult{}, err
+		}
+		defer mlpOutputBuffer.Close()
 	} else {
 		mlpOutputBuffer, err = hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInput(ctx, driver, preFeedForwardBuffer, cfg.GateProjection, cfg.UpProjection, cfg.DownProjection)
 		if err != nil {
@@ -2124,6 +2252,133 @@ func hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInputOutput(ctx context.Context, d
 	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, activated, downCfg, output, workspace)
 }
 
+func hipRunGemma4Q4NativeQ4KGateUpWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipGemma4Q4NativeQ4KGateUpConfig, batch int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
+	if err := hipContextErr(ctx); err != nil {
+		return nil, err
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "HIP driver is not available", nil)
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	if batch <= 0 || input == nil || input.Pointer() == 0 || input.Count() != batch*cfg.Cols || input.SizeBytes() != uint64(batch)*uint64(cfg.Cols)*4 {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up input shape mismatch", nil)
+	}
+	var quantized *hipDeviceByteBuffer
+	var err error
+	if workspace != nil {
+		quantized, err = workspace.EnsureQ8_1Input(driver, batch, cfg.Cols)
+	} else {
+		blocks := batch * (cfg.Cols / hipQ8_1BlockSize)
+		quantized, err = hipAllocateByteBuffer(driver, hipGemma4Q4Layer0Operation, "native Q4_K Q8_1 input", uint64(blocks)*hipQ8_1BlockBytes, blocks)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if workspace == nil {
+		defer quantized.Close()
+	}
+	var quantizeArgs []byte
+	if workspace != nil {
+		quantizeArgs = workspace.Q8_1QuantizeArgs[:]
+	}
+	if err := hipRunQ8_1QuantizeKernelWithArgs(ctx, driver, input, batch, cfg.Cols, quantized, quantizeArgs); err != nil {
+		return nil, err
+	}
+	return hipRunGemma4Q4NativeQ4KGateUpWithQuantizedDeviceInput(ctx, driver, quantized, cfg, batch, workspace)
+}
+
+func hipRunGemma4Q4NativeQ4KGateUpWithQuantizedDeviceInput(ctx context.Context, driver nativeHIPDriver, quantized *hipDeviceByteBuffer, cfg hipGemma4Q4NativeQ4KGateUpConfig, batch int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
+	if err := hipContextErr(ctx); err != nil {
+		return nil, err
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "HIP driver is not available", nil)
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	wantQuantizedBytes := uint64(batch) * uint64(cfg.Cols/hipQ8_1BlockSize) * hipQ8_1BlockBytes
+	if batch <= 0 || quantized == nil || quantized.Pointer() == 0 || quantized.SizeBytes() != wantQuantizedBytes {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "native Q4_K Q8_1 input shape mismatch", nil)
+	}
+	var activation *hipDeviceByteBuffer
+	var err error
+	if workspace != nil {
+		activation, err = workspace.EnsureActivationOutput(driver, batch*cfg.Rows)
+	} else {
+		activation, err = hipAllocateByteBuffer(driver, hipGemma4Q4Layer0Operation, "native Q4_K gate/up activation", uint64(batch)*uint64(cfg.Rows)*4, batch*cfg.Rows)
+	}
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if workspace == nil && !success {
+			_ = activation.Close()
+		}
+	}()
+	var gateUpArgs []byte
+	if workspace != nil {
+		gateUpArgs = workspace.GGUFQ4KQ8_1GateUpArgs[:]
+	}
+	blockCount := cfg.Rows * (cfg.Cols / hipGGUFQ4KBlockSize)
+	gate := hipBorrowDeviceByteBufferValue(driver, "native expanded Q4_K gate", cfg.GatePointer, cfg.GateBytes, blockCount)
+	up := hipBorrowDeviceByteBufferValue(driver, "native expanded Q4_K up", cfg.UpPointer, cfg.UpBytes, blockCount)
+	kernelName := hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairRow8
+	tokensPerBlock := uint32(1)
+	if batch > 1 {
+		kernelName = hipKernelNameGGUFQ4KExpandedQ8_1GELUTanhGateUpPairBatchRow8
+		tokensPerBlock = hipGGUFQ4KQ8_1GateUpBatchTokensPerBlock
+	}
+	if err := hipRunGGUFQ4KQ8_1GELUTanhGateUpKernelGeometryWithArgs(ctx, driver, kernelName, hipGGUFQ4KQ8_1GateUpRow8RowsPerBlock, tokensPerBlock, hipGGUFQ4KExpandedBlockBytes, quantized, &gate, &up, cfg.Rows, cfg.Cols, batch, activation, gateUpArgs); err != nil {
+		return nil, err
+	}
+	success = true
+	return activation, nil
+}
+
+func hipRunGemma4Q4NativeQ4KMLPWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateUpCfg hipGemma4Q4NativeQ4KGateUpConfig, downCfg hipMLXQ4DeviceWeightConfig) (*hipDeviceByteBuffer, error) {
+	output, err := hipAllocateByteBuffer(driver, hipGemma4Q4Layer0Operation, "native Q4_K MLP output", uint64(downCfg.Rows)*4, downCfg.Rows)
+	if err != nil {
+		return nil, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = output.Close()
+		}
+	}()
+	if err := hipRunGemma4Q4NativeQ4KMLPWithDeviceInputOutput(ctx, driver, input, gateUpCfg, downCfg, output, nil); err != nil {
+		return nil, err
+	}
+	success = true
+	return output, nil
+}
+
+func hipRunGemma4Q4NativeQ4KMLPWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateUpCfg hipGemma4Q4NativeQ4KGateUpConfig, downCfg hipMLXQ4DeviceWeightConfig, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	activation, err := hipRunGemma4Q4NativeQ4KGateUpWithDeviceInput(ctx, driver, input, gateUpCfg, 1, workspace)
+	if err != nil {
+		return err
+	}
+	if workspace == nil {
+		defer activation.Close()
+	}
+	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, activation, downCfg, output, workspace)
+}
+
+func hipRunGemma4Q4NativeQ4KMLPWithQuantizedDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, quantized *hipDeviceByteBuffer, gateUpCfg hipGemma4Q4NativeQ4KGateUpConfig, downCfg hipMLXQ4DeviceWeightConfig, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	activation, err := hipRunGemma4Q4NativeQ4KGateUpWithQuantizedDeviceInput(ctx, driver, quantized, gateUpCfg, 1, workspace)
+	if err != nil {
+		return err
+	}
+	if workspace == nil {
+		defer activation.Close()
+	}
+	return hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, activation, downCfg, output, workspace)
+}
+
 func hipRunGemma4Q4DeviceGELUTanhProjection(ctx context.Context, driver nativeHIPDriver, input, multiplyBy []float32, gateCfg, projectionCfg hipMLXQ4DeviceWeightConfig) ([]float32, error) {
 	inputBuffer, err := hipUploadGemma4Q4Float32Input(driver, "GELU tanh projection input", input)
 	if err != nil {
@@ -2242,11 +2497,11 @@ func (cfg hipGemma4Q4Layer0Config) validate() error {
 	if scalar := cfg.effectiveLayerScalar(); math.IsNaN(float64(scalar)) || math.IsInf(float64(scalar), 0) {
 		return core.E(hipGemma4Q4Layer0Operation, "layer scalar must be finite", nil)
 	}
-	if cfg.Embedding.TableEncoding != hipEmbeddingTableEncodingMLXQ4 ||
+	if (cfg.Embedding.TableEncoding != hipEmbeddingTableEncodingMLXQ4 && cfg.Embedding.TableEncoding != hipEmbeddingTableEncodingBF16) ||
 		cfg.Embedding.VocabSize != cfg.VocabSize ||
 		cfg.Embedding.HiddenSize != cfg.HiddenSize ||
 		cfg.Embedding.GroupSize != cfg.GroupSize {
-		return core.E(hipGemma4Q4Layer0Operation, "embedding config must match Gemma4 q4 dimensions", nil)
+		return core.E(hipGemma4Q4Layer0Operation, "embedding config must match Gemma4 dimensions", nil)
 	}
 	if err := cfg.Embedding.validate([]int32{0}); err != nil {
 		return core.E(hipGemma4Q4Layer0Operation, "embedding config", err)
@@ -2261,7 +2516,7 @@ func (cfg hipGemma4Q4Layer0Config) validate() error {
 		cfg.LMHeadProjection.Rows != cfg.VocabSize {
 		return core.E(hipGemma4Q4Layer0Operation, "projection row counts do not match Gemma4 layer geometry", nil)
 	}
-	for label, projection := range map[string]struct {
+	projections := map[string]struct {
 		cfg  hipMLXQ4DeviceWeightConfig
 		cols int
 	}{
@@ -2269,11 +2524,27 @@ func (cfg hipGemma4Q4Layer0Config) validate() error {
 		"k_proj":               {cfg: cfg.KeyProjection, cols: cfg.HiddenSize},
 		"v_proj":               {cfg: cfg.ValueProjection, cols: cfg.HiddenSize},
 		"o_proj":               {cfg: cfg.OutputProjection, cols: cfg.QueryHeads * cfg.HeadDim},
-		"mlp.gate_proj":        {cfg: cfg.GateProjection, cols: cfg.HiddenSize},
-		"mlp.up_proj":          {cfg: cfg.UpProjection, cols: cfg.HiddenSize},
 		"mlp.down_proj":        {cfg: cfg.DownProjection, cols: cfg.IntermediateSize},
 		"embed_tokens_lm_head": {cfg: cfg.LMHeadProjection, cols: cfg.HiddenSize},
-	} {
+	}
+	if cfg.GGUFQ4KGateUp.available() {
+		if err := cfg.GGUFQ4KGateUp.validate(); err != nil {
+			return err
+		}
+		if cfg.GGUFQ4KGateUp.Rows != cfg.IntermediateSize || cfg.GGUFQ4KGateUp.Cols != cfg.HiddenSize {
+			return core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up dimensions do not match Gemma4 layer geometry", nil)
+		}
+	} else {
+		projections["mlp.gate_proj"] = struct {
+			cfg  hipMLXQ4DeviceWeightConfig
+			cols int
+		}{cfg: cfg.GateProjection, cols: cfg.HiddenSize}
+		projections["mlp.up_proj"] = struct {
+			cfg  hipMLXQ4DeviceWeightConfig
+			cols int
+		}{cfg: cfg.UpProjection, cols: cfg.HiddenSize}
+	}
+	for label, projection := range projections {
 		if err := projection.cfg.validateInputCount(projection.cols); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, label+" config", err)
 		}
@@ -2348,15 +2619,19 @@ func (cfg hipGemma4Q4Layer0Config) validatePerLayerInput() error {
 		if err := perLayer.Embedding.validate([]int32{0}); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer embedding config", err)
 		}
-		if err := perLayer.ModelProjection.validate(hipProjectionWeightEncodingBF16); err != nil {
+		if perLayer.modelProjectionQuantized() {
+			if err := perLayer.ModelProjectionQ4.validateInputCount(perLayer.modelProjectionCols()); err != nil {
+				return core.E(hipGemma4Q4Layer0Operation, "per-layer model projection config", err)
+			}
+		} else if err := perLayer.ModelProjection.validate(hipProjectionWeightEncodingBF16); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer model projection config", err)
 		}
-		if perLayer.ModelProjection.Rows != perLayer.Embedding.HiddenSize ||
-			perLayer.ModelProjection.Cols != cfg.HiddenSize ||
-			perLayer.ModelProjection.Rows%perLayer.InputSize != 0 {
+		if perLayer.modelProjectionRows() != perLayer.Embedding.HiddenSize ||
+			perLayer.modelProjectionCols() != cfg.HiddenSize ||
+			perLayer.modelProjectionRows()%perLayer.InputSize != 0 {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer global projection shape does not match layer geometry", nil)
 		}
-		if layerCount := perLayer.ModelProjection.Rows / perLayer.InputSize; cfg.Layer >= layerCount {
+		if layerCount := perLayer.modelProjectionRows() / perLayer.InputSize; cfg.Layer >= layerCount {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer input layer index is outside global projection rows", nil)
 		}
 		if err := hipValidateGemma4Q4NormConfig("per_layer_projection_norm", perLayer.ProjectionNorm, perLayer.InputSize); err != nil {
@@ -2383,12 +2658,8 @@ func (cfg hipGemma4Q4PerLayerInputConfig) layerApplyConfigured() bool {
 
 func (cfg hipGemma4Q4PerLayerInputConfig) hasLayerApply() bool {
 	return cfg.InputSize > 0 &&
-		cfg.InputGate.WeightPointer != 0 &&
-		cfg.InputGate.ScalePointer != 0 &&
-		cfg.InputGate.BiasPointer != 0 &&
-		cfg.Projection.WeightPointer != 0 &&
-		cfg.Projection.ScalePointer != 0 &&
-		cfg.Projection.BiasPointer != 0 &&
+		cfg.InputGate.hasCompleteWeightStorage() &&
+		cfg.Projection.hasCompleteWeightStorage() &&
 		cfg.PostInputNorm.WeightPointer != 0
 }
 
@@ -2397,15 +2668,45 @@ func (cfg hipGemma4Q4PerLayerInputConfig) globalPrecomputeConfigured() bool {
 		cfg.Embedding.ScalePointer != 0 ||
 		cfg.Embedding.BiasPointer != 0 ||
 		cfg.ModelProjection.WeightPointer != 0 ||
+		cfg.ModelProjectionQ4.WeightPointer != 0 ||
+		cfg.ModelProjectionQ4.ScalePointer != 0 ||
+		cfg.ModelProjectionQ4.BiasPointer != 0 ||
 		cfg.ProjectionNorm.WeightPointer != 0
 }
 
 func (cfg hipGemma4Q4PerLayerInputConfig) hasGlobalPrecompute() bool {
-	return cfg.Embedding.EmbeddingPointer != 0 &&
-		cfg.Embedding.ScalePointer != 0 &&
-		cfg.Embedding.BiasPointer != 0 &&
-		cfg.ModelProjection.WeightPointer != 0 &&
+	embeddingConfigured := cfg.Embedding.EmbeddingPointer != 0
+	if cfg.Embedding.TableEncoding == hipEmbeddingTableEncodingMLXQ4 {
+		embeddingConfigured = embeddingConfigured && cfg.Embedding.ScalePointer != 0 && cfg.Embedding.BiasPointer != 0
+	}
+	return embeddingConfigured &&
+		cfg.modelProjectionConfigured() &&
 		cfg.ProjectionNorm.WeightPointer != 0
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionQuantized() bool {
+	return cfg.ModelProjectionQ4.WeightPointer != 0 || cfg.ModelProjectionQ4.ScalePointer != 0 || cfg.ModelProjectionQ4.BiasPointer != 0
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionConfigured() bool {
+	if cfg.modelProjectionQuantized() {
+		return cfg.ModelProjectionQ4.WeightPointer != 0 && cfg.ModelProjectionQ4.ScalePointer != 0 && cfg.ModelProjectionQ4.BiasPointer != 0
+	}
+	return cfg.ModelProjection.WeightPointer != 0
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionRows() int {
+	if cfg.modelProjectionQuantized() {
+		return cfg.ModelProjectionQ4.Rows
+	}
+	return cfg.ModelProjection.Rows
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionCols() int {
+	if cfg.modelProjectionQuantized() {
+		return cfg.ModelProjectionQ4.Cols
+	}
+	return cfg.ModelProjection.Cols
 }
 
 func (cfg *hipGemma4Q4Layer0Config) finalizeScales() {
@@ -2428,8 +2729,8 @@ func (cfg *hipGemma4Q4PerLayerInputConfig) finalizeScales() {
 		return
 	}
 	cfg.EmbeddingScale = hipGemma4Q4EmbeddingScale(cfg.InputSize)
-	if cfg.ModelProjection.Cols > 0 {
-		cfg.ModelProjectionScale = float32(math.Pow(float64(cfg.ModelProjection.Cols), -0.5))
+	if cols := cfg.modelProjectionCols(); cols > 0 {
+		cfg.ModelProjectionScale = float32(math.Pow(float64(cols), -0.5))
 	} else {
 		cfg.ModelProjectionScale = 0
 	}
@@ -2446,10 +2747,11 @@ func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionScale() float32 {
 	if cfg.ModelProjectionScale != 0 {
 		return cfg.ModelProjectionScale
 	}
-	if cfg.ModelProjection.Cols <= 0 {
+	cols := cfg.modelProjectionCols()
+	if cols <= 0 {
 		return 0
 	}
-	return float32(math.Pow(float64(cfg.ModelProjection.Cols), -0.5))
+	return float32(math.Pow(float64(cols), -0.5))
 }
 
 func hipGemma4Q4EmbeddingScale(hiddenSize int) float32 {
@@ -2498,6 +2800,9 @@ func (cfg hipGemma4Q4ForwardConfig) validate() error {
 	if err := first.validate(); err != nil {
 		return err
 	}
+	if err := cfg.validateHeadLoRA(); err != nil {
+		return err
+	}
 	for index, layer := range cfg.Layers[1:] {
 		if err := layer.validate(); err != nil {
 			return err
@@ -2510,6 +2815,23 @@ func (cfg hipGemma4Q4ForwardConfig) validate() error {
 		if first.PerLayerInput.hasGlobalPrecompute() && !layer.PerLayerInput.hasLayerApply() {
 			return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("layer %d per-layer input config is missing", index+1), nil)
 		}
+	}
+	return nil
+}
+
+func (cfg hipGemma4Q4ForwardConfig) validateHeadLoRA() error {
+	if cfg.HeadLoRA == nil {
+		return nil
+	}
+	if len(cfg.Layers) == 0 {
+		return core.E(hipGemma4Q4Layer0Operation, "Gemma4 head LoRA requires model layers", nil)
+	}
+	first := cfg.Layers[0]
+	adapter := cfg.HeadLoRA
+	if adapter.rank <= 0 || !hipQ8ScaleIsPositiveFinite(adapter.alpha) ||
+		len(adapter.a) != adapter.rank*first.HiddenSize ||
+		len(adapter.b) != first.VocabSize*adapter.rank {
+		return core.E(hipGemma4Q4Layer0Operation, "Gemma4 head LoRA shape does not match the model head", nil)
 	}
 	return nil
 }
@@ -2561,7 +2883,7 @@ func (state hipGemma4Q4DecodeState) validate(cfg hipGemma4Q4ForwardConfig) error
 	}
 	for index, layerState := range state.Layers {
 		layerCfg := cfg.Layers[index]
-		if err := hipGemma4Q4ValidateKVState(layerState.Keys, layerState.Values, layerCfg.HeadDim); err != nil {
+		if err := hipGemma4Q4ValidateKVState(layerState.Keys, layerState.Values, layerCfg.keyValueDim()); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("decode state layer %d", index), err)
 		}
 	}
@@ -2588,14 +2910,14 @@ func (state hipGemma4Q4DecodeState) tokenCountForConfig(cfg hipGemma4Q4ForwardCo
 	}
 	maxTokens := 0
 	for index, layerState := range state.Layers {
-		headDim := cfg.Layers[0].HeadDim
-		if index < len(cfg.Layers) && cfg.Layers[index].HeadDim > 0 {
-			headDim = cfg.Layers[index].HeadDim
+		rowWidth := cfg.Layers[0].keyValueDim()
+		if index < len(cfg.Layers) && cfg.Layers[index].keyValueDim() > 0 {
+			rowWidth = cfg.Layers[index].keyValueDim()
 		}
-		if headDim <= 0 || len(layerState.Keys) == 0 {
+		if rowWidth <= 0 || len(layerState.Keys) == 0 {
 			continue
 		}
-		tokens := len(layerState.Keys) / headDim
+		tokens := len(layerState.Keys) / rowWidth
 		if tokens > maxTokens {
 			maxTokens = tokens
 		}
@@ -3007,14 +3329,16 @@ func hipRunGemma4Q4PerLayerInputSet(ctx context.Context, driver nativeHIPDriver,
 	if !cfg.hasLayerApply() {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input precompute requires per-layer gate/projection tensors", nil)
 	}
-	if len(hidden) != cfg.ModelProjection.Cols {
+	rows := cfg.modelProjectionRows()
+	cols := cfg.modelProjectionCols()
+	if len(hidden) != cols {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input hidden length must match model projection cols", nil)
 	}
-	if cfg.InputSize <= 0 || cfg.ModelProjection.Rows%cfg.InputSize != 0 {
+	if cfg.InputSize <= 0 || rows%cfg.InputSize != 0 {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input rows must align with input size", nil)
 	}
-	layerCount := cfg.ModelProjection.Rows / cfg.InputSize
-	if layerCount <= 0 || cfg.Embedding.HiddenSize != cfg.ModelProjection.Rows {
+	layerCount := rows / cfg.InputSize
+	if layerCount <= 0 || cfg.Embedding.HiddenSize != rows {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input global shape mismatch", nil)
 	}
 	perLayerEmbedding, err := hipRunEmbeddingLookupKernelWithDeviceTable(ctx, driver, []int32{tokenID}, cfg.Embedding)
@@ -3028,16 +3352,21 @@ func hipRunGemma4Q4PerLayerInputSet(ctx context.Context, driver nativeHIPDriver,
 	if err != nil {
 		return nil, err
 	}
-	projected, err := hipRunProjectionKernelWithDeviceWeightEncoding(
-		ctx,
-		driver,
-		hidden,
-		cfg.ModelProjection.WeightPointer,
-		cfg.ModelProjection.WeightBytes,
-		cfg.ModelProjection.Rows,
-		cfg.ModelProjection.Cols,
-		hipProjectionWeightEncodingBF16,
-	)
+	var projected []float32
+	if cfg.modelProjectionQuantized() {
+		projected, err = hipRunMLXQ4ProjectionKernelWithDeviceWeightConfig(ctx, driver, hidden, cfg.ModelProjectionQ4)
+	} else {
+		projected, err = hipRunProjectionKernelWithDeviceWeightEncoding(
+			ctx,
+			driver,
+			hidden,
+			cfg.ModelProjection.WeightPointer,
+			cfg.ModelProjection.WeightBytes,
+			rows,
+			cols,
+			hipProjectionWeightEncodingBF16,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3105,20 +3434,22 @@ func hipRunGemma4Q4PerLayerInputConfigDeviceSet(ctx context.Context, driver nati
 	if !cfg.hasLayerApply() {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input precompute requires per-layer gate/projection tensors", nil)
 	}
-	if hidden == nil || hidden.Pointer() == 0 || hidden.Count() != cfg.ModelProjection.Cols || hidden.SizeBytes() != uint64(cfg.ModelProjection.Cols*4) {
+	rows := cfg.modelProjectionRows()
+	cols := cfg.modelProjectionCols()
+	if hidden == nil || hidden.Pointer() == 0 || hidden.Count() != cols || hidden.SizeBytes() != uint64(cols*4) {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input hidden device buffer shape mismatch", nil)
 	}
-	if cfg.InputSize <= 0 || cfg.ModelProjection.Rows%cfg.InputSize != 0 {
+	if cfg.InputSize <= 0 || rows%cfg.InputSize != 0 {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input rows must align with input size", nil)
 	}
-	layerCount := cfg.ModelProjection.Rows / cfg.InputSize
-	if layerCount <= 0 || cfg.Embedding.HiddenSize != cfg.ModelProjection.Rows {
+	layerCount := rows / cfg.InputSize
+	if layerCount <= 0 || cfg.Embedding.HiddenSize != rows {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input global shape mismatch", nil)
 	}
 	var err error
 	var perLayerEmbeddingScaled *hipDeviceByteBuffer
 	if workspace != nil {
-		perLayerEmbeddingScaled, err = workspace.EnsurePerLayerScaled(driver, cfg.ModelProjection.Rows)
+		perLayerEmbeddingScaled, err = workspace.EnsurePerLayerScaled(driver, rows)
 		if err == nil && tokenIDDeviceBuffer != nil {
 			err = hipRunEmbeddingLookupKernelWithDeviceTableGreedyTokenScaledOutputWithWorkspace(ctx, driver, cfg.Embedding, tokenIDDeviceBuffer, perLayerEmbeddingScaled, cfg.embeddingScale(), workspace)
 		} else if err == nil {
@@ -3146,20 +3477,26 @@ func hipRunGemma4Q4PerLayerInputConfigDeviceSet(ctx context.Context, driver nati
 	}
 	var projected *hipDeviceByteBuffer
 	if workspace != nil {
-		projected, err = workspace.EnsurePerLayerProjected(driver, cfg.ModelProjection.Rows)
+		projected, err = workspace.EnsurePerLayerProjected(driver, rows)
 		if err == nil {
-			err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutput(
-				ctx,
-				driver,
-				hidden,
-				cfg.ModelProjection.WeightPointer,
-				cfg.ModelProjection.WeightBytes,
-				cfg.ModelProjection.Rows,
-				cfg.ModelProjection.Cols,
-				hipProjectionWeightEncodingBF16,
-				projected,
-			)
+			if cfg.modelProjectionQuantized() {
+				err = hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, hidden, cfg.ModelProjectionQ4, projected, workspace)
+			} else {
+				err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutput(
+					ctx,
+					driver,
+					hidden,
+					cfg.ModelProjection.WeightPointer,
+					cfg.ModelProjection.WeightBytes,
+					rows,
+					cols,
+					hipProjectionWeightEncodingBF16,
+					projected,
+				)
+			}
 		}
+	} else if cfg.modelProjectionQuantized() {
+		projected, err = hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, hidden, cfg.ModelProjectionQ4)
 	} else {
 		projected, err = hipRunProjectionKernelWithDeviceInputWeightEncoding(
 			ctx,
@@ -3167,8 +3504,8 @@ func hipRunGemma4Q4PerLayerInputConfigDeviceSet(ctx context.Context, driver nati
 			hidden,
 			cfg.ModelProjection.WeightPointer,
 			cfg.ModelProjection.WeightBytes,
-			cfg.ModelProjection.Rows,
-			cfg.ModelProjection.Cols,
+			rows,
+			cols,
 			hipProjectionWeightEncodingBF16,
 		)
 	}
@@ -3274,6 +3611,9 @@ func hipGemma4Q4HostMultiply(left, right []float32) ([]float32, error) {
 }
 
 func hipGemma4Q4DecodeQuantLabel(cfg hipGemma4Q4Layer0Config) string {
+	if cfg.Embedding.TableEncoding == hipEmbeddingTableEncodingBF16 || cfg.QueryProjection.WeightEncoding == hipProjectionWeightEncodingBF16 {
+		return "bf16"
+	}
 	bits := cfg.Embedding.QuantBits
 	if bits == 0 {
 		bits = cfg.QueryProjection.Bits
@@ -3344,6 +3684,12 @@ func hipGemma4Q4ForwardLabels(cfg hipGemma4Q4ForwardConfig, req hipGemma4Q4Forwa
 		labels["gemma4_q4_kv_shared_layers"] = core.Sprintf("%d", cfg.KVSharedLayers)
 		labels["decode_primitives"] += ",gemma4_shared_kv"
 	}
+	if cfg.HeadLoRA != nil {
+		labels["adapter_runtime"] = "hip_gemma4_lm_head"
+		labels["adapter_hash"] = cfg.HeadLoRA.identity.Hash
+		labels["lora_model_status"] = "gemma4_head_linked"
+		labels["decode_primitives"] += ",lora_head_delta"
+	}
 	return labels
 }
 
@@ -3411,6 +3757,21 @@ func (model *hipLoadedModel) loadedGemma4Q4EmbeddingConfig(groupSize int) (hipDe
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
 	}
+	vocab := model.modelInfo.VocabSize
+	hidden := model.modelInfo.HiddenSize
+	if core.Upper(weight.info.TypeName) == "BF16" {
+		if err := hipValidateGemma4Q4Tensor(weight, "embed_tokens weight", "BF16", vocab, hidden, uint64(vocab)*uint64(hidden)*2); err != nil {
+			return hipDeviceEmbeddingLookupConfig{}, err
+		}
+		return hipDeviceEmbeddingLookupConfig{
+			EmbeddingPointer: weight.pointer,
+			EmbeddingBytes:   weight.info.ByteSize,
+			TableEncoding:    hipEmbeddingTableEncodingBF16,
+			VocabSize:        vocab,
+			HiddenSize:       hidden,
+			GroupSize:        groupSize,
+		}, nil
+	}
 	scales, err := model.requiredHIPTensor("language_model.model.embed_tokens.scales", "embed_tokens scales")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
@@ -3419,8 +3780,6 @@ func (model *hipLoadedModel) loadedGemma4Q4EmbeddingConfig(groupSize int) (hipDe
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
 	}
-	vocab := model.modelInfo.VocabSize
-	hidden := model.modelInfo.HiddenSize
 	bits, rows, cols, effectiveGroupSize, groups, packedCols, err := hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases, groupSize, model.modelInfo.QuantBits, "embed_tokens")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
@@ -3471,14 +3830,28 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerInputConfig(layerPrefix strin
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
 	}
-	modelProjection, err := model.loadedGemma4BF16ProjectionConfig(
-		"language_model.model.per_layer_model_projection.weight",
-		"per_layer_model_projection",
-		embedding.HiddenSize,
-		hidden,
-	)
+	modelProjection := hipBF16DeviceWeightConfig{}
+	modelProjectionQ4 := hipMLXQ4DeviceWeightConfig{}
+	modelProjectionRows := 0
+	modelProjectionCols := 0
+	const modelProjectionBase = "language_model.model.per_layer_model_projection"
+	if model.hasHIPTensor(modelProjectionBase + ".scales") {
+		modelProjectionQ4, modelProjectionRows, modelProjectionCols, err = model.loadedGemma4Q4ProjectionConfig(modelProjectionBase, "per_layer_model_projection", groupSize)
+	} else {
+		modelProjection, err = model.loadedGemma4BF16ProjectionConfig(
+			modelProjectionBase+".weight",
+			"per_layer_model_projection",
+			embedding.HiddenSize,
+			hidden,
+		)
+		modelProjectionRows = modelProjection.Rows
+		modelProjectionCols = modelProjection.Cols
+	}
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
+	}
+	if modelProjectionRows != embedding.HiddenSize || modelProjectionCols != hidden {
+		return hipGemma4Q4PerLayerInputConfig{}, core.E(hipGemma4Q4Layer0Operation, "per_layer_model_projection tensor shape/type mismatch", nil)
 	}
 	projectionNorm, err := model.loadedGemma4NormConfig("language_model.model.per_layer_projection_norm.weight", "per_layer_projection_norm", inputSize)
 	if err != nil {
@@ -3502,13 +3875,14 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerInputConfig(layerPrefix strin
 		return hipGemma4Q4PerLayerInputConfig{}, core.E(hipGemma4Q4Layer0Operation, "per-layer input tensor shapes are inconsistent", nil)
 	}
 	cfg := hipGemma4Q4PerLayerInputConfig{
-		InputSize:       inputSize,
-		Embedding:       embedding,
-		ModelProjection: modelProjection,
-		ProjectionNorm:  projectionNorm,
-		InputGate:       inputGate,
-		Projection:      projection,
-		PostInputNorm:   postNorm,
+		InputSize:         inputSize,
+		Embedding:         embedding,
+		ModelProjection:   modelProjection,
+		ModelProjectionQ4: modelProjectionQ4,
+		ProjectionNorm:    projectionNorm,
+		InputGate:         inputGate,
+		Projection:        projection,
+		PostInputNorm:     postNorm,
 	}
 	cfg.finalizeScales()
 	if err := (hipGemma4Q4Layer0Config{
@@ -3527,6 +3901,34 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerEmbeddingConfig(groupSize, nu
 	weight, err := model.requiredHIPTensor("language_model.model.embed_tokens_per_layer.weight", "embed_tokens_per_layer weight")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, 0, err
+	}
+	if core.Upper(weight.info.TypeName) == "BF16" {
+		if len(weight.info.Dimensions) != 2 {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer BF16 weight must be rank 2", nil)
+		}
+		vocab := int(weight.info.Dimensions[0])
+		hiddenTotal := int(weight.info.Dimensions[1])
+		if vocab <= 0 || hiddenTotal <= 0 || numLayers <= 0 || hiddenTotal%numLayers != 0 {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer dimensions must align with layer count", nil)
+		}
+		inputSize := hiddenTotal / numLayers
+		if model.gemma4TextConfig.HiddenSizePerLayerInput > 0 && inputSize != model.gemma4TextConfig.HiddenSizePerLayerInput {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer hidden size does not match Gemma4 config", nil)
+		}
+		if model.gemma4TextConfig.VocabSizePerLayerInput > 0 && vocab != model.gemma4TextConfig.VocabSizePerLayerInput {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer vocab size does not match Gemma4 config", nil)
+		}
+		if err := hipValidateGemma4Q4Tensor(weight, "embed_tokens_per_layer weight", "BF16", vocab, hiddenTotal, uint64(vocab)*uint64(hiddenTotal)*2); err != nil {
+			return hipDeviceEmbeddingLookupConfig{}, 0, err
+		}
+		return hipDeviceEmbeddingLookupConfig{
+			EmbeddingPointer: weight.pointer,
+			EmbeddingBytes:   weight.info.ByteSize,
+			TableEncoding:    hipEmbeddingTableEncodingBF16,
+			VocabSize:        vocab,
+			HiddenSize:       hiddenTotal,
+			GroupSize:        groupSize,
+		}, inputSize, nil
 	}
 	scales, err := model.requiredHIPTensor("language_model.model.embed_tokens_per_layer.scales", "embed_tokens_per_layer scales")
 	if err != nil {
@@ -3606,6 +4008,29 @@ func (model *hipLoadedModel) loadedGemma4Q4ProjectionConfig(baseName, label stri
 	if err != nil {
 		return hipMLXQ4DeviceWeightConfig{}, 0, 0, err
 	}
+	if core.Upper(weight.info.TypeName) == "BF16" {
+		if weight.pointer == 0 || len(weight.info.Dimensions) != 2 {
+			return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" BF16 weight must have a device pointer and rank-2 shape", nil)
+		}
+		rows := int(weight.info.Dimensions[0])
+		cols := int(weight.info.Dimensions[1])
+		if rows <= 0 || cols <= 0 || weight.info.ByteSize != uint64(rows)*uint64(cols)*2 {
+			return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" BF16 tensor shape/type mismatch", nil)
+		}
+		cfg := hipMLXQ4DeviceWeightConfig{
+			WeightPointer:  weight.pointer,
+			WeightBytes:    weight.info.ByteSize,
+			Rows:           rows,
+			Cols:           cols,
+			GroupSize:      groupSize,
+			Bits:           16,
+			WeightEncoding: hipProjectionWeightEncodingBF16,
+		}
+		if err := cfg.validateInputCount(cols); err != nil {
+			return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" BF16 config", err)
+		}
+		return cfg, rows, cols, nil
+	}
 	scales, err := model.requiredHIPTensor(baseName+".scales", label+" scales")
 	if err != nil {
 		return hipMLXQ4DeviceWeightConfig{}, 0, 0, err
@@ -3646,6 +4071,39 @@ func (model *hipLoadedModel) loadedGemma4Q4ProjectionConfig(baseName, label stri
 		return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine config", err)
 	}
 	return cfg, rows, cols, nil
+}
+
+func (model *hipLoadedModel) loadedGemma4Q4NativeQ4KGateUpConfig(mlpBase string) (hipGemma4Q4NativeQ4KGateUpConfig, bool, error) {
+	const suffix = ".q4_k_expanded"
+	gate, gateOK := model.tensors[mlpBase+".gate_proj"+suffix]
+	up, upOK := model.tensors[mlpBase+".up_proj"+suffix]
+	if !gateOK && !upOK {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, nil
+	}
+	if !gateOK || !upOK {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up pair is incomplete", nil)
+	}
+	validTensor := func(tensor hipTensor) bool {
+		return tensor.pointer != 0 &&
+			tensor.info.Type == hipNativeTensorTypeQ4KExpanded &&
+			core.Upper(tensor.info.TypeName) == "Q4_K_EXPANDED" &&
+			len(tensor.info.Dimensions) == 2
+	}
+	if !validTensor(gate) || !validTensor(up) || gate.info.Dimensions[0] != up.info.Dimensions[0] || gate.info.Dimensions[1] != up.info.Dimensions[1] {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, core.E(hipGemma4Q4Layer0Operation, "native Q4_K gate/up tensor shape/type mismatch", nil)
+	}
+	cfg := hipGemma4Q4NativeQ4KGateUpConfig{
+		GatePointer: gate.pointer,
+		UpPointer:   up.pointer,
+		GateBytes:   gate.info.ByteSize,
+		UpBytes:     up.info.ByteSize,
+		Rows:        int(gate.info.Dimensions[1]),
+		Cols:        int(gate.info.Dimensions[0]),
+	}
+	if err := cfg.validate(); err != nil {
+		return hipGemma4Q4NativeQ4KGateUpConfig{}, false, err
+	}
+	return cfg, true, nil
 }
 
 func hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases hipTensor, groupSize, preferredBits int, label string) (int, int, int, int, int, int, error) {
@@ -4160,7 +4618,7 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerAttentionKEqV(layerPrefix, layer
 	if model.loadedGemma4Q4AttentionKEqV(layerType) {
 		return true
 	}
-	if model == nil || layerType != "full_attention" || !model.hipGGUFTensorAliasesEnabled() {
+	if model == nil || layerType != "full_attention" {
 		return false
 	}
 	keyName := layerPrefix + ".self_attn.k_proj.weight"

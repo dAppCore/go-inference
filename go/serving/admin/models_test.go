@@ -85,7 +85,7 @@ func TestListModelsHandler_Good(t *testing.T) {
 }
 
 // TestListModelsHandler_MethodRejection_Bad proves the list route is GET-only.
-func TestListModelsHandler_MethodRejection_Bad(t *testing.T) {
+func TestListModelsHandler_MethodRejection_StatusMethodNotAllowed_Bad(t *testing.T) {
 	rec := httptest.NewRecorder()
 	modelMux(&fakeController{}).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathModels, nil))
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -124,7 +124,7 @@ func TestLoadModelHandler_Good(t *testing.T) {
 
 // TestLoadModelHandler_ConfirmMismatch_Bad proves the confused-deputy gate: a
 // wrong confirm_machine is refused before any load.
-func TestLoadModelHandler_ConfirmMismatch_Bad(t *testing.T) {
+func TestLoadModelHandler_ConfirmMismatch_ConfirmMachine_Bad(t *testing.T) {
 	dir := seedModel(t, "qwen3")
 	fc := &fakeController{}
 	body := jsonBody(t, LoadModelRequest{ModelPath: dir, ConfirmMachine: "lem-wronghash"})
@@ -138,11 +138,12 @@ func TestLoadModelHandler_ConfirmMismatch_Bad(t *testing.T) {
 	}
 }
 
-// TestLoadModelHandler_MissingTarget_Bad proves a body with neither model nor
-// model_path is refused.
-func TestLoadModelHandler_MissingTarget_Bad(t *testing.T) {
+// TestLoadModelHandler_MissingTarget_ModelPath_Bad proves a body with neither
+// model nor model_path is refused — both fields are explicit zero values so
+// the omission this test pins is visible in the request literal, not implicit.
+func TestLoadModelHandler_MissingTarget_ModelPath_Bad(t *testing.T) {
 	fc := &fakeController{}
-	body := jsonBody(t, LoadModelRequest{ConfirmMachine: MachineHash()})
+	body := jsonBody(t, LoadModelRequest{Model: "", ModelPath: "", ConfirmMachine: MachineHash()})
 	rec := httptest.NewRecorder()
 	modelMux(fc).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathModelLoad, body))
 	if rec.Code != http.StatusBadRequest {
@@ -153,7 +154,7 @@ func TestLoadModelHandler_MissingTarget_Bad(t *testing.T) {
 // TestLoadModelHandler_UnverifiedModel_Bad proves a name that does not resolve to
 // a sha-verified dir under the models tree is refused (no loading "whatever is on
 // disk").
-func TestLoadModelHandler_UnverifiedModel_Bad(t *testing.T) {
+func TestLoadModelHandler_UnverifiedModel_SeedModel_Bad(t *testing.T) {
 	seedModel(t, "qwen3") // sets HOME to a temp models dir
 	fc := &fakeController{}
 	body := jsonBody(t, LoadModelRequest{Model: "nonexistent", ConfirmMachine: MachineHash()})
@@ -195,7 +196,7 @@ func TestUnloadModelHandler_Good(t *testing.T) {
 }
 
 // TestUnloadModelHandler_MissingID_Bad proves an unload with no id is refused.
-func TestUnloadModelHandler_MissingID_Bad(t *testing.T) {
+func TestUnloadModelHandler_MissingID_ModelIDRequest_Bad(t *testing.T) {
 	fc := &fakeController{}
 	rec := httptest.NewRecorder()
 	modelMux(fc).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathModelUnload, jsonBody(t, ModelIDRequest{})))

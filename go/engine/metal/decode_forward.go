@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
 
@@ -22,7 +23,7 @@ import (
 // the encode + the growing-window GPU work, nothing else.
 //
 // inputs are the T token hidden vectors (each dModel bf16) — the embedding/lm_head
-// /sampler are separate concerns (a real model load, Snider's call); this exercises
+// /sampler are separate concerns (they need a real model load); this exercises
 // the transformer stack + KV growth. Returns the T per-token output vectors. With
 // the same weights/inputs it equals stepping DecodeStepKV token-by-token,
 // layer-by-layer (gated byte-for-byte in the tests). All raw bf16.
@@ -34,16 +35,27 @@ import (
 type DecodeLayerWeights struct {
 	AttnNormW, WQ, WK, WV, WO []byte
 	// BQ/BK/BV are the ADDITIVE q/k/v projection biases (bf16, [outDim]) — Qwen2/2.5's
-	// distinguishing trait (bias=True on q_proj/k_proj/v_proj; o_proj and the MLP carry
-	// none, so there is no BO). nil for the bias-free arches (llama/gemma/mistral/qwen3).
-	// Added after the projection matvec, before QK-norm/RoPE (see bf16Projector.project).
-	BQ, BK, BV                  []byte
+	// bias=True q/k/v. BO is o_proj's sibling (gpt_oss attention_bias=true reaches o_proj
+	// — bf16 [dModel], added after the attention output projection). All nil for the
+	// bias-free arches (llama/gemma/mistral/qwen3); the MLP projections carry none in any
+	// supported arch. Added after the projection matvec (see bf16Projector.project).
+	BQ, BK, BV, BO []byte
+	// Sinks is the attention-sink logit vector (gpt_oss self_attn.sinks, bf16 [nHeads]): a learned
+	// per-head score seeding each head's softmax denominator as one extra key with NO value mass
+	// (the sdpa_vector kernels' has_sinks lane — see sdpa.go). nil for every sink-free arch, which
+	// keeps the plain SDPA pipelines byte-identical.
+	Sinks                       []byte
 	MLPNormW, WGate, WUp, WDown []byte
 	// MoE, when non-nil, replaces the dense MLP half with the gemma4 dual-branch MoE
 	// feed-forward (MoEBlockBF16) for this layer. The dense MLPNormW/WGate/WUp/WDown
 	// are then unused (the local MLP lives in MoE.WGate/WUp/WDown). Only honoured by
 	// the arch executor (DecodeForwardArch) when the layer's spec.MoE is set.
 	MoE *MoELayerWeights
+	// GatedDelta, when non-nil (a MixerGatedDelta layer — Qwen3.5 hybrid), replaces the attention
+	// half with the linear-attention recurrence; WQ/WK/WV/WO are then unused. The neutral factory-root
+	// weights flow through the converter; the decode reads them via archDecodeState.gatedDelta (#18).
+	GatedDelta    *model.GatedDeltaWeights
+	GatedDeltaCfg model.GatedDeltaConfig
 	// gemma4 norms the loader populates but the decode does NOT consume yet: QK-norm
 	// (per-head RMSNorm on Q/K before RoPE), post-attention norm, post-feed-forward
 	// norm. The native dense decode currently does pre-attn + pre-FF only; wiring these
@@ -379,7 +391,7 @@ func decodeForwardInto(
 			in, out := sc.xA, sc.xB
 			for li := range nLayers {
 				l := lb[li]
-				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, eps, nil); encErr != nil {
+				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, scale, eps, nil, bufView{}); encErr != nil {
 					endEncodingFast(enc)
 					return
 				}

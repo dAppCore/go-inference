@@ -89,6 +89,70 @@ func TestHIPGemma4Q4LoaderOracle(t *testing.T) {
 	}
 }
 
+func TestHIPGemma4MoERouterProjectionOracle(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware oracle tests")
+	}
+	modelPath := hipOracleModelPath()
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_ORACLE_MODEL_PATH to a local Gemma4 MoE model")
+	}
+	runtime := newSystemNativeRuntime()
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(modelPath, inference.WithContextLen(4096)))
+	core.RequireNoError(t, err)
+	defer model.Close()
+	loaded := model.(*rocmModel).native.(*hipLoadedModel)
+	cfg, err := loaded.loadedGemma4Q4ForwardConfig(1)
+	core.RequireNoError(t, err)
+	moe := cfg.Layers[0].MoE
+	if moe == nil {
+		t.Skipf("model %s has no layer-0 MoE router", modelPath)
+	}
+
+	input := make([]float32, moe.RouterProjection.Cols)
+	for index := range input {
+		x := float64(index + 1)
+		input[index] = float32(math.Sin(x*0.017) + 0.5*math.Cos(x*0.031))
+	}
+	payload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(loaded.driver, "rocm.hip.MoERouterOracle", "router input", payload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+	output, err := hipRunProjectionKernelWithDeviceInputWeightEncoding(
+		context.Background(), loaded.driver, inputBuffer,
+		moe.RouterProjection.WeightPointer, moe.RouterProjection.WeightBytes,
+		moe.RouterProjection.Rows, moe.RouterProjection.Cols, hipProjectionWeightEncodingF32,
+	)
+	core.RequireNoError(t, err)
+	defer output.Close()
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.MoERouterOracle", "router scores", moe.NumExperts)
+	core.RequireNoError(t, err)
+
+	weightPayload := hipLoaderOraclePointerBytes(t, loaded.driver, moe.RouterProjection.WeightPointer, moe.RouterProjection.WeightBytes)
+	weights, err := safetensors.DecodeFloat32("F32", weightPayload, moe.RouterProjection.Rows*moe.RouterProjection.Cols)
+	core.RequireNoError(t, err)
+	want, err := hipReferenceF32Projection(input, weights, moe.RouterProjection.Rows, moe.RouterProjection.Cols, nil)
+	core.RequireNoError(t, err)
+	maxDiff, meanDiff := hipOracleMaxMeanDiff(want, got)
+	t.Logf("MOE ROUTER model=%s rows=%d cols=%d maxAbs=%g meanAbs=%g", modelPath, moe.RouterProjection.Rows, moe.RouterProjection.Cols, maxDiff, meanDiff)
+	if maxDiff > 0.001 {
+		t.Fatalf("router projection maxAbs=%g, want <= 0.001", maxDiff)
+	}
+	wantRoutes, err := rocmReferenceRouteExperts(want, moe.TopKExperts, moe.Layer, nil)
+	core.RequireNoError(t, err)
+	gotRoutes, err := rocmReferenceRouteExperts(got, moe.TopKExperts, moe.Layer, nil)
+	core.RequireNoError(t, err)
+	for index := range wantRoutes {
+		if gotRoutes[index].ID != wantRoutes[index].ID {
+			t.Fatalf("router route[%d] ID=%d, want %d", index, gotRoutes[index].ID, wantRoutes[index].ID)
+		}
+		if math.Abs(float64(gotRoutes[index].Prob-wantRoutes[index].Prob)) > 0.0001 {
+			t.Fatalf("router route[%d] probability=%g, want %g", index, gotRoutes[index].Prob, wantRoutes[index].Prob)
+		}
+	}
+}
+
 func tensorElementCount(shape []int) int {
 	count := 1
 	for _, dim := range shape {
@@ -1186,7 +1250,7 @@ func hipOracleEnvFloat(key string, def float64) float64 {
 // Calibrate on E2B/E4B first: they are coherent on hip and MUST match at every
 // step. If they diverge too, the oracle harness is wrong, not the engine.
 //
-// FINDING (2026-07-12, this oracle): the state-carry theory is FALSIFIED. On the
+// FINDING (this oracle): the state-carry theory is FALSIFIED. On the
 // exact production garble trajectory (12B fp16 -> token 45518 "thought" on loop),
 // incremental == recompute at every step (max/refRMS <= 0.006, argmax identical),
 // and so does coherent E2B. The embedding, all 48 per-op layer transforms, and

@@ -76,6 +76,9 @@ func NormalizeSizeQuantMode(size, mode string) string {
 		case "q5":
 			return "q5-status"
 		case "q4":
+			if normalizedSize == "26b-a4b" {
+				return "q4"
+			}
 			return "q4-status"
 		}
 	}

@@ -146,6 +146,46 @@ func TestLoadDiffusionGemmaDecoderTrunk_Good(t *testing.T) {
 	}
 }
 
+func TestParseConfigDiffusionGemmaInfersMoEFromGeometry_Good(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{
+		"model_type":"diffusion_gemma",
+		"text_config":{
+			"model_type":"diffusion_gemma_text",
+			"hidden_size":64,
+			"num_hidden_layers":2,
+			"intermediate_size":32,
+			"num_attention_heads":2,
+			"num_key_value_heads":1,
+			"num_global_key_value_heads":1,
+			"head_dim":32,
+			"global_head_dim":32,
+			"vocab_size":128,
+			"max_position_embeddings":256,
+			"sliding_window":16,
+			"rms_norm_eps":0.000001,
+			"layer_types":["sliding_attention","full_attention"],
+			"num_experts":4,
+			"top_k_experts":2,
+			"moe_intermediate_size":16
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseConfig(diffusion_gemma MoE geometry): %v", err)
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch(diffusion_gemma MoE geometry): %v", err)
+	}
+	if !cfg.EnableMoEBlock || arch.Experts != 4 || arch.TopK != 2 || arch.ExpertFF != 16 {
+		t.Fatalf("MoE = enabled %v / experts %d / top-k %d / expert FF %d, want true/4/2/16", cfg.EnableMoEBlock, arch.Experts, arch.TopK, arch.ExpertFF)
+	}
+	for index, layer := range arch.Layer {
+		if !layer.MoE {
+			t.Fatalf("layer %d is dense, want inferred MoE", index)
+		}
+	}
+}
+
 // gemma4Snapshot resolves an HF-cache snapshot dir for repo, or "" when not cached.
 func gemma4Snapshot(repo string) string {
 	base := filepath.Join(os.Getenv("HOME"), ".cache/huggingface/hub", repo, "snapshots")
@@ -328,7 +368,7 @@ func TestLoad_EFamily_QuantAgnostic(t *testing.T) {
 			}
 			// the checkpoint decides the expectation: a conversion that ships
 			// per_layer_model_projection.scales quantised the projection (upstream
-			// re-conversions flip this — the 2026-07 e2b refresh made it 4-bit), and
+			// re-conversions flip this — e.g. an e2b refresh changed it to 4-bit), and
 			// the loader must follow the weights with no per-weight branch.
 			wantProjQuant := snapshotHasTensor(t, dir, "per_layer_model_projection.scales")
 			m, dm, err := model.Load(dir)

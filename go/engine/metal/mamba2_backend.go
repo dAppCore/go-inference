@@ -4,7 +4,7 @@
 
 package native
 
-import "dappco.re/go/inference/model/mamba2"
+import "dappco.re/go/inference/model/arch/mamba2"
 
 // mamba2_backend.go wires native's device GEMM into the engine-neutral Mamba-2 block. The block's in/out
 // projections are its compute hot spot (dense GEMM — ~all of BlockForwardF32's time per the mamba2

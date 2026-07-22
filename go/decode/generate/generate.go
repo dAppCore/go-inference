@@ -16,6 +16,7 @@ package generate
 import (
 	"context"
 	"io"
+	"iter"
 	"time"
 
 	core "dappco.re/go"
@@ -24,6 +25,27 @@ import (
 	"dappco.re/go/inference/serving"
 	"dappco.re/go/inference/serving/provider/openai"
 )
+
+// retainedChatModel is the optional capability (engine.TextModel) that lets
+// runBasicGenerate share ONE arch decode-state build across its kernel-warm
+// turn and its timed turn, instead of paying for a fresh --context-sized
+// build on every Chat call — see the "chat drives one Chat-equivalent turn"
+// comment in runBasicGenerate for why that matters. Declared locally (rather
+// than importing dappco.re/go/inference/engine) so generate stays engine-
+// neutral: any backend can opt in by implementing these three methods, and a
+// backend that does not (the MTP speculative wrapper today) is unaffected —
+// runBasicGenerate falls back to tm.Chat unchanged.
+type retainedChatModel interface {
+	// OpenRetainedSession opens ONE session for ChatRetained calls to share,
+	// returned as an opaque handle.
+	OpenRetainedSession() (any, error)
+	// ChatRetained streams one turn's completion over rs, replacing any state
+	// already on it (rs's PrefillTokens contract) — the same output a fresh
+	// Chat call would produce, without opening a new session for it.
+	ChatRetained(ctx context.Context, rs any, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token]
+	// CloseRetainedSession releases a session OpenRetainedSession opened.
+	CloseRetainedSession(rs any) error
+}
 
 // Config is the declarative generate request mirroring lthn-mlx's generate flag
 // surface. RunGenerate turns it into a load + generate run (or, when StateName
@@ -63,11 +85,11 @@ type Config struct {
 	// leaves generate on the plain path with the "no speculative path" note.
 	SpeculativeLoader serving.SpeculativeLoader
 
-	// Engine knobs preserved for the drop-in flag surface. These have no
-	// inference.LoadOption seam on the current engine/metal, so RunGenerate
-	// prints an honest notice and loads the engine default (see the notice
-	// wiring below); they light up when the engine exposes the seam.
-	KVCacheMode string // paged, fp16, q8, kq8vq4, turboquant
+	// Engine knobs. KVCacheMode rides the load spec (inference.WithCacheMode) —
+	// the metal engine honours the turboquant family live and refuses unknown or
+	// unservable modes at load; noteCacheKnobs prints the honest capability note.
+	// The remaining knobs keep the drop-in flag surface with honest notices.
+	KVCacheMode string // live KV cache mode: native (default), turboquant[:4|:3.5|:3|:2]
 	KVStorage   string // retained KV storage dtype
 	Pipeline    bool   // one-ahead pipelined decode
 	Native      bool   // no-cgo native token loop (the default go-inference metal engine already is)
@@ -90,10 +112,14 @@ func RunGenerate(ctx context.Context, cfg Config) error {
 	if cfg.ContextLen > 0 {
 		loadOpts = append(loadOpts, inference.WithContextLen(cfg.ContextLen))
 	}
-	// KV-cache mode / storage dtype overrides are validated against the loaded
-	// engine's reported capabilities (noteCacheKnobs, once the model is loaded)
-	// rather than blanket-noted here — the note then names what the engine
-	// actually honours instead of guessing.
+	if mode := core.Trim(cfg.KVCacheMode); mode != "" {
+		// The LIVE cache mode rides the load spec (the metal engine honours the
+		// turboquant family; an unknown or unservable mode fails the load loudly).
+		loadOpts = append(loadOpts, inference.WithCacheMode(mode))
+	}
+	// KV-cache mode / storage dtype overrides are additionally validated against
+	// the loaded engine's reported capabilities (noteCacheKnobs, once the model
+	// is loaded) — the note then names what the engine actually honours.
 	if cfg.Native {
 		printNote(cfg.Log, "generate: native no-cgo token loop (the default go-inference metal engine already is native)")
 	}
@@ -162,7 +188,14 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	// token. Every miss degrades to plain autoregressive with an honest notice.
 	var tm inference.TextModel
 	if det := serving.ResolveServeDraft(cfg.ModelPath, cfg.DraftPath, true); det.Active() {
-		block := resolvedDraftBlock(cfg.DraftBlock)
+		// cfg.DraftBlock passes through RAW (0 included): the LOADER owns the
+		// default — it is arch-aware (engine/metal resolves MoE targets to a
+		// longer block than dense ones), which a pre-resolved constant here
+		// would silently override. Same shape as serve's resolver.
+		blockLabel := "engine-default block"
+		if cfg.DraftBlock > 0 {
+			blockLabel = core.Sprintf("block %d", cfg.DraftBlock)
+		}
 		switch {
 		case det.IsDFlash():
 			// A DFlash block-diffusion drafter is recognised but the engine has no
@@ -170,15 +203,15 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 			// with the shared honest notice rather than misloading it as MTP.
 			printNote(cfg.Log, "generate: %s", serving.DFlashDraftNotice(det))
 		case cfg.SpeculativeLoader == nil:
-			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (block %d would apply)", det.DraftPath, det.Note, block)
+			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (%s would apply)", det.DraftPath, det.Note, blockLabel)
 		case len(images) > 0 || len(audios) > 0 || len(videoFrames) > 0:
 			printNote(cfg.Log, "generate: drafter %s detected but multimodal input routes through a prefill the MTP loop does not carry — generating plain autoregressive", det.DraftPath)
 		default:
-			sm, serr := cfg.SpeculativeLoader(cfg.ModelPath, det.DraftPath, block, loadOpts...)
+			sm, serr := cfg.SpeculativeLoader(cfg.ModelPath, det.DraftPath, cfg.DraftBlock, loadOpts...)
 			if serr != nil {
 				printNote(cfg.Log, "generate: drafter %s detected but the speculative pair failed to load (%v) — generating plain autoregressive", det.DraftPath, serr)
 			} else {
-				printNote(cfg.Log, "generate: MTP speculative lane armed — drafter %s, block %d", det.DraftPath, block)
+				printNote(cfg.Log, "generate: MTP speculative lane armed — drafter %s, %s", det.DraftPath, blockLabel)
 				tm = sm
 			}
 		}
@@ -216,6 +249,17 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 			// the default keeps it off so the decode rate stays clean.
 			inference.WithEnableThinking(&think),
 			inference.WithTemperature(float32(cfg.Temp)),
+			// This path's two Chat calls (the kernel-warm pass below, then the
+			// timed run) never share a prefix — "Chat calls on this path never
+			// reuse KV across runs" is the standing contract the warm-prefix
+			// comment already states. Skip the resident prompt-reuse lane so a
+			// q8-KV-capable model (gemma4 E2B/E4B's default) does not arm
+			// position-invariant per-token landing on account of a reuse that
+			// will never happen — that landing taxes EVERY prefilled token at
+			// per-token (host-synced) speed regardless of prompt length (#54:
+			// 12k-token native prefill measured at 158 tok/s / 77.8s TTFT on an
+			// idle box, independent of length — not a long-context knee).
+			inference.WithDisablePromptReuse(),
 		}
 		// -trace turns on the engine's per-token phase timing. The engine folds the
 		// aggregate GPU-busy / host-serial split into inference.GenerateMetrics
@@ -227,12 +271,40 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		return opts
 	}
 
+	// chat drives one Chat-equivalent turn. warmMsgs below and msgs (the timed
+	// run) are two SEPARATE, unrelated turns — never a shared prefix (see the
+	// standing "Chat calls on this path never reuse KV across runs" contract
+	// above) — but tm.Chat's default cost is a FRESH arch decode-state build
+	// per call, each sized to the full --context: two calls transiently hold
+	// two such builds (the first is only Go-unreferenced, not synchronously
+	// freed, when the second's build starts), measured ~34.9GB peak RSS at
+	// --context 32768 in both q8 and turboquant KV modes. When tm implements
+	// retainedChatModel (the plain metal path) and this run carries no
+	// multimodal input, both turns instead share ONE retained session — opened
+	// once here, closed on return — so the sequence pays for one build, not
+	// two. ChatRetained's PrefillTokens replaces the prior turn's state on
+	// every call, the same fresh-start guarantee a new session gives, so
+	// output is unaffected; a model without the capability (or a multimodal
+	// turn, which ChatRetained does not carry) keeps today's two-build Chat
+	// path unchanged.
+	chat := tm.Chat
+	if len(images) == 0 && len(audios) == 0 && len(videoFrames) == 0 {
+		if rcm, ok := tm.(retainedChatModel); ok {
+			if rs, rerr := rcm.OpenRetainedSession(); rerr == nil {
+				defer func() { _ = rcm.CloseRetainedSession(rs) }()
+				chat = func(ctx context.Context, m []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+					return rcm.ChatRetained(ctx, rs, m, opts...)
+				}
+			}
+		}
+	}
+
 	// run generates up to limit tokens, timing prefill (start → first token)
 	// separately from decode (first → last) so the reported rate is steady-state.
 	run := func(m []inference.Message, limit int, collect *[]byte) (n int, prefill, decode time.Duration) {
 		start := time.Now()
 		var first time.Time
-		for tok := range tm.Chat(ctx, m, genOpts(limit)...) {
+		for tok := range chat(ctx, m, genOpts(limit)...) {
 			if n == 0 {
 				first = time.Now()
 				prefill = first.Sub(start)
@@ -416,11 +488,17 @@ func reportedCacheModes(tm inference.TextModel) []string {
 }
 
 // cacheModeHonoured reports whether want is one of the engine's declared cache
-// modes (case-insensitive). An empty list means the engine declares no
-// selectable mode, so nothing is honoured.
+// modes (case-insensitive). A parameterised request ("turboquant:3.5") matches
+// its declared base family ("turboquant") — engines declare families, not every
+// bit-width spelling. An empty list means the engine declares no selectable
+// mode, so nothing is honoured.
 func cacheModeHonoured(modes []string, want string) bool {
+	base := core.Lower(want)
+	if i := core.Index(base, ":"); i >= 0 {
+		base = base[:i]
+	}
 	for _, mode := range modes {
-		if core.Lower(mode) == core.Lower(want) {
+		if core.Lower(mode) == core.Lower(want) || core.Lower(mode) == base {
 			return true
 		}
 	}
@@ -433,15 +511,6 @@ func cacheModesSuffix(modes []string) string {
 		return ""
 	}
 	return core.Sprintf(" (this engine supports: %s)", core.Join(", ", modes...))
-}
-
-// resolvedDraftBlock reports the block the MTP lane would run for a flag value
-// (0 = engine default).
-func resolvedDraftBlock(flagBlock int) int {
-	if flagBlock > 0 {
-		return flagBlock
-	}
-	return serving.MTPDefaultDraftBlock
 }
 
 // printMTPMetrics appends the MTP acceptance line when the generation rode the

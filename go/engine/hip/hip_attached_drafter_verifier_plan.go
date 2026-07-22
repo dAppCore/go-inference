@@ -74,9 +74,13 @@ type hipAttachedDrafterAssistantProjectionPlan struct {
 }
 
 func (plan hipAttachedDrafterAssistantVerifierPlan) Labels() map[string]string {
+	kernelStatus := hipKernelStatusNotLinked
+	if plan.Status == attachedDrafterAssistantVerifierPlanTensorBound {
+		kernelStatus = hipKernelStatusLinked
+	}
 	labels := map[string]string{
 		"attached_drafter_assistant_verifier_plan":   plan.Status,
-		"attached_drafter_assistant_verifier_kernel": "not_linked",
+		"attached_drafter_assistant_verifier_kernel": kernelStatus,
 	}
 	if plan.Reason != "" {
 		labels["attached_drafter_assistant_verifier_plan_reason"] = plan.Reason
