@@ -1,0 +1,54 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  datadetail.ctml : the Data panel's detail pane (item header, metadata
+  fields, welfare flag, rendered content, score breakdown, review history,
+  and lineage).
+
+  Idiom: a plain document (ctml.Parse + RenderTerm) — the pane carries no
+  live widget, so it needs no band split. The Glamour-rendered CONTENT and
+  SCORES bodies are pre-styled ANSI and ride <verbatim value="key"/> — the
+  terminal renderer passes them through byte-for-byte; the host owns
+  fitting them to width (they are rendered at the pane width) and appends
+  one trailing newline so the blank line that separates a body from the
+  next section heading travels inside the verbatim bytes.
+
+  Host seams (datapanel.go):
+    - Sequence  noselect : zero-or-one row — the no-selection hint; the
+      whole detail body rides the zero-or-one-row `head` sequence, so the
+      two states never render together.
+    - Sequence  head : zero-or-one row {slug, status} gating the body.
+    - Sequence  fields : one row per non-empty metadata field {label,
+      value} — the host skips empty fields, exactly as the old
+      dataDetailRow did.
+    - Sequence  welfare : zero-or-one row {note} — the quarantine flag.
+    - Values    content / scores : the pre-styled Glamour bodies — always
+      present (empty when nothing is selected), because a <verbatim>
+      value must exist at parse time.
+    - Sequences reviewRows / lineageRows : one row per line, each a
+      {s, t, v} triple of status- / thought- / answer-styled segments
+      (unused segments bind empty and render nothing); a follow-on line
+      (a review note) is its own row, its indent travelling in the bound
+      value. reviewNote / lineageEmpty are the zero-or-one-row
+      pending/unavailable/no-lineage states.
+    - Classes   detail-title / detail-status / detail-section /
+      detail-warn / field-label / field-value / row-status / row-thought /
+      row-answer / detail-empty : mapped onto the existing uiStyles
+      palette by dataDetailTheme.
+
+  CONTENT and SCORES keep their headings as standalone <p> blocks above a
+  <verbatim>, so each heading gains the renderer's own paragraph blank
+  beneath it — block-native geometry. REVIEW and LINEAGE keep their rows
+  in the heading's own <p>, so those lines stay adjacent as before.
+-->
+<section id="data-detail">
+<each items="noselect" as="row"><p class="detail-empty">Select an item for its content, scores, and lineage.</p></each>
+<each items="head" as="row"><p><span class="detail-title">{{row.slug}}</span><span class="detail-status">  {{row.status}}</span></p>
+<p><each items="fields" as="field"><span class="field-label">{{field.label}}</span><span class="field-value">{{field.value}}</span><br></br></each></p>
+<each items="welfare" as="flag"><p><span class="detail-warn">! WELFARE FLAG</span><br></br><span class="field-value">{{flag.note}}</span></p></each>
+<p class="detail-section">CONTENT</p>
+<verbatim value="content"/>
+<p class="detail-section">SCORES</p>
+<verbatim value="scores"/>
+<p><span class="detail-section">REVIEW</span><br></br><each items="reviewRows" as="line"><span class="row-status">{{line.s}}</span><span class="row-thought">{{line.t}}</span><span class="row-answer">{{line.v}}</span><br></br></each><each items="reviewNote" as="note"><span class="row-status">{{note.text}}</span><br></br></each></p>
+<p><span class="detail-section">LINEAGE</span><br></br><each items="lineageRows" as="line"><span class="row-status">{{line.s}}</span><span class="row-answer">{{line.v}}</span><span class="row-thought">{{line.t}}</span><br></br></each><each items="lineageEmpty" as="note"><span class="row-status">○ no lineage — an original item</span><br></br></each></p></each>
+</section>
