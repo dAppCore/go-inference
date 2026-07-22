@@ -9,7 +9,7 @@ The sovereign inference engine for the Core Go ecosystem. Module: `dappco.re/go/
 1. **The shared contract** (`go/*.go`) — `TextModel`/`Backend` interfaces, options, registry, discovery. Backends import this; never the reverse.
 2. **The engines** (`go/engine/`) — `engine/metal` (package `native`): the **no-cgo Apple GPU engine** (darwin/arm64, objc bridge via `github.com/tmc/apple`, ICB-replayed decode, MTP speculative pairs, paged SDPA, q8 KV); `engine/hip`: AMD ROCm (linux/amd64). Plus `cmd/lem` (the serving/bench binary), OpenAI/Anthropic/Ollama compat handlers, and conversation state (`-state`, no-prompt-replay).
 
-`docs/` at repo root is the manual: `architecture.md`, `backends.md` (registry + **engine runtime levers**), `cmd-lem.md`, `build.md`, and **`handover.md` — read that one first; it is the working handover from the engine-perf campaigns.**
+`docs/` at repo root is the manual: `architecture.md`, `backends.md` (registry + **engine runtime levers**), `cmd-lem.md`, `build.md`, `history.md`. Working state (handovers, design drafts, receipts, campaign perf notes) lives with the orchestrating agent, not here.
 
 ## Commands
 
