@@ -409,6 +409,15 @@ func (r *verifyStackRecorder) addResident(b metal.MTLBuffer) {
 }
 
 func (r *verifyStackRecorder) captureBind(buf metal.MTLBuffer, off, idx uint) {
+	if off >= 1<<32 {
+		// AGX indirect compute commands mis-encode buffer offsets >= 2^32: the
+		// live encoder path is exact, the replayed ICB bind reads the wrong
+		// bytes (#71 root cause — proven by the shard4g micro; E4B's ~5GB
+		// weight shard binds norm/projection weights past 4.29GB and every
+		// first replay NaN'd). Such a pass cannot record — the live fold serves.
+		r.fail()
+		return
+	}
 	r.addResident(buf)
 	r.lastBinds = append(r.lastBinds, vsCapturedBind{buf: bufID(buf), off: off, idx: idx})
 	if r.debugOps && verifyStackSkipOps != nil {

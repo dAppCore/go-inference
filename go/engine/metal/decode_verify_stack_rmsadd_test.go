@@ -32,15 +32,17 @@ func TestVerifyStackICBReplay_RMSAddTwoLayerParity_Good(t *testing.T) {
 	const rows = 5
 	const eps = 1e-6
 	cases := []struct {
-		name       string
-		dModel     int
-		layers     int
-		shardW     bool // weights as offset views into ONE big buffer (the mmap shard shape)
+		name      string
+		dModel    int
+		layers    int
+		shardW    bool // weights as offset views into ONE big buffer (the mmap shard shape)
+		shardBase uint // first weight offset — >2^32 probes the ICB offset width
 	}{
-		{"e4b-2560-2layer", 2560, 2, false},
-		{"e2b-1536-5layer", 1536, 5, false},
-		{"e4b-2560-2layer-shardw", 2560, 2, true},
-		{"e4b-2560-40layer-shardw", 2560, 40, true},
+		{"e4b-2560-2layer", 2560, 2, false, 0},
+		{"e2b-1536-5layer", 1536, 5, false, 0},
+		{"e4b-2560-2layer-shardw", 2560, 2, true, 0},
+		{"e4b-2560-40layer-shardw", 2560, 40, true, 0},
+		{"e4b-2560-2layer-shard4g", 2560, 2, true, 4295067648},
 	}
 	rng := uint32(0xfeedbeef)
 	next := func() uint32 { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng }
@@ -61,9 +63,12 @@ func TestVerifyStackICBReplay_RMSAddTwoLayerParity_Good(t *testing.T) {
 				off uint
 			}
 			var shard metal.MTLBuffer
-			var shardOff uint
+			shardOff := tc.shardBase
 			if tc.shardW {
-				shard = device.NewBufferWithLengthOptions(uint(tc.layers*4*tc.dModel*2+4096), metal.MTLResourceStorageModeShared)
+				shard = device.NewBufferWithLengthOptions(tc.shardBase+uint(tc.layers*4*tc.dModel*2+4096), metal.MTLResourceStorageModeShared)
+				if shard == nil {
+					t.Skipf("shard allocation of %d bytes unavailable", tc.shardBase)
+				}
 			}
 			weight := func() wView {
 				f := make([]float32, tc.dModel)
@@ -152,6 +157,18 @@ func TestVerifyStackICBReplay_RMSAddTwoLayerParity_Good(t *testing.T) {
 				rec.recRMSRows(rd0, ws[li].wPF.buf, rm, 0, ws[li].wPF.off, 0, rows, tc.dModel, eps)
 				rec.recAdd(rh, 0, rm, 0, rb0, 0, rows*tc.dModel)
 				read = rb0
+			}
+			if tc.shardBase >= 1<<32 {
+				// the #71 root-cause pin: a bind at >=2^32 must FAIL the
+				// recording (AGX ICB commands mis-encode such offsets — the
+				// unguarded recording replayed cos≈0.75 against live).
+				if !rec.failed {
+					t.Fatal("recorder accepted a >=2^32 bind offset — the #71 guard is gone")
+				}
+				if vs := rec.finish(); vs != nil {
+					t.Fatal("finish returned a recording despite the >=2^32 bind")
+				}
+				return
 			}
 			if rec.failed {
 				t.Fatal("recorder failed")
