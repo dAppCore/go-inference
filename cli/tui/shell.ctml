@@ -1,31 +1,31 @@
 <!-- SPDX-Licence-Identifier: EUPL-1.2 -->
 <!--
-  shell.ctml : the lem workspace app shell — the permanent outer chrome
-  (tab strip, session strip, the active panel/overlay body, footer key
-  hints) every primary panel renders inside.
+  shell.ctml : the lem workspace app shell's H/F-only shape — used ONLY for
+  the ONE region shape that still needs host composition: Overlay layouts
+  (80-119 cols) with the inspector open, stacking the full-width inspector
+  above a compact main-panel preview with a rule between
+  (renderInspectorStack, layout.go). Every OTHER region shape now rides its
+  own declarative shell (shellregion.ctml single-pane; shellwide.ctml Wide
+  side-by-side) since go-html v0.14.0 shipped a themeable C slot and
+  row-scoped verbatim (docs/ctml.md S:15.2, S:6.5) — see those two files for
+  the converted shapes, and renderFrame's own doc comment (layout.go) for
+  the full account of which shape uses which.
 
   Idiom: a <layout variant="HF"> rendered through renderBandFrame (the HF
   band-split idiom overlays and the Data list's live filter input already
   use, overlayframe.go / datapanel.go) — the host splits the render at the
-  H slot's own recorded box height and composes the region (the active main
-  panel, plus the wide/toggled inspector — renderWorkspaceRegion,
-  layout.go) BETWEEN the two bands, exactly as a widget-carrying overlay
+  H slot's own recorded box height and composes the region (renderInspector
+  Stack) BETWEEN the two bands, exactly as a widget-carrying overlay
   composes a live Bubbles widget between its own H and F bands.
 
-  The C slot is deliberately unused. go-html's renderTermContent hardcodes
-  a (0,1) padding on the Content slot with no TermTheme override — unlike
-  Header/Footer/Sidebar/Aside, which all route through a themeable style
-  (see shellFrameTheme's theme.Header/theme.Footer overrides in layout.go).
-  L and R share the same defect through renderTermBox's own hardcoded -4/-2
-  offsets. Content already fitted to a slot's own width by the host arrives
-  one or more columns too wide once that hidden offset is added, and the
-  slot's own Width() enforcement then word-wraps the overflow onto a
-  spurious extra row instead of leaving it byte-exact (confirmed with a
-  throwaway geometry probe against C and L during this slice; not part of
-  the shipped diff). The region must keep the SAME width contract every
-  panel body (chat/work/data/models/service) and the inspector already
-  render against, so it rides the proven HF+host-composition idiom instead
-  of any middle-band slot.
+  The C slot is deliberately unused HERE, but not because it is unusable —
+  shellregion.ctml/shellwide.ctml now use it and R for every other shape.
+  This file's region shape is two INDEPENDENTLY-SIZED panes stacked
+  vertically with a rule between, a shape HLCRF's five-letter slot
+  vocabulary has no pair for (H/F are whole-page top/bottom bands, not a
+  reusable mid-page pair) — renderInspectorStack's own doc comment
+  (layout.go) has the full account; it is the friction this slice reports
+  rather than works around.
 
   Host seams (layout.go):
     - Values  header : the tab strip (renderPanelBar, tabs.go) and the
