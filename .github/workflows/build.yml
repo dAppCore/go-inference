@@ -16,6 +16,7 @@ name: Build
 on:
   push:
     branches: [dev, main]
+    tags: ['v*']            # a version tag publishes the REAL release (guarded on-main)
   workflow_dispatch:
 
 permissions:
@@ -66,7 +67,7 @@ jobs:
           EXE: ${{ matrix.exe }}
         run: |
           set -euo pipefail
-          VERSION="dev-${GITHUB_SHA:0:12}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="$GITHUB_REF_NAME"; else VERSION="dev-${GITHUB_SHA:0:12}"; fi
           mkdir -p bin
           go build -trimpath -ldflags "-X main.version=${VERSION}" -o "bin/lem${EXE}" ./cli
           test -s "bin/lem${EXE}"
@@ -107,7 +108,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="dev-${GITHUB_SHA:0:12}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="$GITHUB_REF_NAME"; else VERSION="dev-${GITHUB_SHA:0:12}"; fi
           task metallib
           task build:embed VERSION="${VERSION}"
           test -s bin/lem
@@ -119,25 +120,65 @@ jobs:
           if-no-files-found: error
 
   # ---- release: package each built binary under BOTH names (build once, package
-  #      twice) and publish to the rolling `dev` prerelease. Runs only for dev
-  #      pushes; requires cpu to have succeeded and tolerates metal being skipped. ----
+  #      twice). Two publish shapes: a dev push feeds the rolling `dev`
+  #      prerelease; a v* TAG (guarded: the tagged commit must be on main)
+  #      publishes the real versioned release. Requires cpu green; tolerates
+  #      metal skipped. ----
   release:
-    name: Zip (Native + Driver) + rolling dev prerelease
+    name: Zip (Native + Driver) + release
     needs: [cpu, metal]
-    if: ${{ !cancelled() && needs.cpu.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
+    if: ${{ !cancelled() && needs.cpu.result == 'success' && github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # the tag-on-main ancestry guard needs history
+
+      # A tag release only publishes if the tagged commit is reachable from
+      # main — "a tag hitting main". A tag pushed off-branch fails LOUDLY
+      # (the run goes red) rather than silently minting a release.
+      - name: Guard — tag must be on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch -q origin main
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "tag $GITHUB_REF_NAME is on main — releasing"
+          else
+            echo "::error::tag $GITHUB_REF_NAME ($GITHUB_SHA) is NOT on main — refusing to release"
+            exit 1
+          fi
+
+      - name: Resolve version + release shape
+        id: shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=$GITHUB_REF_NAME"      >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME"          >> "$GITHUB_OUTPUT"
+            echo "name=$GITHUB_REF_NAME"         >> "$GITHUB_OUTPUT"
+            echo "prerelease=false"              >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
+            echo "tag=dev"                        >> "$GITHUB_OUTPUT"
+            echo "name=dev (rolling)"             >> "$GITHUB_OUTPUT"
+            echo "prerelease=true"                >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: dist        # one dir per cell: dist/lem-<backend>-<os>-<arch>/lem[.exe]
 
       - name: Package Native + Driver zips
         shell: bash
+        env:
+          VERSION: ${{ steps.shape.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="dev-${GITHUB_SHA:0:12}"
           mkdir -p out
           cd dist
           # ONLY the binary artifacts (lem-cpu-*, lem-metal-*) — lem-sdks also
@@ -159,12 +200,12 @@ jobs:
           done
           ls -la ../out
 
-      - name: Publish rolling dev prerelease
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: dev
-          name: dev (rolling)
-          prerelease: true
+          tag_name: ${{ steps.shape.outputs.tag }}
+          name: ${{ steps.shape.outputs.name }}
+          prerelease: ${{ steps.shape.outputs.prerelease }}
           files: out/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
