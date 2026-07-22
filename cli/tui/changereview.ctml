@@ -1,0 +1,27 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  changereview.ctml : the change-acceptance overlay — the reviewed
+  receipt in a scrolling viewport behind an acknowledge + double-Enter
+  gate.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the receipt body
+  lives in a live Bubbles viewport (scroll state is keyboard-owned), and
+  its ANSI output cannot ride a .ctml document, so the layout renders
+  the header and footer bands and the host composes the viewport between
+  them (renderOverlayFrame splits at the H box height).
+
+  Host seams (agentoverlay.go):
+    - Sequence  review : one row {title} — the review title.
+    - Sequence  warn : zero-or-one row {text} — the review warning, only
+      when one is set (an empty sequence renders nothing).
+    - Sequences promptContinue / promptAcknowledge / promptApply :
+      zero-or-one rows selecting the footer prompt — all three texts are
+      static markup, so the gate stage is carried by WHICH sequence
+      holds the row, the selection-as-sequence-split idiom.
+    - Classes   overlay-warn / overlay-keys : mapped onto the existing
+      uiStyles palette by overlayFrameTheme.
+-->
+<layout variant="HF">
+<h><each items="review" as="row"><h2>{{row.title}}</h2></each><each items="warn" as="row"><p class="overlay-warn">{{row.text}}</p></each></h>
+<f><each items="promptContinue" as="row"><p class="overlay-keys">enter continues · esc cancels</p></each><each items="promptAcknowledge" as="row"><p class="overlay-keys">a acknowledges no validation · enter continues · esc cancels</p></each><each items="promptApply" as="row"><p class="overlay-keys">enter applies this exact reviewed receipt · esc cancels</p></each></f>
+</layout>

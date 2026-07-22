@@ -2,7 +2,15 @@
 
 package tui
 
-import core "dappco.re/go"
+import (
+	_ "embed"
+
+	"github.com/charmbracelet/lipgloss"
+
+	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
+)
 
 // The Settings tab: a cursor list of knobs adjusted with ←/→ (or h/l). Values
 // apply to the NEXT load (context) or the next turn (the rest) — the honest
@@ -103,19 +111,59 @@ func (s settings) move(delta int) settings {
 	return s
 }
 
-func (s settings) view(width int, styles uiStyles) string {
-	var b core.Builder
-	b.WriteString(styles.title.Render("settings") + "\n\n")
-	for i, row := range s.rows() {
-		cursor := "  "
-		name := styles.answer.Render(row.name)
-		if i == s.cursor {
-			cursor = styles.accent.Render("› ")
-			name = styles.accent.Render(row.name)
+// settingsCTML is the Settings form's markup — see settings.ctml for the
+// seams it exposes (row sequences, class tokens, the settings-form block id).
+//
+//go:embed settings.ctml
+var settingsCTML []byte
+
+// settingsFormBindings binds ONE row per knob — selection styling rides the
+// row-scoped class bind (class="{{row.state}}", go-html v0.13.0) and the
+// marker glyph rides the row, so no before/active/after sequence split is
+// needed. A form this size re-binds on every change for free.
+func settingsFormBindings(form settings) ctml.Bindings {
+	rows := make([]map[string]any, 0, len(form.rows()))
+	for index, row := range form.rows() {
+		state, marker := "row-idle", "○"
+		if index == form.cursor {
+			state, marker = "row-active", "›"
 		}
-		b.WriteString(cursor + name + "  " + styles.title.Render("‹ "+row.value+" ›") + "\n")
-		b.WriteString("    " + styles.thought.Render(row.hint) + "\n\n")
+		rows = append(rows, map[string]any{
+			"state": state, "marker": marker,
+			"name": row.name, "value": row.value, "hint": row.hint,
+		})
 	}
-	b.WriteString(styles.status.Render("↑/↓ select · ←/→ change · values apply as hinted"))
-	return b.String()
+	return ctml.Bindings{Sequences: map[string][]map[string]any{"rows": rows}}
+}
+
+// settingsFormTheme maps the markup's class tokens onto the existing palette,
+// so the .ctml render reuses uiStyles paint exactly — no colours of its own.
+func settingsFormTheme(styles uiStyles) *html.TermTheme {
+	theme := html.DefaultTermTheme()
+	theme.Text = styles.answer
+	theme.Heading = styles.title // the <h2> form title
+	theme.Classes = map[string]lipgloss.Style{
+		"row-idle":   styles.answer,
+		"row-active": styles.accent,
+		"row-value":  styles.title,
+		"row-hint":   styles.thought,
+		"form-keys":  styles.status,
+	}
+	return theme
+}
+
+// renderSettings parses settings.ctml with the current row bindings and
+// renders it through the go-html terminal renderer: the form title, one
+// <dl> row per knob (value line + indented hint), and the key footer.
+func renderSettings(form settings, width int, styles uiStyles) string {
+	if width <= 0 {
+		return ""
+	}
+	tree, err := ctml.Parse(settingsCTML, settingsFormBindings(form))
+	if err != nil {
+		// settings.ctml is embedded and static, so a parse failure is a build
+		// defect; TestRenderSettings_Good pins the markup as parseable.
+		return ""
+	}
+	return html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: settingsFormTheme(styles)})
 }

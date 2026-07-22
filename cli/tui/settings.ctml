@@ -1,0 +1,35 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  settings.ctml : the Settings form (one <dl> row per knob + the key footer).
+
+  Host seams (settings.go):
+    - Sequence  rows : ONE row per knob {state, marker, name, value, hint}
+      in cursor order — selection styling rides the row-scoped class bind
+      class="{{row.state}}" (go-html v0.13.0) and the marker glyph rides
+      the row (› active, ○ idle), so the before/active/after sequence
+      split this file previously needed is retired; the host re-binds on
+      every cursor move.
+    - Classes   row-idle / row-active / row-value / row-hint / form-keys :
+      mapped onto the existing uiStyles palette by settingsFormTheme.
+    - id="knob-{{row.name}}" : each row records its own box under a
+      box-recording render (the binding author owns id uniqueness — knob
+      names are unique); inert under RenderTerm today, ready for a mouse
+      consumer. id="settings-form" is the enclosing block.
+
+  Row shape: <dt> is the value line (marker + name + ‹ value ›), <dd> the
+  hint the renderer indents beneath it, and each <dl> closes with the blank
+  separator a form row needs. Rows are block-shaped, so the file indents
+  freely; only single-row constructs (the <dt> line, the footer) stay on one
+  source line, because a text run's edge whitespace survives only when it
+  does not touch a line break. Selection gutters are marker glyphs
+  (› active, ○ idle): the parser drops whitespace-only runs between
+  siblings, so a two-space gutter cannot be expressed in markup.
+-->
+<section id="settings-form">
+<h2>settings</h2>
+<each items="rows" as="row"><dl id="knob-{{row.name}}">
+  <dt><span class="{{row.state}}">{{row.marker}} {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
+  <dd><span class="row-hint">{{row.hint}}</span></dd>
+</dl></each>
+<p class="form-keys">↑/↓ select · ←/→ change · ctrl+s saves · esc closes</p>
+</section>

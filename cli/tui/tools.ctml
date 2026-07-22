@@ -1,0 +1,39 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  tools.ctml : the Tools tab (function-calling state, the built-in tool
+  list, recent call receipts, and the key footer).
+
+  Host seams (tools.go):
+    - Value      state : the enabled-state text — an always-present lone
+      scalar rides Bindings.Values and binds document-scope ({{state}});
+      the one-row-sequence carrier this line used before Values existed
+      is retired. A CONDITIONAL section still rides a zero-or-one-row
+      sequence: a Values miss renders empty but its surrounding literal
+      text would remain.
+    - Sequences  tools / recentTitle / recent : the built-in tool rows,
+      the conditional "recent calls" heading (zero or one row — an <each>
+      over an empty sequence renders nothing, so a section that appears
+      only with data rides a zero-or-one-row sequence), and the last five
+      call receipts.
+    - Classes    tool-label / tool-state / tool-name / tool-desc /
+      tool-receipt / tool-keys : mapped onto the existing uiStyles palette
+      by toolsPanelTheme.
+    - id="tools-panel" : the block a box-recording render would identify;
+      inert under RenderTerm today, ready for a mouse consumer.
+
+  Adjacent single-line rows (the tool list, the receipts) ride ONE <p>
+  with a <br> closing each <each> row: separate block elements would gain
+  blank separators between rows. The two-cell gutter between a tool name
+  and its description travels IN the bound desc value, because a
+  whitespace-only source run between sibling spans drops in the parser.
+  Single-row constructs stay on one source line so a text run's edge
+  whitespace ("function calling: ") survives.
+-->
+<section id="tools-panel">
+<h2>tools</h2>
+<p><span class="tool-label">function calling: </span><span class="tool-state">{{state}}</span></p>
+<p><each items="tools" as="tool"><span class="tool-name">{{tool.name}}</span><span class="tool-desc">{{tool.desc}}</span><br></br></each></p>
+<each items="recentTitle" as="row"><h2>recent calls</h2></each>
+<p><each items="recent" as="row"><span class="tool-receipt">{{row.receipt}}</span><br></br></each></p>
+<p class="tool-keys">enter toggles · calls appear dim in the chat transcript</p>
+</section>

@@ -1,0 +1,25 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  dataeditor.ctml : the edit-as-derived overlay (Data panel) — two text
+  areas (Prompt/Response) saving as a new derived item.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the live textareas
+  emit pre-styled ANSI, which cannot ride a .ctml document, so the
+  layout renders the header and footer bands and the host composes the
+  widgets between them (renderOverlayFrame splits at the H box height).
+  The "Response" label sits BETWEEN the two textareas — chrome trapped
+  between two live ANSI regions stays host-side, because a .ctml
+  document renders contiguously.
+
+  Host seams (dataoverlay.go):
+    - Sequences pairLabel / messagesLabel : zero-or-one rows selecting
+      the prompt caption — both texts are static markup, so the item
+      kind is carried by WHICH sequence holds the row, the selection-as-
+      sequence-split idiom.
+    - Classes   overlay-keys : mapped onto the existing uiStyles palette
+      by overlayFrameTheme.
+-->
+<layout variant="HF">
+<h><h2>Edit as derived</h2><each items="pairLabel" as="row"><p>Prompt</p></each><each items="messagesLabel" as="row"><p>Prompt (context only — earlier turns are kept as-is)</p></each></h>
+<f><p class="overlay-keys">tab changes field · ctrl+s saves as a new derived item · esc cancels</p></f>
+</layout>

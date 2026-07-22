@@ -1,0 +1,54 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  palette.ctml : the command palette overlay (Ctrl+K) — the searchable,
+  always-filtering workspace action list.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout, the overlays'
+  widget-carrying idiom (workeditor.ctml, agentanswer.ctml) applied to a
+  selectable row list for the first time: the live Bubbles FilterInput
+  emits pre-styled ANSI, which cannot ride a .ctml document, so the
+  layout renders the header and footer bands and the host composes the
+  filter input between them (renderBandFrame splits at the H box
+  height) — exactly datalist.ctml's own borrowing of this idiom, lent
+  back to an actual overlay. The header stays a fixed title rather than
+  swapping to the filter box the way Bubbles' own titleView did: the
+  palette is filtering for effectively its whole visible lifetime
+  (Open() always arms Filtering, and Enter/Esc close the overlay before
+  either ever reaches list.Model), so a title that vanished the instant
+  the overlay opened would rarely be seen — the same always-on-header
+  choice datalist.ctml already made for its own live filter input.
+
+  Host seams (palette.go):
+    - Sequence  rows : the current PAGE of the Bubbles list model's
+      visible commands, ONE row per command {state, marker, id, title,
+      detail} — selection styling rides the row-scoped class bind
+      class="{{row.state}}" (go-html v0.13.0) and the marker glyph
+      rides the row (› active, ○ idle), the same idiom picker.ctml
+      established. detail already carries the "— unavailable: reason"
+      suffix (commandListItem.Description), so an unavailable command
+      paints identically to an available one — matching the original
+      list.DefaultDelegate, which never styled the two states apart.
+    - Sequences empty / page : zero-or-one-row conditional sections —
+      "No items." once nothing matches and the filter is not being
+      typed, and "page x/y" once the command count needs more than one
+      page.
+    - Classes   row-idle / row-active / row-hint / palette-empty /
+      palette-page / overlay-keys : mapped onto the existing uiStyles
+      palette by commandPaletteTheme.
+    - id="cmd-{{row.id}}" : each row records its own box under a
+      box-recording render, keyed by the command's stable ID; inert
+      under RenderTerm today, ready for a mouse consumer, matching
+      picker.ctml's id="model-{{row.id}}".
+-->
+<layout variant="HF">
+<h><h2>Commands</h2></h>
+<f>
+<each items="rows" as="row"><dl id="cmd-{{row.id}}">
+  <dt><span class="{{row.state}}">{{row.marker}} {{row.title}}</span></dt>
+  <dd><span class="row-hint">{{row.detail}}</span></dd>
+</dl></each>
+<each items="empty" as="row"><p class="palette-empty">{{row.text}}</p></each>
+<each items="page" as="row"><p class="palette-page">{{row.label}}</p></each>
+<p class="overlay-keys">type filters · ↑/↓ select · enter runs · esc closes</p>
+</f>
+</layout>

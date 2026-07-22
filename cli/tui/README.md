@@ -61,30 +61,332 @@ by go-html's terminal renderer (`dappco.re/go/html`). The tab strip
 
 1. **Markup file** — the screen's structure lives in a `.ctml` file embedded
    beside its Go file (`//go:embed`). Text content doubles as its own i18n
-   key; `class` attributes are static strings; comments record the host
-   seams the file exposes.
+   key; comments record the host seams the file exposes.
 2. **Bindings** — dynamic rows enter at parse time through `ctml.Bindings`
    `Sequences` and `<each items="..." as="row">`, bound in text as
-   `{{row.field}}`. Re-parse and re-bind on every state change — screens
-   this size make that free. A per-row style variation cannot ride a class
-   attribute (they are static), so the host splits rows into one sequence
-   per style (see `panelBarBindings`: `tabsBefore` / `tabsActive` /
-   `tabsAfter`).
+   `{{row.field}}` — literal text and binds mix freely in one run
+   (`○ {{row.name}}`), and a lone always-present scalar rides
+   `Bindings.Values` at document scope (`{{state}}` outside any `<each>`;
+   row scope wins inside one). A `Values` miss renders empty while the
+   literal text around it remains, so a value whose absence must hide a
+   whole line still rides a zero-or-one-row sequence. Re-parse and
+   re-bind on every state change — screens this size make that free.
+   `{{path}}` also interpolates inside any attribute value, resolved per
+   row at construction (go-html v0.13.0): selection styling rides ONE
+   sequence with a row-scoped class (`class="{{row.state}}"` plus a bound
+   marker glyph — see `settingsFormBindings`), and a row can carry its
+   own box id (`id="knob-{{row.name}}"` — the binding author owns id
+   uniqueness). The before/active/after sequence split earlier slices
+   used for selection styling is retired. A zero-or-one-row sequence is
+   still the idiom for choosing between alternate STATIC texts (the
+   overlays' create/edit titles and gate prompts): text content is markup
+   copy, and moving it into a binding would strip its i18n key.
 3. **Theme** — `html.TermTheme.Classes` maps the markup's class tokens onto
    the existing `uiStyles` palette (`panelBarTheme`). The markup carries no
    colours of its own; the palette in `style.go` stays the single source of
-   visual truth.
+   visual truth. A screen whose lines each pick their own paint binds the
+   class token per row (`class="{{row.class}}"`) over a flattened
+   `{class, text}` sequence — the inspector's capability groups, runtime
+   lines, and inter-group blank separators all ride one sequence this way.
 4. **Boxes and mouse** — render through `html.RenderTermBoxes` to receive the
    `html.BoxMap` of every id'd block, then resolve mouse coordinates with
    `teabox.Resolve` inside the app's `tea.MouseMsg` handling (`onMouse`).
    Screen cells map to frame-inner cells by subtracting `frameInsetRows` /
-   `frameInsetCols` (the outer border). The renderer boxes block-level
-   elements only, so a single-row strip derives its per-item boxes from the
-   render itself (`mergePanelTabBoxes`) and merges them into the same map —
-   teabox's smallest-box rule then prefers the item over the strip.
+   `frameInsetCols` (the outer border). The tab strip is a
+   `<layout variant="LC">` rendered with `TermOptions.FitSlots` (v0.13.0):
+   the brand and tab slots size to their own content, pack edge-to-edge on
+   one row, and record native slot boxes ("L", "C") that tile the strip —
+   the renderer's own receipt, replacing the retired ANSI-segment
+   derivation (`mergePanelTabBoxes`). `panelBarTheme` keeps the L slot's
+   fixed 4-column fit chrome one row tall (space-glyph left/right border),
+   and `panelBarHit` maps a C-slot hit to a tab by walking the same
+   `panelBarCells` the bindings rendered — one cell source, so the render
+   and the resolution can never disagree; the inter-tab gap cells stay
+   non-hits.
 
 A left click on a tab switches panels through exactly the same path as
 `Tab`/`Shift+Tab` (`selectPanel`); the wheel keeps scrolling the transcript.
+
+### Form screens
+
+The Settings form (`settings.go` + `settings.ctml`) establishes the
+row-binding idiom form-shaped screens copy:
+
+- **One `<dl>` per knob row** — `<dt>` is the value line (marker + name +
+  `‹ value ›`), `<dd>` the hint, which the terminal renderer draws as
+  exactly the row shape a form needs: value line, indented hint line, blank
+  separator.
+- **Rows flow through ONE sequence** — selection styling rides the
+  row-scoped class bind (`class="{{row.state}}"`) and the marker glyph
+  rides the row (`settingsFormBindings`), re-bound on every cursor move.
+- **Selection gutters are marker glyphs** (`›` active, `○` idle): the
+  parser drops whitespace-only runs between siblings, so a plain two-space
+  gutter cannot be expressed in markup.
+- **Rows are block-shaped**, so the `.ctml` file indents freely; only the
+  single-row constructs inside a row (the `<dt>` line, the footer) stay on
+  one source line.
+- **Per-row boxes ride row-scoped ids** — `id="knob-{{row.name}}"`
+  resolves per row, so each block-shaped row records its own box under a
+  box-recording render (inert under `RenderTerm`, ready for a mouse
+  consumer); the binding author owns id uniqueness.
+
+`preferences.go` is the preference *store* (config load/set/commit), not a
+screen — it has no rendering to migrate; the preference-editing UI is the
+inspector.
+
+### Leaf widgets
+
+The Models panel (`picker.go` + `picker.ctml`) and the Tools tab
+(`tools.go` + `tools.ctml`) add the leaf-widget idioms:
+
+- **A Bubbles-list screen keeps its state in `list.Model`** (items, cursor,
+  fuzzy filter, pagination through `Update`) and derives its row bindings
+  from it — the current page as one sequence, each row carrying its
+  selection class, marker, and box id (`id="model-{{row.id}}"`, keyed by
+  the model path discovery already de-duplicates on); the host truncates
+  each field to the row budget because the page math requires exactly one
+  line per `<dt>` (a `<dt>` wraps to the render width, and a wrapped row
+  would overflow the page the list delegate sized).
+- **Adjacent single-line rows ride ONE `<p>` with a `<br>` closing each
+  `<each>` row** — separate block elements would gain blank separators.
+- **A section that appears only with data is an `<each>` over a
+  zero-or-one-row sequence**; an empty sequence renders nothing, heading
+  included. A lone *always-present* value rides `Bindings.Values` instead
+  (the tools state line) — the conditional section cannot, because a
+  `Values` miss renders empty while its surrounding literal text remains.
+- **A plain gutter between two bound spans travels in the bound value**
+  (whitespace-only source runs drop; a gutter with a glyph can stay in
+  markup as tabs/settings do).
+
+`markdown.go` is the Glamour render *cache* (per-width renderers, hashed
+turn results, stream refresh plumbing), not a view — it composes nothing
+and has no rendering to migrate. Its output is pre-styled ANSI text, which
+cannot ride a `.ctml` document at all: ANSI escapes are invalid XML
+characters, `<raw>` content is static (bindings stay literal inside it),
+and the terminal renderer re-wraps inline runs. The transcript screen
+composes Glamour output *around* ctml-rendered chrome instead.
+
+### Overlays
+
+The overlay layer (`dataoverlay.go` + `agentoverlay.go`) renders through
+`<layout>`/HLCRF documents (`ctml.ParseLayout`), two idioms chosen per
+overlay and noted in each `.ctml` header:
+
+- **An all-text overlay is a full `<layout variant="HCF">`** rendered in
+  one `RenderTerm` call (`databulk.ctml`, `launchreview.ctml`): H the
+  title band, C the content, F the key hints. The layout brings its own
+  geometry — the C region indents one column, and bands butt together
+  without the blank a block gap would leave.
+- **A widget-carrying overlay is a `<layout variant="HF">`**: live
+  Bubbles widgets (textinput/textarea/viewport) emit pre-styled ANSI,
+  which cannot ride a `.ctml` document, so `renderOverlayFrame` renders
+  the layout once through `RenderTermBoxes` and splits the output at the
+  H slot's own recorded box height — the renderer's receipt for where
+  the header band ends — and the host composes the widgets between the
+  bands. Chrome trapped *between* two widgets (the `Response` / `Model`
+  captions) stays host-side: a `.ctml` document renders contiguously.
+- **Alternate texts split into zero-or-one-row sequences** (the armed
+  prompt, the create/edit title, the acknowledge/apply gate): class and
+  text are static, so state selects WHICH sequence holds the row.
+- **A multi-line receipt body binds one row per line** closing with
+  `<br>` — a bound value cannot carry a line break through an inline
+  run; blank lines survive as empty rows between breaks.
+- The footer band's blank spacing row lives in `overlayFrameTheme`
+  (Footer top padding), not in host composition. Layout slots record
+  real H/C/F boxes, but overlays are centred by `renderOverlay` after
+  the fact, so no mouse affordance is wired through them yet.
+
+`agentcap.go` is the agent capability *model* (feature catalogue,
+snapshots, requests, the provider interface and its unavailable stub),
+not a view — it composes nothing and has no rendering to migrate.
+
+### Panels around live widgets, and pre-styled content
+
+The Data panel (`datapanel.go` + `datalist.ctml` + `datadetail.ctml`) and
+the inspector (`inspector.go` + `inspector.ctml`) close the panel
+migration with three idioms:
+
+- **A panel with chrome+widget shape reuses the overlays' HF band seam**:
+  `renderBandFrame` (the theme-agnostic core `renderOverlayFrame` wraps)
+  renders `datalist.ctml`'s header and row bands, and the live Bubbles
+  filter input composes between them; the list's own band theme keeps
+  both bands plain — no footer top padding — so with no widget present
+  the bands join back into the contiguous list.
+- **Pre-styled ANSI rides `<verbatim value="key"/>`**: the detail pane's
+  Glamour-rendered CONTENT and SCORES bodies pass through byte-for-byte.
+  A verbatim value must exist at parse time, so the host always supplies
+  both (empty when nothing is selected), and each carries one trailing
+  newline — the blank separating a body from the next heading travels in
+  the caller-owned bytes. A verbatim is block-level: its section heading
+  sits as its own `<p>` above it and gains the renderer's paragraph
+  blank beneath, where a heading over ordinary rows keeps them adjacent
+  inside its own `<p>`.
+- **A dense pane of single-line rows is `<p>`-per-section with `<br>`
+  rows** (the launch-review body idiom): consecutive `<p>` blocks
+  separate with exactly one blank line, so the inspector reproduces its
+  height-budgeted vertical rhythm without `<h2>` paragraph spacing.
+  Mixed-paint lines flatten to `{class, text}` rows; only a `<p>`'s
+  first line loses a leading gutter, so interior rows keep their
+  two-space cursors and indents, and a row that can open a band leads
+  with a marker glyph instead.
+
+### Tables and stores
+
+`records.go`, `migrations.go`, `datasetmigrations.go`, and `export.go`
+are data plumbing only: the ORM record schemas, the `lem.duckdb`
+migration runner, the `datasets.duckdb` migration runner, and the
+session exporter (Markdown/JSON files written through `coreio`, palette
+mirrored — its "render" builds the export document, not a screen). None
+composes a screen — like `preferences.go`, `markdown.go`, and
+`agentcap.go` before them, they have no rendering to migrate.
+
+No TUI screen is genuinely columnar today. When one arrives, the
+terminal renderer has a real table path — `<table>`/`<tr>`/`<td>` (and
+`thead`/`th`) render through lipgloss/table as a bordered,
+content-sized grid, and none of those tags is reserved by ctml — but a
+label+detail row list is not a table: it stays on the `<dl>` idiom
+settings and the picker established.
+
+### The app shell
+
+`layout.go` (`renderFrame` + `shell.ctml`/`shellregion.ctml`/`shellwide.ctml`)
+closes the migration at the outermost layer: the permanent frame every
+primary panel renders inside — tab strip, session strip, the active
+panel/overlay body, footer key hints, all inside one rounded border.
+
+- **The header/footer bands are a `<layout variant="HF">` band-split** in
+  all three shell files alike. The header (tab strip + session strip,
+  already joined and each already fitted to the frame's inner width) and
+  the footer (status + key hints, likewise pre-fitted) ride `<verbatim>` in
+  the H and F slots.
+- **The region joins the same declarative surface as H/F for every shape
+  but one**, since go-html v0.14.0 shipped a themeable `Content` style
+  (`TermTheme.Content`, matching the pre-existing themeable `Aside`) and
+  row-scoped verbatim: a zero-chrome C (and R) now passes pre-fitted
+  content through byte-exact at the slot's full width, closing the gap the
+  previous round left open (docs/ctml.md S:15.2/S:15.5). Wide layouts
+  (`shellwide.ctml`, `<layout variant="HCRF">`) bind the main panel to C
+  and the inspector to R, one `RenderTerm` call (`renderWideLayout`) in
+  place of `lipgloss.JoinHorizontal` and a manual `│` separator column.
+  Every single-pane shape — Narrow either way, Overlay with the inspector
+  closed — binds the one active pane to C (`shellregion.ctml`,
+  `<layout variant="HCF">`), replacing a bare `fitPane` call. The ONE shape
+  that still cannot join header+region+footer into a single call is
+  Overlay with the inspector open: `shell.ctml`'s H/F-only layout, split by
+  `renderBandFrame`, stays host-joined (`lipgloss.JoinVertical`) with the
+  region rendered between the bands — the same HF+host-composition idiom a
+  widget-carrying overlay uses for a live Bubbles widget between its own
+  bands. What changed as of go-html v0.15.0 (docs/ctml.md S:15.7) is that
+  the REGION itself no longer hand-stacks: two independently-sized panes
+  stacked vertically with a rule between is a documented idiom — an `HC`
+  layout, H the upper pane with its own bottom border as the divider, C the
+  lower pane — not a missing construct, since only the *middle* band's
+  L/C/R packing is width-gated (side by side ≥80 columns, stacked below);
+  H/middle/F themselves stack vertically at any width. `renderInspectorStack`
+  (`layout.go`) now renders `shellinspectorpair.ctml`'s `<layout
+  variant="HC">` through its own `RenderTerm` call, replacing the old
+  `lipgloss.JoinVertical(inspector, separator, main)` plus a manually
+  `core.Repeat("─", …)` rule line. It stays a SEPARATE call from
+  `shell.ctml`'s H/F band, rather than nesting fully into one page-wide
+  call: `TermTheme` is one flat struct threaded through every nested
+  `Layout` in a single render, so a unified call would force the page
+  header's `H` (needing zero chrome, pre-fitted byte-exact like every
+  sibling shell) and the pair's own `H` (needing its natural bordered
+  chrome, since that border IS the rule) to share one `Header` style — a
+  throwaway probe during this slice confirmed zeroing `Header` for the page
+  header silently zeroed the pair's divider too. `shellinspectorpair.ctml`'s
+  own header comment has the full account.
+- **The Wide inspector is 32 columns again, not 28.** go-html v0.15.0 adds
+  `TermOptions.AsideWidth` (S:15.1): a width *request* that overrides the
+  non-FitSlots middle band's fixed R budget (the unexported
+  `termAsideWidth`, still 28 by default) per render, with C absorbing the
+  difference. `renderWideLayout` (`layout.go`) is the one render path that
+  sets it, requesting `wideInspectorWidth` (32) — restoring both the
+  pre-.ctml value and name. A zero-chrome C still does not collapse the C/R
+  junction: go-html always inserts its own single-column gutter before R,
+  but that gutter is now paintable — `TermTheme.GutterRule` (S:15.6) sets
+  the glyph rendered there, the full band height, in the theme's `Rule`
+  style; `shellWideTheme` sets `GutterRule = "│"` (repointed at
+  `styles.separator`'s own colour) so the historic visible rule returns.
+  `wideInspectorWidth` documents the REQUEST rather than mirroring
+  go-html's own unrequested default — go-html exports no accessor for that
+  default (S:15.5) — and `TestWideInspectorWidth_MatchesRequest` pins the
+  request against a live `RenderTermBoxes` call on the real
+  `shellwide.ctml` render path (the box map is the render-time source of
+  truth, S:15.5) so upstream regression in honouring `AsideWidth` fails
+  loudly rather than silently reflowing the frame back to 28. The main
+  panel gets its historic width back too (`measureFrame`'s Wide case); both
+  the width and the rule are real, visible deltas, tied entirely to these
+  two doctrine clauses.
+- **Mouse hit-testing needed no re-plumbing, this slice included.**
+  `onMouse` resolves against its own independent `renderPanelBarBoxes`
+  call, keyed off `frameInsetRows`/`frameInsetCols` and the tab strip's
+  row-0 position — both unchanged since the tab strip's own render path
+  (`renderPanelBar`, `tabs.ctml`) is untouched. No region content (chat
+  transcript, Work/Data/Models/Service panels, the inspector) resolves a
+  mouse coordinate against its own composition today, so there was no
+  "old composition maths" to re-plumb onto boxes for this slice either.
+- **The chat transcript's row LIST is declarative; each row's own
+  STRUCTURE stays host-decided.** `transcript.ctml` is a zero-or-one-row
+  "notice" sequence (the session status banner) followed by one row per
+  turn, each row's verbatim `body` the turn's complete pre-formatted
+  output — row-scoped verbatim (`<verbatim value="{{turn.body}}"/>`,
+  materialised per row against the enclosing `<each>`, S:6.5) replaced the
+  old hand-grown `core.Builder` accumulation loop. What did NOT convert:
+  a turn's SHAPE (an inline "you "+text line for `user`, a label+result
+  pair for `tool`, or an optional thinking line + label + Glamour/streaming
+  body + tool calls + a live spinner for `assistant`) still branches in Go
+  (`renderTranscriptTurn`), because `<switch>`/`<if>`/`<unless>` compile to
+  a `func(*Context) bool/string` closure resolved once per RENDER against
+  `Context.Data` (S:7) — the same context for every row an `<each>`
+  produces, not a per-row scope the way a `{{path}}` bind is. A row can
+  vary its VALUES; it cannot vary its STRUCTURE. This is the documented
+  closed-vocabulary boundary (S:1.1: a named lookup, never an expression),
+  not a workaround.
+
+### The command palette
+
+The command palette (`palette.go` + `palette.ctml`, `Ctrl+K`) closes the
+screen-by-screen migration: the overlays' widget-carrying idiom
+(`workeditor.ctml`, `agentanswer.ctml`) extended onto a selectable row
+list for the first time.
+
+- **A `<layout variant="HF">`, exactly `datalist.ctml`'s own borrowing of
+  the overlay idiom, lent back to an actual overlay.** The live Bubbles
+  `FilterInput` emits pre-styled ANSI, so `renderBandFrame` renders the
+  header and footer bands and the host composes the filter input between
+  them while filtering (`list.Model.SettingFilter()`) — an ADDITIONAL
+  line, not a swap of the header the way Bubbles' own `titleView` used
+  to. The header stays fixed because the palette is filtering for
+  effectively its whole visible lifetime (`Open()` always arms
+  `Filtering`, and Enter/Esc close the overlay before either ever
+  reaches `list.Model`), so a header that vanished the instant the
+  overlay opened would rarely be seen.
+- **Rows are Picker's `<dl>` idiom, not the Data list's dense `<p>`+`<br>`
+  rows**: each command is a two-line block (marker + title, indented
+  description), matching Picker's value-line/hint-line shape rather than
+  Data's one-line-per-item density. Selection styling rides the
+  row-scoped class bind (`class="{{row.state}}"`) with the marker glyph
+  on the row; an unavailable command's "— unavailable: reason" suffix
+  already lives in its description text (`commandListItem.Description`),
+  so it paints identically to an available row — the original
+  `list.DefaultDelegate` never styled the two states apart, and this
+  conversion does not invent a distinction that was not there.
+- **`ctml.SubcommandList` (go-html's `CoreCommand`-derived list
+  generator, `docs/ctml.md` S:16) does not fit.** It walks a
+  `*core.Core` command registry and renders a bare `<ul>` of `I18nKey()`
+  labels — no selection state, no filtering, no availability/reason —
+  and the palette's `workspaceCommand` catalogue has no relationship to
+  `core.Command`/`CommandAction` at all. Adapting one to the other would
+  mean building a registry bridge that does not exist, for a
+  rendering-only slice; the palette instead composes the same generic
+  row-list idiom `picker.ctml` and `datalist.ctml` already established.
+- Bubbles' own chrome — the auto-generated help line, the dot pagination
+  bar, the title-vs-filter swap — is replaced wholesale with host-owned
+  markup, the same trade every earlier screen made: a literal "page x/y"
+  line once the command count needs more than one page (`picker.ctml`'s
+  own convention), and a static, accurate key-hint footer instead of
+  Bubbles' generic `KeyMap`-derived one.
 
 ## Keys
 
@@ -99,7 +401,10 @@ A left click on a tab switches panels through exactly the same path as
 | `Ctrl+O` | global | Toggle the inspector |
 | `Ctrl+S` | global | Commit inspector settings |
 | `F1` | global | Full key help |
+| `F2` | global | Open the Settings form overlay (context length, max tokens, thinking) |
 | `Ctrl+C` | global | Cancel jobs, stop service, close resources, and quit |
+| arrows or `h`/`j`/`k`/`l` | Settings overlay | Select a knob and change its value |
+| `Ctrl+S` / `Esc` | Settings overlay | Save the generation knobs to preferences / close |
 | `Enter` | Chat | Send a non-empty prompt when a model is loaded |
 | `Alt+Enter` | Chat | Insert a newline in the composer |
 | `Esc` | Chat | Cancel the visible session's generation |

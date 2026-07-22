@@ -1,0 +1,37 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  shellregion.ctml : the lem workspace shell for a SINGLE active region pane
+  — Narrow layouts (<80 cols: the main panel, or the inspector alone when
+  toggled) and Overlay layouts with the inspector closed (80-119 cols: the
+  main panel alone). One <layout variant="HCF"> rendered in one RenderTerm
+  call (renderBandLayout — the "every region is text" idiom databulk.ctml
+  and launchreview.ctml already use, overlayframe.go) replaces the old host
+  fitPane call for these two shapes (renderFrame, layout.go).
+
+  C carries whichever pane is active, pre-fitted by renderFrame to
+  metrics.innerWidth x metrics.regionHeight before binding — go-html has no
+  height concept for a layout slot, so the row count IS whatever the bound
+  bytes contain. C's own theme chrome is stripped to zero (shellRegionTheme)
+  so that pre-fitted content passes through byte-exact at the full slot
+  width (go-html v0.14.0's TermTheme.Content lever, docs/ctml.md
+  S:15.2/S:15.5) — the same technique H/F already use below.
+
+  See shellwide.ctml for the side-by-side sibling shape (Wide, C+R
+  together), and shell.ctml for the ONE region shape that still needs host
+  composition (Overlay with the inspector open — two independently-sized
+  panes stacked vertically, a shape HLCRF's slot vocabulary has no letters
+  for; renderFrame's own comment has the full account).
+
+  Host seams (layout.go, shellRegionBindings):
+    - Values  header  : tab strip + session strip, joined, pre-fitted to
+      metrics.innerWidth — verbatim, byte-exact.
+    - Values  content : the one active pane, pre-fitted to metrics.innerWidth
+      x metrics.regionHeight — verbatim, byte-exact.
+    - Values  footer  : the status/key-hint line, pre-fitted to
+      metrics.innerWidth — verbatim, byte-exact.
+-->
+<layout variant="HCF">
+<h><verbatim value="header"/></h>
+<c><verbatim value="content"/></c>
+<f><verbatim value="footer"/></f>
+</layout>

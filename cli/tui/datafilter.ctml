@@ -1,0 +1,19 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  datafilter.ctml : the Data panel's structural-filter overlay — one line
+  of parseDataFilterExpr grammar, pre-filled from the current filter.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the live textinput
+  emits pre-styled ANSI, which cannot ride a .ctml document, so the
+  layout renders the header and footer bands and the host composes the
+  input between them (renderOverlayFrame splits at the H box height).
+  Every line is static, so this file binds nothing.
+
+  Host seams (dataoverlay.go):
+    - Classes  overlay-hint / overlay-keys : mapped onto the existing
+      uiStyles palette by overlayFrameTheme.
+-->
+<layout variant="HF">
+<h><h2>Filter</h2><p class="overlay-hint">dataset= status= kind= source= &lt;score expr&gt;, comma-separated</p></h>
+<f><p class="overlay-keys">enter applies · esc cancels</p></f>
+</layout>

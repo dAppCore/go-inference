@@ -1,0 +1,31 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  launchreview.ctml : the read-only launch/registration review overlay —
+  provider, model, warning, and the reviewed receipt body, confirmed
+  with a single Enter.
+
+  Idiom: full <layout variant="HCF"> via ctml.ParseLayout — every region
+  is text, so the whole overlay renders in one RenderTerm call
+  (renderOverlayLayout). H is the title band with the reviewed
+  provider/model pair, C the warning and receipt body, F the key hints.
+
+  Host seams (agentoverlay.go):
+    - Sequence  review : one row {title, provider, model} — the review
+      title and the (defaulted) provider/model pair.
+    - Sequence  warn : zero-or-one row {text} — the review warning, only
+      when one is set (an empty sequence renders nothing).
+    - Sequence  body : one row per receipt line — a bound value cannot
+      carry a line break through an inline run, so the host splits the
+      body and each row closes with <br>; blank receipt lines survive as
+      empty rows between breaks.
+    - Classes   overlay-warn / overlay-keys : mapped onto the existing
+      uiStyles palette by overlayFrameTheme.
+
+  Single-row constructs stay on one source line so a text run's edge
+  whitespace ("Provider: ") survives.
+-->
+<layout variant="HCF">
+<h><each items="review" as="row"><h2>{{row.title}}</h2><p>Provider: {{row.provider}}<br></br>Model: {{row.model}}</p></each></h>
+<c><each items="warn" as="row"><p class="overlay-warn">{{row.text}}</p></each><p><each items="body" as="row"><span>{{row.line}}</span><br></br></each></p></c>
+<f><p class="overlay-keys">enter confirms · esc cancels</p></f>
+</layout>

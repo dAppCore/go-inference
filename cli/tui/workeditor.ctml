@@ -1,0 +1,27 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  workeditor.ctml : the Work create/edit overlay — title, task, and
+  repository fields recording a Work without starting a Git service.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the live
+  textinput/textarea widgets emit pre-styled ANSI, which cannot ride a
+  .ctml document, so the layout renders the header and footer bands and
+  the host composes the fields between them (renderOverlayFrame splits
+  at the H box height). The "Full task" and "Repository" captions sit
+  BETWEEN live widgets — chrome trapped between two ANSI regions stays
+  host-side, because a .ctml document renders contiguously.
+
+  Host seams (agentoverlay.go):
+    - Sequences createTitle / editTitle : zero-or-one rows selecting the
+      overlay title — both texts are static markup, so create-vs-edit is
+      carried by WHICH sequence holds the row, the selection-as-
+      sequence-split idiom.
+    - Sequence  validation : zero-or-one row {text} — the save error,
+      only after a rejected save (an empty sequence renders nothing).
+    - Classes   overlay-keys / overlay-error : mapped onto the existing
+      uiStyles palette by overlayFrameTheme.
+-->
+<layout variant="HF">
+<h><each items="createTitle" as="row"><h2>Create Work</h2></each><each items="editTitle" as="row"><h2>Edit Work</h2></each><p>Work title</p></h>
+<f><p class="overlay-keys">tab changes field · ctrl+s saves · esc cancels</p><each items="validation" as="row"><p class="overlay-error">{{row.text}}</p></each></f>
+</layout>
