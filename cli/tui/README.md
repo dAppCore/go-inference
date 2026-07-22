@@ -53,6 +53,39 @@ The transcript follows output only while already at the bottom. Manual upward
 scrolling preserves the reading position and shows a `new output` marker;
 `End` returns to live output.
 
+## Rendering with .ctml
+
+Screens are migrating from hand-composed Lip Gloss to `.ctml` markup rendered
+by go-html's terminal renderer (`dappco.re/go/html`). The tab strip
+(`tabs.go` + `tabs.ctml`) establishes the idiom each converted screen copies:
+
+1. **Markup file** — the screen's structure lives in a `.ctml` file embedded
+   beside its Go file (`//go:embed`). Text content doubles as its own i18n
+   key; `class` attributes are static strings; comments record the host
+   seams the file exposes.
+2. **Bindings** — dynamic rows enter at parse time through `ctml.Bindings`
+   `Sequences` and `<each items="..." as="row">`, bound in text as
+   `{{row.field}}`. Re-parse and re-bind on every state change — screens
+   this size make that free. A per-row style variation cannot ride a class
+   attribute (they are static), so the host splits rows into one sequence
+   per style (see `panelBarBindings`: `tabsBefore` / `tabsActive` /
+   `tabsAfter`).
+3. **Theme** — `html.TermTheme.Classes` maps the markup's class tokens onto
+   the existing `uiStyles` palette (`panelBarTheme`). The markup carries no
+   colours of its own; the palette in `style.go` stays the single source of
+   visual truth.
+4. **Boxes and mouse** — render through `html.RenderTermBoxes` to receive the
+   `html.BoxMap` of every id'd block, then resolve mouse coordinates with
+   `teabox.Resolve` inside the app's `tea.MouseMsg` handling (`onMouse`).
+   Screen cells map to frame-inner cells by subtracting `frameInsetRows` /
+   `frameInsetCols` (the outer border). The renderer boxes block-level
+   elements only, so a single-row strip derives its per-item boxes from the
+   render itself (`mergePanelTabBoxes`) and merges them into the same map —
+   teabox's smallest-box rule then prefers the item over the strip.
+
+A left click on a tab switches panels through exactly the same path as
+`Tab`/`Shift+Tab` (`selectPanel`); the wheel keeps scrolling the transcript.
+
 ## Keys
 
 | Key | Scope | Action |

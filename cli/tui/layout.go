@@ -18,6 +18,15 @@ const (
 
 const wideInspectorWidth = 32
 
+// frameInsetRows and frameInsetCols map screen cells to frame-inner cells:
+// renderFrame's outer rounded border occupies row 0 and column 0, so inner
+// content — the panel bar first — begins one cell in on both axes. Mouse
+// hit-testing subtracts these before resolving against a component box map.
+const (
+	frameInsetRows = 1
+	frameInsetCols = 1
+)
+
 func chooseLayout(width int) layoutKind {
 	switch {
 	case width >= 120:

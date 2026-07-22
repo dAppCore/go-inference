@@ -2797,3 +2797,103 @@ func countAgentCall(calls []string, want string) int {
 	}
 	return count
 }
+
+func TestSelectPanel_Good(t *testing.T) {
+	a := newApp("", 0, 64)
+	if cmd := a.selectPanel(panelWork); cmd != nil {
+		t.Fatal("selecting a non-Models panel must not schedule a command")
+	}
+	if a.activePanel != panelWork {
+		t.Fatalf("activePanel = %v, want work", a.activePanel)
+	}
+}
+
+func TestSelectPanel_Ugly(t *testing.T) {
+	a := newApp("", 0, 64)
+	cmd := a.selectPanel(panelModels)
+	if a.activePanel != panelModels {
+		t.Fatalf("activePanel = %v, want models", a.activePanel)
+	}
+	if cmd == nil {
+		t.Fatal("a first Models visit with an empty picker must schedule discovery")
+	}
+}
+
+// tabClick builds the left-press message for the centre of one derived tab
+// box, offset from strip-local to screen cells by the frame insets.
+func tabClick(t *testing.T, a app, panel panelID) tea.MouseMsg {
+	t.Helper()
+	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+	_, boxes := renderPanelBarBoxes(a.activePanel, metrics.innerWidth, metrics.kind, a.styles)
+	box, ok := boxes[panelTabBlockID(panel)]
+	if !ok {
+		t.Fatalf("box map missing %s", panelTabBlockID(panel))
+	}
+	return tea.MouseMsg{
+		X:      frameInsetCols + box.Col + box.Width/2,
+		Y:      frameInsetRows + box.Row,
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonLeft,
+	}
+}
+
+func TestOnMouse_Good(t *testing.T) {
+	a := newApp("", 0, 64)
+	model, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	a = model.(app)
+	model, cmd := a.Update(tabClick(t, a, panelWork))
+	a = model.(app)
+	if a.activePanel != panelWork {
+		t.Fatalf("activePanel = %v, want work", a.activePanel)
+	}
+	if cmd != nil {
+		t.Fatal("switching to Work must not schedule a command")
+	}
+	model, cmd = a.Update(tabClick(t, a, panelModels))
+	a = model.(app)
+	if a.activePanel != panelModels {
+		t.Fatalf("activePanel = %v, want models", a.activePanel)
+	}
+	if cmd == nil {
+		t.Fatal("a first Models visit through a click must schedule discovery")
+	}
+}
+
+func TestOnMouse_Bad(t *testing.T) {
+	a := newApp("", 0, 64)
+	model, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	a = model.(app)
+	press := func(x, y int, button tea.MouseButton) {
+		t.Helper()
+		model, _ = a.Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: button})
+		a = model.(app)
+		if a.activePanel != panelChat {
+			t.Fatalf("press at (%d, %d) switched panel to %v", x, y, a.activePanel)
+		}
+	}
+	press(frameInsetCols+6, 0, tea.MouseButtonLeft)             // the border row above the strip
+	press(frameInsetCols, frameInsetRows, tea.MouseButtonLeft)  // the brand cell resolves to the strip, not a tab
+	press(frameInsetCols+8, frameInsetRows, tea.MouseButtonWheelUp) // wheel messages keep their transcript route
+}
+
+func TestOnMouse_Ugly(t *testing.T) {
+	// Before any WindowSizeMsg the frame has no geometry: no panic, no switch.
+	a := newApp("", 0, 64)
+	model, _ := a.Update(tea.MouseMsg{X: 8, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	a = model.(app)
+	if a.activePanel != panelChat {
+		t.Fatalf("sizeless click switched panel to %v", a.activePanel)
+	}
+
+	// Under an overlay the bar takes no clicks — the keyboard gate mirrored.
+	b := newApp("", 0, 64)
+	model, _ = b.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	b = model.(app)
+	click := tabClick(t, b, panelWork)
+	b.activeOverlay = overlayHelp
+	model, _ = b.Update(click)
+	b = model.(app)
+	if b.activePanel != panelChat {
+		t.Fatalf("overlay click switched panel to %v", b.activePanel)
+	}
+}
