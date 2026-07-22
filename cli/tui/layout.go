@@ -20,7 +20,20 @@ const (
 	layoutWide
 )
 
-const wideInspectorWidth = 32
+// regionAsideWidth is go-html's fixed R-slot outer-width budget in
+// non-FitSlots mode at >=80 columns (the unexported termAsideWidth
+// constant; docs/ctml.md S:15.1) -- there is no TermOptions or Layout lever
+// to request a different width for R (confirmed by reading term_layout.go
+// and by a throwaway RenderTermBoxes probe during this slice, not part of
+// the shipped diff). go-html exports no accessor for the fixed budgets
+// (docs/ctml.md S:15.5: "the budgets stay unexported"), so this constant
+// duplicates the value rather than reading it live every frame;
+// TestRegionAsideWidth_MatchesGoHTML pins it against a real RenderTermBoxes
+// call so any upstream drift fails loudly here instead of silently
+// reflowing the Wide frame. Replaces the pre-.ctml wideInspectorWidth=32 --
+// see shellwide.ctml's own header comment for the width-contract delta this
+// causes.
+const regionAsideWidth = 28
 
 // frameInsetRows and frameInsetCols map screen cells to frame-inner cells:
 // renderFrame's outer rounded border occupies row 0 and column 0, so inner
@@ -75,9 +88,10 @@ func measureFrame(width, height int, inspectorOpen bool) frameMetrics {
 	metrics.mainHeight = metrics.regionHeight
 	switch metrics.kind {
 	case layoutWide:
-		metrics.inspectorWidth = wideInspectorWidth
+		metrics.inspectorWidth = regionAsideWidth
 		metrics.inspectorHeight = metrics.regionHeight
-		metrics.mainWidth = max(1, metrics.innerWidth-wideInspectorWidth-1)
+		// -1: go-html's own C/R gutter column (S:15.1) -- shellwide.ctml.
+		metrics.mainWidth = max(1, metrics.innerWidth-regionAsideWidth-1)
 	case layoutOverlay:
 		if inspectorOpen {
 			metrics.inspectorWidth = metrics.innerWidth
@@ -95,12 +109,27 @@ func measureFrame(width, height int, inspectorOpen bool) frameMetrics {
 	return metrics
 }
 
-// shellCTML is the app shell's markup -- see shell.ctml for the seams it
-// exposes (the header/footer verbatim values, and why the region rides
-// between them rather than through a middle-band slot).
+// shellCTML is the app shell's markup for the ONE region shape that stays
+// host composition -- Overlay layouts with the inspector open -- see
+// shell.ctml for the seams it exposes and renderInspectorStack for why that
+// one shape cannot join shellRegionCTML/shellWideCTML below.
 //
 //go:embed shell.ctml
 var shellCTML []byte
+
+// shellRegionCTML is the shell shape for a single active region pane
+// (Narrow either way; Overlay with the inspector closed) -- see
+// shellregion.ctml for the seams it exposes.
+//
+//go:embed shellregion.ctml
+var shellRegionCTML []byte
+
+// shellWideCTML is the shell shape for the Wide layout kind's side-by-side
+// main panel and inspector -- see shellwide.ctml for the seams it exposes
+// and the R-slot width contract.
+//
+//go:embed shellwide.ctml
+var shellWideCTML []byte
 
 // shellFrameTheme maps the shell markup onto the existing palette. The H/F
 // bands are stripped of the default theme's border and padding -- the same
@@ -116,6 +145,30 @@ func shellFrameTheme(styles uiStyles) *html.TermTheme {
 	return theme
 }
 
+// shellRegionTheme extends shellFrameTheme with a zero-chrome Content slot:
+// C's content -- the single active pane -- arrives pre-fitted to its exact
+// target width by renderFrame, exactly as H/F already do, so TermTheme's
+// default (0,1) Content gutter is stripped the same way Header/Footer
+// already are (go-html v0.14.0's themeable Content lever, docs/ctml.md
+// S:15.2) -- otherwise the pre-fitted content lands one column over budget
+// and gets word-wrapped onto a spurious extra row (S:15.5).
+func shellRegionTheme(styles uiStyles) *html.TermTheme {
+	theme := shellFrameTheme(styles)
+	theme.Content = lipgloss.NewStyle()
+	return theme
+}
+
+// shellWideTheme extends shellRegionTheme with a zero-chrome Aside (R) slot
+// for the Wide layout's side-by-side main+inspector: both C and R arrive
+// pre-fitted to their own exact width by renderFrame, so both slots' default
+// chrome is stripped (Aside was already themeable pre-v0.14.0; Content
+// joined it in round 4, S:15.2).
+func shellWideTheme(styles uiStyles) *html.TermTheme {
+	theme := shellRegionTheme(styles)
+	theme.Aside = lipgloss.NewStyle()
+	return theme
+}
+
 // shellBindings supplies the shell's two verbatim values. header and footer
 // arrive already pre-rendered and pre-fitted to metrics.innerWidth by
 // renderFrame, exactly as the pre-.ctml shell computed them.
@@ -123,33 +176,53 @@ func shellBindings(header, footer string) ctml.Bindings {
 	return ctml.Bindings{Values: map[string]any{"header": header, "footer": footer}}
 }
 
+// shellRegionBindings supplies shellregion.ctml's three verbatim values.
+// content is whichever pane is active, pre-fitted by renderFrame to
+// metrics.innerWidth x metrics.regionHeight.
+func shellRegionBindings(header, footer, content string) ctml.Bindings {
+	return ctml.Bindings{Values: map[string]any{"header": header, "footer": footer, "content": content}}
+}
+
+// shellWideBindings supplies shellwide.ctml's four verbatim values. main and
+// inspector are pre-fitted by renderFrame to their own exact target width
+// (metrics.mainWidth, regionAsideWidth) x metrics.regionHeight.
+func shellWideBindings(header, footer, main, inspector string) ctml.Bindings {
+	return ctml.Bindings{Values: map[string]any{
+		"header": header, "footer": footer, "main": main, "inspector": inspector,
+	}}
+}
+
 // renderFrame composes the permanent workspace shell. All truncation is done
 // by Lip Gloss on rendered cell widths; no ANSI string is sliced manually.
 //
-// The outer rounded border and the region (the active main panel, plus the
-// wide/toggled inspector) stay hand composed. The border because go-html's
-// TermTheme has no whole-page border concept -- Header/Footer/Sidebar/Aside
-// each style their own band, nothing wraps H+middle+F together (S:15 has no
-// such style). The region because the one slot that can fill remaining
-// width -- Content -- hardcodes a (0,1) padding with no theme override
-// (unlike Header/Footer/Sidebar/Aside), so a full-width verbatim placed
-// there is corrupted: content already fitted to the slot's own width
-// arrives one column too wide once that padding is added, and the slot's
-// own Width() enforcement then word-wraps the overflow onto a spurious
-// extra row rather than leaving it byte-exact (shell.ctml's header comment
-// has the full account; L/R share the defect through their own hardcoded
-// offsets). The region must keep the SAME width contract every panel body
-// and the inspector already render against, so it is computed exactly as
-// before (renderWorkspaceRegion, unchanged) and rides between the shell's
-// H and F bands -- the same HF+host-composition idiom a widget-carrying
-// overlay already uses for a live Bubbles widget between its own bands.
+// The outer rounded border stays hand composed: go-html's TermTheme has no
+// whole-page border concept -- Header/Footer/Sidebar/Aside each style their
+// own band, nothing wraps H+middle+F together (S:15 has no such style).
+//
+// The region (the active main panel, plus the wide/toggled inspector) joins
+// the shell's own declarative surface for every shape but one, since
+// go-html v0.14.0: a zero-chrome Content slot (and the pre-existing
+// themeable Aside) now passes pre-fitted content through byte-exact at the
+// slot's full width (docs/ctml.md S:15.2/S:15.5 -- shellregion.ctml's and
+// shellwide.ctml's own header comments have the width contract in full), so
+// Wide's main+inspector and every single-pane shape render through ONE
+// go-html RenderTerm call (renderBandLayout) instead of
+// lipgloss.JoinHorizontal/fitPane host composition. The ONE shape that
+// still cannot join them -- Overlay with the inspector open, stacking two
+// independently-sized panes vertically with a rule between -- has no HLCRF
+// slot vocabulary to express it in (H/F are whole-page top/bottom bands,
+// not a reusable mid-page pair), so it stays exactly as before this slice:
+// shell.ctml's H/F-only layout, split by renderBandFrame, with
+// renderInspectorStack composing the region between the bands -- the same
+// HF+host-composition idiom a widget-carrying overlay uses for a live
+// Bubbles widget between its own bands.
 //
 // The tab strip and session strip (both already fully styled, single-line,
 // pre-fitted to metrics.innerWidth) join as the shell's one "header" value;
 // the status/key-hint line is the "footer" value. Verbatim is emitted
-// exactly as supplied with no added blank, so the "\n" join below is the
-// only seam deciding header/session adjacency -- matching the pre-.ctml
-// JoinVertical's own row order byte-for-byte.
+// exactly as supplied with no added blank, so the "\n" join building header
+// is the only seam deciding header/session adjacency -- matching the
+// pre-.ctml JoinVertical's own row order byte-for-byte.
 func renderFrame(spec frameSpec, styles uiStyles) string {
 	if spec.Width <= 0 || spec.Height <= 0 {
 		return ""
@@ -162,9 +235,28 @@ func renderFrame(spec frameSpec, styles uiStyles) string {
 	sessions := fitLine(styles.title.Render("SESSIONS")+"  "+styles.session.Render(spec.SessionStrip), metrics.innerWidth, styles.session)
 	header := core.Join("\n", tabstrip, sessions)
 	footer := fitLine(spec.Footer, metrics.innerWidth, styles.footer)
-	region := renderWorkspaceRegion(spec, metrics, styles)
-	head, foot := renderBandFrame(shellCTML, metrics.innerWidth, shellFrameTheme(styles), shellBindings(header, footer))
-	inside := lipgloss.JoinVertical(lipgloss.Left, head, region, foot)
+
+	var inside string
+	switch {
+	case metrics.kind == layoutOverlay && spec.InspectorOpen:
+		region := renderInspectorStack(spec, metrics, styles)
+		head, foot := renderBandFrame(shellCTML, metrics.innerWidth, shellFrameTheme(styles), shellBindings(header, footer))
+		inside = lipgloss.JoinVertical(lipgloss.Left, head, region, foot)
+	case metrics.kind == layoutWide:
+		main := fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
+		inspector := fitPane(spec.Inspector, metrics.inspectorWidth, metrics.inspectorHeight, styles.inspector)
+		inside = renderBandLayout(shellWideCTML, metrics.innerWidth, shellWideTheme(styles), shellWideBindings(header, footer, main, inspector))
+	default: // layoutNarrow (either pane) and layoutOverlay with the inspector closed
+		content, style := spec.Main, styles.panel
+		width, height := metrics.mainWidth, metrics.mainHeight
+		if metrics.kind == layoutNarrow && spec.InspectorOpen {
+			content, style = spec.Inspector, styles.inspector
+			width, height = metrics.inspectorWidth, metrics.inspectorHeight
+		}
+		fitted := fitPane(content, width, height, style)
+		inside = renderBandLayout(shellRegionCTML, metrics.innerWidth, shellRegionTheme(styles), shellRegionBindings(header, footer, fitted))
+	}
+
 	return styles.outerFrame.
 		Width(metrics.innerWidth).
 		Height(metrics.innerHeight).
@@ -173,26 +265,23 @@ func renderFrame(spec frameSpec, styles uiStyles) string {
 		Render(inside)
 }
 
-func renderWorkspaceRegion(spec frameSpec, metrics frameMetrics, styles uiStyles) string {
-	switch metrics.kind {
-	case layoutWide:
-		main := fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
-		separator := fitPane(core.Repeat("│\n", max(0, metrics.regionHeight-1))+"│", 1, metrics.regionHeight, styles.separator)
-		inspector := fitPane(spec.Inspector, metrics.inspectorWidth, metrics.inspectorHeight, styles.inspector)
-		return lipgloss.JoinHorizontal(lipgloss.Top, main, separator, inspector)
-	case layoutOverlay:
-		if spec.InspectorOpen {
-			inspector := fitPane(spec.Inspector, metrics.inspectorWidth, metrics.inspectorHeight, styles.inspector)
-			separator := fitLine(core.Repeat("─", metrics.innerWidth), metrics.innerWidth, styles.separator)
-			main := fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
-			return lipgloss.JoinVertical(lipgloss.Left, inspector, separator, main)
-		}
-	case layoutNarrow:
-		if spec.InspectorOpen {
-			return fitPane(spec.Inspector, metrics.innerWidth, metrics.regionHeight, styles.inspector)
-		}
-	}
-	return fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
+// renderInspectorStack composes the ONE region shape go-html's <layout>
+// still cannot express in a single render: Overlay layouts (80-119 cols)
+// with the inspector open, stacking the full-width inspector above a
+// compact main-panel preview with a horizontal rule between. H/L/C/R/F is a
+// closed, five-letter vocabulary -- H and F are whole-page top/bottom bands,
+// not a reusable mid-page pair, and go-html's own automatic L/C/R vertical
+// stacking triggers only below 80 columns (termStackThreshold, docs/ctml.md
+// S:15.1), above this layout kind's own floor -- so two independently-sized
+// panes stacked vertically here has no slot to bind through. This is the
+// friction this slice reports rather than works around; it stays exactly
+// the pre-.ctml host composition (lipgloss.JoinVertical + a manual rule
+// line), called from renderFrame only for this one case.
+func renderInspectorStack(spec frameSpec, metrics frameMetrics, styles uiStyles) string {
+	inspector := fitPane(spec.Inspector, metrics.inspectorWidth, metrics.inspectorHeight, styles.inspector)
+	separator := fitLine(core.Repeat("─", metrics.innerWidth), metrics.innerWidth, styles.separator)
+	main := fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
+	return lipgloss.JoinVertical(lipgloss.Left, inspector, separator, main)
 }
 
 func fitLine(content string, width int, style lipgloss.Style) string {

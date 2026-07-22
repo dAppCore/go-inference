@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"dappco.re/go/html"
 )
 
 func TestChooseLayout_Good(t *testing.T) {
@@ -30,6 +32,23 @@ func TestChooseLayout_Ugly(t *testing.T) {
 		if got := chooseLayout(width); got != layoutNarrow {
 			t.Fatalf("chooseLayout(%d) = %d, want narrow", width, got)
 		}
+	}
+}
+
+// TestRegionAsideWidth_MatchesGoHTML pins regionAsideWidth (layout.go)
+// against a live go-html render: R's fixed outer-width budget is an
+// unexported constant (termAsideWidth, ctml.md S:15.1/S:15.5), so this
+// package duplicates it locally rather than reading it live every frame.
+// If go-html ever changes that budget, this test fails loudly instead of
+// shellwide.ctml's frame silently reflowing.
+func TestRegionAsideWidth_MatchesGoHTML(t *testing.T) {
+	theme := html.DefaultTermTheme()
+	theme.Content = lipgloss.NewStyle()
+	theme.Aside = lipgloss.NewStyle()
+	page := html.NewLayout("CR").C(html.Verbatim("")).R(html.Verbatim(""))
+	_, boxes := page.RenderTermBoxes(html.NewContext(), html.TermOptions{Width: 120, Theme: theme})
+	if got := boxes["R"].Width; got != regionAsideWidth {
+		t.Fatalf("go-html's live R budget = %d, regionAsideWidth const = %d -- update the constant (ctml.md S:15.1)", got, regionAsideWidth)
 	}
 }
 

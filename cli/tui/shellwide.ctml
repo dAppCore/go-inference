@@ -1,0 +1,56 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  shellwide.ctml : the lem workspace shell for the Wide layout kind (>=120
+  cols) — the main panel and the permanent inspector side by side. One
+  <layout variant="HCRF"> rendered in one RenderTerm call (renderBandLayout):
+  C carries the main panel body, R the inspector, replacing renderFrame's old
+  lipgloss.JoinHorizontal plus a manual one-column "|" separator pane
+  (layout.go's pre-this-slice renderWorkspaceRegion).
+
+  Both C and R are zero-chrome (shellWideTheme: theme.Content AND
+  theme.Aside stripped) so each pane's pre-fitted content passes through
+  byte-exact — go-html v0.14.0's TermTheme.Content lever plus the
+  pre-existing themeable Aside field, docs/ctml.md S:15.2.
+
+  WIDTH CONTRACT — go-html's non-FitSlots middle band gives R a FIXED
+  28-column outer budget whenever R is present at >=80 cols (the unexported
+  termAsideWidth constant; docs/ctml.md S:15.1). There is no TermOptions or
+  Layout lever to request a different R width — confirmed by reading
+  term_layout.go and by a throwaway RenderTermBoxes probe during this slice
+  (not part of the shipped diff). regionAsideWidth (layout.go) mirrors this
+  fixed 28 as a documented local constant, because go-html exports no
+  accessor for it (docs/ctml.md S:15.5: "the budgets stay unexported");
+  TestRegionAsideWidth_MatchesGoHTML pins it against a live RenderTermBoxes
+  call, so any upstream drift fails loudly there rather than silently
+  reflowing this frame.
+
+  This REPLACES the pre-.ctml wideInspectorWidth=32: the inspector is now
+  28 columns and the main panel gains those 4 columns back (measureFrame's
+  layoutWide case) — a real, visible width delta, tied to this one doctrine
+  clause, not a silent rewrap. A zero-chrome C does not collapse the C/R
+  junction either: go-html always inserts its own single blank-space gutter
+  before R when R is present (S:15.1), so the visible "|" rule the old host
+  separator drew is gone with it — the gutter is blank, and go-html has no
+  theme lever to paint a glyph into it — metrics.mainWidth already reserves
+  that one column (measureFrame).
+
+  See shellregion.ctml for the single-pane sibling shape (Narrow, and
+  Overlay with the inspector closed).
+
+  Host seams (layout.go, shellWideBindings):
+    - Values  header    : tab strip + session strip, pre-fitted to
+      metrics.innerWidth — verbatim, byte-exact.
+    - Values  main      : the active main panel body, pre-fitted to
+      metrics.mainWidth x metrics.regionHeight — verbatim, byte-exact.
+    - Values  inspector : the inspector body, pre-fitted to
+      metrics.inspectorWidth (regionAsideWidth) x metrics.regionHeight —
+      verbatim, byte-exact.
+    - Values  footer    : the status/key-hint line, pre-fitted to
+      metrics.innerWidth — verbatim, byte-exact.
+-->
+<layout variant="HCRF">
+<h><verbatim value="header"/></h>
+<c><verbatim value="main"/></c>
+<r><verbatim value="inspector"/></r>
+<f><verbatim value="footer"/></f>
+</layout>

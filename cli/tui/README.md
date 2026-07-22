@@ -249,56 +249,78 @@ settings and the picker established.
 
 ### The app shell
 
-`layout.go` (`renderFrame` + `shell.ctml`) closes the migration at the
-outermost layer: the permanent frame every primary panel renders inside
-— tab strip, session strip, the active panel/overlay body, footer key
-hints, all inside one rounded border.
+`layout.go` (`renderFrame` + `shell.ctml`/`shellregion.ctml`/`shellwide.ctml`)
+closes the migration at the outermost layer: the permanent frame every
+primary panel renders inside — tab strip, session strip, the active
+panel/overlay body, footer key hints, all inside one rounded border.
 
-- **A `<layout variant="HF">` band-split, not a full HLCRF page.** The
-  header (tab strip + session strip, already joined and each already
-  fitted to the frame's inner width) and the footer (status + key hints,
-  likewise pre-fitted) ride `<verbatim>` in the H and F slots;
-  `renderBandFrame` (the same HF idiom overlays and the Data list's live
-  filter input already use) splits the render at the H slot's own
-  recorded box height, and the host composes the region — the active main
-  panel, plus the wide/toggled inspector, `renderWorkspaceRegion` —
-  between the two bands, exactly as a widget-carrying overlay composes a
-  live Bubbles widget between its own bands.
-- **The Content slot is a dead end for full-width verbatim.** Unlike
-  Header/Footer/Sidebar/Aside, `renderTermContent` hardcodes a `(0,1)`
-  padding with no `TermTheme` override; content already fitted to the
-  slot's own width arrives one column too wide once that padding lands,
-  and the slot's own `Width()` enforcement word-wraps the overflow onto a
-  spurious extra row instead of leaving it byte-exact. `renderTermBox`
-  (Sidebar/Aside — L and R) carries the same defect through its own
-  hardcoded `-4`/`-2` offsets. H and F have no such tax — both route
-  through nothing but the (fully themeable, here stripped-to-blank)
-  `theme.Header`/`theme.Footer` style — so the region stays host-composed
-  and rides between the bands rather than through any middle-band slot.
-  `wideInspectorWidth`, `measureFrame`'s per-`layoutKind` maths, and
-  `renderWorkspaceRegion`'s wide/compact/narrow arrangements are therefore
-  unchanged: none of it is a rendering-composition concern .ctml can take
-  over, since the one slot that could hold it corrupts pre-fitted content,
-  and the arithmetic itself has nowhere to live in a language with no
-  operators (docs/ctml.md S:8.4).
-- **Mouse hit-testing needed no re-plumbing.** `onMouse` resolves against
-  its own independent `renderPanelBarBoxes` call, keyed off
-  `frameInsetRows`/`frameInsetCols` and the tab strip's row-0 position —
-  both unchanged by this slice, since the tab strip's own render path
-  (`renderPanelBar`, `tabs.ctml`) is untouched; it now merely arrives at
-  the shell as a pre-rendered value instead of a `JoinVertical` argument.
-- **The chat transcript stays hand-composed.** `renderTranscript`'s
-  turn-by-turn Glamour composition is a list whose row COUNT is unbounded
-  and whose per-row body is pre-styled ANSI — exactly the `<each>` +
-  per-row `<verbatim>` shape a transcript would need — but `<verbatim
-  value="key">` resolves `key` once against the document-wide
-  `Bindings.Values` at PARSE time (`ctml/parse.go`'s `parseVerbatim`), not
-  per row at render time the way a `{{path}}` bind does; every row inside
-  an `<each>` would render the identical fixed content. Converting the
-  transcript would need either an unbounded flat list of named verbatim
-  slots (impractical) or row-scoped verbatim resolution go-html does not
-  have yet (mirroring how `id="row-{{row.id}}"` already resolves per row
-  for box identification). Left unconverted, not silently skipped.
+- **The header/footer bands are a `<layout variant="HF">` band-split** in
+  all three shell files alike. The header (tab strip + session strip,
+  already joined and each already fitted to the frame's inner width) and
+  the footer (status + key hints, likewise pre-fitted) ride `<verbatim>` in
+  the H and F slots.
+- **The region joins the same declarative surface as H/F for every shape
+  but one**, since go-html v0.14.0 shipped a themeable `Content` style
+  (`TermTheme.Content`, matching the pre-existing themeable `Aside`) and
+  row-scoped verbatim: a zero-chrome C (and R) now passes pre-fitted
+  content through byte-exact at the slot's full width, closing the gap the
+  previous round left open (docs/ctml.md S:15.2/S:15.5). Wide layouts
+  (`shellwide.ctml`, `<layout variant="HCRF">`) bind the main panel to C
+  and the inspector to R, one `RenderTerm` call (`renderBandLayout`) in
+  place of `lipgloss.JoinHorizontal` and a manual `│` separator column.
+  Every single-pane shape — Narrow either way, Overlay with the inspector
+  closed — binds the one active pane to C (`shellregion.ctml`,
+  `<layout variant="HCF">`), replacing a bare `fitPane` call. The ONE shape
+  that still cannot join them is Overlay with the inspector open: two
+  independently-sized panes stacked vertically with a rule between, which
+  HLCRF's five-letter slot vocabulary has no pair for (H/F are whole-page
+  top/bottom bands, not a reusable mid-page pair, and go-html's own
+  automatic L/C/R vertical stacking triggers only below 80 columns —
+  S:15.1 — above this layout kind's own floor). That one shape stays
+  exactly the pre-.ctml host composition: `shell.ctml`'s H/F-only layout,
+  split by `renderBandFrame`, with `renderInspectorStack` composing the
+  region between the bands — the same HF+host-composition idiom a
+  widget-carrying overlay uses for a live Bubbles widget between its own
+  bands.
+- **The Wide inspector is now 28 columns, not 32.** go-html's non-FitSlots
+  middle band gives R a fixed outer-width budget (the unexported
+  `termAsideWidth`, S:15.1) whenever R is present at ≥80 columns — there is
+  no `TermOptions`/`Layout` lever to request a different width, and a
+  zero-chrome C does not collapse the C/R junction either: go-html always
+  inserts its own single blank-space gutter before R, so the old visible
+  `│` rule is gone with it (the gutter is blank; there is no theme lever to
+  paint a glyph into it). `regionAsideWidth` (`layout.go`) mirrors the
+  fixed budget as a documented local constant — go-html exports no
+  accessor for it (S:15.5) — and `TestRegionAsideWidth_MatchesGoHTML` pins
+  it against a live `RenderTermBoxes` call so upstream drift fails loudly
+  rather than silently reflowing the frame. The main panel gains the 4
+  columns back (`measureFrame`'s Wide case); this is a real, visible width
+  delta, tied entirely to that one doctrine clause.
+- **Mouse hit-testing needed no re-plumbing, this slice included.**
+  `onMouse` resolves against its own independent `renderPanelBarBoxes`
+  call, keyed off `frameInsetRows`/`frameInsetCols` and the tab strip's
+  row-0 position — both unchanged since the tab strip's own render path
+  (`renderPanelBar`, `tabs.ctml`) is untouched. No region content (chat
+  transcript, Work/Data/Models/Service panels, the inspector) resolves a
+  mouse coordinate against its own composition today, so there was no
+  "old composition maths" to re-plumb onto boxes for this slice either.
+- **The chat transcript's row LIST is declarative; each row's own
+  STRUCTURE stays host-decided.** `transcript.ctml` is a zero-or-one-row
+  "notice" sequence (the session status banner) followed by one row per
+  turn, each row's verbatim `body` the turn's complete pre-formatted
+  output — row-scoped verbatim (`<verbatim value="{{turn.body}}"/>`,
+  materialised per row against the enclosing `<each>`, S:6.5) replaced the
+  old hand-grown `core.Builder` accumulation loop. What did NOT convert:
+  a turn's SHAPE (an inline "you "+text line for `user`, a label+result
+  pair for `tool`, or an optional thinking line + label + Glamour/streaming
+  body + tool calls + a live spinner for `assistant`) still branches in Go
+  (`renderTranscriptTurn`), because `<switch>`/`<if>`/`<unless>` compile to
+  a `func(*Context) bool/string` closure resolved once per RENDER against
+  `Context.Data` (S:7) — the same context for every row an `<each>`
+  produces, not a per-row scope the way a `{{path}}` bind is. A row can
+  vary its VALUES; it cannot vary its STRUCTURE. This is the documented
+  closed-vocabulary boundary (S:1.1: a named lookup, never an expression),
+  not a workaround.
 
 ### The command palette
 

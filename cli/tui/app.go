@@ -4,6 +4,7 @@ package tui
 
 import (
 	"context"
+	_ "embed"
 	"sync"
 	"time"
 
@@ -16,10 +17,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/decode/parser"
 )
+
+// transcriptCTML is the chat panel's turn-list markup -- see transcript.ctml
+// for the row-scoped verbatim idiom it exposes and why per-turn STRUCTURE
+// stays host-decided (renderTranscriptTurn) while the row LIST itself is
+// declarative.
+//
+//go:embed transcript.ctml
+var transcriptCTML []byte
 
 // turn is one rendered element in the transcript.
 type turn struct {
@@ -3051,62 +3062,101 @@ func (a app) transcriptHeight() int {
 	return h
 }
 
+// renderTranscript renders transcript.ctml: a zero-or-one-row "notice"
+// sequence (the session status banner) followed by one row per turn, each
+// row's verbatim "body" the complete pre-formatted turn (renderTranscriptTurn)
+// -- go-html owns the row iteration and the byte-exact verbatim passthrough,
+// the host still owns every turn's own content (transcript.ctml's header
+// comment has the full account of why). A parse failure never happens
+// against this embedded, static markup outside a build defect (the same
+// assumption renderBandFrame/renderBandLayout make, overlayframe.go) and
+// degrades to an empty transcript rather than panicking.
 func (a app) renderTranscript() string {
-	var b core.Builder
+	tree, err := ctml.Parse(transcriptCTML, a.transcriptBindings())
+	if err != nil {
+		return ""
+	}
+	return lipgloss.NewStyle().Width(a.view.Width).Render(html.RenderTerm(tree, html.NewContext()))
+}
+
+// transcriptBindings supplies transcript.ctml's two row sequences. notice is
+// zero-or-one row so an absent banner renders nothing (not an empty line);
+// every turn row's own leadingBlank folds in the "\n" go-html's own
+// block-level join does not supply a second one of, reproducing the
+// original "\n\n" turn gap byte-for-byte (transcript.ctml's header comment).
+func (a app) transcriptBindings() ctml.Bindings {
 	notice := a.sessionTranscriptNotice()
+	var noticeRows []map[string]any
 	if notice != "" {
-		b.WriteString(a.styles.attention.Render(notice))
+		noticeRows = []map[string]any{{"text": a.styles.attention.Render(notice)}}
 	}
+	turnRows := make([]map[string]any, 0, len(a.turns))
 	for i, t := range a.turns {
-		if i > 0 || notice != "" {
-			b.WriteString("\n\n")
+		leadingBlank := i > 0 || notice != ""
+		turnRows = append(turnRows, map[string]any{"body": a.renderTranscriptTurn(i, t, leadingBlank)})
+	}
+	return ctml.Bindings{Sequences: map[string][]map[string]any{
+		"notice": noticeRows,
+		"turns":  turnRows,
+	}}
+}
+
+// renderTranscriptTurn formats exactly one turn -- byte-for-byte what the
+// pre-.ctml renderTranscript loop wrote inline for the same turn, role
+// branching included (transcript.ctml's header comment explains why that
+// branching stays here rather than in markup). leadingBlank prepends the
+// single "\n" this row owes the inter-turn gap; blocks() (go-html) supplies
+// the other half of the "\n\n" via its own row-to-row join.
+func (a app) renderTranscriptTurn(i int, t turn, leadingBlank bool) string {
+	var b core.Builder
+	if leadingBlank {
+		b.WriteString("\n")
+	}
+	switch t.role {
+	case "user":
+		b.WriteString(a.styles.user.Render("you ") + a.styles.answer.Render(t.text))
+	case "tool":
+		label := "tool result"
+		if len(t.calls) > 0 {
+			label = core.Concat("tool · ", t.calls[0])
 		}
-		switch t.role {
-		case "user":
-			b.WriteString(a.styles.user.Render("you ") + a.styles.answer.Render(t.text))
-		case "tool":
-			label := "tool result"
-			if len(t.calls) > 0 {
-				label = core.Concat("tool · ", t.calls[0])
-			}
-			b.WriteString(a.styles.thought.Render(label))
-			if result := visibleToolResult(t.text); result != "" {
-				b.WriteString("\n" + a.styles.answer.Render(result))
-			}
-		default:
-			if t.thought != "" {
-				b.WriteString(a.styles.thought.Render("· thinking · "+core.Trim(t.thought)) + "\n")
-			}
-			label := t.model
-			if label == "" {
-				label = a.modelName
-			}
-			if label == "" {
-				label = "assistant"
-			}
-			b.WriteString(a.styles.assistant.Render(label))
-			streaming := a.generating && i == len(a.turns)-1
-			if t.text != "" {
-				b.WriteString("\n")
-				if streaming {
-					b.WriteString(a.styles.answer.Render(t.text))
-				} else {
-					turnID := t.id
-					if turnID == "" {
-						turnID = core.Sprintf("transcript-%d", i)
-					}
-					b.WriteString(a.markdown.Render(turnID, t.text, max(1, a.view.Width-2)))
+		b.WriteString(a.styles.thought.Render(label))
+		if result := visibleToolResult(t.text); result != "" {
+			b.WriteString("\n" + a.styles.answer.Render(result))
+		}
+	default:
+		if t.thought != "" {
+			b.WriteString(a.styles.thought.Render("· thinking · "+core.Trim(t.thought)) + "\n")
+		}
+		label := t.model
+		if label == "" {
+			label = a.modelName
+		}
+		if label == "" {
+			label = "assistant"
+		}
+		b.WriteString(a.styles.assistant.Render(label))
+		streaming := a.generating && i == len(a.turns)-1
+		if t.text != "" {
+			b.WriteString("\n")
+			if streaming {
+				b.WriteString(a.styles.answer.Render(t.text))
+			} else {
+				turnID := t.id
+				if turnID == "" {
+					turnID = core.Sprintf("transcript-%d", i)
 				}
+				b.WriteString(a.markdown.Render(turnID, t.text, max(1, a.view.Width-2)))
 			}
-			for _, c := range t.calls {
-				b.WriteString("\n" + a.styles.thought.Render("→ "+c))
-			}
-			if t.text == "" && t.thought == "" && a.generating && i == len(a.turns)-1 {
-				b.WriteString(a.styles.thought.Render(a.spin.View() + " …"))
-			}
+		}
+		for _, c := range t.calls {
+			b.WriteString("\n" + a.styles.thought.Render("→ "+c))
+		}
+		if t.text == "" && t.thought == "" && a.generating && i == len(a.turns)-1 {
+			b.WriteString(a.styles.thought.Render(a.spin.View() + " …"))
 		}
 	}
-	return lipgloss.NewStyle().Width(a.view.Width).Render(b.String())
+	return b.String()
 }
 
 func (a app) transcriptTurnOffset(turnID string) int {
