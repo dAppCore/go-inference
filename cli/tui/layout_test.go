@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 )
 
 func TestChooseLayout_Good(t *testing.T) {
@@ -35,20 +36,27 @@ func TestChooseLayout_Ugly(t *testing.T) {
 	}
 }
 
-// TestRegionAsideWidth_MatchesGoHTML pins regionAsideWidth (layout.go)
-// against a live go-html render: R's fixed outer-width budget is an
-// unexported constant (termAsideWidth, ctml.md S:15.1/S:15.5), so this
-// package duplicates it locally rather than reading it live every frame.
-// If go-html ever changes that budget, this test fails loudly instead of
-// shellwide.ctml's frame silently reflowing.
-func TestRegionAsideWidth_MatchesGoHTML(t *testing.T) {
-	theme := html.DefaultTermTheme()
-	theme.Content = lipgloss.NewStyle()
-	theme.Aside = lipgloss.NewStyle()
-	page := html.NewLayout("CR").C(html.Verbatim("")).R(html.Verbatim(""))
-	_, boxes := page.RenderTermBoxes(html.NewContext(), html.TermOptions{Width: 120, Theme: theme})
-	if got := boxes["R"].Width; got != regionAsideWidth {
-		t.Fatalf("go-html's live R budget = %d, regionAsideWidth const = %d -- update the constant (ctml.md S:15.1)", got, regionAsideWidth)
+// TestWideInspectorWidth_MatchesRequest pins wideInspectorWidth (layout.go)
+// against a live render of the REAL shellwide.ctml shell path: since go-html
+// v0.15.0, R's outer width is a REQUEST (TermOptions.AsideWidth, docs/ctml.md
+// S:15.1) the caller makes going in, not a fixed upstream constant to mirror
+// -- S:15.5's own doctrine is "the box map is the render-time source of
+// truth", so this test reads the requested width back from the render's own
+// BoxMap rather than asserting a hardcoded upstream default. If go-html ever
+// stops honouring the AsideWidth request, this fails loudly here instead of
+// shellwide.ctml's frame silently reflowing back to go-html's unrequested
+// 28-column default.
+func TestWideInspectorWidth_MatchesRequest(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	layout, err := ctml.ParseLayout(shellWideCTML, shellWideBindings("HEADER", "FOOTER", "MAIN", "INSPECTOR"))
+	if err != nil {
+		t.Fatalf("parse shellwide.ctml: %v", err)
+	}
+	_, boxes := layout.RenderTermBoxes(html.NewContext(), html.TermOptions{
+		Width: 140, Theme: shellWideTheme(styles), AsideWidth: wideInspectorWidth,
+	})
+	if got := boxes["R"].Width; got != wideInspectorWidth {
+		t.Fatalf("shellwide.ctml's live R box width = %d, want the requested wideInspectorWidth = %d (ctml.md S:15.1) -- go-html stopped honouring the AsideWidth request", got, wideInspectorWidth)
 	}
 }
 

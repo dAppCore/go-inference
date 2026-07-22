@@ -1,31 +1,40 @@
 <!-- SPDX-Licence-Identifier: EUPL-1.2 -->
 <!--
   shell.ctml : the lem workspace app shell's H/F-only shape — used ONLY for
-  the ONE region shape that still needs host composition: Overlay layouts
-  (80-119 cols) with the inspector open, stacking the full-width inspector
-  above a compact main-panel preview with a rule between
-  (renderInspectorStack, layout.go). Every OTHER region shape now rides its
-  own declarative shell (shellregion.ctml single-pane; shellwide.ctml Wide
-  side-by-side) since go-html v0.14.0 shipped a themeable C slot and
-  row-scoped verbatim (docs/ctml.md S:15.2, S:6.5) — see those two files for
-  the converted shapes, and renderFrame's own doc comment (layout.go) for
-  the full account of which shape uses which.
+  the ONE shape whose header+region+footer still cannot join into a single
+  render call: Overlay layouts (80-119 cols) with the inspector open,
+  stacking the full-width inspector above a compact main-panel preview with
+  a rule between. Every OTHER shape rides its own declarative shell that
+  joins header+region+footer in one call (shellregion.ctml single-pane;
+  shellwide.ctml Wide side-by-side) since go-html v0.14.0 shipped a themeable
+  C slot and row-scoped verbatim (docs/ctml.md S:15.2, S:6.5) — see those two
+  files for the converted shapes, and renderFrame's own doc comment
+  (layout.go) for the full account of which shape uses which.
 
   Idiom: a <layout variant="HF"> rendered through renderBandFrame (the HF
   band-split idiom overlays and the Data list's live filter input already
   use, overlayframe.go / datapanel.go) — the host splits the render at the
-  H slot's own recorded box height and composes the region (renderInspector
-  Stack) BETWEEN the two bands, exactly as a widget-carrying overlay
-  composes a live Bubbles widget between its own H and F bands.
+  H slot's own recorded box height and composes the region BETWEEN the two
+  bands, exactly as a widget-carrying overlay composes a live Bubbles widget
+  between its own H and F bands.
 
   The C slot is deliberately unused HERE, but not because it is unusable —
   shellregion.ctml/shellwide.ctml now use it and R for every other shape.
-  This file's region shape is two INDEPENDENTLY-SIZED panes stacked
-  vertically with a rule between, a shape HLCRF's five-letter slot
-  vocabulary has no pair for (H/F are whole-page top/bottom bands, not a
-  reusable mid-page pair) — renderInspectorStack's own doc comment
-  (layout.go) has the full account; it is the friction this slice reports
-  rather than works around.
+  As of go-html v0.15.0 (docs/ctml.md S:15.7) the REGION between these bands
+  is no longer hand-stacked either: renderInspectorStack (layout.go) renders
+  it as its own go-html "HC" layout (shellinspectorpair.ctml), H the
+  inspector with its own bottom border as the divider, C the main preview.
+  What stays true to this file specifically is that its H/F bands cannot
+  ALSO fold that pair into the same RenderTerm call: TermTheme is one flat
+  struct threaded through every nested Layout in a single render, so a
+  unified call would force this file's zero-chrome H (the pre-fitted tab
+  strip, byte-exact like every sibling shell) and the pair's own H (needing
+  its natural bordered chrome, since that border IS the rule) to share one
+  Header style — confirmed by a throwaway probe during this slice (not part
+  of the shipped diff): zeroing Header for the page header silently zeroed
+  the pair's divider too. shellinspectorpair.ctml's own header comment and
+  renderInspectorStack's doc comment (layout.go) have the full account; it
+  is the friction this slice reports rather than works around.
 
   Host seams (layout.go):
     - Values  header : the tab strip (renderPanelBar, tabs.go) and the
