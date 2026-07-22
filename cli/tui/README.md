@@ -86,6 +86,34 @@ by go-html's terminal renderer (`dappco.re/go/html`). The tab strip
 A left click on a tab switches panels through exactly the same path as
 `Tab`/`Shift+Tab` (`selectPanel`); the wheel keeps scrolling the transcript.
 
+### Form screens
+
+The Settings form (`settings.go` + `settings.ctml`) establishes the
+row-binding idiom form-shaped screens copy:
+
+- **One `<dl>` per knob row** — `<dt>` is the value line (marker + name +
+  `‹ value ›`), `<dd>` the hint, which the terminal renderer draws as
+  exactly the row shape a form needs: value line, indented hint line, blank
+  separator.
+- **Rows flow through three sequences** (`rowsBefore` / `rowsActive` /
+  `rowsAfter`) split around the cursor, exactly like the tab strip: class
+  attributes are static, so selection styling is carried by which sequence
+  a row lands in (`settingsFormBindings`).
+- **Selection gutters are marker glyphs** (`›` active, `○` idle): the
+  parser drops whitespace-only runs between siblings, so a plain two-space
+  gutter cannot be expressed in markup.
+- **Rows are block-shaped**, so the `.ctml` file indents freely; only the
+  single-row constructs inside a row (the `<dt>` line, the footer) stay on
+  one source line.
+- **No per-row boxes** — an `<each>` row cannot vary its `id` any more than
+  its `class`, so form rows record nothing in a box map; a screen that
+  needs row clicks either enumerates its rows statically or derives boxes
+  from the render as the tab strip does.
+
+`preferences.go` is the preference *store* (config load/set/commit), not a
+screen — it has no rendering to migrate; the preference-editing UI is the
+inspector.
+
 ## Keys
 
 | Key | Scope | Action |
