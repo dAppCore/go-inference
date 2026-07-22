@@ -349,15 +349,34 @@ var verifyStackAllBarriers = os.Getenv("LTHN_VERIFY_STACK_ALLBARRIERS") == "1"
 // so K changes keep the buffer identity — the #71 identity-replay probe.
 var verifyStackPLEPad = os.Getenv("LTHN_VERIFY_STACK_PLE_PAD") == "1"
 
-// verifyStackSkipOp (LTHN_VERIFY_STACK_SKIP_OP=<class>) omits ONE op class
-// from the recording — the #71 poison-op discriminator: at replay the skipped
-// op's output keeps the record-along pass's near-correct bytes, so the NaN
-// vanishes iff the skipped class is the corrupting one.
-var verifyStackSkipOp = os.Getenv("LTHN_VERIFY_STACK_SKIP_OP")
+// verifyStackSkipOp (LTHN_VERIFY_STACK_SKIP_OP=<class>[,<class>...]) omits op
+// classes from the recording — the #71 poison-op discriminator: at replay a
+// skipped op's output keeps the record-along pass's near-correct bytes, so
+// the NaN vanishes iff the skipped set contains the corrupting op(s).
+var verifyStackSkipOps = func() map[string]bool {
+	raw := os.Getenv("LTHN_VERIFY_STACK_SKIP_OP")
+	if raw == "" {
+		return nil
+	}
+	m := map[string]bool{}
+	start := 0
+	for i := 0; i <= len(raw); i++ {
+		if i == len(raw) || raw[i] == ',' {
+			if i > start {
+				m[raw[start:i]] = true
+			}
+			start = i + 1
+		}
+	}
+	return m
+}()
 
 func (r *verifyStackRecorder) skip(class string) bool {
-	if verifyStackSkipOp != "" && verifyStackSkipOp == class {
+	if verifyStackSkipOps != nil && verifyStackSkipOps[class] {
+		// consume both one-shot latches: a skipped op must not leak its armed
+		// overlap (a barrier removal) onto whatever records next.
 		r.lastSkipped = true
+		r.overlap = false
 		return true
 	}
 	return false
@@ -678,7 +697,7 @@ func (r *verifyStackRecorder) recRMSRows(x, w, out metal.MTLBuffer, xOff, wOff, 
 	if r == nil || r.failed {
 		return
 	}
-	if r.skip("rms") {
+	if r.skip("rms") || r.skip(core.Sprintf("rms%d", axisSize)) {
 		return
 	}
 	pso, err := pipelineForICB(rmsKernelBF16(axisSize))
