@@ -1,7 +1,10 @@
-# Portable CI for go-inference — the default-tag (no-GPU) test + coverage lane.
-# go-inference is a Metal/CGO project; the FULL lem build (engine/metal, the
-# metallibs) needs macOS 26 / Metal 4 and lives in build.yml on a self-hosted
-# runner. This lane runs the portable suite (Taskfile `test`/`cover`) on any OS.
+# PR gate + push CI for go-inference — the model-free test surface on all three
+# desktop OSes. The suite is testable without a model loaded (engine/metal skips
+# cleanly without MLX_METALLIB_PATH; engine/hip's contract tests are host-side),
+# so this lane is the go/no-go for PRs into dev: linux + macos are REQUIRED
+# checks; windows is EXPERIMENTAL (continue-on-error) until the cgo-on windows
+# graph is proven — its logs name the real portability offenders either way.
+# The full artifact build (and the metal lane) lives in build.yml.
 name: CI
 
 on:
@@ -13,29 +16,59 @@ on:
 permissions:
   contents: read
 
+env:
+  GO_VERSION: "1.26"
+
 jobs:
   test:
-    name: Portable test + coverage
-    runs-on: ubuntu-latest
+    name: tests · ${{ matrix.os_name }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,  os_name: linux,   experimental: false }
+          - { runner: macos-latest,   os_name: macos,   experimental: false }
+          - { runner: windows-latest, os_name: windows, experimental: true }
     env:
-      GOWORK: "off"          # resolve deps from go/go.mod tags, not the workspace
-      CGO_ENABLED: "1"       # go/ links duckdb (go-duckdb/v2 ships prebuilt linux libs)
+      CGO_ENABLED: "1"        # go/ links duckdb (prebuilt libs for all three OSes)
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
-          # The module root is go/ (go.sum lives there, not at the repo root); without
-          # this, setup-go's cache aborts with "Dependencies file is not found ...
-          # Supported file pattern: go.sum". This lane only compiles the go/ module.
-          cache-dependency-path: go/go.sum
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go/go.sum
+            cli/go.sum
 
-      - name: Portable tests + coverage (default tags — engine/metal excluded)
+      # The module suite resolves from go.mod tags (GOWORK=off) — proves the
+      # published dependency surface, not the workspace.
+      - name: Module suite (default tags — engine/metal skips without a metallib)
         working-directory: go
+        env:
+          GOWORK: "off"
+        shell: bash
         run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
 
+      # cli + examples need the workspace (cli requires the LOCAL go/ tree; the
+      # examples module is the acceptance surface — every public feature ships
+      # with its example, so compiling them all catches API breakage model-free).
+      - name: TUI suite (workspace)
+        working-directory: cli
+        shell: bash
+        run: go test -count=1 ./tui/...
+
+      - name: Examples compile + vet (workspace — the acceptance surface)
+        working-directory: examples
+        shell: bash
+        run: |
+          go build ./...
+          go vet ./...
+
       - name: Upload coverage to Codecov
+        if: matrix.os_name == 'linux'
         uses: codecov/codecov-action@v5
         with:
           files: go/coverage.out
