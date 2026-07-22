@@ -810,6 +810,7 @@ const (
 	overlayDataNote
 	overlayDataFilter
 	overlayDataBulk
+	overlaySettings
 )
 
 type helpOverlay struct {

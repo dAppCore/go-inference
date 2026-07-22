@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	coreio "dappco.re/go/io"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -40,7 +42,7 @@ func TestRenderSettings_Good(t *testing.T) {
 			t.Fatalf("form missing the hint %q: %q", text, plain)
 		}
 	}
-	if !strings.Contains(plain, "↑/↓ select · ←/→ change · values apply as hinted") {
+	if !strings.Contains(plain, "↑/↓ select · ←/→ change · ctrl+s saves · esc closes") {
 		t.Fatalf("form missing the key footer: %q", plain)
 	}
 
@@ -99,5 +101,89 @@ func TestRenderSettings_Ugly(t *testing.T) {
 	third := strings.Index(plain, "thinking")
 	if first < 0 || second < first || third < second {
 		t.Fatalf("the sequence split must preserve row order: %q", plain)
+	}
+}
+
+// TestSettingsOverlay_Good drives the wired Settings screen end to end: F2
+// opens it in the overlay layer, a knob adjust edits a.cfg live and persists
+// to the real preference store on ctrl+s, and esc closes it cleanly.
+func TestSettingsOverlay_Good(t *testing.T) {
+	medium := coreio.NewMockMedium()
+	opened := openPreferences(medium, appConfigPath)
+	if !opened.OK {
+		t.Fatalf("open preferences: %v", opened.Value)
+	}
+	preferences := opened.Value.(preferenceStore)
+	a := newApp("", 0, 4096)
+	a.attachPreferences(preferences)
+	m, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	a = m.(app)
+
+	// F2 opens the Settings overlay.
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyF2})
+	a = m.(app)
+	if a.activeOverlay != overlaySettings {
+		t.Fatalf("F2 did not open the settings overlay: overlay=%d", a.activeOverlay)
+	}
+
+	// The form renders in the overlay layer — the KV-cache hint is unique to
+	// the settings form (it is not in the footer or any other screen).
+	if plain := ansi.Strip(a.View()); !strings.Contains(plain, "KV cache size") {
+		t.Fatalf("settings form not rendered in the overlay layer:\n%s", plain)
+	}
+
+	// Navigate to the max-tokens row and bump it one step; the edit lands on
+	// a.cfg immediately, exactly as the value hint promises.
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a = m.(app)
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
+	a = m.(app)
+	if a.cfg.maxTokens() != 8192 {
+		t.Fatalf("adjust did not raise max tokens live: %d", a.cfg.maxTokens())
+	}
+
+	// Ctrl+S commits the generation knobs through the same store the
+	// inspector writes; reopening the store proves the round-trip.
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	a = m.(app)
+	if a.errText != "" {
+		t.Fatalf("ctrl+s reported an error: %q", a.errText)
+	}
+	reopened := openPreferences(medium, appConfigPath)
+	if !reopened.OK {
+		t.Fatalf("reopen preferences: %v", reopened.Value)
+	}
+	if values := reopened.Value.(preferenceStore).Values(); values.MaxTokens != 8192 {
+		t.Fatalf("adjust did not round-trip through the store: %#v", values)
+	}
+
+	// Esc closes the overlay without disturbing the live edit.
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	a = m.(app)
+	if a.activeOverlay != overlayNone {
+		t.Fatalf("esc did not close the settings overlay: overlay=%d", a.activeOverlay)
+	}
+	if a.cfg.maxTokens() != 8192 {
+		t.Fatalf("esc reverted the live edit: %d", a.cfg.maxTokens())
+	}
+}
+
+// TestSettingsOverlay_Bad proves the commit path fails loudly when no
+// preference store is connected — the overlay stays open and surfaces the
+// reason rather than silently discarding the change.
+func TestSettingsOverlay_Bad(t *testing.T) {
+	a := newApp("", 0, 4096)
+	m, _ := a.Update(tea.KeyMsg{Type: tea.KeyF2})
+	a = m.(app)
+	if a.activeOverlay != overlaySettings {
+		t.Fatalf("F2 did not open the settings overlay: overlay=%d", a.activeOverlay)
+	}
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	a = m.(app)
+	if a.errText == "" {
+		t.Fatal("ctrl+s without a store did not surface an error")
+	}
+	if a.activeOverlay != overlaySettings {
+		t.Fatalf("a failed commit closed the overlay: overlay=%d", a.activeOverlay)
 	}
 }

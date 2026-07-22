@@ -1189,6 +1189,31 @@ func (a *app) rebuildTheme(selected theme) {
 	}
 }
 
+// commitGenerationSettings persists the three generation knobs the Settings
+// overlay edits (context length, max tokens, thinking) to the SAME preference
+// store the inspector's Save writes through — a.cfg is the single live source
+// of truth for these values, so the overlay and the inspector never diverge.
+func (a *app) commitGenerationSettings() core.Result {
+	if a == nil || a.preferences == nil {
+		return core.Fail(core.E("tui.app.commitGenerationSettings", "preference store is unavailable", nil))
+	}
+	thinking := []string{"model", "on", "off"}[a.cfg.thinkIdx]
+	entries := []struct {
+		key   string
+		value any
+	}{
+		{preferenceContextLength, a.cfg.contextLen()},
+		{preferenceMaxTokens, a.cfg.maxTokens()},
+		{preferenceThinking, thinking},
+	}
+	for _, entry := range entries {
+		if result := a.preferences.Set(entry.key, entry.value); !result.OK {
+			return result
+		}
+	}
+	return a.preferences.Commit()
+}
+
 func (a app) Init() tea.Cmd {
 	cmds := []tea.Cmd{a.spin.Tick}
 	if a.boot.phase == bootLoading {
@@ -1918,6 +1943,13 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.activeOverlay = overlayHelp
 		return a, nil
 	}
+	if key.Matches(msg, a.keys.Settings) {
+		// The Settings form edits a.cfg live — the same value the inspector
+		// edits and generation reads — and opens fresh at the first knob.
+		a.cfg.cursor = 0
+		a.activeOverlay = overlaySettings
+		return a, nil
+	}
 	if key.Matches(msg, a.keys.NewSession) {
 		if result := a.createSession(); !result.OK {
 			a.errText = result.Error()
@@ -2456,6 +2488,28 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.activeOverlay, a.dataEditor = overlayNone, nil
+		return a, nil
+	}
+	if a.activeOverlay == overlaySettings {
+		// Cursor and knob adjustments run against a.cfg — the single live
+		// source of truth these values share with the inspector — so the two
+		// screens never diverge. Esc (handled above) closes without reverting
+		// the live edits, exactly as closing the inspector does; ctrl+s
+		// persists the three generation.* knobs to the same preference store.
+		switch message.String() {
+		case "ctrl+s":
+			if result := a.commitGenerationSettings(); !result.OK {
+				a.errText = result.Error()
+			}
+		case "up", "k":
+			a.cfg = a.cfg.move(-1)
+		case "down", "j":
+			a.cfg = a.cfg.move(1)
+		case "left", "h":
+			a.cfg = a.cfg.adjust(-1)
+		case "right", "l":
+			a.cfg = a.cfg.adjust(1)
+		}
 		return a, nil
 	}
 	if a.activeOverlay == overlayGitEnableReview && message.String() != "enter" {
@@ -3294,6 +3348,8 @@ func (a app) overlayView() string {
 		} else {
 			body = a.changeOverlay.View(bodyWidth, bodyHeight, a.styles)
 		}
+	case overlaySettings:
+		body = renderSettings(a.cfg, bodyWidth, a.styles)
 	case overlayProjectReview:
 		body = newLaunchReviewOverlay(a.agentReview, a.agentRequest.Provider, a.agentRequest.Model).View(bodyWidth, bodyHeight, a.styles)
 	case overlayGitEnableReview, overlayLaunchReview, overlayAgentSelection:
@@ -3407,9 +3463,9 @@ func (a app) inspectorView() string {
 }
 
 func (a app) footerLine() string {
-	keys := "tab panels  ·  ctrl+k commands  ·  ctrl+o inspector  ·  f1 help"
+	keys := "tab panels  ·  ctrl+k commands  ·  ctrl+o inspector  ·  f2 settings  ·  f1 help"
 	if chooseLayout(a.width) == layoutNarrow {
-		keys = "tab panels  ·  ^K commands  ·  ^O info  ·  F1 help"
+		keys = "tab panels  ·  ^K commands  ·  ^O info  ·  F2 settings  ·  F1 help"
 	}
 	status := a.statusLine()
 	if status == "" {

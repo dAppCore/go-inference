@@ -187,7 +187,10 @@ not a view — it composes nothing and has no rendering to migrate.
 | `Ctrl+O` | global | Toggle the inspector |
 | `Ctrl+S` | global | Commit inspector settings |
 | `F1` | global | Full key help |
+| `F2` | global | Open the Settings form overlay (context length, max tokens, thinking) |
 | `Ctrl+C` | global | Cancel jobs, stop service, close resources, and quit |
+| arrows or `h`/`j`/`k`/`l` | Settings overlay | Select a knob and change its value |
+| `Ctrl+S` / `Esc` | Settings overlay | Save the generation knobs to preferences / close |
 | `Enter` | Chat | Send a non-empty prompt when a model is loaded |
 | `Alt+Enter` | Chat | Insert a newline in the composer |
 | `Esc` | Chat | Cancel the visible session's generation |

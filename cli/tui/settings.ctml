@@ -36,5 +36,5 @@
   <dt><span class="row-idle">○ <span>{{row.name}}</span></span><span class="row-value">  ‹ <span>{{row.value}}</span> ›</span></dt>
   <dd><span class="row-hint">{{row.hint}}</span></dd>
 </dl></each>
-<p class="form-keys">↑/↓ select · ←/→ change · values apply as hinted</p>
+<p class="form-keys">↑/↓ select · ←/→ change · ctrl+s saves · esc closes</p>
 </section>
