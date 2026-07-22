@@ -117,29 +117,23 @@ func (s settings) move(delta int) settings {
 //go:embed settings.ctml
 var settingsCTML []byte
 
-// settingsFormBindings splits the knob rows around the cursor. Three
-// sequences (before / active / after) because .ctml class attributes are
-// static strings — an <each> row cannot vary its own class — so selection
-// styling is carried by which sequence a row lands in. A form this size
-// re-binds on every change for free.
+// settingsFormBindings binds ONE row per knob — selection styling rides the
+// row-scoped class bind (class="{{row.state}}", go-html v0.13.0) and the
+// marker glyph rides the row, so no before/active/after sequence split is
+// needed. A form this size re-binds on every change for free.
 func settingsFormBindings(form settings) ctml.Bindings {
-	sequences := map[string][]map[string]any{
-		"rowsBefore": {},
-		"rowsActive": {},
-		"rowsAfter":  {},
-	}
+	rows := make([]map[string]any, 0, len(form.rows()))
 	for index, row := range form.rows() {
-		entry := map[string]any{"name": row.name, "value": row.value, "hint": row.hint}
-		switch {
-		case index < form.cursor:
-			sequences["rowsBefore"] = append(sequences["rowsBefore"], entry)
-		case index == form.cursor:
-			sequences["rowsActive"] = append(sequences["rowsActive"], entry)
-		default:
-			sequences["rowsAfter"] = append(sequences["rowsAfter"], entry)
+		state, marker := "row-idle", "○"
+		if index == form.cursor {
+			state, marker = "row-active", "›"
 		}
+		rows = append(rows, map[string]any{
+			"state": state, "marker": marker,
+			"name": row.name, "value": row.value, "hint": row.hint,
+		})
 	}
-	return ctml.Bindings{Sequences: sequences}
+	return ctml.Bindings{Sequences: map[string][]map[string]any{"rows": rows}}
 }
 
 // settingsFormTheme maps the markup's class tokens onto the existing palette,

@@ -2,7 +2,15 @@
 
 package tui
 
-import core "dappco.re/go"
+import (
+	_ "embed"
+
+	"github.com/charmbracelet/lipgloss"
+
+	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
+)
 
 type inspectorControl uint8
 
@@ -124,137 +132,214 @@ func (inspector *inspectorState) Save(target *app) core.Result {
 	return core.Ok(nil)
 }
 
+// inspectorCTML is the inspector's markup — see inspector.ctml for the
+// seams it exposes (the four body gates, the knob/line sequences, class
+// tokens).
+//
+//go:embed inspector.ctml
+var inspectorCTML []byte
+
+// View renders the contextual inspector through inspector.ctml: exactly one
+// of the four panel-shaped bodies is gated in by the active panel, and the
+// render is fitted to the pane as before.
 func (inspector inspectorState) View(target app, width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
-	var builder core.Builder
-	builder.WriteString(target.styles.title.Render("INSPECTOR") + "\n\n")
+	tree, err := ctml.Parse(inspectorCTML, inspector.bindings(target))
+	if err != nil {
+		// inspector.ctml is embedded and static, so a parse failure is a
+		// build defect; TestInspector_Good pins the markup as parseable.
+		return ""
+	}
+	rendered := html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: inspectorTheme(target.styles)})
+	return fitPane(rendered, width, height, target.styles.inspector)
+}
+
+// inspectorTheme maps the inspector markup's class tokens onto the existing
+// palette, so the .ctml render reuses uiStyles paint exactly — no colours
+// of its own. Unclassed text (the bound status values) takes the pane's own
+// inspector style, exactly as the raw builder text previously inherited it
+// from fitPane.
+func inspectorTheme(styles uiStyles) *html.TermTheme {
+	theme := html.DefaultTermTheme()
+	theme.Text = styles.inspector
+	theme.Classes = map[string]lipgloss.Style{
+		"inspector-title": styles.title,
+		"label":           styles.accent,
+		"control-active":  styles.accent,
+		"control-idle":    styles.status,
+		"control-value":   styles.title,
+		"c-title":         styles.title,
+		"c-status":        styles.status,
+		"c-thought":       styles.thought,
+		"c-attention":     styles.attention,
+		"c-success":       styles.success,
+		"c-answer":        styles.answer,
+	}
+	return theme
+}
+
+// bindings assembles the inspector's sequences for the active panel: the
+// panel's body gate holds one row, every other gate stays empty, so the
+// document renders exactly one body.
+func (inspector inspectorState) bindings(target app) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"chatBody": {}, "chatSettings": {}, "chatMode": {}, "chatTools": {},
+		"chatKnowledge": {}, "chatDirty": {},
+		"workBody": {}, "workHead": {}, "workRuntime": {}, "workCap": {}, "workFeatures": {},
+		"modelsBody": {}, "modelsHead": {},
+		"serviceBody": {},
+	}
 	switch target.activePanel {
 	case panelWork:
-		inspector.renderWork(&builder, target)
+		inspector.workBindings(target, sequences)
 	case panelModels:
-		builder.WriteString(target.styles.accent.Render("MODEL DETAIL") + "\n")
+		modelsHead := sequences["modelsHead"]
 		if selected, ok := target.picker.SelectedItem().(modelItem); ok {
-			builder.WriteString(target.styles.title.Render(selected.name) + "\n")
-			builder.WriteString(target.styles.status.Render(selected.modelType) + "\n")
-			builder.WriteString(target.styles.thought.Render(selected.path) + "\n\n")
+			modelsHead = append(modelsHead,
+				map[string]any{"class": "c-title", "text": selected.name},
+				map[string]any{"class": "c-status", "text": selected.modelType},
+				map[string]any{"class": "c-thought", "text": selected.path},
+			)
 		} else {
-			builder.WriteString(target.styles.status.Render("○ select a discovered model") + "\n\n")
+			modelsHead = append(modelsHead, map[string]any{"class": "c-status", "text": "○ select a discovered model"})
 		}
-		builder.WriteString(target.styles.accent.Render("LOADED") + "  ")
-		if target.modelName == "" {
-			builder.WriteString(target.styles.status.Render("○ none"))
-		} else {
-			builder.WriteString(target.styles.success.Render("● " + target.modelName))
+		sequences["modelsHead"] = modelsHead
+		loadedClass, loaded := "c-status", "○ none"
+		if target.modelName != "" {
+			loadedClass, loaded = "c-success", "● "+target.modelName
 		}
+		sequences["modelsBody"] = append(sequences["modelsBody"], map[string]any{"loadedClass": loadedClass, "loaded": loaded})
 	case panelService:
-		builder.WriteString(target.styles.accent.Render("ADDRESS") + "\n")
-		builder.WriteString(target.styles.title.Render(target.svc.addr()) + "\n\n")
-		builder.WriteString(target.styles.accent.Render("REQUESTS") + "  ")
-		builder.WriteString(target.styles.title.Render(core.Sprintf("%d", target.svc.requests.Load())) + "\n\n")
-		builder.WriteString(target.styles.accent.Render("STATE") + "  ")
+		stateClass, state := "c-status", "○ stopped"
 		if target.svc.running {
-			builder.WriteString(target.styles.success.Render("● serving"))
-		} else {
-			builder.WriteString(target.styles.status.Render("○ stopped"))
+			stateClass, state = "c-success", "● serving"
 		}
+		sequences["serviceBody"] = append(sequences["serviceBody"], map[string]any{
+			"addr":       target.svc.addr(),
+			"requests":   core.Sprintf("%d", target.svc.requests.Load()),
+			"stateClass": stateClass,
+			"state":      state,
+		})
 	default:
-		inspector.renderChat(&builder, target)
+		inspector.chatBindings(target, sequences)
 	}
-	return fitPane(builder.String(), width, height, target.styles.inspector)
+	return ctml.Bindings{Sequences: sequences}
 }
 
-func (inspector inspectorState) renderWork(builder *core.Builder, target app) {
-	builder.WriteString(target.styles.accent.Render("WORK DETAIL") + "\n")
+// controlRow is one knob row: the cursor and selection class ride the row
+// (class="{{row.state}}"), so a single sequence serves every knob.
+func (inspector inspectorState) controlRow(control inspectorControl, label, value string) map[string]any {
+	state, cursor := "control-idle", "  "
+	if inspector.cursor == int(control) {
+		state, cursor = "control-active", "› "
+	}
+	return map[string]any{"state": state, "cursor": cursor, "label": label, "value": value}
+}
+
+// chatBindings fills the Chat body: the status head, the knob rows, and the
+// flattened knowledge lines.
+func (inspector inspectorState) chatBindings(target app, sequences map[string][]map[string]any) {
+	model := "○ none"
+	if target.modelName != "" {
+		model = "● " + target.modelName
+	}
+	generation := "○ idle"
+	if target.generating {
+		generation = "◉ generating"
+	}
+	sequences["chatBody"] = append(sequences["chatBody"], map[string]any{"model": model, "generation": generation})
+	sequences["chatSettings"] = append(sequences["chatSettings"],
+		inspector.controlRow(inspectorControlContext, "context", core.Sprintf("%d", target.cfg.contextLen())),
+		inspector.controlRow(inspectorControlMaxTokens, "max tokens", core.Sprintf("%d", target.cfg.maxTokens())),
+		inspector.controlRow(inspectorControlThinking, "thinking", thinkNames[target.cfg.thinkIdx]),
+		inspector.controlRow(inspectorControlTheme, "theme", inspector.Theme()),
+	)
+	sequences["chatMode"] = append(sequences["chatMode"],
+		inspector.controlRow(inspectorControlMode, "sampling", target.modes.current().name))
+	tools := "○ disabled"
+	if target.tools.enabled {
+		tools = "● enabled"
+	}
+	sequences["chatTools"] = append(sequences["chatTools"],
+		inspector.controlRow(inspectorControlTools, "function calls", tools))
+
+	knowledge := sequences["chatKnowledge"]
+	line := func(class, text string) {
+		knowledge = append(knowledge, map[string]any{"class": class, "text": text})
+	}
+	switch {
+	case !inspector.knowledge.ready:
+		line("c-status", "  ○ discovery pending")
+	case len(inspector.knowledge.documents) == 0:
+		line("c-status", "  ○ no local documents")
+	default:
+		line("c-success", core.Sprintf("  ● %d local documents", len(inspector.knowledge.documents)))
+		for _, document := range inspector.knowledge.documents {
+			line("c-status", "    "+document.Title+"  "+document.Path)
+		}
+	}
+	if len(target.attachments) > 0 {
+		line("c-title", core.Sprintf("  %d attached snapshots", len(target.attachments)))
+	}
+	for _, warning := range inspector.knowledge.warnings {
+		label := warning.Path
+		if label == "" {
+			label = warning.Mount
+		}
+		line("c-attention", "  ! "+label)
+		line("c-thought", "    "+warning.Reason)
+	}
+	sequences["chatKnowledge"] = knowledge
+
+	if inspector.dirty {
+		sequences["chatDirty"] = append(sequences["chatDirty"], map[string]any{})
+	}
+}
+
+// workBindings fills the Work body: the selection head, the runtime lines,
+// the capability summary, and the flattened feature-group lines (group
+// headings, feature rows, and the blank separators between groups all ride
+// one sequence, each line choosing its own palette class).
+func (inspector inspectorState) workBindings(target app, sequences map[string][]map[string]any) {
+	sequences["workBody"] = append(sequences["workBody"], map[string]any{})
+
+	head := sequences["workHead"]
 	if target.work == nil {
-		builder.WriteString(target.styles.status.Render("○ no work item selected") + "\n\n")
+		head = append(head, map[string]any{"class": "c-status", "text": "○ no work item selected"})
 	} else if selected, ok := target.work.Selected(); ok {
-		builder.WriteString(target.styles.title.Render(selected.Title) + "\n")
-		builder.WriteString(target.styles.status.Render(workGlyph(selected.Status)+" "+core.Upper(selected.Status)) + "\n")
+		head = append(head,
+			map[string]any{"class": "c-title", "text": selected.Title},
+			map[string]any{"class": "c-status", "text": workGlyph(selected.Status) + " " + core.Upper(selected.Status)},
+		)
 		if selected.Repo != "" {
-			builder.WriteString(target.styles.thought.Render(selected.Repo+"  "+selected.Branch) + "\n")
+			head = append(head, map[string]any{"class": "c-thought", "text": selected.Repo + "  " + selected.Branch})
 		}
 		if selected.Question != "" {
-			builder.WriteString(target.styles.attention.Render("? "+selected.Question) + "\n")
+			head = append(head, map[string]any{"class": "c-attention", "text": "? " + selected.Question})
 		}
-		builder.WriteString("\n")
 	} else {
-		builder.WriteString(target.styles.status.Render("○ no work item selected") + "\n\n")
+		head = append(head, map[string]any{"class": "c-status", "text": "○ no work item selected"})
 	}
+	sequences["workHead"] = head
 
-	inspector.renderRuntime(builder, target)
-
-	capabilities := []agentCapability{}
-	if target.work != nil {
-		capabilities = target.work.Capabilities()
-	} else if target.agent != nil {
-		capabilities = target.agent.Capabilities()
-	}
-	byFeature := make(map[agentFeature]agentCapability, len(capabilities))
-	reason := defaultAgentUnavailableReason
-	for _, capability := range capabilities {
-		byFeature[capability.Feature] = capability
-		if !capability.Available && capability.Reason != "" {
-			reason = capability.Reason
-		}
-	}
-	builder.WriteString(target.styles.accent.Render("AGENT CAPABILITY") + "\n")
-	available := 0
-	for _, capability := range capabilities {
-		if capability.Available {
-			available++
-		}
-	}
-	if available == 0 {
-		builder.WriteString(target.styles.attention.Render("○ not installed") + "\n")
-		builder.WriteString(target.styles.thought.Render(reason) + "\n\n")
-	} else {
-		builder.WriteString(target.styles.success.Render(core.Sprintf("● %d actions available", available)) + "\n\n")
-	}
-
-	selectedFeature := agentFeature("")
-	if target.work != nil {
-		selectedFeature = target.work.SelectedAction().Feature
-	}
-	for _, group := range agentFeatureGroups {
-		builder.WriteString(target.styles.accent.Render(group.Title) + "\n")
-		for _, feature := range group.Features {
-			capability, exists := byFeature[feature]
-			if !exists {
-				capability = agentCapability{Feature: feature, Reason: reason}
-			}
-			cursor := "  "
-			if feature == selectedFeature {
-				cursor = "› "
-			}
-			glyph := "○"
-			style := target.styles.status
-			if capability.Available {
-				glyph = "●"
-				style = target.styles.success
-			}
-			builder.WriteString(cursor + style.Render(glyph+" "+agentFeatureTitle(feature)) + "\n")
-		}
-		builder.WriteString("\n")
-	}
-}
-
-func (inspector inspectorState) renderRuntime(builder *core.Builder, target app) {
-	builder.WriteString(target.styles.accent.Render("RUNTIME") + "\n")
+	runtime := sequences["workRuntime"]
 	if target.work != nil {
 		if selected, ok := target.work.Selected(); ok && selected.Runtime != "" {
-			builder.WriteString(target.styles.title.Render("assigned  "+selected.Runtime) + "\n")
+			runtime = append(runtime, map[string]any{"class": "c-title", "text": "assigned  " + selected.Runtime})
 		}
 	}
 	switch {
 	case !inspector.runtime.ready:
-		builder.WriteString(target.styles.status.Render("○ detection pending") + "\n\n")
+		runtime = append(runtime, map[string]any{"class": "c-status", "text": "○ detection pending"})
 	case inspector.runtime.reason != "":
-		builder.WriteString(target.styles.attention.Render("○ unavailable") + "\n")
-		builder.WriteString(target.styles.thought.Render(inspector.runtime.reason) + "\n\n")
+		runtime = append(runtime,
+			map[string]any{"class": "c-attention", "text": "○ unavailable"},
+			map[string]any{"class": "c-thought", "text": inspector.runtime.reason},
+		)
 	case len(inspector.runtime.capabilities) == 0:
-		builder.WriteString(target.styles.status.Render("○ none available") + "\n\n")
+		runtime = append(runtime, map[string]any{"class": "c-status", "text": "○ none available"})
 	default:
 		for index, capability := range inspector.runtime.capabilities {
 			marker := "○"
@@ -265,17 +350,72 @@ func (inspector inspectorState) renderRuntime(builder *core.Builder, target app)
 			if capability.Version != "" {
 				name = core.Concat(name, "  ", capability.Version)
 			}
-			builder.WriteString(target.styles.success.Render(marker+" "+name) + "\n")
-			features := runtimeFeatureLabels(capability)
-			if len(features) > 0 {
-				builder.WriteString(target.styles.thought.Render("  "+core.Join(" · ", features...)) + "\n")
+			runtime = append(runtime, map[string]any{"class": "c-success", "text": marker + " " + name})
+			if features := runtimeFeatureLabels(capability); len(features) > 0 {
+				runtime = append(runtime, map[string]any{"class": "c-thought", "text": "  " + core.Join(" · ", features...)})
 			}
 			if capability.Path != "" {
-				builder.WriteString(target.styles.thought.Render("  "+capability.Path) + "\n")
+				runtime = append(runtime, map[string]any{"class": "c-thought", "text": "  " + capability.Path})
 			}
 		}
-		builder.WriteString("\n")
 	}
+	sequences["workRuntime"] = runtime
+
+	capabilities := []agentCapability{}
+	if target.work != nil {
+		capabilities = target.work.Capabilities()
+	} else if target.agent != nil {
+		capabilities = target.agent.Capabilities()
+	}
+	byFeature := make(map[agentFeature]agentCapability, len(capabilities))
+	reason := defaultAgentUnavailableReason
+	available := 0
+	for _, capability := range capabilities {
+		byFeature[capability.Feature] = capability
+		if !capability.Available && capability.Reason != "" {
+			reason = capability.Reason
+		}
+		if capability.Available {
+			available++
+		}
+	}
+	if available == 0 {
+		sequences["workCap"] = append(sequences["workCap"],
+			map[string]any{"class": "c-attention", "text": "○ not installed"},
+			map[string]any{"class": "c-thought", "text": reason},
+		)
+	} else {
+		sequences["workCap"] = append(sequences["workCap"],
+			map[string]any{"class": "c-success", "text": core.Sprintf("● %d actions available", available)})
+	}
+
+	selectedFeature := agentFeature("")
+	if target.work != nil {
+		selectedFeature = target.work.SelectedAction().Feature
+	}
+	features := sequences["workFeatures"]
+	for groupIndex, group := range agentFeatureGroups {
+		if groupIndex > 0 {
+			features = append(features, map[string]any{"class": "", "text": ""})
+		}
+		features = append(features, map[string]any{"class": "label", "text": group.Title})
+		for _, feature := range group.Features {
+			capability, exists := byFeature[feature]
+			if !exists {
+				capability = agentCapability{Feature: feature, Reason: reason}
+			}
+			cursor := "  "
+			if feature == selectedFeature {
+				cursor = "› "
+			}
+			glyph, class := "○", "c-status"
+			if capability.Available {
+				glyph, class = "●", "c-success"
+			}
+			features = append(features, map[string]any{"class": class, "text": cursor + glyph + " " + agentFeatureTitle(feature)})
+		}
+	}
+	sequences["workFeatures"] = features
 }
 
 func runtimeFeatureLabels(capability runtimeCapability) []string {
@@ -299,69 +439,6 @@ func runtimeFeatureLabels(capability runtimeCapability) []string {
 		features = append(features, "sub-second start")
 	}
 	return features
-}
-
-func (inspector inspectorState) renderChat(builder *core.Builder, target app) {
-	model := "○ none"
-	if target.modelName != "" {
-		model = "● " + target.modelName
-	}
-	generation := "○ idle"
-	if target.generating {
-		generation = "◉ generating"
-	}
-	builder.WriteString(target.styles.accent.Render("SESSION") + "  ● active\n")
-	builder.WriteString(target.styles.accent.Render("MODEL") + "  " + model + "\n")
-	builder.WriteString(target.styles.accent.Render("GENERATION") + "  " + generation + "\n\n")
-	builder.WriteString(target.styles.accent.Render("SETTINGS") + "\n")
-	inspector.renderControl(builder, target, inspectorControlContext, "context", core.Sprintf("%d", target.cfg.contextLen()))
-	inspector.renderControl(builder, target, inspectorControlMaxTokens, "max tokens", core.Sprintf("%d", target.cfg.maxTokens()))
-	inspector.renderControl(builder, target, inspectorControlThinking, "thinking", thinkNames[target.cfg.thinkIdx])
-	inspector.renderControl(builder, target, inspectorControlTheme, "theme", inspector.Theme())
-	builder.WriteString("\n" + target.styles.accent.Render("MODE") + "\n")
-	inspector.renderControl(builder, target, inspectorControlMode, "sampling", target.modes.current().name)
-	builder.WriteString("\n" + target.styles.accent.Render("TOOLS") + "\n")
-	tools := "○ disabled"
-	if target.tools.enabled {
-		tools = "● enabled"
-	}
-	inspector.renderControl(builder, target, inspectorControlTools, "function calls", tools)
-	builder.WriteString("\n" + target.styles.accent.Render("KNOWLEDGE") + "\n")
-	switch {
-	case !inspector.knowledge.ready:
-		builder.WriteString(target.styles.status.Render("  ○ discovery pending") + "\n")
-	case len(inspector.knowledge.documents) == 0:
-		builder.WriteString(target.styles.status.Render("  ○ no local documents") + "\n")
-	default:
-		builder.WriteString(target.styles.success.Render(core.Sprintf("  ● %d local documents", len(inspector.knowledge.documents))) + "\n")
-		for _, document := range inspector.knowledge.documents {
-			builder.WriteString(target.styles.status.Render("    "+document.Title+"  "+document.Path) + "\n")
-		}
-	}
-	if len(target.attachments) > 0 {
-		builder.WriteString(target.styles.title.Render(core.Sprintf("  %d attached snapshots", len(target.attachments))) + "\n")
-	}
-	for _, warning := range inspector.knowledge.warnings {
-		label := warning.Path
-		if label == "" {
-			label = warning.Mount
-		}
-		builder.WriteString(target.styles.attention.Render("  ! "+label) + "\n")
-		builder.WriteString(target.styles.thought.Render("    "+warning.Reason) + "\n")
-	}
-	if inspector.dirty {
-		builder.WriteString("\n" + target.styles.attention.Render("● unsaved · ctrl+s"))
-	}
-}
-
-func (inspector inspectorState) renderControl(builder *core.Builder, target app, control inspectorControl, label, value string) {
-	cursor := "  "
-	style := target.styles.status
-	if inspector.cursor == int(control) {
-		cursor = "› "
-		style = target.styles.accent
-	}
-	builder.WriteString(cursor + style.Render(label) + "  " + target.styles.title.Render("‹ "+value+" ›") + "\n")
 }
 
 func wrapIndex(index, delta, length int) int {

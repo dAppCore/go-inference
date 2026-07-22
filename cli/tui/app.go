@@ -1424,7 +1424,7 @@ func (a app) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 	_, boxes := renderPanelBarBoxes(a.activePanel, metrics.innerWidth, metrics.kind, a.styles)
-	panel, ok := panelBarHit(boxes, msg.X-frameInsetCols, msg.Y-frameInsetRows)
+	panel, ok := panelBarHit(boxes, msg.X-frameInsetCols, msg.Y-frameInsetRows, a.activePanel, metrics.kind)
 	if !ok {
 		return a.route(msg)
 	}

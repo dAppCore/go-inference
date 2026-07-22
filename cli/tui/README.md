@@ -61,8 +61,7 @@ by go-html's terminal renderer (`dappco.re/go/html`). The tab strip
 
 1. **Markup file** — the screen's structure lives in a `.ctml` file embedded
    beside its Go file (`//go:embed`). Text content doubles as its own i18n
-   key; `class` attributes are static strings; comments record the host
-   seams the file exposes.
+   key; comments record the host seams the file exposes.
 2. **Bindings** — dynamic rows enter at parse time through `ctml.Bindings`
    `Sequences` and `<each items="..." as="row">`, bound in text as
    `{{row.field}}` — literal text and binds mix freely in one run
@@ -71,22 +70,39 @@ by go-html's terminal renderer (`dappco.re/go/html`). The tab strip
    row scope wins inside one). A `Values` miss renders empty while the
    literal text around it remains, so a value whose absence must hide a
    whole line still rides a zero-or-one-row sequence. Re-parse and
-   re-bind on every state change — screens this size make that free. A
-   per-row style variation cannot ride a class attribute (they are
-   static), so the host splits rows into one sequence per style (see
-   `panelBarBindings`: `tabsBefore` / `tabsActive` / `tabsAfter`).
+   re-bind on every state change — screens this size make that free.
+   `{{path}}` also interpolates inside any attribute value, resolved per
+   row at construction (go-html v0.13.0): selection styling rides ONE
+   sequence with a row-scoped class (`class="{{row.state}}"` plus a bound
+   marker glyph — see `settingsFormBindings`), and a row can carry its
+   own box id (`id="knob-{{row.name}}"` — the binding author owns id
+   uniqueness). The before/active/after sequence split earlier slices
+   used for selection styling is retired. A zero-or-one-row sequence is
+   still the idiom for choosing between alternate STATIC texts (the
+   overlays' create/edit titles and gate prompts): text content is markup
+   copy, and moving it into a binding would strip its i18n key.
 3. **Theme** — `html.TermTheme.Classes` maps the markup's class tokens onto
    the existing `uiStyles` palette (`panelBarTheme`). The markup carries no
    colours of its own; the palette in `style.go` stays the single source of
-   visual truth.
+   visual truth. A screen whose lines each pick their own paint binds the
+   class token per row (`class="{{row.class}}"`) over a flattened
+   `{class, text}` sequence — the inspector's capability groups, runtime
+   lines, and inter-group blank separators all ride one sequence this way.
 4. **Boxes and mouse** — render through `html.RenderTermBoxes` to receive the
    `html.BoxMap` of every id'd block, then resolve mouse coordinates with
    `teabox.Resolve` inside the app's `tea.MouseMsg` handling (`onMouse`).
    Screen cells map to frame-inner cells by subtracting `frameInsetRows` /
-   `frameInsetCols` (the outer border). The renderer boxes block-level
-   elements only, so a single-row strip derives its per-item boxes from the
-   render itself (`mergePanelTabBoxes`) and merges them into the same map —
-   teabox's smallest-box rule then prefers the item over the strip.
+   `frameInsetCols` (the outer border). The tab strip is a
+   `<layout variant="LC">` rendered with `TermOptions.FitSlots` (v0.13.0):
+   the brand and tab slots size to their own content, pack edge-to-edge on
+   one row, and record native slot boxes ("L", "C") that tile the strip —
+   the renderer's own receipt, replacing the retired ANSI-segment
+   derivation (`mergePanelTabBoxes`). `panelBarTheme` keeps the L slot's
+   fixed 4-column fit chrome one row tall (space-glyph left/right border),
+   and `panelBarHit` maps a C-slot hit to a tab by walking the same
+   `panelBarCells` the bindings rendered — one cell source, so the render
+   and the resolution can never disagree; the inter-tab gap cells stay
+   non-hits.
 
 A left click on a tab switches panels through exactly the same path as
 `Tab`/`Shift+Tab` (`selectPanel`); the wheel keeps scrolling the transcript.
@@ -100,20 +116,19 @@ row-binding idiom form-shaped screens copy:
   `‹ value ›`), `<dd>` the hint, which the terminal renderer draws as
   exactly the row shape a form needs: value line, indented hint line, blank
   separator.
-- **Rows flow through three sequences** (`rowsBefore` / `rowsActive` /
-  `rowsAfter`) split around the cursor, exactly like the tab strip: class
-  attributes are static, so selection styling is carried by which sequence
-  a row lands in (`settingsFormBindings`).
+- **Rows flow through ONE sequence** — selection styling rides the
+  row-scoped class bind (`class="{{row.state}}"`) and the marker glyph
+  rides the row (`settingsFormBindings`), re-bound on every cursor move.
 - **Selection gutters are marker glyphs** (`›` active, `○` idle): the
   parser drops whitespace-only runs between siblings, so a plain two-space
   gutter cannot be expressed in markup.
 - **Rows are block-shaped**, so the `.ctml` file indents freely; only the
   single-row constructs inside a row (the `<dt>` line, the footer) stay on
   one source line.
-- **No per-row boxes** — an `<each>` row cannot vary its `id` any more than
-  its `class`, so form rows record nothing in a box map; a screen that
-  needs row clicks either enumerates its rows statically or derives boxes
-  from the render as the tab strip does.
+- **Per-row boxes ride row-scoped ids** — `id="knob-{{row.name}}"`
+  resolves per row, so each block-shaped row records its own box under a
+  box-recording render (inert under `RenderTerm`, ready for a mouse
+  consumer); the binding author owns id uniqueness.
 
 `preferences.go` is the preference *store* (config load/set/commit), not a
 screen — it has no rendering to migrate; the preference-editing UI is the
@@ -126,7 +141,9 @@ The Models panel (`picker.go` + `picker.ctml`) and the Tools tab
 
 - **A Bubbles-list screen keeps its state in `list.Model`** (items, cursor,
   fuzzy filter, pagination through `Update`) and derives its row bindings
-  from it — the current page split before/active/after; the host truncates
+  from it — the current page as one sequence, each row carrying its
+  selection class, marker, and box id (`id="model-{{row.id}}"`, keyed by
+  the model path discovery already de-duplicates on); the host truncates
   each field to the row budget because the page math requires exactly one
   line per `<dt>` (a `<dt>` wraps to the render width, and a wrapped row
   would overflow the page the list delegate sized).
@@ -183,11 +200,43 @@ overlay and noted in each `.ctml` header:
 snapshots, requests, the provider interface and its unavailable stub),
 not a view — it composes nothing and has no rendering to migrate.
 
+### Panels around live widgets, and pre-styled content
+
+The Data panel (`datapanel.go` + `datalist.ctml` + `datadetail.ctml`) and
+the inspector (`inspector.go` + `inspector.ctml`) close the panel
+migration with three idioms:
+
+- **A panel with chrome+widget shape reuses the overlays' HF band seam**:
+  `renderBandFrame` (the theme-agnostic core `renderOverlayFrame` wraps)
+  renders `datalist.ctml`'s header and row bands, and the live Bubbles
+  filter input composes between them; the list's own band theme keeps
+  both bands plain — no footer top padding — so with no widget present
+  the bands join back into the contiguous list.
+- **Pre-styled ANSI rides `<verbatim value="key"/>`**: the detail pane's
+  Glamour-rendered CONTENT and SCORES bodies pass through byte-for-byte.
+  A verbatim value must exist at parse time, so the host always supplies
+  both (empty when nothing is selected), and each carries one trailing
+  newline — the blank separating a body from the next heading travels in
+  the caller-owned bytes. A verbatim is block-level: its section heading
+  sits as its own `<p>` above it and gains the renderer's paragraph
+  blank beneath, where a heading over ordinary rows keeps them adjacent
+  inside its own `<p>`.
+- **A dense pane of single-line rows is `<p>`-per-section with `<br>`
+  rows** (the launch-review body idiom): consecutive `<p>` blocks
+  separate with exactly one blank line, so the inspector reproduces its
+  height-budgeted vertical rhythm without `<h2>` paragraph spacing.
+  Mixed-paint lines flatten to `{class, text}` rows; only a `<p>`'s
+  first line loses a leading gutter, so interior rows keep their
+  two-space cursors and indents, and a row that can open a band leads
+  with a marker glyph instead.
+
 ### Tables and stores
 
-`records.go`, `migrations.go`, and `datasetmigrations.go` are tables in
-the database sense only: the ORM record schemas, the `lem.duckdb`
-migration runner, and the `datasets.duckdb` migration runner. None
+`records.go`, `migrations.go`, `datasetmigrations.go`, and `export.go`
+are data plumbing only: the ORM record schemas, the `lem.duckdb`
+migration runner, the `datasets.duckdb` migration runner, and the
+session exporter (Markdown/JSON files written through `coreio`, palette
+mirrored — its "render" builds the export document, not a screen). None
 composes a screen — like `preferences.go`, `markdown.go`, and
 `agentcap.go` before them, they have no rendering to migrate.
 

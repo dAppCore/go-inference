@@ -24,34 +24,49 @@ import (
 //     exactly as the transcript composes Glamour output around
 //     ctml-rendered chrome.
 //
-// renderOverlayFrame is the HF idiom's seam: it renders the layout once
-// through RenderTermBoxes and splits the output at the H slot's own
-// recorded box height — the renderer's receipt for where the header band
-// ends — so the host never re-measures rendered chrome.
+// renderOverlayFrame is the HF idiom's seam for overlays: renderBandFrame
+// under the overlay theme.
 func renderOverlayFrame(src []byte, width int, styles uiStyles, bindings ...ctml.Bindings) (head, foot string) {
+	return renderBandFrame(src, width, overlayFrameTheme(styles), bindings...)
+}
+
+// renderOverlayLayout is the HCF idiom's seam for overlays: renderBandLayout
+// under the overlay theme.
+func renderOverlayLayout(src []byte, width int, styles uiStyles, bindings ...ctml.Bindings) string {
+	return renderBandLayout(src, width, overlayFrameTheme(styles), bindings...)
+}
+
+// renderBandFrame is the HF idiom's theme-agnostic core: it renders the
+// layout once through RenderTermBoxes and splits the output at the H slot's
+// own recorded box height — the renderer's receipt for where the header band
+// ends — so the host never re-measures rendered chrome. Overlays call it
+// through renderOverlayFrame; a primary panel with the same chrome+widget
+// shape (the Data list around its live filter input) calls it with its own
+// band theme.
+func renderBandFrame(src []byte, width int, theme *html.TermTheme, bindings ...ctml.Bindings) (head, foot string) {
 	layout, err := ctml.ParseLayout(src, bindings...)
 	if err != nil {
-		// Overlay markup is embedded and static, so a parse failure is a
-		// build defect; the TestRender<Overlay>_Good tests pin each file
+		// Band markup is embedded and static, so a parse failure is a
+		// build defect; the TestRender<Surface>_Good tests pin each file
 		// as parseable.
 		return "", ""
 	}
-	rendered, boxes := layout.RenderTermBoxes(html.NewContext(), html.TermOptions{Width: width, Theme: overlayFrameTheme(styles)})
+	rendered, boxes := layout.RenderTermBoxes(html.NewContext(), html.TermOptions{Width: width, Theme: theme})
 	lines := core.Split(rendered, "\n")
 	split := min(boxes["H"].Height, len(lines))
 	return core.Join("\n", lines[:split]...), core.Join("\n", lines[split:]...)
 }
 
-// renderOverlayLayout is the HCF idiom's seam: one RenderTerm call for an
-// overlay whose every region is text.
-func renderOverlayLayout(src []byte, width int, styles uiStyles, bindings ...ctml.Bindings) string {
+// renderBandLayout is the HCF idiom's theme-agnostic core: one RenderTerm
+// call for a surface whose every region is text.
+func renderBandLayout(src []byte, width int, theme *html.TermTheme, bindings ...ctml.Bindings) string {
 	layout, err := ctml.ParseLayout(src, bindings...)
 	if err != nil {
 		// Embedded static markup — a parse failure is a build defect (see
-		// renderOverlayFrame).
+		// renderBandFrame).
 		return ""
 	}
-	return layout.RenderTerm(html.NewContext(), html.TermOptions{Width: width, Theme: overlayFrameTheme(styles)})
+	return layout.RenderTerm(html.NewContext(), html.TermOptions{Width: width, Theme: theme})
 }
 
 // overlayFrameTheme maps overlay markup onto the existing palette, so the
