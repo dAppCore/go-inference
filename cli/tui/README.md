@@ -247,6 +247,59 @@ content-sized grid, and none of those tags is reserved by ctml — but a
 label+detail row list is not a table: it stays on the `<dl>` idiom
 settings and the picker established.
 
+### The app shell
+
+`layout.go` (`renderFrame` + `shell.ctml`) closes the migration at the
+outermost layer: the permanent frame every primary panel renders inside
+— tab strip, session strip, the active panel/overlay body, footer key
+hints, all inside one rounded border.
+
+- **A `<layout variant="HF">` band-split, not a full HLCRF page.** The
+  header (tab strip + session strip, already joined and each already
+  fitted to the frame's inner width) and the footer (status + key hints,
+  likewise pre-fitted) ride `<verbatim>` in the H and F slots;
+  `renderBandFrame` (the same HF idiom overlays and the Data list's live
+  filter input already use) splits the render at the H slot's own
+  recorded box height, and the host composes the region — the active main
+  panel, plus the wide/toggled inspector, `renderWorkspaceRegion` —
+  between the two bands, exactly as a widget-carrying overlay composes a
+  live Bubbles widget between its own bands.
+- **The Content slot is a dead end for full-width verbatim.** Unlike
+  Header/Footer/Sidebar/Aside, `renderTermContent` hardcodes a `(0,1)`
+  padding with no `TermTheme` override; content already fitted to the
+  slot's own width arrives one column too wide once that padding lands,
+  and the slot's own `Width()` enforcement word-wraps the overflow onto a
+  spurious extra row instead of leaving it byte-exact. `renderTermBox`
+  (Sidebar/Aside — L and R) carries the same defect through its own
+  hardcoded `-4`/`-2` offsets. H and F have no such tax — both route
+  through nothing but the (fully themeable, here stripped-to-blank)
+  `theme.Header`/`theme.Footer` style — so the region stays host-composed
+  and rides between the bands rather than through any middle-band slot.
+  `wideInspectorWidth`, `measureFrame`'s per-`layoutKind` maths, and
+  `renderWorkspaceRegion`'s wide/compact/narrow arrangements are therefore
+  unchanged: none of it is a rendering-composition concern .ctml can take
+  over, since the one slot that could hold it corrupts pre-fitted content,
+  and the arithmetic itself has nowhere to live in a language with no
+  operators (docs/ctml.md S:8.4).
+- **Mouse hit-testing needed no re-plumbing.** `onMouse` resolves against
+  its own independent `renderPanelBarBoxes` call, keyed off
+  `frameInsetRows`/`frameInsetCols` and the tab strip's row-0 position —
+  both unchanged by this slice, since the tab strip's own render path
+  (`renderPanelBar`, `tabs.ctml`) is untouched; it now merely arrives at
+  the shell as a pre-rendered value instead of a `JoinVertical` argument.
+- **The chat transcript stays hand-composed.** `renderTranscript`'s
+  turn-by-turn Glamour composition is a list whose row COUNT is unbounded
+  and whose per-row body is pre-styled ANSI — exactly the `<each>` +
+  per-row `<verbatim>` shape a transcript would need — but `<verbatim
+  value="key">` resolves `key` once against the document-wide
+  `Bindings.Values` at PARSE time (`ctml/parse.go`'s `parseVerbatim`), not
+  per row at render time the way a `{{path}}` bind does; every row inside
+  an `<each>` would render the identical fixed content. Converting the
+  transcript would need either an unbounded flat list of named verbatim
+  slots (impractical) or row-scoped verbatim resolution go-html does not
+  have yet (mirroring how `id="row-{{row.id}}"` already resolves per row
+  for box identification). Left unconverted, not silently skipped.
+
 ## Keys
 
 | Key | Scope | Action |
