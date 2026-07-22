@@ -402,7 +402,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		help:               newHelpOverlay(keys, styles),
 		inspector:          newInspector(),
 		agent:              agent,
-		picker:             newPicker(styles),
+		picker:             newPicker(),
 		spin:               sp,
 		input:              in,
 		cfg:                cfg,
@@ -1174,7 +1174,6 @@ func (a *app) rebuildTheme(selected theme) {
 	}
 	a.styles = newUIStyles(selected)
 	a.markdown = newMarkdownRenderer(selected.name)
-	a.picker.Styles.Title = a.styles.title
 	if a.palette != nil {
 		a.palette.list.Styles.Title = a.styles.title
 	}
@@ -3162,7 +3161,7 @@ func (a app) panelView() string {
 	}
 	switch a.activePanel {
 	case panelModels:
-		return a.picker.View()
+		return renderPicker(a.picker, measureFrame(a.width, a.height, a.inspectorOpen).mainWidth, a.styles)
 	case panelService:
 		return a.svc.view(a.modelName, a.width, a.styles)
 	case panelWork:

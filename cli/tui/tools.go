@@ -3,9 +3,14 @@
 package tui
 
 import (
+	_ "embed"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/parser"
 )
@@ -100,27 +105,77 @@ func (t *toolState) execute(call inference.ToolCall) string {
 	return "error: unknown tool " + call.Name
 }
 
-func (t toolState) view(width int, styles uiStyles) string {
-	var b core.Builder
-	b.WriteString(styles.title.Render("tools") + "\n\n")
-	state := "disabled — replies are plain chat"
-	if t.enabled {
-		state = "enabled — declarations ride the system turn; calls run locally and feed back"
+// toolsCTML is the Tools tab's markup — see tools.ctml for the seams it
+// exposes (the state/tools/recent sequences, class tokens, the tools-panel
+// block id).
+//
+//go:embed tools.ctml
+var toolsCTML []byte
+
+// toolsPanelBindings binds the tab's dynamic content: the enabled-state line
+// (a lone dynamic value riding a one-row sequence), one row per built-in
+// tool, and — only when calls have run — the "recent calls" heading (a
+// zero-or-one-row sequence, the conditional-section idiom) with the last
+// five receipts. The two-cell gutter between a tool name and its
+// description travels in the bound desc value, because a whitespace-only
+// source run between sibling spans drops in the parser.
+func toolsPanelBindings(state toolState) ctml.Bindings {
+	stateText := "disabled — replies are plain chat"
+	if state.enabled {
+		stateText = "enabled — declarations ride the system turn; calls run locally and feed back"
 	}
-	b.WriteString("  " + styles.accent.Render("function calling: ") + styles.answer.Render(state) + "\n\n")
-	for _, bt := range t.tools {
-		b.WriteString("  " + styles.answer.Render(bt.decl.Name) + "  " + styles.thought.Render(bt.decl.Description) + "\n")
+	sequences := map[string][]map[string]any{
+		"state":       {{"text": stateText}},
+		"tools":       {},
+		"recentTitle": {},
+		"recent":      {},
 	}
-	if len(t.lastRun) > 0 {
-		b.WriteString("\n" + styles.title.Render("recent calls") + "\n")
-		start := len(t.lastRun) - 5
-		if start < 0 {
-			start = 0
+	for _, tool := range state.tools {
+		sequences["tools"] = append(sequences["tools"], map[string]any{
+			"name": tool.decl.Name,
+			"desc": "  " + tool.decl.Description,
+		})
+	}
+	if len(state.lastRun) > 0 {
+		sequences["recentTitle"] = append(sequences["recentTitle"], map[string]any{})
+		start := max(0, len(state.lastRun)-5)
+		for _, receipt := range state.lastRun[start:] {
+			sequences["recent"] = append(sequences["recent"], map[string]any{"receipt": receipt})
 		}
-		for _, r := range t.lastRun[start:] {
-			b.WriteString("  " + styles.thought.Render(r) + "\n")
-		}
 	}
-	b.WriteString("\n" + styles.status.Render("enter toggles · calls appear dim in the chat transcript"))
-	return b.String()
+	return ctml.Bindings{Sequences: sequences}
+}
+
+// toolsPanelTheme maps the markup's class tokens onto the existing palette,
+// so the .ctml render reuses uiStyles paint exactly — no colours of its own.
+func toolsPanelTheme(styles uiStyles) *html.TermTheme {
+	theme := html.DefaultTermTheme()
+	theme.Text = styles.answer
+	theme.Heading = styles.title // the <h2> section titles
+	theme.Classes = map[string]lipgloss.Style{
+		"tool-label":   styles.accent,
+		"tool-state":   styles.answer,
+		"tool-name":    styles.answer,
+		"tool-desc":    styles.thought,
+		"tool-receipt": styles.thought,
+		"tool-keys":    styles.status,
+	}
+	return theme
+}
+
+// renderTools parses tools.ctml with the current tool bindings and renders
+// it through the go-html terminal renderer: the tab title, the
+// function-calling state line, one line per built-in tool, the recent-call
+// receipts when any exist, and the key footer.
+func renderTools(state toolState, width int, styles uiStyles) string {
+	if width <= 0 {
+		return ""
+	}
+	tree, err := ctml.Parse(toolsCTML, toolsPanelBindings(state))
+	if err != nil {
+		// tools.ctml is embedded and static, so a parse failure is a build
+		// defect; TestRenderTools_Good pins the markup as parseable.
+		return ""
+	}
+	return html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: toolsPanelTheme(styles)})
 }

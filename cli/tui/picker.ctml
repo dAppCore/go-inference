@@ -1,0 +1,52 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  picker.ctml : the Models panel (discovered checkpoints, one row per
+  model, with filter, empty, and page state).
+
+  Host seams (picker.go):
+    - Sequences  rowsBefore / rowsActive / rowsAfter : the current PAGE of
+      the Bubbles list model's visible items, split around its cursor.
+      Three sequences because a class attribute is a static string in
+      .ctml (an <each> row cannot vary its own class), so selection
+      styling is carried by WHICH sequence a row lands in; the host
+      re-binds the split on every update. State stays in list.Model —
+      this file only draws it.
+    - Sequences  filter / empty / page : zero-or-one-row conditional
+      sections — the typed filter while filtering, the "No items." text
+      when nothing is discovered, and "page x/y" when the list paginates.
+    - Classes    row-idle / row-active / row-hint / filter-prompt /
+      filter-value / picker-empty / picker-page / picker-keys : mapped
+      onto the existing uiStyles palette by modelPickerTheme.
+    - id="model-picker" : the block a box-recording render would identify;
+      inert under RenderTerm today, ready for a mouse consumer.
+
+  Row shape: <dt> is the marker + model name, <dd> the "type  path" hint
+  the renderer indents beneath it, and each <dl> closes with the blank
+  separator — three cells per row, the same density the list model's
+  default delegate paginates by (height 2 + spacing 1), so a bound page
+  always fits the pane. The host truncates name and hint to the row
+  budget because <dt> lines never wrap. Selection gutters are marker
+  glyphs (› active, ○ idle): the parser drops whitespace-only runs
+  between siblings, so a plain gutter cannot be expressed in markup.
+  Single-row constructs stay on one source line so a text run's edge
+  whitespace ("Filter: ") survives.
+-->
+<section id="model-picker">
+<h2>Models</h2>
+<each items="filter" as="row"><p><span class="filter-prompt">Filter: </span><span class="filter-value">{{row.value}}</span></p></each>
+<each items="rowsBefore" as="row"><dl>
+  <dt><span class="row-idle">○ <span>{{row.name}}</span></span></dt>
+  <dd><span class="row-hint">{{row.detail}}</span></dd>
+</dl></each>
+<each items="rowsActive" as="row"><dl>
+  <dt><span class="row-active">› <span>{{row.name}}</span></span></dt>
+  <dd><span class="row-hint">{{row.detail}}</span></dd>
+</dl></each>
+<each items="rowsAfter" as="row"><dl>
+  <dt><span class="row-idle">○ <span>{{row.name}}</span></span></dt>
+  <dd><span class="row-hint">{{row.detail}}</span></dd>
+</dl></each>
+<each items="empty" as="row"><p class="picker-empty">{{row.text}}</p></each>
+<each items="page" as="row"><p class="picker-page">{{row.label}}</p></each>
+<p class="picker-keys">↑/↓ select · / filter · enter load</p>
+</section>

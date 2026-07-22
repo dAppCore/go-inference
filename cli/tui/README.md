@@ -114,6 +114,32 @@ row-binding idiom form-shaped screens copy:
 screen — it has no rendering to migrate; the preference-editing UI is the
 inspector.
 
+### Leaf widgets
+
+The Models panel (`picker.go` + `picker.ctml`) and the Tools tab
+(`tools.go` + `tools.ctml`) add the leaf-widget idioms:
+
+- **A Bubbles-list screen keeps its state in `list.Model`** (items, cursor,
+  fuzzy filter, pagination through `Update`) and derives its row bindings
+  from it — the current page split before/active/after; the host truncates
+  each field to the row budget because `<dt>` lines never wrap.
+- **Adjacent single-line rows ride ONE `<p>` with a `<br>` closing each
+  `<each>` row** — separate block elements would gain blank separators.
+- **A section that appears only with data is an `<each>` over a
+  zero-or-one-row sequence** (the same one-row trick a lone dynamic value
+  uses); an empty sequence renders nothing, heading included.
+- **A plain gutter between two bound spans travels in the bound value**
+  (whitespace-only source runs drop; a gutter with a glyph can stay in
+  markup as tabs/settings do).
+
+`markdown.go` is the Glamour render *cache* (per-width renderers, hashed
+turn results, stream refresh plumbing), not a view — it composes nothing
+and has no rendering to migrate. Its output is pre-styled ANSI text, which
+cannot ride a `.ctml` document at all: ANSI escapes are invalid XML
+characters, `<raw>` content is static (bindings stay literal inside it),
+and the terminal renderer re-wraps inline runs. The transcript screen
+composes Glamour output *around* ctml-rendered chrome instead.
+
 ## Keys
 
 | Key | Scope | Action |
