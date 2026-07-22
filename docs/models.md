@@ -71,7 +71,7 @@ auto-arms a detected drafter). Two rules, both measured:
 Gated-delta linear attention interleaved with full attention (`full_attention_interval 4`),
 262144-token context, served through the factory route (`model.Assemble` + arch_session with the
 fused whole-token chain decode, `engine/metal/arch_qwen_fused.go`; the parallel composed engine
-retired in #50) with the device gated-delta block (`docs/design-hybrid-recurrence.md`). Both
+retired in #50) with the device gated-delta block. Both
 artefact forms serve: the mlx-community 4-bit conversions (the serving form) and the official
 `Qwen/` bf16 exports (the source/eval form). Sub-2-bit packs (Bonsai 1-bit) serve through the
 LoadLinear b1→b2 exact repack + owned-weight resident binding (#60; the post-#50 up-front decline

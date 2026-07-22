@@ -64,7 +64,7 @@ close by porting a kernel, it is the ecosystem's own shape: Marlin, the fast
 kernel both GPTQ and AWQ lean on, is hand-written Nvidia tensor-core PTX with
 no ROCm equivalent. Scoping ROCm quant work as "port GPTQ to HIP" swims
 against that grain; the native-feeling targets are GGUF, FP8, and MXFP4
-above. See `docs/design-rocm.md` §A.2 and the
+above. See the
 [vLLM ROCm quantization compatibility matrix](https://docs.vllm.ai/en/latest/features/quantization/)
 for the full picture.
 
