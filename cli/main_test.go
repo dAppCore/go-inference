@@ -45,6 +45,7 @@ func TestRunCommand_Dispatch(t *testing.T) {
 		{"data route", []string{"data"}, 2, false},
 		{"ebook route", []string{"ebook"}, 2, false},
 		{"spec route", []string{"spec", "--output", specOut}, 0, false},
+		{"update route", []string{"update", "--help"}, 0, false},
 		{"version route", []string{"version"}, 0, false},
 		{"version flag", []string{"--version"}, 0, false},
 	} {
@@ -91,6 +92,7 @@ func TestHelpPresentsLongFlagsOnly(t *testing.T) {
 		{"data", "review", "--help"},
 		{"spec", "--help"},
 		{"ebook", "--help"},
+		{"update", "--help"},
 		{"tui", "--help"},
 	} {
 		t.Run(strings.Join(argv, "_"), func(t *testing.T) {
@@ -115,7 +117,7 @@ func TestPrintUsage(t *testing.T) {
 	var buf bytes.Buffer
 	printUsage(&buf)
 	out := buf.String()
-	for _, verb := range []string{"serve", "generate", "ssd", "sft", "tune", "pack", "ebook", "quant", "data", "spec"} {
+	for _, verb := range []string{"serve", "generate", "ssd", "sft", "tune", "pack", "ebook", "quant", "data", "spec", "update"} {
 		if !core.Contains(out, verb) {
 			t.Errorf("usage missing verb %q", verb)
 		}
