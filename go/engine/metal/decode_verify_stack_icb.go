@@ -387,6 +387,10 @@ func (r *verifyStackRecorder) skip(class string) bool {
 // basePos (the #71 bootstrap-identity probe isolating the rewrite primitive).
 var verifyStackNoRebind = os.Getenv("LTHN_VERIFY_STACK_NO_REBIND") == "1"
 
+// verifyStackOwnEncoder (LTHN_VERIFY_STACK_OWN_ENCODER=1) executes the replay
+// in a dedicated serial encoder instead of mid-fold — the #71 integration probe.
+var verifyStackOwnEncoder = os.Getenv("LTHN_VERIFY_STACK_OWN_ENCODER") == "1"
+
 var verifyStackRowHashArmed = os.Getenv("LTHN_VERIFY_STACK_ROWHASH") == "1"
 
 func (r *verifyStackRecorder) addResident(b metal.MTLBuffer) {
@@ -407,6 +411,11 @@ func (r *verifyStackRecorder) addResident(b metal.MTLBuffer) {
 func (r *verifyStackRecorder) captureBind(buf metal.MTLBuffer, off, idx uint) {
 	r.addResident(buf)
 	r.lastBinds = append(r.lastBinds, vsCapturedBind{buf: bufID(buf), off: off, idx: idx})
+	if r.debugOps && verifyStackSkipOps != nil {
+		// bind-level trace only on skip-narrowed streams (full streams would
+		// log ~7k lines) — the #71 topology-vs-micro differ.
+		nativeTraceLog(core.Sprintf("bind cmd=%d idx=%d buf=%x off=%d\n", r.used-1, idx, bufID(buf), off))
+	}
 }
 
 // nextCmd allocates the next ICB command. Every command but the pass's first

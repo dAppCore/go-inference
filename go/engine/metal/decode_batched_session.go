@@ -1529,7 +1529,17 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 				nativeTraceLog("verify-stack resident sweep done\n")
 			}
-			vsReplay.executeInto(enc, basePos, pleSlabBuf)
+			if verifyStackOwnEncoder {
+				// #71 probe: the replay executes in its OWN serial encoder —
+				// isolates the mid-encoder executeCommands integration.
+				endEncodingFast(enc)
+				encICB := computeCommandEncoderFast(cb)
+				vsReplay.executeInto(encICB, basePos, pleSlabBuf)
+				endEncodingFast(encICB)
+				enc = computeCommandEncoderFast(cb)
+			} else {
+				vsReplay.executeInto(enc, basePos, pleSlabBuf)
+			}
 			readRows, outRows = inRows, inRows
 			readOff = rowOff
 			if verifyStackReplayCmds > 0 {
