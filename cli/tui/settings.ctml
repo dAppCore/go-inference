@@ -3,15 +3,18 @@
   settings.ctml : the Settings form (one <dl> row per knob + the key footer).
 
   Host seams (settings.go):
-    - Sequences  rowsBefore / rowsActive / rowsAfter : the knob rows in
-      cursor order, split around the selected row. Three sequences because a
-      class attribute is a static string in .ctml (an <each> row cannot vary
-      its own class), so selection styling is carried by WHICH sequence a
-      row lands in; the host re-binds the split on every cursor move.
-    - Classes    row-idle / row-active / row-value / row-hint / form-keys :
+    - Sequence  rows : ONE row per knob {state, marker, name, value, hint}
+      in cursor order — selection styling rides the row-scoped class bind
+      class="{{row.state}}" (go-html v0.13.0) and the marker glyph rides
+      the row (› active, ○ idle), so the before/active/after sequence
+      split this file previously needed is retired; the host re-binds on
+      every cursor move.
+    - Classes   row-idle / row-active / row-value / row-hint / form-keys :
       mapped onto the existing uiStyles palette by settingsFormTheme.
-    - id="settings-form" : the block a box-recording render would identify;
-      inert under RenderTerm today, ready for a mouse consumer.
+    - id="knob-{{row.name}}" : each row records its own box under a
+      box-recording render (the binding author owns id uniqueness — knob
+      names are unique); inert under RenderTerm today, ready for a mouse
+      consumer. id="settings-form" is the enclosing block.
 
   Row shape: <dt> is the value line (marker + name + ‹ value ›), <dd> the
   hint the renderer indents beneath it, and each <dl> closes with the blank
@@ -24,16 +27,8 @@
 -->
 <section id="settings-form">
 <h2>settings</h2>
-<each items="rowsBefore" as="row"><dl>
-  <dt><span class="row-idle">○ {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
-  <dd><span class="row-hint">{{row.hint}}</span></dd>
-</dl></each>
-<each items="rowsActive" as="row"><dl>
-  <dt><span class="row-active">› {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
-  <dd><span class="row-hint">{{row.hint}}</span></dd>
-</dl></each>
-<each items="rowsAfter" as="row"><dl>
-  <dt><span class="row-idle">○ {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
+<each items="rows" as="row"><dl id="knob-{{row.name}}">
+  <dt><span class="{{row.state}}">{{row.marker}} {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
   <dd><span class="row-hint">{{row.hint}}</span></dd>
 </dl></each>
 <p class="form-keys">↑/↓ select · ←/→ change · ctrl+s saves · esc closes</p>

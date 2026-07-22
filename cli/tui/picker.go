@@ -100,22 +100,22 @@ func newPicker() list.Model {
 var pickerCTML []byte
 
 // modelPickerBindings derives the panel's rows from the list model's own
-// state: the current page of visible items split around the cursor
-// (before / active / after, because .ctml class attributes are static
-// strings — an <each> row cannot vary its own class), plus the
-// zero-or-one-row conditional sections for the typed filter, the empty
-// state, and the page position. Name and hint are truncated host-side to
-// the row budget because the page math budgets exactly three cells per
-// row — a <dt> now wraps to the render width, and a wrapped row would
-// overflow the page the list delegate sized.
+// state: the current page of visible items as ONE sequence — selection
+// styling rides the row-scoped class bind (class="{{row.state}}", go-html
+// v0.13.0) and the marker glyph rides the row, so no before/active/after
+// split is needed — plus the zero-or-one-row conditional sections for the
+// typed filter, the empty state, and the page position. Each row also
+// binds its box id (the model path — unique, discovery de-duplicates on
+// it). Name and hint are truncated host-side to the row budget because the
+// page math budgets exactly three cells per row — a <dt> wraps to the
+// render width, and a wrapped row would overflow the page the list
+// delegate sized.
 func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
 	sequences := map[string][]map[string]any{
-		"filter":     {},
-		"rowsBefore": {},
-		"rowsActive": {},
-		"rowsAfter":  {},
-		"empty":      {},
-		"page":       {},
+		"filter": {},
+		"rows":   {},
+		"empty":  {},
+		"page":   {},
 	}
 	if picker.FilterState() == list.Filtering {
 		sequences["filter"] = append(sequences["filter"], map[string]any{"value": picker.FilterValue()})
@@ -129,18 +129,21 @@ func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
 		if !ok {
 			continue
 		}
-		row := map[string]any{
+		state, marker := "row-idle", "○"
+		if index == active {
+			state, marker = "row-active", "›"
+		}
+		id := entry.Title()
+		if model, ok := item.(modelItem); ok {
+			id = model.path
+		}
+		sequences["rows"] = append(sequences["rows"], map[string]any{
+			"state":  state,
+			"marker": marker,
+			"id":     id,
 			"name":   ansi.Truncate(entry.Title(), budget, "…"),
 			"detail": ansi.Truncate(entry.Description(), budget, "…"),
-		}
-		switch {
-		case index < active:
-			sequences["rowsBefore"] = append(sequences["rowsBefore"], row)
-		case index == active:
-			sequences["rowsActive"] = append(sequences["rowsActive"], row)
-		default:
-			sequences["rowsAfter"] = append(sequences["rowsAfter"], row)
-		}
+		})
 	}
 	if len(visible) == 0 && picker.FilterState() != list.Filtering {
 		sequences["empty"] = append(sequences["empty"], map[string]any{"text": "No items."})
