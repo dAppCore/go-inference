@@ -65,11 +65,16 @@ by go-html's terminal renderer (`dappco.re/go/html`). The tab strip
    seams the file exposes.
 2. **Bindings** — dynamic rows enter at parse time through `ctml.Bindings`
    `Sequences` and `<each items="..." as="row">`, bound in text as
-   `{{row.field}}`. Re-parse and re-bind on every state change — screens
-   this size make that free. A per-row style variation cannot ride a class
-   attribute (they are static), so the host splits rows into one sequence
-   per style (see `panelBarBindings`: `tabsBefore` / `tabsActive` /
-   `tabsAfter`).
+   `{{row.field}}` — literal text and binds mix freely in one run
+   (`○ {{row.name}}`), and a lone always-present scalar rides
+   `Bindings.Values` at document scope (`{{state}}` outside any `<each>`;
+   row scope wins inside one). A `Values` miss renders empty while the
+   literal text around it remains, so a value whose absence must hide a
+   whole line still rides a zero-or-one-row sequence. Re-parse and
+   re-bind on every state change — screens this size make that free. A
+   per-row style variation cannot ride a class attribute (they are
+   static), so the host splits rows into one sequence per style (see
+   `panelBarBindings`: `tabsBefore` / `tabsActive` / `tabsAfter`).
 3. **Theme** — `html.TermTheme.Classes` maps the markup's class tokens onto
    the existing `uiStyles` palette (`panelBarTheme`). The markup carries no
    colours of its own; the palette in `style.go` stays the single source of
@@ -122,12 +127,16 @@ The Models panel (`picker.go` + `picker.ctml`) and the Tools tab
 - **A Bubbles-list screen keeps its state in `list.Model`** (items, cursor,
   fuzzy filter, pagination through `Update`) and derives its row bindings
   from it — the current page split before/active/after; the host truncates
-  each field to the row budget because `<dt>` lines never wrap.
+  each field to the row budget because the page math requires exactly one
+  line per `<dt>` (a `<dt>` wraps to the render width, and a wrapped row
+  would overflow the page the list delegate sized).
 - **Adjacent single-line rows ride ONE `<p>` with a `<br>` closing each
   `<each>` row** — separate block elements would gain blank separators.
 - **A section that appears only with data is an `<each>` over a
-  zero-or-one-row sequence** (the same one-row trick a lone dynamic value
-  uses); an empty sequence renders nothing, heading included.
+  zero-or-one-row sequence**; an empty sequence renders nothing, heading
+  included. A lone *always-present* value rides `Bindings.Values` instead
+  (the tools state line) — the conditional section cannot, because a
+  `Values` miss renders empty while its surrounding literal text remains.
 - **A plain gutter between two bound spans travels in the bound value**
   (whitespace-only source runs drop; a gutter with a glyph can stay in
   markup as tabs/settings do).
@@ -173,6 +182,21 @@ overlay and noted in each `.ctml` header:
 `agentcap.go` is the agent capability *model* (feature catalogue,
 snapshots, requests, the provider interface and its unavailable stub),
 not a view — it composes nothing and has no rendering to migrate.
+
+### Tables and stores
+
+`records.go`, `migrations.go`, and `datasetmigrations.go` are tables in
+the database sense only: the ORM record schemas, the `lem.duckdb`
+migration runner, and the `datasets.duckdb` migration runner. None
+composes a screen — like `preferences.go`, `markdown.go`, and
+`agentcap.go` before them, they have no rendering to migrate.
+
+No TUI screen is genuinely columnar today. When one arrives, the
+terminal renderer has a real table path — `<table>`/`<tr>`/`<td>` (and
+`thead`/`th`) render through lipgloss/table as a bordered,
+content-sized grid, and none of those tags is reserved by ctml — but a
+label+detail row list is not a table: it stays on the `<dl>` idiom
+settings and the picker established.
 
 ## Keys
 

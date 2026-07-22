@@ -4,12 +4,17 @@
   list, recent call receipts, and the key footer).
 
   Host seams (tools.go):
-    - Sequences  state / tools / recentTitle / recent : the enabled-state
-      line (one row — a lone dynamic value rides a one-row sequence), the
-      built-in tool rows, the conditional "recent calls" heading (zero or
-      one row — an <each> over an empty sequence renders nothing, so a
-      section that appears only with data rides a zero-or-one-row
-      sequence), and the last five call receipts.
+    - Value      state : the enabled-state text — an always-present lone
+      scalar rides Bindings.Values and binds document-scope ({{state}});
+      the one-row-sequence carrier this line used before Values existed
+      is retired. A CONDITIONAL section still rides a zero-or-one-row
+      sequence: a Values miss renders empty but its surrounding literal
+      text would remain.
+    - Sequences  tools / recentTitle / recent : the built-in tool rows,
+      the conditional "recent calls" heading (zero or one row — an <each>
+      over an empty sequence renders nothing, so a section that appears
+      only with data rides a zero-or-one-row sequence), and the last five
+      call receipts.
     - Classes    tool-label / tool-state / tool-name / tool-desc /
       tool-receipt / tool-keys : mapped onto the existing uiStyles palette
       by toolsPanelTheme.
@@ -26,7 +31,7 @@
 -->
 <section id="tools-panel">
 <h2>tools</h2>
-<each items="state" as="row"><p><span class="tool-label">function calling: </span><span class="tool-state">{{row.text}}</span></p></each>
+<p><span class="tool-label">function calling: </span><span class="tool-state">{{state}}</span></p>
 <p><each items="tools" as="tool"><span class="tool-name">{{tool.name}}</span><span class="tool-desc">{{tool.desc}}</span><br></br></each></p>
 <each items="recentTitle" as="row"><h2>recent calls</h2></each>
 <p><each items="recent" as="row"><span class="tool-receipt">{{row.receipt}}</span><br></br></each></p>

@@ -25,7 +25,9 @@
   separator — three cells per row, the same density the list model's
   default delegate paginates by (height 2 + spacing 1), so a bound page
   always fits the pane. The host truncates name and hint to the row
-  budget because <dt> lines never wrap. Selection gutters are marker
+  budget because the page math requires exactly one line per <dt> — a
+  <dt> wraps to the render width, and a wrapped row would overflow the
+  page the delegate sized. Selection gutters are marker
   glyphs (› active, ○ idle): the parser drops whitespace-only runs
   between siblings, so a plain gutter cannot be expressed in markup.
   Single-row constructs stay on one source line so a text run's edge
@@ -35,15 +37,15 @@
 <h2>Models</h2>
 <each items="filter" as="row"><p><span class="filter-prompt">Filter: </span><span class="filter-value">{{row.value}}</span></p></each>
 <each items="rowsBefore" as="row"><dl>
-  <dt><span class="row-idle">○ <span>{{row.name}}</span></span></dt>
+  <dt><span class="row-idle">○ {{row.name}}</span></dt>
   <dd><span class="row-hint">{{row.detail}}</span></dd>
 </dl></each>
 <each items="rowsActive" as="row"><dl>
-  <dt><span class="row-active">› <span>{{row.name}}</span></span></dt>
+  <dt><span class="row-active">› {{row.name}}</span></dt>
   <dd><span class="row-hint">{{row.detail}}</span></dd>
 </dl></each>
 <each items="rowsAfter" as="row"><dl>
-  <dt><span class="row-idle">○ <span>{{row.name}}</span></span></dt>
+  <dt><span class="row-idle">○ {{row.name}}</span></dt>
   <dd><span class="row-hint">{{row.detail}}</span></dd>
 </dl></each>
 <each items="empty" as="row"><p class="picker-empty">{{row.text}}</p></each>

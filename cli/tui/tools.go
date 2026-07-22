@@ -112,8 +112,9 @@ func (t *toolState) execute(call inference.ToolCall) string {
 //go:embed tools.ctml
 var toolsCTML []byte
 
-// toolsPanelBindings binds the tab's dynamic content: the enabled-state line
-// (a lone dynamic value riding a one-row sequence), one row per built-in
+// toolsPanelBindings binds the tab's dynamic content: the enabled-state
+// text (an always-present lone scalar riding Bindings.Values — the one-row
+// sequence it rode before Values existed is retired), one row per built-in
 // tool, and — only when calls have run — the "recent calls" heading (a
 // zero-or-one-row sequence, the conditional-section idiom) with the last
 // five receipts. The two-cell gutter between a tool name and its
@@ -125,7 +126,6 @@ func toolsPanelBindings(state toolState) ctml.Bindings {
 		stateText = "enabled — declarations ride the system turn; calls run locally and feed back"
 	}
 	sequences := map[string][]map[string]any{
-		"state":       {{"text": stateText}},
 		"tools":       {},
 		"recentTitle": {},
 		"recent":      {},
@@ -143,7 +143,7 @@ func toolsPanelBindings(state toolState) ctml.Bindings {
 			sequences["recent"] = append(sequences["recent"], map[string]any{"receipt": receipt})
 		}
 	}
-	return ctml.Bindings{Sequences: sequences}
+	return ctml.Bindings{Sequences: sequences, Values: map[string]any{"state": stateText}}
 }
 
 // toolsPanelTheme maps the markup's class tokens onto the existing palette,
