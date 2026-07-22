@@ -9,8 +9,10 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	core "dappco.re/go"
 	"github.com/tmc/apple/foundation"
@@ -639,8 +641,59 @@ type vsRecordSink struct {
 
 func (s vsRecordSink) setPSO(pso metal.MTLComputePipelineState) { setICBPSO(s.cmd, pso) }
 func (s vsRecordSink) setBuf(buf metal.MTLBuffer, off, idx uint) {
+	if off >= 1<<32 {
+		// AGX ICB commands mis-encode bind offsets >= 2^32 (#71). Rebase the
+		// bind onto a no-copy window over the same memory so the recorded
+		// offset drops below 2^31 — byte-identical reads, zero copy.
+		nb, noff, ok := vsRebaseHighBind(buf, off)
+		if !ok {
+			s.rec.fail()
+			return
+		}
+		buf, off = nb, noff
+	}
 	s.rec.captureBind(buf, off, idx)
 	setICBKernelBuffer(s.cmd, buf, off, idx)
+}
+
+// vsHighBindWindows memoises the 2GiB-segment no-copy windows the rebase
+// hands out — keyed by source buffer identity and segment base, held for the
+// process (the shard mmap they view outlives every recording).
+var (
+	vsHighBindMu      sync.Mutex
+	vsHighBindWindows = map[[2]uintptr]metal.MTLBuffer{}
+)
+
+// vsRebaseHighBind returns a buffer+offset pair binding the SAME bytes as
+// (buf, off) with the offset under 2^31: a no-copy window over buf's memory
+// at the containing 2GiB-aligned segment base. Fails (ok=false) when the
+// window cannot be built page-aligned — the caller declines the recording.
+func vsRebaseHighBind(buf metal.MTLBuffer, off uint) (metal.MTLBuffer, uint, bool) {
+	const seg = uint(1) << 31
+	base := off &^ (seg - 1)
+	ln := uint(buf.Length())
+	if base >= ln {
+		return nil, 0, false
+	}
+	// page-floor the window: the shard mmap's length is the exact file size,
+	// but its final partial page is mapped regardless, so a floored window
+	// only excludes binds STARTING inside that fragment (declined below).
+	winLen := (ln - base) &^ uint(os.Getpagesize()-1)
+	if winLen == 0 || off-base >= winLen {
+		return nil, 0, false
+	}
+	key := [2]uintptr{bufID(buf), uintptr(base)}
+	vsHighBindMu.Lock()
+	defer vsHighBindMu.Unlock()
+	if w, ok := vsHighBindWindows[key]; ok {
+		return w, off - base, true
+	}
+	w := newNoCopyBuffer(unsafe.Add(buf.Contents(), base), winLen)
+	if w == nil || w.GetID() == 0 {
+		return nil, 0, false
+	}
+	vsHighBindWindows[key] = w
+	return w, off - base, true
 }
 func (s vsRecordSink) setI32(v int32, idx uint) {
 	b := scalarI32(v)

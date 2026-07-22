@@ -42,7 +42,7 @@ func TestVerifyStackICBReplay_RMSAddTwoLayerParity_Good(t *testing.T) {
 		{"e2b-1536-5layer", 1536, 5, false, 0},
 		{"e4b-2560-2layer-shardw", 2560, 2, true, 0},
 		{"e4b-2560-40layer-shardw", 2560, 40, true, 0},
-		{"e4b-2560-2layer-shard4g", 2560, 2, true, 4295067648},
+		{"e4b-2560-2layer-shard4g", 2560, 2, true, 1<<32 + 1<<20},
 	}
 	rng := uint32(0xfeedbeef)
 	next := func() uint32 { rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5; return rng }
@@ -65,9 +65,12 @@ func TestVerifyStackICBReplay_RMSAddTwoLayerParity_Good(t *testing.T) {
 			var shard metal.MTLBuffer
 			shardOff := tc.shardBase
 			if tc.shardW {
-				shard = device.NewBufferWithLengthOptions(tc.shardBase+uint(tc.layers*4*tc.dModel*2+4096), metal.MTLResourceStorageModeShared)
+				page := uint(os.Getpagesize())
+				need := tc.shardBase + uint(tc.layers*4*tc.dModel*2)
+				need = (need + page - 1) &^ (page - 1)
+				shard = device.NewBufferWithLengthOptions(need, metal.MTLResourceStorageModeShared)
 				if shard == nil {
-					t.Skipf("shard allocation of %d bytes unavailable", tc.shardBase)
+					t.Skipf("shard allocation of %d bytes unavailable", need)
 				}
 			}
 			weight := func() wView {
@@ -158,18 +161,8 @@ func TestVerifyStackICBReplay_RMSAddTwoLayerParity_Good(t *testing.T) {
 				rec.recAdd(rh, 0, rm, 0, rb0, 0, rows*tc.dModel)
 				read = rb0
 			}
-			if tc.shardBase >= 1<<32 {
-				// the #71 root-cause pin: a bind at >=2^32 must FAIL the
-				// recording (AGX ICB commands mis-encode such offsets — the
-				// unguarded recording replayed cos≈0.75 against live).
-				if !rec.failed {
-					t.Fatal("recorder accepted a >=2^32 bind offset — the #71 guard is gone")
-				}
-				if vs := rec.finish(); vs != nil {
-					t.Fatal("finish returned a recording despite the >=2^32 bind")
-				}
-				return
-			}
+			// >=2^32 binds REBASE onto no-copy windows over the same memory
+			// (the #71 re-enable): recording succeeds and replays byte-exact.
 			if rec.failed {
 				t.Fatal("recorder failed")
 			}
@@ -209,5 +202,36 @@ func TestVerifyStackICBReplay_RMSAddTwoLayerParity_Good(t *testing.T) {
 				t.Errorf("%s replay rows diverge from live: cos %.6f", tc.name, cos)
 			}
 		})
+	}
+}
+
+// TestVsRebaseHighBind_Ugly pins the rebase edges directly: offsets under
+// 2^31 within the window rebase to (window, off-base); a bind starting inside
+// the page-floored tail fragment declines; base past the buffer declines.
+func TestVsRebaseHighBind_Ugly(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("MLX_METALLIB_PATH not set")
+	}
+	if err := ensureInit(); err != nil {
+		t.Skipf("metal init: %v", err)
+	}
+	page := uint(os.Getpagesize())
+	ln := uint(1)<<32 + 3*page + 123 // odd tail: floored window excludes the final 123 bytes
+	buf := device.NewBufferWithLengthOptions(ln, metal.MTLResourceStorageModeShared)
+	if buf == nil {
+		t.Skip("4GiB allocation unavailable")
+	}
+	if _, _, ok := vsRebaseHighBind(buf, uint(1)<<33); ok {
+		t.Error("base beyond the buffer must decline")
+	}
+	w, off, ok := vsRebaseHighBind(buf, uint(1)<<32+page)
+	if !ok || w == nil || off != page {
+		t.Errorf("in-window bind must rebase to the segment window: ok=%v off=%d", ok, off)
+	}
+	if w2, off2, ok2 := vsRebaseHighBind(buf, uint(1)<<32+2*page); !ok2 || bufID(w2) != bufID(w) || off2 != 2*page {
+		t.Errorf("same-segment bind must reuse the memoised window: ok=%v same=%v off=%d", ok2, ok2 && bufID(w2) == bufID(w), off2)
+	}
+	if _, _, ok := vsRebaseHighBind(buf, uint(1)<<32+3*page+16); ok {
+		t.Error("a bind starting inside the floored tail fragment must decline")
 	}
 }
