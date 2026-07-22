@@ -5,6 +5,7 @@
 package native
 
 import (
+	core "dappco.re/go"
 	"github.com/tmc/apple/metal"
 )
 
@@ -110,6 +111,17 @@ type fastICBSink struct {
 
 func (s fastICBSink) setPSO(pso metal.MTLComputePipelineState) { setICBPSO(s.cmd, pso) }
 func (s fastICBSink) setBuf(buf metal.MTLBuffer, off, idx uint) {
+	if off >= 1<<32 {
+		// AGX ICB commands mis-encode bind offsets >= 2^32 (#71). The arch
+		// lane binds per-tensor buffers (residentBytes) so this never fires
+		// today — rebase if a future layout hands a shard view, warn if the
+		// window can't build (no decline channel here).
+		if nb, noff, ok := vsRebaseHighBind(buf, off); ok {
+			buf, off = nb, noff
+		} else {
+			nativeTraceLog(core.Sprintf("arch ICB: UNREBASABLE bind off=%d (>=2^32) — replay WILL corrupt\n", off))
+		}
+	}
 	setICBKernelBuffer(s.cmd, buf, off, idx)
 }
 func (s fastICBSink) setI32(v int32, idx uint) {

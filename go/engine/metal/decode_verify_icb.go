@@ -259,6 +259,16 @@ type vtRecordSink struct {
 
 func (s vtRecordSink) setPSO(pso metal.MTLComputePipelineState) { setICBPSO(s.cmd, pso) }
 func (s vtRecordSink) setBuf(buf metal.MTLBuffer, off, idx uint) {
+	if off >= 1<<32 {
+		// AGX ICB commands mis-encode bind offsets >= 2^32 (#71) — rebase
+		// onto a no-copy window or decline the recording.
+		nb, noff, ok := vsRebaseHighBind(buf, off)
+		if !ok {
+			s.rec.fail()
+			return
+		}
+		buf, off = nb, noff
+	}
 	s.rec.addResident(buf)
 	setICBKernelBuffer(s.cmd, buf, off, idx)
 }

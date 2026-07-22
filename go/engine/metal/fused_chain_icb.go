@@ -126,6 +126,17 @@ type recSink struct {
 
 func (s recSink) setPSO(pso metal.MTLComputePipelineState) { setICBPSO(s.cmd, pso) }
 func (s recSink) setBuf(buf metal.MTLBuffer, off, idx uint) {
+	if off >= 1<<32 {
+		// AGX ICB commands mis-encode bind offsets >= 2^32 (#71). The chain's
+		// weights are per-tensor buffers today, so this only fires if a future
+		// layout binds a shard view — rebase, or bind broken WITH a loud trace
+		// (this sink has no decline channel).
+		if nb, noff, ok := vsRebaseHighBind(buf, off); ok {
+			buf, off = nb, noff
+		} else {
+			nativeTraceLog(core.Sprintf("fused-chain ICB: UNREBASABLE bind off=%d (>=2^32) — replay WILL corrupt\n", off))
+		}
+	}
 	s.rec.track(buf)
 	setICBKernelBuffer(s.cmd, buf, off, idx)
 }
