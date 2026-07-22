@@ -24,6 +24,7 @@ func TestKeyMap_Good(t *testing.T) {
 		{"inspector", tea.KeyMsg{Type: tea.KeyCtrlO}, keys.ToggleInspector},
 		{"search", tea.KeyMsg{Type: tea.KeyCtrlF}, keys.Search},
 		{"save", tea.KeyMsg{Type: tea.KeyCtrlS}, keys.Save},
+		{"settings", tea.KeyMsg{Type: tea.KeyF2}, keys.Settings},
 		{"help", tea.KeyMsg{Type: tea.KeyF1}, keys.Help},
 	}
 	for _, test := range tests {
