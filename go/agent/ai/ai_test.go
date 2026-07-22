@@ -120,7 +120,7 @@ func TestReadEvents_Good_SkipsMissingDays(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(events))
 	}
-	if events[0].Timestamp != dayOne || events[1].Timestamp != dayThree {
+	if !events[0].Timestamp.Equal(dayOne) || !events[1].Timestamp.Equal(dayThree) {
 		t.Fatalf("events not returned in chronological order: %+v", events)
 	}
 }
