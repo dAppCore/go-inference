@@ -31,8 +31,12 @@ func init() {
 // ignores its argv (serve --addr ... --model ... — whatever serveArgs built)
 // and just stays alive until killed: SIGKILL can't be caught, and a plain
 // `sleep` terminates on SIGTERM by default too, so no trap is needed to
-// satisfy spawn/Stop/Status/crash-restart tests.
-const fakeDriverScript = "#!/bin/sh\nexec sleep 600\n"
+// satisfy spawn/Stop/Status/crash-restart tests. The sleep is invoked by
+// absolute path because isolateDriverLookup deliberately empties PATH — a
+// bare `sleep` exits 127 instantly, turning every spawn into a silent
+// crash-restart storm (the loop raced its own storm and only won on some
+// platforms; caught on the linux CI runner).
+const fakeDriverScript = "#!/bin/sh\nexec /bin/sleep 600\n"
 
 // writeFakeDriver drops an executable fake driver binary named name into dir
 // and returns its path.

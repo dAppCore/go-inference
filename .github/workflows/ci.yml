@@ -26,6 +26,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+          # The module root is go/ (go.sum lives there, not at the repo root); without
+          # this, setup-go's cache aborts with "Dependencies file is not found ...
+          # Supported file pattern: go.sum". This lane only compiles the go/ module.
+          cache-dependency-path: go/go.sum
 
       - name: Portable tests + coverage (default tags — engine/metal excluded)
         working-directory: go

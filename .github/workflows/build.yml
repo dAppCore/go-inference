@@ -1,7 +1,16 @@
-# Build the sovereign `lem` binary for every target and ship the zips.
-# One binary named `lem` per platform (the GPU backend — metal/rocm/cuda — loads
-# its kernel sidecar at runtime); targets are separated by build folder, not by
-# binary name. Zips flow to a rolling `dev` prerelease.
+# Build the sovereign `lem` binary for every hosted-buildable cell and ship the zips.
+#
+# lem links DuckDB (go-store/chathistory) via cgo, so there is NO pure-Go build and
+# NO cheap cross-compile: each cell is a NATIVE cgo build on a matching runner.
+# GitHub owns the portable cpu cells it can build natively; the ROCm/CUDA cells
+# (amd, cuda) stay on GitLab's homelab runner (it has the toolchain); the metal
+# cell needs a macOS 26 / Metal 4 box to compile the metallibs, so it rides a
+# self-hosted Mac lane (dormant until ENABLE_MACOS_METAL is set).
+#
+# Every build ships in two packagings of the same binary (see docs/release-artifacts.md):
+#   Native  {os}-{arch}-lem-{backend}-{version}.zip          -> binary `lem`
+#   Driver  {os}-{arch}-lem-driver-{backend}-{version}.zip   -> binary `lem-{backend}`
+# Zips flow to a rolling `dev` prerelease; version is `dev-<short-sha>`.
 name: Build
 
 on:
@@ -12,77 +21,140 @@ on:
 permissions:
   contents: read
 
+env:
+  GO_VERSION: "1.26"
+
 jobs:
-  build:
-    name: lem · ${{ matrix.goos }}/${{ matrix.goarch }}
-    runs-on: ${{ matrix.os }}
+  # ---- cpu cells: native cgo, one per hosted os/arch (duckdb ships prebuilt libs
+  #      for darwin/{amd64,arm64}, linux/{amd64,arm64}, windows/amd64 — NOT
+  #      windows/arm64, which is therefore not a cell). The workspace (go.work)
+  #      wires cli -> local go/; GOWORK=off cannot build the binary because cli
+  #      pins a published go/inference tag that lags the local tree. ----------------
+  cpu:
+    name: lem cpu · ${{ matrix.os_name }}/${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest,     goos: darwin,  goarch: arm64, metal: true }
-          - { os: ubuntu-latest,    goos: linux,   goarch: amd64 }
-          - { os: ubuntu-24.04-arm, goos: linux,   goarch: arm64 }
-          - { os: windows-latest,   goos: windows, goarch: amd64 }
-    env:
-      CGO_ENABLED: "1"
-      GOWORK: "off"
+          # Dropped cells, proven by live runs 2026-07-22 (docs/release-artifacts.md):
+          #  - macos/x86_64: the macos-13 runner label is retired (queued forever) —
+          #    no hosted Intel Mac remains; revisit only on real demand.
+          #  - windows/x86_64: lem's code is not Windows-portable yet (unix-only
+          #    syscall.Kill + raw-fd reads outside build constraints) — a code
+          #    campaign, not a CI matrix entry; restore the cell when it compiles.
+          - { runner: macos-latest,     os_name: macos,   arch: aarch64, exe: "" }
+          - { runner: ubuntu-latest,    os_name: linux,   arch: x86_64,  exe: "" }
+          - { runner: ubuntu-24.04-arm, os_name: linux,   arch: aarch64, exe: "" }
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive          # metal needs external/mlx
+        # cpu build needs neither external/mlx (metal) nor the ROCm sources.
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: ${{ env.GO_VERSION }}
+          # go.sum lives in the modules, not the repo root; list both so setup-go's
+          # cache key is honest (build touches cli, cli requires local go/).
+          cache-dependency-path: |
+            go/go.sum
+            cli/go.sum
+
+      - name: Build lem (native cgo; workspace wires cli -> local go/)
+        shell: bash
+        env:
+          CGO_ENABLED: "1"
+          EXE: ${{ matrix.exe }}
+        run: |
+          set -euo pipefail
+          VERSION="dev-${GITHUB_SHA:0:12}"
+          mkdir -p bin
+          go build -trimpath -ldflags "-X main.version=${VERSION}" -o "bin/lem${EXE}" ./cli
+          test -s "bin/lem${EXE}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lem-cpu-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: bin/lem${{ matrix.exe }}
+          if-no-files-found: error
+
+  # ---- metal cell: macos/aarch64, self-contained (metallibs embedded). Hosted
+  #      macOS runners are < macOS 26 and cannot compile the Metal 4 metallibs, so
+  #      a plain build would ship a metallib-less, non-runnable binary. This lane is
+  #      DORMANT on normal pushes (the `if` is false when the variable is unset, so
+  #      it never queues or fails): register a self-hosted macOS 26 arm64 runner and
+  #      set repo variable ENABLE_MACOS_METAL=true to activate it. Interim: the metal
+  #      artifact is built manually on the owner's Mac (task metallib && task build:embed).
+  metal:
+    name: lem metal · macos/aarch64 (self-hosted macOS 26)
+    if: ${{ vars.ENABLE_MACOS_METAL == 'true' }}
+    runs-on: [self-hosted, macOS, ARM64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive          # external/mlx for `task metallib`
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go/go.sum
+            cli/go.sum
 
       - name: Install Task
         run: go install github.com/go-task/task/v3/cmd/task@latest
 
-      - name: Build lem
+      - name: Build self-contained metal lem (metallibs baked in)
         shell: bash
-        env:
-          METAL: ${{ matrix.metal }}
         run: |
-          set -e
-          if [ "$METAL" = "true" ]; then
-            task metallib && task build:embed     # self-contained metal lem
-          else
-            task build:native                     # plain lem (GPU sidecar loads at runtime)
-          fi
-
-      - name: Assemble build folder (build/dist/<target>/lem)
-        shell: bash
-        env:
-          TARGET: ${{ matrix.goos }}-${{ matrix.goarch }}
-        run: |
-          set -e
-          mkdir -p "build/dist/$TARGET"
-          cp bin/lem* "build/dist/$TARGET/"
+          set -euo pipefail
+          VERSION="dev-${GITHUB_SHA:0:12}"
+          task metallib
+          task build:embed VERSION="${VERSION}"
+          test -s bin/lem
 
       - uses: actions/upload-artifact@v4
         with:
-          name: lem-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: build/dist/${{ matrix.goos }}-${{ matrix.goarch }}/
+          name: lem-metal-macos-aarch64
+          path: bin/lem
+          if-no-files-found: error
 
+  # ---- release: package each built binary under BOTH names (build once, package
+  #      twice) and publish to the rolling `dev` prerelease. Runs only for dev
+  #      pushes; requires cpu to have succeeded and tolerates metal being skipped. ----
   release:
-    name: Zip + rolling dev prerelease
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    name: Zip (Native + Driver) + rolling dev prerelease
+    needs: [cpu, metal]
+    if: ${{ !cancelled() && needs.cpu.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/dev' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          path: dist        # one subfolder per target (lem-<goos>-<goarch>/lem)
+          path: dist        # one dir per cell: dist/lem-<backend>-<os>-<arch>/lem[.exe]
 
-      - name: Zip each target
+      - name: Package Native + Driver zips
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          VERSION="dev-${GITHUB_SHA:0:12}"
+          mkdir -p out
           cd dist
-          for d in */; do (cd "$d" && zip -r "../${d%/}.zip" .); done
-          ls -la *.zip
+          for d in lem-*/; do
+            name="${d%/}"                                 # e.g. lem-cpu-macos-aarch64
+            IFS=- read -r _ backend os arch <<< "$name"   # backend/os/arch from the name
+            bin="$(ls "$d")"                              # lem or lem.exe
+            ext=""; case "$bin" in *.exe) ext=".exe";; esac
+            # Native — the binary a user runs locally, named `lem`.
+            cp "$d/$bin" "lem${ext}"; chmod 0755 "lem${ext}"
+            zip -jq "../out/${os}-${arch}-lem-${backend}-${VERSION}.zip" "lem${ext}"
+            rm -f "lem${ext}"
+            # Driver — the binary a compute box serves over the API, named `lem-<backend>`.
+            cp "$d/$bin" "lem-${backend}${ext}"; chmod 0755 "lem-${backend}${ext}"
+            zip -jq "../out/${os}-${arch}-lem-driver-${backend}-${VERSION}.zip" "lem-${backend}${ext}"
+            rm -f "lem-${backend}${ext}"
+          done
+          ls -la ../out
 
       - name: Publish rolling dev prerelease
         uses: softprops/action-gh-release@v2
@@ -90,7 +162,7 @@ jobs:
           tag_name: dev
           name: dev (rolling)
           prerelease: true
-          files: dist/*.zip
+          files: out/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -101,7 +173,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            go/go.sum
+            cli/go.sum
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -111,7 +186,7 @@ jobs:
           java-version: "21"
       - name: Install generators
         run: |
-          npm install -g @openapitools/openapi-generator-cli@7.22.0
+          npm install -g @openapitools/openapi-generator-cli@2.40.0   # npm wrapper is 2.x; it manages the 7.x Java generator
           go install github.com/go-task/task/v3/cmd/task@latest
       - name: Generate SDKs (lem spec -> OpenAPI 3.1 -> typed clients)
         run: task sdk

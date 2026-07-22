@@ -559,30 +559,34 @@ func TestNativeContract_CapabilityReportGenericReactiveRegistryLabels_Good(t *te
 		QuantBits:    4,
 	}, inference.AdapterIdentity{}, true, defaultHIPKernelStatus())
 
+	// qwen3_6_moe has NO native ROCm execution path (the truth-pass source,
+	// profile.ArchitectureProfileNotes post-#50: nothing replaced the retired
+	// composed detour) — the registry-derived report must say metadata_only,
+	// not standalone-native.
 	if report.Labels["engine_feature_architecture"] != "qwen3_6_moe" ||
 		report.Labels["engine_feature_family"] != "qwen" ||
 		report.Labels["engine_feature_chat_template_id"] != "qwen" ||
 		report.Labels["engine_feature_reasoning_parser"] != "qwen" ||
 		report.Labels["engine_feature_tool_parser"] != "qwen" ||
-		report.Labels["engine_feature_text_generate"] != "true" ||
-		report.Labels["engine_feature_capabilities"] != "generate,chat.template,reasoning.parse,tool.parse" ||
-		report.Labels["engine_load_status"] != string(ROCmModelLoadStandaloneNative) ||
-		report.Labels["engine_load_target"] != "standalone" ||
+		report.Labels["engine_feature_text_generate"] != "false" ||
+		report.Labels["engine_feature_capabilities"] != "chat.template,reasoning.parse,tool.parse" ||
+		report.Labels["engine_load_status"] != string(ROCmModelLoadMetadataOnly) ||
+		report.Labels["engine_load_target"] != "metadata" ||
 		report.Labels["engine_load_staged"] != "false" ||
-		report.Labels["engine_load_native_runtime"] != "true" ||
-		report.Labels["engine_load_standalone"] != "true" ||
-		report.Labels["engine_load_text_generate"] != "true" {
+		report.Labels["engine_load_native_runtime"] != "false" ||
+		report.Labels["engine_load_standalone"] != "false" ||
+		report.Labels["engine_load_text_generate"] != "false" {
 		t.Fatalf("report labels = %+v, want generic registry-derived Qwen engine feature labels", report.Labels)
 	}
 	modelLoad, ok := report.Capability(inference.CapabilityModelLoad)
 	if !ok ||
-		modelLoad.Labels["engine_load_status"] != string(ROCmModelLoadStandaloneNative) ||
-		modelLoad.Labels["engine_load_target"] != "standalone" ||
+		modelLoad.Labels["engine_load_status"] != string(ROCmModelLoadMetadataOnly) ||
+		modelLoad.Labels["engine_load_target"] != "metadata" ||
 		modelLoad.Labels["engine_load_staged"] != "false" ||
-		modelLoad.Labels["engine_load_native_runtime"] != "true" ||
-		modelLoad.Labels["engine_load_standalone"] != "true" ||
-		modelLoad.Labels["engine_load_text_generate"] != "true" {
-		t.Fatalf("model-load capability = %+v ok=%v, want standalone-native Qwen load-status labels", modelLoad, ok)
+		modelLoad.Labels["engine_load_native_runtime"] != "false" ||
+		modelLoad.Labels["engine_load_standalone"] != "false" ||
+		modelLoad.Labels["engine_load_text_generate"] != "false" {
+		t.Fatalf("model-load capability = %+v ok=%v, want metadata-only Qwen load-status labels", modelLoad, ok)
 	}
 	if cap, ok := report.Capability(inference.CapabilityGenerate); !ok || cap.Status != inference.CapabilityStatusPlanned {
 		t.Fatalf("generate capability = %+v ok=%v, registry-routed Qwen remains planned without linked kernels", cap, ok)
@@ -2274,8 +2278,12 @@ func TestNativeContract_PlanModelFit_Rocm16GBMoELazyExperts_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanModelFit: %v", err)
 	}
-	if report == nil || !report.Fits || report.MemoryPlan.MachineClass != "rocm-16gb" {
-		t.Fatalf("fit report = %+v, want fitting ROCm 16GB MoE plan", report)
+	// The 16GB memory plan computes fully, but qwen3_moe has no native ROCm
+	// execution path (truth-pass: nothing replaced the retired composed
+	// detour), so the honest report is ArchitectureOK=false and Fits=false —
+	// the plan maths is the thing under test, not a native fit claim.
+	if report == nil || report.Fits || report.ArchitectureOK || report.MemoryPlan.MachineClass != "rocm-16gb" {
+		t.Fatalf("fit report = %+v, want ROCm 16GB MoE plan with the architecture gap reported honestly", report)
 	}
 	if report.MemoryPlan.CacheMode != "k-q8-v-q4" || report.MemoryPlan.Labels["moe_lazy_experts"] != "true" || report.MemoryPlan.Labels["prefill_chunk_tokens"] != "512" {
 		t.Fatalf("memory plan = %+v, want compact KV, lazy experts, and chunked prefill", report.MemoryPlan)
