@@ -140,7 +140,10 @@ jobs:
           VERSION="dev-${GITHUB_SHA:0:12}"
           mkdir -p out
           cd dist
-          for d in lem-*/; do
+          # ONLY the binary artifacts (lem-cpu-*, lem-metal-*) — lem-sdks also
+          # lands in dist/ and must never enter the packaging loop.
+          for d in lem-cpu-*/ lem-metal-*/; do
+            [ -d "$d" ] || continue                       # unmatched glob (metal skipped)
             name="${d%/}"                                 # e.g. lem-cpu-macos-aarch64
             IFS=- read -r _ backend os arch <<< "$name"   # backend/os/arch from the name
             bin="$(ls "$d")"                              # lem or lem.exe
