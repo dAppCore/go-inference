@@ -1,0 +1,40 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  shell.ctml : the lem workspace app shell — the permanent outer chrome
+  (tab strip, session strip, the active panel/overlay body, footer key
+  hints) every primary panel renders inside.
+
+  Idiom: a <layout variant="HF"> rendered through renderBandFrame (the HF
+  band-split idiom overlays and the Data list's live filter input already
+  use, overlayframe.go / datapanel.go) — the host splits the render at the
+  H slot's own recorded box height and composes the region (the active main
+  panel, plus the wide/toggled inspector — renderWorkspaceRegion,
+  layout.go) BETWEEN the two bands, exactly as a widget-carrying overlay
+  composes a live Bubbles widget between its own H and F bands.
+
+  The C slot is deliberately unused. go-html's renderTermContent hardcodes
+  a (0,1) padding on the Content slot with no TermTheme override — unlike
+  Header/Footer/Sidebar/Aside, which all route through a themeable style
+  (see shellFrameTheme's theme.Header/theme.Footer overrides in layout.go).
+  L and R share the same defect through renderTermBox's own hardcoded -4/-2
+  offsets. Content already fitted to a slot's own width by the host arrives
+  one or more columns too wide once that hidden offset is added, and the
+  slot's own Width() enforcement then word-wraps the overflow onto a
+  spurious extra row instead of leaving it byte-exact (confirmed with a
+  throwaway geometry probe against C and L during this slice; not part of
+  the shipped diff). The region must keep the SAME width contract every
+  panel body (chat/work/data/models/service) and the inspector already
+  render against, so it rides the proven HF+host-composition idiom instead
+  of any middle-band slot.
+
+  Host seams (layout.go):
+    - Values  header : the tab strip (renderPanelBar, tabs.go) and the
+      session strip (sessionStrip, app.go), already joined with one "\n"
+      and each already fitted to metrics.innerWidth — verbatim, byte-exact.
+    - Values  footer : the status/key-hint line (footerLine, app.go),
+      already fitted to metrics.innerWidth — verbatim, byte-exact.
+-->
+<layout variant="HF">
+<h><verbatim value="header"/></h>
+<f><verbatim value="footer"/></f>
+</layout>
