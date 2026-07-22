@@ -37,11 +37,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Dropped cells, proven by live runs 2026-07-22 (docs/release-artifacts.md):
+          #  - macos/x86_64: the macos-13 runner label is retired (queued forever) —
+          #    no hosted Intel Mac remains; revisit only on real demand.
+          #  - windows/x86_64: lem's code is not Windows-portable yet (unix-only
+          #    syscall.Kill + raw-fd reads outside build constraints) — a code
+          #    campaign, not a CI matrix entry; restore the cell when it compiles.
           - { runner: macos-latest,     os_name: macos,   arch: aarch64, exe: "" }
-          - { runner: macos-13,         os_name: macos,   arch: x86_64,  exe: "" }
           - { runner: ubuntu-latest,    os_name: linux,   arch: x86_64,  exe: "" }
           - { runner: ubuntu-24.04-arm, os_name: linux,   arch: aarch64, exe: "" }
-          - { runner: windows-latest,   os_name: windows, arch: x86_64,  exe: ".exe" }
     steps:
       - uses: actions/checkout@v4
         # cpu build needs neither external/mlx (metal) nor the ROCm sources.
@@ -182,7 +186,7 @@ jobs:
           java-version: "21"
       - name: Install generators
         run: |
-          npm install -g @openapitools/openapi-generator-cli@7.22.0
+          npm install -g @openapitools/openapi-generator-cli@2.40.0   # npm wrapper is 2.x; it manages the 7.x Java generator
           go install github.com/go-task/task/v3/cmd/task@latest
       - name: Generate SDKs (lem spec -> OpenAPI 3.1 -> typed clients)
         run: task sdk

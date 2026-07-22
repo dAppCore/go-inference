@@ -32,15 +32,19 @@ into the Native zip as `lem` and into the Driver zip as `lem-{backend}`. No doub
 |----|------|---------|----------|-----|
 | macos | aarch64 | metal | self-hosted macOS 26 lane (dormant) / manual | `task metallib && task build:embed` |
 | macos | aarch64 | cpu | **GitHub** `macos-latest` | native cgo `go build ./cli` |
-| macos | x86_64 | cpu | **GitHub** `macos-13` | native cgo |
 | linux | x86_64 | amd | **GitLab** homelab | `make lem-amd` |
 | linux | x86_64 | cuda | **GitLab** homelab | `make lem-cuda` |
 | linux | x86_64 | cpu | **GitHub** `ubuntu-latest` (rolling) · **GitLab** `make lem-cpu-x86` (tag) | native cgo |
 | linux | aarch64 | cpu | **GitHub** `ubuntu-24.04-arm` (rolling) · **GitLab** `make lem-cpu-aarch64` (tag) | native cgo |
-| windows | x86_64 | cpu | **GitHub** `windows-latest` | native cgo (mingw) |
 
 ### Excluded cells (and why)
 
+- **cpu · macos/x86_64** — the `macos-13` runner label is retired (live-proven 2026-07-22:
+  queued forever); GitHub hosts no Intel Mac any more. Revisit only on real demand.
+- **cpu · windows/x86_64** — lem's code is not Windows-portable yet: unix-only
+  `syscall.Kill` + raw-fd reads sit outside build constraints (live-proven 2026-07-22,
+  three compile errors). Restoring the cell is a code-portability campaign, not a
+  matrix entry.
 - **cpu · windows/aarch64** — `duckdb-go-bindings` ships no `windows-arm64` prebuilt lib, so
   the binary cannot link. Not a cell.
 - **metal · anything but macos/aarch64** — Metal is Apple-GPU only.
