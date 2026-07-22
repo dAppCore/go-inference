@@ -300,6 +300,50 @@ hints, all inside one rounded border.
   have yet (mirroring how `id="row-{{row.id}}"` already resolves per row
   for box identification). Left unconverted, not silently skipped.
 
+### The command palette
+
+The command palette (`palette.go` + `palette.ctml`, `Ctrl+K`) closes the
+screen-by-screen migration: the overlays' widget-carrying idiom
+(`workeditor.ctml`, `agentanswer.ctml`) extended onto a selectable row
+list for the first time.
+
+- **A `<layout variant="HF">`, exactly `datalist.ctml`'s own borrowing of
+  the overlay idiom, lent back to an actual overlay.** The live Bubbles
+  `FilterInput` emits pre-styled ANSI, so `renderBandFrame` renders the
+  header and footer bands and the host composes the filter input between
+  them while filtering (`list.Model.SettingFilter()`) — an ADDITIONAL
+  line, not a swap of the header the way Bubbles' own `titleView` used
+  to. The header stays fixed because the palette is filtering for
+  effectively its whole visible lifetime (`Open()` always arms
+  `Filtering`, and Enter/Esc close the overlay before either ever
+  reaches `list.Model`), so a header that vanished the instant the
+  overlay opened would rarely be seen.
+- **Rows are Picker's `<dl>` idiom, not the Data list's dense `<p>`+`<br>`
+  rows**: each command is a two-line block (marker + title, indented
+  description), matching Picker's value-line/hint-line shape rather than
+  Data's one-line-per-item density. Selection styling rides the
+  row-scoped class bind (`class="{{row.state}}"`) with the marker glyph
+  on the row; an unavailable command's "— unavailable: reason" suffix
+  already lives in its description text (`commandListItem.Description`),
+  so it paints identically to an available row — the original
+  `list.DefaultDelegate` never styled the two states apart, and this
+  conversion does not invent a distinction that was not there.
+- **`ctml.SubcommandList` (go-html's `CoreCommand`-derived list
+  generator, `docs/ctml.md` S:16) does not fit.** It walks a
+  `*core.Core` command registry and renders a bare `<ul>` of `I18nKey()`
+  labels — no selection state, no filtering, no availability/reason —
+  and the palette's `workspaceCommand` catalogue has no relationship to
+  `core.Command`/`CommandAction` at all. Adapting one to the other would
+  mean building a registry bridge that does not exist, for a
+  rendering-only slice; the palette instead composes the same generic
+  row-list idiom `picker.ctml` and `datalist.ctml` already established.
+- Bubbles' own chrome — the auto-generated help line, the dot pagination
+  bar, the title-vs-filter swap — is replaced wholesale with host-owned
+  markup, the same trade every earlier screen made: a literal "page x/y"
+  line once the command count needs more than one page (`picker.ctml`'s
+  own convention), and a static, accurate key-hint footer instead of
+  Bubbles' generic `KeyMap`-derived one.
+
 ## Keys
 
 | Key | Scope | Action |

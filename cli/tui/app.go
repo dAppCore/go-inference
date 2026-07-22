@@ -1174,9 +1174,6 @@ func (a *app) rebuildTheme(selected theme) {
 	}
 	a.styles = newUIStyles(selected)
 	a.markdown = newMarkdownRenderer(selected.name)
-	if a.palette != nil {
-		a.palette.list.Styles.Title = a.styles.title
-	}
 	if a.switcher != nil {
 		a.switcher.list.Styles.Title = a.styles.title
 	}
@@ -3291,7 +3288,7 @@ func (a app) overlayView() string {
 	var body string
 	switch a.activeOverlay {
 	case overlayCommands:
-		body = a.palette.View(bodyWidth, bodyHeight)
+		body = a.palette.View(bodyWidth, bodyHeight, a.styles)
 	case overlaySessions:
 		if a.switcher == nil {
 			body = overlayEmpty("Recent sessions", "session workspace is not connected")

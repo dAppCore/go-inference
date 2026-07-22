@@ -7,11 +7,181 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/dataset"
 )
+
+// paletteWithCommands builds a commandPalette over an explicit command set —
+// the palette.ctml render tests' equivalent of picker_test.go's
+// pickerWithItems, giving each test deterministic titles/descriptions
+// instead of the full default catalogue. Filter state starts Unfiltered,
+// same as newPicker's underlying list.Model, so callers opt into filtering
+// explicitly.
+func paletteWithCommands(commands ...workspaceCommand) *commandPalette {
+	items := make([]list.Item, 0, len(commands))
+	byID := make(map[commandID]workspaceCommand, len(commands))
+	for _, command := range commands {
+		items = append(items, commandListItem{command: command})
+		byID[command.ID] = command
+	}
+	model := list.New(items, list.NewDefaultDelegate(), 68, 16)
+	model.Title = "Commands"
+	model.SetShowStatusBar(false)
+	model.SetFilteringEnabled(true)
+	return &commandPalette{commands: commands, byID: byID, list: model}
+}
+
+func TestRenderCommandPalette_Good(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	palette := newCommandPalette(styles)
+	palette.list.SetSize(80, 20)
+	palette.list.SetFilterState(list.Unfiltered)
+	plain := ansi.Strip(palette.View(80, 20, styles))
+	lines := strings.Split(plain, "\n")
+
+	if strings.TrimSpace(lines[0]) != "Commands" {
+		t.Fatalf("palette must open with its title line: %q", lines[0])
+	}
+	if !strings.Contains(plain, "› New session") {
+		t.Fatalf("the first command must carry the active marker: %q", plain)
+	}
+	if !strings.Contains(plain, "Create and open a blank chat session") {
+		t.Fatalf("row missing its description hint: %q", plain)
+	}
+	if !strings.Contains(plain, "○ ") {
+		t.Fatalf("idle rows must carry the idle marker: %q", plain)
+	}
+	if !strings.Contains(plain, "type filters · ↑/↓ select · enter runs · esc closes") {
+		t.Fatalf("palette missing the key footer: %q", plain)
+	}
+
+	row := -1
+	for index, line := range lines {
+		if strings.Contains(line, "› New session") {
+			row = index
+			break
+		}
+	}
+	if row < 0 || row+1 >= len(lines) {
+		t.Fatalf("selected row not found in the rendered lines: %q", plain)
+	}
+	if !strings.Contains(lines[row+1], "Create and open a blank chat session") {
+		t.Fatalf("hint must sit directly beneath its title line: %q", lines[row+1])
+	}
+
+	for index, line := range lines {
+		if got := lipgloss.Width(line); got > 80 {
+			t.Fatalf("line %d width = %d, exceeds 80: %q", index, got, line)
+		}
+	}
+}
+
+func TestRenderCommandPalette_Bad(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	palette := newCommandPalette(styles)
+	for _, width := range []int{0, -4} {
+		if got := palette.View(width, 16, styles); got != "" {
+			t.Fatalf("View(width=%d) = %q, want empty", width, got)
+		}
+	}
+	if got := (*commandPalette)(nil).View(80, 16, styles); got != "" {
+		t.Fatalf("View on a nil palette = %q, want empty", got)
+	}
+}
+
+func TestRenderCommandPalette_Ugly(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+
+	// While filtering, the live Bubbles filter widget composes as an
+	// EXTRA line between the header and the rows — the header stays
+	// visible throughout, unlike Bubbles' own titleView, which swapped
+	// the title out for the filter box.
+	filtered := paletteWithCommands(
+		workspaceCommand{ID: "cmd.alpha", Title: "Alpha", Description: "First command", Available: true},
+		workspaceCommand{ID: "cmd.beta", Title: "Beta", Description: "Second command", Available: true},
+	)
+	filtered.list.SetSize(80, 20)
+	filtered.list.SetFilterText("beta")
+	filtered.list.SetFilterState(list.Filtering)
+	plain := ansi.Strip(filtered.View(80, 20, styles))
+	if !strings.Contains(plain, "Commands") {
+		t.Fatalf("the header stays visible while filtering: %q", plain)
+	}
+	if !strings.Contains(plain, "› Beta") || strings.Contains(plain, "Alpha") {
+		t.Fatalf("filtering must render matches only, cursor on the first: %q", plain)
+	}
+
+	// A match-free filter renders no rows and no "No items." mislabel —
+	// the empty state is reserved for a genuinely unfiltered empty list.
+	filtered.list.SetFilterText("zzz")
+	filtered.list.SetFilterState(list.Filtering)
+	plain = ansi.Strip(filtered.View(80, 20, styles))
+	if strings.Contains(plain, "No items.") || strings.Contains(plain, "○ ") {
+		t.Fatalf("a match-free filter renders no rows and no empty mislabel: %q", plain)
+	}
+
+	// An unavailable command's reason already lives in its description
+	// text (commandListItem.Description) — the original
+	// list.DefaultDelegate never painted available/unavailable rows
+	// apart, so the row carries no separate class for it.
+	reasoned := paletteWithCommands(workspaceCommand{
+		ID: "cmd.gated", Title: "Gated command", Description: "Needs setup", Available: false, Reason: "not connected",
+	})
+	reasoned.list.SetSize(80, 20)
+	plain = ansi.Strip(reasoned.View(80, 20, styles))
+	if !strings.Contains(plain, "Needs setup — unavailable: not connected") {
+		t.Fatalf("an unavailable row must carry its reason: %q", plain)
+	}
+
+	// A long title/description truncates to the row budget instead of
+	// wrapping, so a page of rows keeps the density the list model
+	// paginates by.
+	long := paletteWithCommands(workspaceCommand{
+		ID:          "cmd.long",
+		Title:       "A very long command title that will not fit the row budget at all",
+		Description: "An equally long description that also needs truncation to fit cleanly",
+		Available:   true,
+	})
+	long.list.SetSize(40, 20)
+	plain = ansi.Strip(long.View(40, 20, styles))
+	if !strings.Contains(plain, "…") {
+		t.Fatalf("an over-budget row must truncate with an ellipsis: %q", plain)
+	}
+	for index, line := range strings.Split(plain, "\n") {
+		if got := lipgloss.Width(line); got > 40 {
+			t.Fatalf("line %d width = %d, exceeds 40: %q", index, got, line)
+		}
+	}
+
+	// More commands than one short pane holds: only the current page
+	// renders, with the page position stated.
+	commands := make([]workspaceCommand, 0, 30)
+	for index := range 30 {
+		commands = append(commands, workspaceCommand{
+			ID:          commandID(core.Sprintf("cmd.page%02d", index)),
+			Title:       core.Sprintf("Command %02d", index),
+			Description: "A paginated command",
+			Available:   true,
+		})
+	}
+	paged := paletteWithCommands(commands...)
+	paged.list.SetSize(40, 10)
+	plain = ansi.Strip(paged.View(40, 10, styles))
+	if !strings.Contains(plain, "page 1/") {
+		t.Fatalf("a paginated list must state its page position: %q", plain)
+	}
+	if !strings.Contains(plain, "› Command 00") {
+		t.Fatalf("the first page must open on the first item: %q", plain)
+	}
+	if strings.Contains(plain, "Command 29") {
+		t.Fatalf("rows beyond the current page must not render: %q", plain)
+	}
+}
 
 func TestCommandPalette_Good(t *testing.T) {
 	styles := newUIStyles(midnightTheme())
