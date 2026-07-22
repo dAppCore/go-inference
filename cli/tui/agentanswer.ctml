@@ -1,0 +1,20 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  agentanswer.ctml : the answer-agent-question overlay — one textarea
+  feeding a native run's pending question.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the live textarea
+  emits pre-styled ANSI, which cannot ride a .ctml document, so the
+  layout renders the header and footer bands and the host composes the
+  textarea between them (renderOverlayFrame splits at the H box height).
+
+  Host seams (agentoverlay.go):
+    - Sequence  question : zero-or-one row {text} — the question line
+      (a lone dynamic value rides a one-row sequence).
+    - Classes   overlay-keys : mapped onto the existing uiStyles palette
+      by overlayFrameTheme.
+-->
+<layout variant="HF">
+<h><h2>Answer agent question</h2><each items="question" as="row"><p>{{row.text}}</p></each></h>
+<f><p class="overlay-keys">enter submits · esc cancels</p></f>
+</layout>

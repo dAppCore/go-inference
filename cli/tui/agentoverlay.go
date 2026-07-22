@@ -3,12 +3,15 @@
 package tui
 
 import (
+	_ "embed"
+
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
 	core "dappco.re/go"
+	"dappco.re/go/html/ctml"
 )
 
 // workEditor keeps Work creation and editing local to the TUI. It deliberately
@@ -97,6 +100,35 @@ func (editor *workEditor) values() (string, string, string) {
 	return core.Trim(editor.title.Value()), core.Trim(editor.task.Value()), core.Trim(editor.repository.Value())
 }
 
+// workEditorCTML is the Work editor overlay's markup — see workeditor.ctml
+// for the seams it exposes (the create/edit title split, the conditional
+// validation line, class tokens).
+//
+//go:embed workeditor.ctml
+var workEditorCTML []byte
+
+// workEditorBindings selects the create-vs-edit title — both texts are
+// static markup, so the mode is carried by which zero-or-one-row sequence
+// holds the row, the selection-as-sequence-split idiom — and binds the
+// save-validation error (zero-or-one row; an empty sequence renders
+// nothing).
+func workEditorBindings(editor *workEditor) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"createTitle": {},
+		"editTitle":   {},
+		"validation":  {},
+	}
+	if editor != nil && editor.editingID != "" {
+		sequences["editTitle"] = append(sequences["editTitle"], map[string]any{})
+	} else {
+		sequences["createTitle"] = append(sequences["createTitle"], map[string]any{})
+	}
+	if editor != nil && editor.validation != "" {
+		sequences["validation"] = append(sequences["validation"], map[string]any{"text": editor.validation})
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
 func (editor *workEditor) View(width, height int, styles uiStyles) string {
 	if editor == nil {
 		return ""
@@ -105,11 +137,8 @@ func (editor *workEditor) View(width, height int, styles uiStyles) string {
 	editor.title.Width = fieldWidth
 	editor.repository.Width = fieldWidth
 	editor.task.SetWidth(fieldWidth)
-	title := "Create Work"
-	if editor.editingID != "" {
-		title = "Edit Work"
-	}
-	return fitPane(core.Join("\n", title, "", "Work title", editor.title.View(), "", "Full task", editor.task.View(), "", "Repository", editor.repository.View(), "", "tab changes field · ctrl+s saves · esc cancels", editor.validation), width, height, styles.panel)
+	head, foot := renderOverlayFrame(workEditorCTML, width, styles, workEditorBindings(editor))
+	return fitPane(core.Join("\n", head, editor.title.View(), "", "Full task", editor.task.View(), "", "Repository", editor.repository.View(), foot), width, height, styles.panel)
 }
 
 type launchReviewOverlay struct {
@@ -160,12 +189,31 @@ func (overlay *agentAnswerOverlay) answer() string {
 	return core.Trim(overlay.input.Value())
 }
 
+// agentAnswerCTML is the answer overlay's markup — see agentanswer.ctml
+// for the seams it exposes (the question row, class tokens).
+//
+//go:embed agentanswer.ctml
+var agentAnswerCTML []byte
+
+// agentAnswerBindings binds the pending question — a lone dynamic value
+// riding a one-row sequence.
+func agentAnswerBindings(overlay *agentAnswerOverlay) ctml.Bindings {
+	question := ""
+	if overlay != nil {
+		question = overlay.question
+	}
+	return ctml.Bindings{Sequences: map[string][]map[string]any{
+		"question": {{"text": question}},
+	}}
+}
+
 func (overlay *agentAnswerOverlay) View(width, height int, styles uiStyles) string {
 	if overlay == nil {
 		return ""
 	}
 	overlay.input.SetWidth(max(12, width-6))
-	return fitPane(core.Join("\n", "Answer agent question", "", overlay.question, "", overlay.input.View(), "", "enter submits · esc cancels"), width, height, styles.panel)
+	head, foot := renderOverlayFrame(agentAnswerCTML, width, styles, agentAnswerBindings(overlay))
+	return fitPane(core.Join("\n", head, "", overlay.input.View(), foot), width, height, styles.panel)
 }
 
 type changeAcceptanceOverlay struct {
@@ -208,20 +256,50 @@ func (overlay *changeAcceptanceOverlay) Update(message tea.KeyMsg) bool {
 	return true
 }
 
+// changeReviewCTML is the change-acceptance overlay's markup — see
+// changereview.ctml for the seams it exposes (the title row, the
+// conditional warning, the three-way prompt split, class tokens).
+//
+//go:embed changereview.ctml
+var changeReviewCTML []byte
+
+// changeAcceptanceBindings binds the review title and warning, and selects
+// the gate prompt: all three prompt texts are static markup, so the gate
+// stage is carried by which zero-or-one-row sequence holds the row, the
+// selection-as-sequence-split idiom.
+func changeAcceptanceBindings(overlay *changeAcceptanceOverlay) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"review":            {},
+		"warn":              {},
+		"promptContinue":    {},
+		"promptAcknowledge": {},
+		"promptApply":       {},
+	}
+	if overlay != nil {
+		sequences["review"] = append(sequences["review"], map[string]any{"title": overlay.review.Title})
+		if overlay.review.Warning != "" {
+			sequences["warn"] = append(sequences["warn"], map[string]any{"text": overlay.review.Warning})
+		}
+		switch {
+		case overlay.final:
+			sequences["promptApply"] = append(sequences["promptApply"], map[string]any{})
+		case overlay.review.NeedsAcknowledgement && !overlay.acknowledged:
+			sequences["promptAcknowledge"] = append(sequences["promptAcknowledge"], map[string]any{})
+		default:
+			sequences["promptContinue"] = append(sequences["promptContinue"], map[string]any{})
+		}
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
 func (overlay *changeAcceptanceOverlay) View(width, height int, styles uiStyles) string {
 	if overlay == nil {
 		return ""
 	}
-	prompt := "enter continues · esc cancels"
-	if overlay.review.NeedsAcknowledgement && !overlay.acknowledged {
-		prompt = "a acknowledges no validation · enter continues · esc cancels"
-	}
-	if overlay.final {
-		prompt = "enter applies this exact reviewed receipt · esc cancels"
-	}
 	overlay.viewport.Width, overlay.viewport.Height = max(1, width-4), max(1, height-6)
 	overlay.viewport.SetContent(overlay.review.Body)
-	return fitPane(core.Join("\n", overlay.review.Title, overlay.review.Warning, "", overlay.viewport.View(), "", prompt), width, height, styles.panel)
+	head, foot := renderOverlayFrame(changeReviewCTML, width, styles, changeAcceptanceBindings(overlay))
+	return fitPane(core.Join("\n", head, overlay.viewport.View(), foot), width, height, styles.panel)
 }
 
 func newLaunchReviewOverlay(review agentReview, provider, model string) *launchReviewOverlay {
@@ -311,6 +389,67 @@ func (overlay *launchReviewOverlay) selection() (string, string) {
 	return core.Trim(overlay.providerInput.Value()), core.Trim(overlay.modelInput.Value())
 }
 
+// launchReviewCTML and agentSelectCTML are the launch-review overlay's two
+// markup shapes — launchreview.ctml (read-only receipt review, full HCF)
+// and agentselect.ctml (editable provider/model selection, HF around the
+// inputs); see each file for the seams it exposes.
+//
+//go:embed launchreview.ctml
+var launchReviewCTML []byte
+
+//go:embed agentselect.ctml
+var agentSelectCTML []byte
+
+// reviewBodyRows splits a multi-line receipt body into one row per line —
+// a bound value cannot carry a line break through an inline run, so each
+// row closes with <br> in the markup; empty lines ride as empty rows.
+func reviewBodyRows(body string) []map[string]any {
+	rows := []map[string]any{}
+	for _, line := range core.Split(body, "\n") {
+		rows = append(rows, map[string]any{"line": line})
+	}
+	return rows
+}
+
+// launchReviewBindings binds the read-only shape: the title with the
+// defaulted provider/model pair (one row), the conditional warning, and
+// the receipt body lines.
+func launchReviewBindings(overlay *launchReviewOverlay, provider, model string) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"review": {},
+		"warn":   {},
+		"body":   {},
+	}
+	if overlay != nil {
+		sequences["review"] = append(sequences["review"], map[string]any{
+			"title": overlay.review.Title, "provider": provider, "model": model,
+		})
+		if overlay.review.Warning != "" {
+			sequences["warn"] = append(sequences["warn"], map[string]any{"text": overlay.review.Warning})
+		}
+		sequences["body"] = reviewBodyRows(overlay.review.Body)
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
+// agentSelectionBindings binds the editable shape: the title (one row),
+// the receipt body lines, and the conditional warning.
+func agentSelectionBindings(overlay *launchReviewOverlay) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"review": {},
+		"body":   {},
+		"warn":   {},
+	}
+	if overlay != nil {
+		sequences["review"] = append(sequences["review"], map[string]any{"title": overlay.review.Title})
+		sequences["body"] = reviewBodyRows(overlay.review.Body)
+		if overlay.review.Warning != "" {
+			sequences["warn"] = append(sequences["warn"], map[string]any{"text": overlay.review.Warning})
+		}
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
 func (overlay *launchReviewOverlay) View(width, height int, styles uiStyles) string {
 	if overlay == nil {
 		return ""
@@ -323,12 +462,13 @@ func (overlay *launchReviewOverlay) View(width, height int, styles uiStyles) str
 		model = "default model"
 	}
 	if !overlay.editable {
-		return fitPane(core.Join("\n", overlay.review.Title, "", "Provider: "+provider, "Model: "+model, "", overlay.review.Warning, "", overlay.review.Body, "", "enter confirms · esc cancels"), width, height, styles.panel)
+		return fitPane(renderOverlayLayout(launchReviewCTML, width, styles, launchReviewBindings(overlay, provider, model)), width, height, styles.panel)
 	}
 	fieldWidth := max(12, width-6)
 	overlay.providerInput.Width = fieldWidth
 	overlay.modelInput.Width = fieldWidth
-	return fitPane(core.Join("\n", overlay.review.Title, "", "Provider", overlay.providerInput.View(), "Model", overlay.modelInput.View(), "", overlay.review.Body, "", overlay.review.Warning, "", "tab selects provider/model · enter confirms · esc cancels"), width, height, styles.panel)
+	head, foot := renderOverlayFrame(agentSelectCTML, width, styles, agentSelectionBindings(overlay))
+	return fitPane(core.Join("\n", head, overlay.providerInput.View(), "Model", overlay.modelInput.View(), foot), width, height, styles.panel)
 }
 
 type agentActionMsg struct {

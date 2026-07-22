@@ -3,11 +3,14 @@
 package tui
 
 import (
+	_ "embed"
+
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	core "dappco.re/go"
+	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference/dataset"
 )
 
@@ -87,6 +90,30 @@ func (editor *dataItemEditor) values() (string, string) {
 	return editor.prompt.Value(), editor.response.Value()
 }
 
+// dataEditorCTML is the edit-as-derived overlay's markup — see
+// dataeditor.ctml for the seams it exposes (the prompt-caption split,
+// class tokens).
+//
+//go:embed dataeditor.ctml
+var dataEditorCTML []byte
+
+// dataItemEditorBindings selects the prompt caption by item kind: both
+// captions are static markup text, so the messages-kind note is carried by
+// which zero-or-one-row sequence holds the row, the selection-as-
+// sequence-split idiom.
+func dataItemEditorBindings(editor *dataItemEditor) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"pairLabel":     {},
+		"messagesLabel": {},
+	}
+	if editor != nil && editor.original.Kind == dataset.KindMessages {
+		sequences["messagesLabel"] = append(sequences["messagesLabel"], map[string]any{})
+	} else {
+		sequences["pairLabel"] = append(sequences["pairLabel"], map[string]any{})
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
 func (editor *dataItemEditor) View(width, height int, styles uiStyles) string {
 	if editor == nil {
 		return ""
@@ -94,15 +121,11 @@ func (editor *dataItemEditor) View(width, height int, styles uiStyles) string {
 	fieldWidth := max(12, width-6)
 	editor.prompt.SetWidth(fieldWidth)
 	editor.response.SetWidth(fieldWidth)
-	promptLabel := "Prompt"
-	if editor.original.Kind == dataset.KindMessages {
-		promptLabel = "Prompt (context only — earlier turns are kept as-is)"
-	}
+	head, foot := renderOverlayFrame(dataEditorCTML, width, styles, dataItemEditorBindings(editor))
 	return fitPane(core.Join("\n",
-		"Edit as derived", "",
-		promptLabel, editor.prompt.View(), "",
-		"Response", editor.response.View(), "",
-		"tab changes field · ctrl+s saves as a new derived item · esc cancels",
+		head, editor.prompt.View(), "",
+		"Response", editor.response.View(),
+		foot,
 	), width, height, styles.panel)
 }
 
@@ -157,12 +180,31 @@ func (overlay *dataNoteOverlay) Bulk() bool {
 	return overlay != nil && overlay.itemID == ""
 }
 
+// dataNoteCTML is the note/label overlay's markup — see datanote.ctml for
+// the seams it exposes (the caller-supplied title/prompt row, class tokens).
+//
+//go:embed datanote.ctml
+var dataNoteCTML []byte
+
+// dataNoteBindings binds the caller-supplied title and prompt — one row,
+// because a lone pair of dynamic values rides a one-row sequence.
+func dataNoteBindings(overlay *dataNoteOverlay) ctml.Bindings {
+	title, prompt := "", ""
+	if overlay != nil {
+		title, prompt = overlay.title, overlay.prompt
+	}
+	return ctml.Bindings{Sequences: map[string][]map[string]any{
+		"note": {{"title": title, "prompt": prompt}},
+	}}
+}
+
 func (overlay *dataNoteOverlay) View(width, height int, styles uiStyles) string {
 	if overlay == nil {
 		return ""
 	}
 	overlay.input.Width = max(12, width-6)
-	return fitPane(core.Join("\n", overlay.title, "", overlay.prompt, overlay.input.View(), "", "enter submits · esc cancels"), width, height, styles.panel)
+	head, foot := renderOverlayFrame(dataNoteCTML, width, styles, dataNoteBindings(overlay))
+	return fitPane(core.Join("\n", head, overlay.input.View(), foot), width, height, styles.panel)
 }
 
 // dataBulkOverlay gates a bulk-apply-to-current-filter action behind an
@@ -198,24 +240,46 @@ func (overlay *dataBulkOverlay) Confirm(key string) bool {
 	return true
 }
 
+// dataBulkCTML is the bulk-confirm overlay's markup — see databulk.ctml
+// for the seams it exposes (the title/count row, the conditional note, the
+// armed-prompt split, class tokens).
+//
+//go:embed databulk.ctml
+var dataBulkCTML []byte
+
+// dataBulkBindings binds the action title and item count, the optional
+// shared note (zero-or-one row), and the phase prompt: both prompt texts
+// are static markup, so the armed state is carried by which zero-or-one-row
+// sequence holds the row, the selection-as-sequence-split idiom.
+func dataBulkBindings(overlay *dataBulkOverlay) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"bulk":    {},
+		"note":    {},
+		"arm":     {},
+		"confirm": {},
+	}
+	if overlay != nil {
+		sequences["bulk"] = append(sequences["bulk"], map[string]any{
+			"title": overlay.action.title(),
+			"count": core.Sprintf("%d", overlay.count),
+		})
+		if overlay.note != "" {
+			sequences["note"] = append(sequences["note"], map[string]any{"text": overlay.note})
+		}
+		if overlay.armed {
+			sequences["confirm"] = append(sequences["confirm"], map[string]any{})
+		} else {
+			sequences["arm"] = append(sequences["arm"], map[string]any{})
+		}
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
 func (overlay *dataBulkOverlay) View(width, height int, styles uiStyles) string {
 	if overlay == nil {
 		return ""
 	}
-	prompt := "enter continues · esc cancels"
-	if overlay.armed {
-		prompt = "enter applies this action to every listed item · esc cancels"
-	}
-	lines := []string{
-		"Bulk " + overlay.action.title(),
-		"",
-		core.Sprintf("This will apply to %d item(s) matching the current filter.", overlay.count),
-	}
-	if overlay.note != "" {
-		lines = append(lines, "", "Note: "+overlay.note)
-	}
-	lines = append(lines, "", prompt)
-	return fitPane(core.Join("\n", lines...), width, height, styles.panel)
+	return fitPane(renderOverlayLayout(dataBulkCTML, width, styles, dataBulkBindings(overlay)), width, height, styles.panel)
 }
 
 // dataFilterOverlay edits the Data panel's structural filter as one line
@@ -255,15 +319,18 @@ func (overlay *dataFilterOverlay) Value() string {
 	return overlay.input.Value()
 }
 
+// dataFilterCTML is the filter overlay's markup — see datafilter.ctml for
+// the seams it exposes (class tokens; every line is static, so it binds
+// nothing).
+//
+//go:embed datafilter.ctml
+var dataFilterCTML []byte
+
 func (overlay *dataFilterOverlay) View(width, height int, styles uiStyles) string {
 	if overlay == nil {
 		return ""
 	}
 	overlay.input.Width = max(12, width-6)
-	return fitPane(core.Join("\n",
-		"Filter", "",
-		"dataset= status= kind= source= <score expr>, comma-separated",
-		overlay.input.View(), "",
-		"enter applies · esc cancels",
-	), width, height, styles.panel)
+	head, foot := renderOverlayFrame(dataFilterCTML, width, styles)
+	return fitPane(core.Join("\n", head, overlay.input.View(), foot), width, height, styles.panel)
 }

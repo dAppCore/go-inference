@@ -140,6 +140,40 @@ characters, `<raw>` content is static (bindings stay literal inside it),
 and the terminal renderer re-wraps inline runs. The transcript screen
 composes Glamour output *around* ctml-rendered chrome instead.
 
+### Overlays
+
+The overlay layer (`dataoverlay.go` + `agentoverlay.go`) renders through
+`<layout>`/HLCRF documents (`ctml.ParseLayout`), two idioms chosen per
+overlay and noted in each `.ctml` header:
+
+- **An all-text overlay is a full `<layout variant="HCF">`** rendered in
+  one `RenderTerm` call (`databulk.ctml`, `launchreview.ctml`): H the
+  title band, C the content, F the key hints. The layout brings its own
+  geometry — the C region indents one column, and bands butt together
+  without the blank a block gap would leave.
+- **A widget-carrying overlay is a `<layout variant="HF">`**: live
+  Bubbles widgets (textinput/textarea/viewport) emit pre-styled ANSI,
+  which cannot ride a `.ctml` document, so `renderOverlayFrame` renders
+  the layout once through `RenderTermBoxes` and splits the output at the
+  H slot's own recorded box height — the renderer's receipt for where
+  the header band ends — and the host composes the widgets between the
+  bands. Chrome trapped *between* two widgets (the `Response` / `Model`
+  captions) stays host-side: a `.ctml` document renders contiguously.
+- **Alternate texts split into zero-or-one-row sequences** (the armed
+  prompt, the create/edit title, the acknowledge/apply gate): class and
+  text are static, so state selects WHICH sequence holds the row.
+- **A multi-line receipt body binds one row per line** closing with
+  `<br>` — a bound value cannot carry a line break through an inline
+  run; blank lines survive as empty rows between breaks.
+- The footer band's blank spacing row lives in `overlayFrameTheme`
+  (Footer top padding), not in host composition. Layout slots record
+  real H/C/F boxes, but overlays are centred by `renderOverlay` after
+  the fact, so no mouse affordance is wired through them yet.
+
+`agentcap.go` is the agent capability *model* (feature catalogue,
+snapshots, requests, the provider interface and its unavailable stub),
+not a view — it composes nothing and has no rendering to migrate.
+
 ## Keys
 
 | Key | Scope | Action |

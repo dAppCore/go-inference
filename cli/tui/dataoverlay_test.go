@@ -8,6 +8,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/dataset"
@@ -94,6 +96,62 @@ func TestDataItemEditor_Nil(t *testing.T) {
 	}
 }
 
+func TestRenderDataEditor_Good(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	editor := newDataItemEditor(conformancePairItem("ds", "the prompt", "the response", testTime()))
+	view := editor.View(60, 24, styles)
+	plain := ansi.Strip(view)
+	lines := strings.Split(plain, "\n")
+
+	if strings.TrimSpace(lines[0]) != "Edit as derived" {
+		t.Fatalf("overlay must open with its title line: %q", lines[0])
+	}
+	if strings.TrimSpace(lines[1]) != "" {
+		t.Fatalf("title must be followed by a blank separator: %q", lines[1])
+	}
+	if strings.TrimSpace(lines[2]) != "Prompt" {
+		t.Fatalf("pair-kind editor must caption the first field Prompt: %q", lines[2])
+	}
+	if !strings.Contains(lines[3], "the prompt") {
+		t.Fatalf("prompt textarea must sit directly beneath its caption: %q", lines[3])
+	}
+	if !strings.Contains(plain, "Response") {
+		t.Fatalf("overlay missing the Response caption: %q", plain)
+	}
+	if !strings.Contains(plain, "tab changes field · ctrl+s saves as a new derived item ·") {
+		t.Fatalf("overlay missing the key footer: %q", plain)
+	}
+	for index, line := range lines {
+		if got := lipgloss.Width(line); got > 60 {
+			t.Fatalf("line %d width = %d, exceeds 60: %q", index, got, line)
+		}
+	}
+}
+
+func TestRenderDataEditor_Bad(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	editor := newDataItemEditor(conformancePairItem("ds", "p", "r", testTime()))
+	for _, width := range []int{0, -4} {
+		if got := editor.View(width, 24, styles); got != "" {
+			t.Fatalf("View(width=%d) = %q, want empty", width, got)
+		}
+	}
+}
+
+func TestRenderDataEditor_Ugly(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	content := dataMessagesJSON(t, []dataset.MessageTurn{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}})
+	editor := newDataItemEditor(dataset.Item{ID: "m1", DatasetID: "ds", Kind: dataset.KindMessages, Content: content})
+	plain := ansi.Strip(editor.View(70, 24, styles))
+
+	if !strings.Contains(plain, "Prompt (context only — earlier turns are kept as-is)") {
+		t.Fatalf("messages-kind editor must swap in the context-only caption: %q", plain)
+	}
+	if strings.Index(plain, "context only") > strings.Index(plain, "Response") {
+		t.Fatalf("the caption split must keep the prompt caption above Response: %q", plain)
+	}
+}
+
 // ---- dataNoteOverlay ----
 
 func TestDataNoteOverlay_RequiresNonEmptyValueToSubmit(t *testing.T) {
@@ -146,6 +204,59 @@ func TestDataNoteOverlay_Nil(t *testing.T) {
 	}
 	if view := overlay.View(80, 24, newUIStyles(midnightTheme())); view != "" {
 		t.Fatalf("nil overlay view = %q", view)
+	}
+}
+
+func TestRenderDataNote_Good(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	overlay := newDataNoteOverlay(dataActionTag, "item-1", "Tag item", "Tag label", "label")
+	view := overlay.View(48, 12, styles)
+	plain := ansi.Strip(view)
+	lines := strings.Split(plain, "\n")
+
+	if strings.TrimSpace(lines[0]) != "Tag item" {
+		t.Fatalf("overlay must open with its title line: %q", lines[0])
+	}
+	if strings.TrimSpace(lines[1]) != "" {
+		t.Fatalf("title must be followed by a blank separator: %q", lines[1])
+	}
+	if strings.TrimSpace(lines[2]) != "Tag label" {
+		t.Fatalf("prompt must sit beneath the separator: %q", lines[2])
+	}
+	if !strings.Contains(lines[3], "label") {
+		t.Fatalf("the input must sit directly beneath the prompt: %q", lines[3])
+	}
+	if !strings.Contains(plain, "enter submits · esc cancels") {
+		t.Fatalf("overlay missing the key footer: %q", plain)
+	}
+	for index, line := range lines {
+		if got := lipgloss.Width(line); got > 48 {
+			t.Fatalf("line %d width = %d, exceeds 48: %q", index, got, line)
+		}
+	}
+}
+
+func TestRenderDataNote_Bad(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	overlay := newDataNoteOverlay(dataActionTag, "item-1", "Tag", "p", "ph")
+	for _, width := range []int{0, -4} {
+		if got := overlay.View(width, 12, styles); got != "" {
+			t.Fatalf("View(width=%d) = %q, want empty", width, got)
+		}
+	}
+}
+
+func TestRenderDataNote_Ugly(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	// The bulk flavour (empty itemID) renders the same frame — the shared
+	// note is a caller concern, not a markup one.
+	overlay := newDataNoteOverlay(dataActionQuarantineClear, "", "Bulk clear quarantine", "Why should these clear?", "note")
+	plain := ansi.Strip(overlay.View(48, 12, styles))
+	if strings.Index(plain, "Bulk clear quarantine") > strings.Index(plain, "Why should these clear?") {
+		t.Fatalf("title must render above the prompt: %q", plain)
+	}
+	if !strings.Contains(plain, "enter submits · esc cancels") {
+		t.Fatalf("bulk-flavoured note overlay missing the key footer: %q", plain)
 	}
 }
 
@@ -206,6 +317,65 @@ func TestDataBulkOverlay_Nil(t *testing.T) {
 	}
 }
 
+func TestRenderDataBulk_Good(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	overlay := newDataBulkOverlay(dataActionApprove, 42, "")
+	view := overlay.View(48, 12, styles)
+	plain := ansi.Strip(view)
+	lines := strings.Split(plain, "\n")
+
+	if strings.TrimSpace(lines[0]) != "Bulk Approve" {
+		t.Fatalf("overlay must open with its action title: %q", lines[0])
+	}
+	if strings.TrimSpace(lines[1]) != "" {
+		t.Fatalf("title must be followed by a blank separator: %q", lines[1])
+	}
+	if !strings.Contains(plain, "This will apply to 42 item(s) matching the") {
+		t.Fatalf("overlay missing the count sentence: %q", plain)
+	}
+	if strings.Contains(plain, "Note:") {
+		t.Fatalf("a note-free bulk action must not render a note row: %q", plain)
+	}
+	if !strings.Contains(plain, "enter continues · esc cancels") {
+		t.Fatalf("unarmed overlay missing the continue prompt: %q", plain)
+	}
+	for index, line := range lines {
+		if got := lipgloss.Width(line); got > 48 {
+			t.Fatalf("line %d width = %d, exceeds 48: %q", index, got, line)
+		}
+	}
+}
+
+func TestRenderDataBulk_Bad(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	overlay := newDataBulkOverlay(dataActionApprove, 1, "")
+	for _, width := range []int{0, -4} {
+		if got := overlay.View(width, 12, styles); got != "" {
+			t.Fatalf("View(width=%d) = %q, want empty", width, got)
+		}
+	}
+}
+
+func TestRenderDataBulk_Ugly(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	overlay := newDataBulkOverlay(dataActionQuarantineClear, 7, "false positive batch")
+	overlay.Confirm("enter") // arm
+	plain := ansi.Strip(overlay.View(48, 12, styles))
+
+	if !strings.Contains(plain, "Note: false positive batch") {
+		t.Fatalf("collected note must render its row: %q", plain)
+	}
+	if strings.Index(plain, "item(s)") > strings.Index(plain, "Note:") {
+		t.Fatalf("the note must follow the count sentence: %q", plain)
+	}
+	if !strings.Contains(plain, "enter applies this action to every listed item") {
+		t.Fatalf("armed overlay must swap to the apply prompt: %q", plain)
+	}
+	if strings.Contains(plain, "enter continues") {
+		t.Fatalf("armed overlay must not keep the continue prompt: %q", plain)
+	}
+}
+
 // ---- dataFilterOverlay ----
 
 func TestDataFilterOverlay_EnterAlwaysSubmitsEvenEmpty(t *testing.T) {
@@ -234,5 +404,60 @@ func TestDataFilterOverlay_Nil(t *testing.T) {
 	}
 	if view := overlay.View(80, 24, newUIStyles(midnightTheme())); view != "" {
 		t.Fatalf("nil overlay view = %q", view)
+	}
+}
+
+func TestRenderDataFilter_Good(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	overlay := newDataFilterOverlay("status=pending")
+	view := overlay.View(80, 12, styles)
+	plain := ansi.Strip(view)
+	lines := strings.Split(plain, "\n")
+
+	if strings.TrimSpace(lines[0]) != "Filter" {
+		t.Fatalf("overlay must open with its title line: %q", lines[0])
+	}
+	if strings.TrimSpace(lines[1]) != "" {
+		t.Fatalf("title must be followed by a blank separator: %q", lines[1])
+	}
+	if !strings.Contains(plain, "dataset= status= kind= source= <score expr>, comma-separated") {
+		t.Fatalf("overlay missing the grammar hint: %q", plain)
+	}
+	if !strings.Contains(plain, "status=pending") {
+		t.Fatalf("overlay missing the pre-filled input: %q", plain)
+	}
+	if !strings.Contains(plain, "enter applies · esc cancels") {
+		t.Fatalf("overlay missing the key footer: %q", plain)
+	}
+	for index, line := range lines {
+		if got := lipgloss.Width(line); got > 80 {
+			t.Fatalf("line %d width = %d, exceeds 80: %q", index, got, line)
+		}
+	}
+}
+
+func TestRenderDataFilter_Bad(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	overlay := newDataFilterOverlay("")
+	for _, width := range []int{0, -4} {
+		if got := overlay.View(width, 12, styles); got != "" {
+			t.Fatalf("View(width=%d) = %q, want empty", width, got)
+		}
+	}
+}
+
+func TestRenderDataFilter_Ugly(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	// A narrow pane wraps the grammar hint; the escaped <score expr> token
+	// must survive the entity round trip and no line may overflow.
+	overlay := newDataFilterOverlay("")
+	plain := ansi.Strip(overlay.View(24, 12, styles))
+	if !strings.Contains(plain, "<score") {
+		t.Fatalf("escaped grammar token missing from the narrow render: %q", plain)
+	}
+	for index, line := range strings.Split(plain, "\n") {
+		if got := lipgloss.Width(line); got > 24 {
+			t.Fatalf("line %d width = %d, exceeds 24: %q", index, got, line)
+		}
 	}
 }
