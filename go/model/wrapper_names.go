@@ -7,9 +7,26 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
-// NormalizeWrapperNames makes every "language_model."-prefixed tensor (the multimodal wrapper layout
-// some packs use) ALSO addressable by its stripped "model.…" name, so an assembler's bare lookups
-// work whether or not the checkpoint nests the text model under the wrapper.
+// wrapperStripped returns k's bare-text-model alias for the two multimodal wrapper layouts HF
+// packs ship — "language_model.…" (the classic wrapper nesting: language_model.model.norm.weight
+// → model.norm.weight) and "model.language_model.…" (the current transformers layout Qwen3.5
+// snapshots use: model.language_model.embed_tokens.weight → model.embed_tokens.weight) — or
+// ("", false) when k carries neither prefix. The two prefixes are mutually exclusive (one starts
+// "language_model.", the other "model."), so the match order cannot mistake one form for the
+// other; non-text wrapper siblings (model.visual.…, mtp.…) match neither and pass through.
+func wrapperStripped(k string) (string, bool) {
+	if rest, ok := core.CutPrefix(k, "language_model."); ok {
+		return rest, true
+	}
+	if rest, ok := core.CutPrefix(k, "model.language_model."); ok {
+		return "model." + rest, true
+	}
+	return "", false
+}
+
+// NormalizeWrapperNames makes every wrapper-prefixed tensor (either multimodal wrapper layout —
+// see wrapperStripped) ALSO addressable by its stripped "model.…" name, so an assembler's bare
+// lookups work whether or not the checkpoint nests the text model under a wrapper.
 // Returns the input unchanged when there is nothing to alias — no such prefix (flat text-only
 // packs), or every wrapped tensor's stripped alias is ALREADY present (a map this function has
 // aliased before). That same-map return is load-bearing for the owned-tensor adoption (#60):
@@ -20,11 +37,10 @@ import (
 // stripped name is never overwritten by an alias (the checkpoint's own tensor stays
 // authoritative; the old fresh-map build left that collision to map iteration order).
 func NormalizeWrapperNames(t map[string]safetensors.Tensor) map[string]safetensors.Tensor {
-	const pfx = "language_model."
 	needsAlias := false
 	for k := range t {
-		if core.HasPrefix(k, pfx) {
-			if _, ok := t[k[len(pfx):]]; !ok {
+		if alias, ok := wrapperStripped(k); ok {
+			if _, present := t[alias]; !present {
 				needsAlias = true
 				break
 			}
@@ -38,9 +54,9 @@ func NormalizeWrapperNames(t map[string]safetensors.Tensor) map[string]safetenso
 		out[k] = v
 	}
 	for k, v := range t {
-		if core.HasPrefix(k, pfx) {
-			if _, ok := out[k[len(pfx):]]; !ok {
-				out[k[len(pfx):]] = v
+		if alias, ok := wrapperStripped(k); ok {
+			if _, present := out[alias]; !present {
+				out[alias] = v
 			}
 		}
 	}
