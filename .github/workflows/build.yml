@@ -69,7 +69,10 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="$GITHUB_REF_NAME"; else VERSION="dev-${GITHUB_SHA:0:12}"; fi
           mkdir -p bin
-          go build -trimpath -ldflags "-X main.version=${VERSION}" -o "bin/lem${EXE}" ./cli
+          # main.backend is "cpu" for every cell this job builds (the other backends —
+          # metal, amd, cuda — are built by their own dedicated jobs/CI); lem's
+          # self-update asset-selection reads it to pick its own release asset.
+          go build -trimpath -ldflags "-X main.version=${VERSION} -X main.backend=cpu" -o "bin/lem${EXE}" ./cli
           test -s "bin/lem${EXE}"
 
       - uses: actions/upload-artifact@v4
@@ -110,7 +113,12 @@ jobs:
           set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then VERSION="$GITHUB_REF_NAME"; else VERSION="dev-${GITHUB_SHA:0:12}"; fi
           task metallib
-          task build:embed VERSION="${VERSION}"
+          # GO_VERSION_LDFLAGS is Taskfile.yml's own var, threaded into build:embed's
+          # -ldflags; overriding it here on the CLI (Task's documented per-invocation
+          # override, e.g. the Taskfile's own "task build VERSION=1.2.3" example) folds
+          # in main.backend=metal without touching Taskfile.yml, whose ldflags string
+          # otherwise only knows about main.version.
+          task build:embed VERSION="${VERSION}" GO_VERSION_LDFLAGS="-X main.version=${VERSION} -X main.backend=metal"
           test -s bin/lem
 
       - uses: actions/upload-artifact@v4
@@ -161,7 +169,16 @@ jobs:
             echo "version=$GITHUB_REF_NAME"      >> "$GITHUB_OUTPUT"
             echo "tag=$GITHUB_REF_NAME"          >> "$GITHUB_OUTPUT"
             echo "name=$GITHUB_REF_NAME"         >> "$GITHUB_OUTPUT"
-            echo "prerelease=false"              >> "$GITHUB_OUTPUT"
+            # A tag containing '-' (v1.2.3-beta.1, v1.2.3-alpha.2, even a bare
+            # v2.0.0-rc.1) is a semver prerelease — publish it as a GitHub
+            # prerelease so go-update's channel filter (alpha/beta substring,
+            # else the prerelease flag) classifies it correctly instead of
+            # every tag looking "stable".
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              echo "prerelease=true"             >> "$GITHUB_OUTPUT"
+            else
+              echo "prerelease=false"            >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "version=dev-${GITHUB_SHA:0:12}" >> "$GITHUB_OUTPUT"
             echo "tag=dev"                        >> "$GITHUB_OUTPUT"
