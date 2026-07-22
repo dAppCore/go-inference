@@ -3,12 +3,17 @@
 package tui
 
 import (
+	_ "embed"
 	"sort"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference"
 )
 
@@ -74,13 +79,113 @@ func displayName(path string) string {
 	return core.PathBase(path)
 }
 
-// newPicker builds the model list with the house dark styling.
-func newPicker(styles uiStyles) list.Model {
-	delegate := list.NewDefaultDelegate()
-	l := list.New(nil, delegate, 0, 0)
+// newPicker builds the model list. The list.Model owns picker STATE only —
+// items, cursor, filter, pagination — and its default delegate survives as
+// the page-size driver (height 2 + spacing 1, the same three cells a
+// picker.ctml row occupies); rendering goes through renderPicker, so the
+// list carries no lipgloss styling of its own.
+func newPicker() list.Model {
+	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Models"
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
-	l.Styles.Title = styles.title
 	return l
+}
+
+// pickerCTML is the Models panel's markup — see picker.ctml for the seams it
+// exposes (row/filter/empty/page sequences, class tokens, the model-picker
+// block id).
+//
+//go:embed picker.ctml
+var pickerCTML []byte
+
+// modelPickerBindings derives the panel's rows from the list model's own
+// state: the current page of visible items split around the cursor
+// (before / active / after, because .ctml class attributes are static
+// strings — an <each> row cannot vary its own class), plus the
+// zero-or-one-row conditional sections for the typed filter, the empty
+// state, and the page position. Name and hint are truncated host-side to
+// the row budget because <dt> lines never wrap.
+func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"filter":     {},
+		"rowsBefore": {},
+		"rowsActive": {},
+		"rowsAfter":  {},
+		"empty":      {},
+		"page":       {},
+	}
+	if picker.FilterState() == list.Filtering {
+		sequences["filter"] = append(sequences["filter"], map[string]any{"value": picker.FilterValue()})
+	}
+	visible := picker.VisibleItems()
+	start, end := picker.Paginator.GetSliceBounds(len(visible))
+	active := picker.Index() - start
+	budget := max(1, width-2)
+	for index, item := range visible[start:end] {
+		entry, ok := item.(list.DefaultItem)
+		if !ok {
+			continue
+		}
+		row := map[string]any{
+			"name":   ansi.Truncate(entry.Title(), budget, "…"),
+			"detail": ansi.Truncate(entry.Description(), budget, "…"),
+		}
+		switch {
+		case index < active:
+			sequences["rowsBefore"] = append(sequences["rowsBefore"], row)
+		case index == active:
+			sequences["rowsActive"] = append(sequences["rowsActive"], row)
+		default:
+			sequences["rowsAfter"] = append(sequences["rowsAfter"], row)
+		}
+	}
+	if len(visible) == 0 && picker.FilterState() != list.Filtering {
+		sequences["empty"] = append(sequences["empty"], map[string]any{"text": "No items."})
+	}
+	if picker.Paginator.TotalPages > 1 {
+		sequences["page"] = append(sequences["page"], map[string]any{
+			"label": core.Sprintf("page %d/%d", picker.Paginator.Page+1, picker.Paginator.TotalPages),
+		})
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
+// modelPickerTheme maps the markup's class tokens onto the existing palette,
+// so the .ctml render reuses uiStyles paint exactly — no colours of its own.
+func modelPickerTheme(styles uiStyles) *html.TermTheme {
+	theme := html.DefaultTermTheme()
+	theme.Text = styles.answer
+	theme.Heading = styles.title // the <h2> panel title
+	theme.Classes = map[string]lipgloss.Style{
+		"row-idle":      styles.answer,
+		"row-active":    styles.accent,
+		"row-hint":      styles.thought,
+		"filter-prompt": styles.accent,
+		"filter-value":  styles.answer,
+		"picker-empty":  styles.status,
+		"picker-page":   styles.status,
+		"picker-keys":   styles.status,
+	}
+	return theme
+}
+
+// renderPicker parses picker.ctml with bindings derived from the list
+// model's current state and renders it through the go-html terminal
+// renderer: the panel title, the filter line while filtering, one <dl> row
+// per model on the current page (marker + name, indented type/path hint),
+// the empty and page states, and the key footer. Cursor movement, fuzzy
+// filtering, and pagination stay in list.Model — this is the render swap
+// over a.picker.Update.
+func renderPicker(picker list.Model, width int, styles uiStyles) string {
+	if width <= 0 {
+		return ""
+	}
+	tree, err := ctml.Parse(pickerCTML, modelPickerBindings(picker, width))
+	if err != nil {
+		// picker.ctml is embedded and static, so a parse failure is a build
+		// defect; TestRenderPicker_Good pins the markup as parseable.
+		return ""
+	}
+	return html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: modelPickerTheme(styles)})
 }
