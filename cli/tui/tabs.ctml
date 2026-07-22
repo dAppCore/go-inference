@@ -1,0 +1,21 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  tabs.ctml : the lem workspace tab strip (brand + one entry per panel).
+
+  Host seams (tabs.go):
+    - Sequences  tabsBefore / tabsActive / tabsAfter : the panel labels in
+      panel order, split around the active tab. Three sequences because a
+      class attribute is a static string in .ctml (an <each> row cannot vary
+      its own class), so active styling is carried by WHICH sequence a row
+      lands in; the host re-binds the split on every active-tab change.
+    - Classes    brand / nav-active / nav-inactive : mapped onto the existing
+      uiStyles palette by panelBarTheme.
+    - id="panel-bar" : the block the terminal renderer records in its box
+      map for mouse resolution (teabox). Per-tab boxes are derived beside it
+      by mergePanelTabBoxes, because inline elements never record boxes.
+
+  The <nav> body stays on ONE source line: a text run's edge whitespace
+  survives only when it does not touch a line break, and the inter-tab gaps
+  ("  ○ ") are significant cells in a one-row strip.
+-->
+<nav id="panel-bar"><span class="brand">LEM</span><each items="tabsBefore" as="tab"><span class="nav-inactive">  ○ <span>{{tab.label}}</span></span></each><each items="tabsActive" as="tab"><span class="nav-active">  ● <span>{{tab.label}}</span></span></each><each items="tabsAfter" as="tab"><span class="nav-inactive">  ○ <span>{{tab.label}}</span></span></each></nav>

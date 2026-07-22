@@ -1378,8 +1378,44 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return a.onKey(msg)
+
+	case tea.MouseMsg:
+		return a.onMouse(msg)
 	}
 	return a.route(msg)
+}
+
+// onMouse gives left presses to the panel bar first: the bar's .ctml render
+// exposes a box map, so a click resolves through teabox to the tab that
+// painted at that cell (see tabs.go). The keyboard gates apply unchanged —
+// during boot or under an overlay the bar takes no clicks — and every
+// unclaimed mouse message keeps its existing route to the focused panel
+// (wheel scrolling in the chat transcript).
+func (a app) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if a.boot.phase != bootReady || a.activeOverlay != overlayNone {
+		return a.route(msg)
+	}
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return a.route(msg)
+	}
+	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+	_, boxes := renderPanelBarBoxes(a.activePanel, metrics.innerWidth, metrics.kind, a.styles)
+	panel, ok := panelBarHit(boxes, msg.X-frameInsetCols, msg.Y-frameInsetRows)
+	if !ok {
+		return a.route(msg)
+	}
+	return a, a.selectPanel(panel)
+}
+
+// selectPanel activates target and returns the Models discovery command a
+// first visit needs — the single switching path shared by the tab keys and
+// panel-bar clicks, so both land with identical side effects.
+func (a *app) selectPanel(target panelID) tea.Cmd {
+	a.activePanel = target
+	if target == panelModels && len(a.picker.Items()) == 0 {
+		return discoverModels
+	}
+	return nil
 }
 
 func (a *app) connectWorkspace(resources *workspaceResources) core.Result {
@@ -1974,14 +2010,9 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	case "tab", "shift+tab":
 		if msg.String() == "tab" {
-			a.activePanel = a.activePanel.next()
-		} else {
-			a.activePanel = a.activePanel.prev()
+			return a, a.selectPanel(a.activePanel.next())
 		}
-		if a.activePanel == panelModels && len(a.picker.Items()) == 0 {
-			return a, discoverModels
-		}
-		return a, nil
+		return a, a.selectPanel(a.activePanel.prev())
 	case "esc":
 		if a.generating && a.gen != nil {
 			if managed := a.sessionJobs[a.gen.SessionID]; managed != nil {

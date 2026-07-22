@@ -105,7 +105,9 @@ func runWithWorkspace(
 		return runWorkspaceCheck(a, stdout, stderr)
 	}
 
-	program := tea.NewProgram(a, tea.WithAltScreen(), tea.WithContext(ctx))
+	// Cell-motion mouse reporting feeds the panel bar's teabox hit-testing
+	// (click a tab to switch panels) and the transcript's wheel scrolling.
+	program := tea.NewProgram(a, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
 	finalModel, runErr := program.Run()
 	shutdownResult := shutdownProgramModel(a, finalModel)
 	if runErr != nil {
@@ -145,7 +147,7 @@ func newDataReviewApp(ctx context.Context, slug string) app {
 // keeping that message rather than promising a broken TUI.
 func RunDataReview(ctx context.Context, slug string, stdout, stderr io.Writer) int {
 	a := newDataReviewApp(ctx, slug)
-	program := tea.NewProgram(a, tea.WithAltScreen(), tea.WithContext(ctx))
+	program := tea.NewProgram(a, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx))
 	finalModel, runErr := program.Run()
 	shutdownResult := shutdownProgramModel(a, finalModel)
 	if runErr != nil {
