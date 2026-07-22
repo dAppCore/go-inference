@@ -1,0 +1,40 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  settings.ctml : the Settings form (one <dl> row per knob + the key footer).
+
+  Host seams (settings.go):
+    - Sequences  rowsBefore / rowsActive / rowsAfter : the knob rows in
+      cursor order, split around the selected row. Three sequences because a
+      class attribute is a static string in .ctml (an <each> row cannot vary
+      its own class), so selection styling is carried by WHICH sequence a
+      row lands in; the host re-binds the split on every cursor move.
+    - Classes    row-idle / row-active / row-value / row-hint / form-keys :
+      mapped onto the existing uiStyles palette by settingsFormTheme.
+    - id="settings-form" : the block a box-recording render would identify;
+      inert under RenderTerm today, ready for a mouse consumer.
+
+  Row shape: <dt> is the value line (marker + name + ‹ value ›), <dd> the
+  hint the renderer indents beneath it, and each <dl> closes with the blank
+  separator a form row needs. Rows are block-shaped, so the file indents
+  freely; only single-row constructs (the <dt> line, the footer) stay on one
+  source line, because a text run's edge whitespace survives only when it
+  does not touch a line break. Selection gutters are marker glyphs
+  (› active, ○ idle): the parser drops whitespace-only runs between
+  siblings, so a two-space gutter cannot be expressed in markup.
+-->
+<section id="settings-form">
+<h2>settings</h2>
+<each items="rowsBefore" as="row"><dl>
+  <dt><span class="row-idle">○ <span>{{row.name}}</span></span><span class="row-value">  ‹ <span>{{row.value}}</span> ›</span></dt>
+  <dd><span class="row-hint">{{row.hint}}</span></dd>
+</dl></each>
+<each items="rowsActive" as="row"><dl>
+  <dt><span class="row-active">› <span>{{row.name}}</span></span><span class="row-value">  ‹ <span>{{row.value}}</span> ›</span></dt>
+  <dd><span class="row-hint">{{row.hint}}</span></dd>
+</dl></each>
+<each items="rowsAfter" as="row"><dl>
+  <dt><span class="row-idle">○ <span>{{row.name}}</span></span><span class="row-value">  ‹ <span>{{row.value}}</span> ›</span></dt>
+  <dd><span class="row-hint">{{row.hint}}</span></dd>
+</dl></each>
+<p class="form-keys">↑/↓ select · ←/→ change · values apply as hinted</p>
+</section>
