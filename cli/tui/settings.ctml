@@ -25,15 +25,15 @@
 <section id="settings-form">
 <h2>settings</h2>
 <each items="rowsBefore" as="row"><dl>
-  <dt><span class="row-idle">○ <span>{{row.name}}</span></span><span class="row-value">  ‹ <span>{{row.value}}</span> ›</span></dt>
+  <dt><span class="row-idle">○ {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
   <dd><span class="row-hint">{{row.hint}}</span></dd>
 </dl></each>
 <each items="rowsActive" as="row"><dl>
-  <dt><span class="row-active">› <span>{{row.name}}</span></span><span class="row-value">  ‹ <span>{{row.value}}</span> ›</span></dt>
+  <dt><span class="row-active">› {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
   <dd><span class="row-hint">{{row.hint}}</span></dd>
 </dl></each>
 <each items="rowsAfter" as="row"><dl>
-  <dt><span class="row-idle">○ <span>{{row.name}}</span></span><span class="row-value">  ‹ <span>{{row.value}}</span> ›</span></dt>
+  <dt><span class="row-idle">○ {{row.name}}</span><span class="row-value">  ‹ {{row.value}} ›</span></dt>
   <dd><span class="row-hint">{{row.hint}}</span></dd>
 </dl></each>
 <p class="form-keys">↑/↓ select · ←/→ change · values apply as hinted</p>

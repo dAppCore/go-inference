@@ -105,7 +105,9 @@ var pickerCTML []byte
 // strings — an <each> row cannot vary its own class), plus the
 // zero-or-one-row conditional sections for the typed filter, the empty
 // state, and the page position. Name and hint are truncated host-side to
-// the row budget because <dt> lines never wrap.
+// the row budget because the page math budgets exactly three cells per
+// row — a <dt> now wraps to the render width, and a wrapped row would
+// overflow the page the list delegate sized.
 func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
 	sequences := map[string][]map[string]any{
 		"filter":     {},

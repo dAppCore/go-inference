@@ -18,4 +18,4 @@
   survives only when it does not touch a line break, and the inter-tab gaps
   ("  ○ ") are significant cells in a one-row strip.
 -->
-<nav id="panel-bar"><span class="brand">LEM</span><each items="tabsBefore" as="tab"><span class="nav-inactive">  ○ <span>{{tab.label}}</span></span></each><each items="tabsActive" as="tab"><span class="nav-active">  ● <span>{{tab.label}}</span></span></each><each items="tabsAfter" as="tab"><span class="nav-inactive">  ○ <span>{{tab.label}}</span></span></each></nav>
+<nav id="panel-bar"><span class="brand">LEM</span><each items="tabsBefore" as="tab"><span class="nav-inactive">  ○ {{tab.label}}</span></each><each items="tabsActive" as="tab"><span class="nav-active">  ● {{tab.label}}</span></each><each items="tabsAfter" as="tab"><span class="nav-inactive">  ○ {{tab.label}}</span></each></nav>

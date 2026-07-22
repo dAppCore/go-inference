@@ -24,7 +24,7 @@
   whitespace ("This will apply to ") survives.
 -->
 <layout variant="HCF">
-<h><each items="bulk" as="row"><h2>Bulk <span>{{row.title}}</span></h2><p>This will apply to <span>{{row.count}}</span> item(s) matching the current filter.</p></each></h>
-<c><each items="note" as="row"><p>Note: <span>{{row.text}}</span></p></each></c>
+<h><each items="bulk" as="row"><h2>Bulk {{row.title}}</h2><p>This will apply to {{row.count}} item(s) matching the current filter.</p></each></h>
+<c><each items="note" as="row"><p>Note: {{row.text}}</p></each></c>
 <f><each items="arm" as="row"><p class="overlay-keys">enter continues · esc cancels</p></each><each items="confirm" as="row"><p class="overlay-keys">enter applies this action to every listed item · esc cancels</p></each></f>
 </layout>

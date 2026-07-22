@@ -25,7 +25,7 @@
   whitespace ("Provider: ") survives.
 -->
 <layout variant="HCF">
-<h><each items="review" as="row"><h2>{{row.title}}</h2><p>Provider: <span>{{row.provider}}</span><br></br>Model: <span>{{row.model}}</span></p></each></h>
+<h><each items="review" as="row"><h2>{{row.title}}</h2><p>Provider: {{row.provider}}<br></br>Model: {{row.model}}</p></each></h>
 <c><each items="warn" as="row"><p class="overlay-warn">{{row.text}}</p></each><p><each items="body" as="row"><span>{{row.line}}</span><br></br></each></p></c>
 <f><p class="overlay-keys">enter confirms · esc cancels</p></f>
 </layout>
