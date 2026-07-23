@@ -8,8 +8,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 )
 
 // The Settings tab: a cursor list of knobs adjusted with ←/→ (or h/l). Values
@@ -140,15 +140,15 @@ func settingsFormBindings(form settings) ctml.Bindings {
 // so the .ctml render reuses uiStyles paint exactly — no colours of its own.
 func settingsFormTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.answer
-	theme.Heading = styles.title // the <h2> form title
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.answer)
+	theme.Heading = termStyle(styles.title) // the <h2> form title
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"row-idle":   styles.answer,
 		"row-active": styles.accent,
 		"row-value":  styles.title,
 		"row-hint":   styles.thought,
 		"form-keys":  styles.status,
-	}
+	})
 	return theme
 }
 
@@ -165,5 +165,5 @@ func renderSettings(form settings, width int, styles uiStyles) string {
 		// defect; TestRenderSettings_Good pins the markup as parseable.
 		return ""
 	}
-	return html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: settingsFormTheme(styles)})
+	return termOutput(html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: settingsFormTheme(styles)}))
 }

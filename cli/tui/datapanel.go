@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 	"dappco.re/go/inference/dataset"
 )
 
@@ -596,10 +596,10 @@ func dataListBindings(panel *dataPanel, width int) ctml.Bindings {
 // contiguous list this panel always drew.
 func dataListTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.answer
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle()
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.answer)
+	theme.Header = termStyle(lipgloss.NewStyle())
+	theme.Footer = termStyle(lipgloss.NewStyle())
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"list-title":  styles.title,
 		"list-meta":   styles.status,
 		"list-filter": styles.thought,
@@ -610,7 +610,7 @@ func dataListTheme(styles uiStyles) *html.TermTheme {
 		"list-empty":  styles.status,
 		"list-hint":   styles.thought,
 		"list-keys":   styles.thought,
-	}
+	})
 	return theme
 }
 
@@ -691,8 +691,8 @@ func (panel *dataPanel) dataDetailBindings(width int) ctml.Bindings {
 // of its own.
 func dataDetailTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.answer
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.answer)
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"detail-empty":   styles.status,
 		"detail-title":   styles.title,
 		"detail-status":  styles.status,
@@ -703,7 +703,7 @@ func dataDetailTheme(styles uiStyles) *html.TermTheme {
 		"row-status":     styles.status,
 		"row-thought":    styles.thought,
 		"row-answer":     styles.answer,
-	}
+	})
 	return theme
 }
 
@@ -718,7 +718,7 @@ func (panel *dataPanel) renderDetail(width, height int, styles uiStyles) string 
 		// parseable.
 		return ""
 	}
-	rendered := html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: dataDetailTheme(styles)})
+	rendered := termOutput(html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: dataDetailTheme(styles)}))
 	return fitPane(rendered, width, height, styles.panel)
 }
 

@@ -8,8 +8,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 )
 
 type inspectorControl uint8
@@ -152,7 +152,7 @@ func (inspector inspectorState) View(target app, width, height int) string {
 		// build defect; TestInspector_Good pins the markup as parseable.
 		return ""
 	}
-	rendered := html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: inspectorTheme(target.styles)})
+	rendered := termOutput(html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: inspectorTheme(target.styles)}))
 	return fitPane(rendered, width, height, target.styles.inspector)
 }
 
@@ -163,8 +163,8 @@ func (inspector inspectorState) View(target app, width, height int) string {
 // from fitPane.
 func inspectorTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.inspector
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.inspector)
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"inspector-title": styles.title,
 		"label":           styles.accent,
 		"control-active":  styles.accent,
@@ -176,7 +176,7 @@ func inspectorTheme(styles uiStyles) *html.TermTheme {
 		"c-attention":     styles.attention,
 		"c-success":       styles.success,
 		"c-answer":        styles.answer,
-	}
+	})
 	return theme
 }
 

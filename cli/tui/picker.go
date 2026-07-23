@@ -12,8 +12,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 	"dappco.re/go/inference"
 )
 
@@ -160,9 +160,9 @@ func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
 // so the .ctml render reuses uiStyles paint exactly — no colours of its own.
 func modelPickerTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.answer
-	theme.Heading = styles.title // the <h2> panel title
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.answer)
+	theme.Heading = termStyle(styles.title) // the <h2> panel title
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"row-idle":      styles.answer,
 		"row-active":    styles.accent,
 		"row-hint":      styles.thought,
@@ -171,7 +171,7 @@ func modelPickerTheme(styles uiStyles) *html.TermTheme {
 		"picker-empty":  styles.status,
 		"picker-page":   styles.status,
 		"picker-keys":   styles.status,
-	}
+	})
 	return theme
 }
 
@@ -192,5 +192,5 @@ func renderPicker(picker list.Model, width int, styles uiStyles) string {
 		// defect; TestRenderPicker_Good pins the markup as parseable.
 		return ""
 	}
-	return html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: modelPickerTheme(styles)})
+	return termOutput(html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: modelPickerTheme(styles)}))
 }

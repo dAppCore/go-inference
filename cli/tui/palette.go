@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 	coreio "dappco.re/go/io"
 )
 
@@ -228,18 +228,18 @@ func commandPaletteBindings(palette *commandPalette, width int) ctml.Bindings {
 // primary panel.
 func commandPaletteTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.answer
-	theme.Heading = styles.title
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle().Padding(1, 0, 0, 0)
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.answer)
+	theme.Heading = termStyle(styles.title)
+	theme.Header = termStyle(lipgloss.NewStyle())
+	theme.Footer = termStyle(lipgloss.NewStyle().Padding(1, 0, 0, 0))
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"row-idle":      styles.answer,
 		"row-active":    styles.accent,
 		"row-hint":      styles.thought,
 		"palette-empty": styles.status,
 		"palette-page":  styles.status,
 		"overlay-keys":  styles.status,
-	}
+	})
 	return theme
 }
 

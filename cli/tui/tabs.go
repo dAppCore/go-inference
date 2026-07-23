@@ -8,9 +8,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
-	"dappco.re/go/html/teabox"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
+	"dappco.re/go/html/engine/teabox"
 )
 
 type panelID uint8
@@ -110,15 +110,15 @@ func panelBarBindings(active panelID, kind layoutKind) ctml.Bindings {
 // tile the rendered strip exactly.
 func panelBarTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.header
-	theme.Sidebar = lipgloss.NewStyle().
+	theme.Text = termStyle(styles.header)
+	theme.Sidebar = termStyle(lipgloss.NewStyle().
 		Border(lipgloss.Border{Left: " ", Right: " "}).
-		BorderTop(false).BorderBottom(false)
-	theme.Classes = map[string]lipgloss.Style{
+		BorderTop(false).BorderBottom(false))
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"brand":        styles.brand,
 		"nav-active":   styles.navActive,
 		"nav-inactive": styles.navInactive,
-	}
+	})
 	return theme
 }
 
@@ -150,7 +150,7 @@ func renderPanelBarBoxes(active panelID, width int, kind layoutKind, styles uiSt
 		FitSlots: true,
 	})
 	clampBoxesToWidth(boxes, width)
-	return fitLine(line, width, styles.header), boxes
+	return fitLine(termOutput(line), width, styles.header), boxes
 }
 
 // clampBoxesToWidth trims the box map to the fitted render: fitLine

@@ -11,7 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	core "dappco.re/go"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
 )
 
 // workEditor keeps Work creation and editing local to the TUI. It deliberately

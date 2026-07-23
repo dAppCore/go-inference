@@ -17,8 +17,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/decode/parser"
@@ -3076,7 +3076,7 @@ func (a app) renderTranscript() string {
 	if err != nil {
 		return ""
 	}
-	return lipgloss.NewStyle().Width(a.view.Width).Render(html.RenderTerm(tree, html.NewContext()))
+	return lipgloss.NewStyle().Width(a.view.Width).Render(termOutput(html.RenderTerm(tree, html.NewContext())))
 }
 
 // transcriptBindings supplies transcript.ctml's two row sequences. notice is

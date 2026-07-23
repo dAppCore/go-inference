@@ -10,7 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	core "dappco.re/go"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
 	"dappco.re/go/inference/dataset"
 )
 

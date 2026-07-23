@@ -8,8 +8,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 )
 
 type layoutKind uint8
@@ -145,8 +145,8 @@ var shellWideCTML []byte
 // it byte-exact.
 func shellFrameTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle()
+	theme.Header = termStyle(lipgloss.NewStyle())
+	theme.Footer = termStyle(lipgloss.NewStyle())
 	return theme
 }
 
@@ -159,7 +159,7 @@ func shellFrameTheme(styles uiStyles) *html.TermTheme {
 // and gets word-wrapped onto a spurious extra row (S:15.5).
 func shellRegionTheme(styles uiStyles) *html.TermTheme {
 	theme := shellFrameTheme(styles)
-	theme.Content = lipgloss.NewStyle()
+	theme.Content = termStyle(lipgloss.NewStyle())
 	return theme
 }
 
@@ -176,9 +176,9 @@ func shellRegionTheme(styles uiStyles) *html.TermTheme {
 // default border colour.
 func shellWideTheme(styles uiStyles) *html.TermTheme {
 	theme := shellRegionTheme(styles)
-	theme.Aside = lipgloss.NewStyle()
+	theme.Aside = termStyle(lipgloss.NewStyle())
 	theme.GutterRule = "│"
-	theme.Rule = styles.separator
+	theme.Rule = termStyle(styles.separator)
 	return theme
 }
 
@@ -219,7 +219,7 @@ func renderWideLayout(src []byte, width int, theme *html.TermTheme, bindings ...
 		// renderBandFrame, overlayframe.go).
 		return ""
 	}
-	return layout.RenderTerm(html.NewContext(), html.TermOptions{Width: width, Theme: theme, AsideWidth: wideInspectorWidth})
+	return termOutput(layout.RenderTerm(html.NewContext(), html.TermOptions{Width: width, Theme: theme, AsideWidth: wideInspectorWidth}))
 }
 
 // renderFrame composes the permanent workspace shell. All truncation is done
@@ -332,10 +332,10 @@ var shellInspectorPairCTML []byte
 // history), not go-html's own similar-but-different default border colour.
 func inspectorPairTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Header = lipgloss.NewStyle().
+	theme.Header = termStyle(lipgloss.NewStyle().
 		Border(lipgloss.NormalBorder(), false, false, true, false).
-		BorderForeground(styles.theme.border)
-	theme.Content = lipgloss.NewStyle()
+		BorderForeground(styles.theme.border))
+	theme.Content = termStyle(lipgloss.NewStyle())
 	return theme
 }
 

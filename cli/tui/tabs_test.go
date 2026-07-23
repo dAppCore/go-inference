@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"dappco.re/go/html"
+	"dappco.re/go/html/engine/html"
 )
 
 func TestRenderPanelBar_Good(t *testing.T) {

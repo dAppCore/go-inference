@@ -6,8 +6,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 )
 
 // The overlay layer renders its text chrome through .ctml <layout>
@@ -52,6 +52,7 @@ func renderBandFrame(src []byte, width int, theme *html.TermTheme, bindings ...c
 		return "", ""
 	}
 	rendered, boxes := layout.RenderTermBoxes(html.NewContext(), html.TermOptions{Width: width, Theme: theme})
+	rendered = termOutput(rendered)
 	lines := core.Split(rendered, "\n")
 	split := min(boxes["H"].Height, len(lines))
 	return core.Join("\n", lines[:split]...), core.Join("\n", lines[split:]...)
@@ -66,7 +67,7 @@ func renderBandLayout(src []byte, width int, theme *html.TermTheme, bindings ...
 		// renderBandFrame).
 		return ""
 	}
-	return layout.RenderTerm(html.NewContext(), html.TermOptions{Width: width, Theme: theme})
+	return termOutput(layout.RenderTerm(html.NewContext(), html.TermOptions{Width: width, Theme: theme}))
 }
 
 // overlayFrameTheme maps overlay markup onto the existing palette, so the
@@ -78,15 +79,15 @@ func renderBandLayout(src []byte, width int, theme *html.TermTheme, bindings ...
 // host composition.
 func overlayFrameTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.answer
-	theme.Heading = styles.title // the <h2> overlay titles
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle().Padding(1, 0, 0, 0)
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.answer)
+	theme.Heading = termStyle(styles.title) // the <h2> overlay titles
+	theme.Header = termStyle(lipgloss.NewStyle())
+	theme.Footer = termStyle(lipgloss.NewStyle().Padding(1, 0, 0, 0))
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"overlay-hint":  styles.thought,
 		"overlay-warn":  styles.attention,
 		"overlay-error": styles.err,
 		"overlay-keys":  styles.status,
-	}
+	})
 	return theme
 }

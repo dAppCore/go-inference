@@ -5,7 +5,10 @@
 // built on Bubble Tea + Bubbles + Lip Gloss.
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	termlipgloss "charm.land/lipgloss/v2"
+	"github.com/charmbracelet/lipgloss"
+)
 
 // theme contains semantic colours rather than component-specific paint. Every
 // colour is adaptive so the same hierarchy remains legible on light terminals.
@@ -108,5 +111,67 @@ func newUIStyles(t theme) uiStyles {
 		separator:   lipgloss.NewStyle().Foreground(t.border),
 		outerFrame:  lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.border),
 		inputBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.border).Padding(0, 1),
+	}
+}
+
+// termStyle adapts the v1 styles owned by the Bubble Tea shell to the v2
+// styles required by go-render's terminal theme. It is intentionally a
+// renderer-boundary copy: the shell continues to own and render v1 styles.
+func termStyle(source lipgloss.Style) termlipgloss.Style {
+	target := termlipgloss.NewStyle()
+	if colour := source.GetForeground(); hasTermColour(colour) {
+		target = target.Foreground(colour)
+	}
+	if source.GetBold() {
+		target = target.Bold(true)
+	}
+	if source.GetItalic() {
+		target = target.Italic(true)
+	}
+	if source.GetUnderline() {
+		target = target.Underline(true).UnderlineSpaces(source.GetUnderlineSpaces())
+	}
+
+	if top, right, bottom, left := source.GetPadding(); top != 0 || right != 0 || bottom != 0 || left != 0 {
+		target = target.Padding(top, right, bottom, left)
+	}
+	if border, top, right, bottom, left := source.GetBorder(); border != (lipgloss.Border{}) {
+		target = target.Border(termlipgloss.Border(border), top, right, bottom, left)
+	}
+	if colour := source.GetBorderTopForeground(); hasTermColour(colour) {
+		target = target.BorderTopForeground(colour)
+	}
+	if colour := source.GetBorderRightForeground(); hasTermColour(colour) {
+		target = target.BorderRightForeground(colour)
+	}
+	if colour := source.GetBorderBottomForeground(); hasTermColour(colour) {
+		target = target.BorderBottomForeground(colour)
+	}
+	if colour := source.GetBorderLeftForeground(); hasTermColour(colour) {
+		target = target.BorderLeftForeground(colour)
+	}
+	return target
+}
+
+func termStyles(styles map[string]lipgloss.Style) map[string]termlipgloss.Style {
+	converted := make(map[string]termlipgloss.Style, len(styles))
+	for name, style := range styles {
+		converted[name] = termStyle(style)
+	}
+	return converted
+}
+
+// termOutput applies Lip Gloss v2's output-layer profile conversion before a
+// go-render fragment enters the Bubble Tea v1 shell.
+func termOutput(rendered string) string {
+	return termlipgloss.Sprint(rendered)
+}
+
+func hasTermColour(colour lipgloss.TerminalColor) bool {
+	switch colour.(type) {
+	case nil, lipgloss.NoColor, *lipgloss.NoColor:
+		return false
+	default:
+		return true
 	}
 }

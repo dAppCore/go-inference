@@ -9,8 +9,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/engine/ctml"
+	"dappco.re/go/html/engine/html"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/parser"
 )
@@ -150,16 +150,16 @@ func toolsPanelBindings(state toolState) ctml.Bindings {
 // so the .ctml render reuses uiStyles paint exactly — no colours of its own.
 func toolsPanelTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Text = styles.answer
-	theme.Heading = styles.title // the <h2> section titles
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Text = termStyle(styles.answer)
+	theme.Heading = termStyle(styles.title) // the <h2> section titles
+	theme.Classes = termStyles(map[string]lipgloss.Style{
 		"tool-label":   styles.accent,
 		"tool-state":   styles.answer,
 		"tool-name":    styles.answer,
 		"tool-desc":    styles.thought,
 		"tool-receipt": styles.thought,
 		"tool-keys":    styles.status,
-	}
+	})
 	return theme
 }
 
@@ -177,5 +177,5 @@ func renderTools(state toolState, width int, styles uiStyles) string {
 		// defect; TestRenderTools_Good pins the markup as parseable.
 		return ""
 	}
-	return html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: toolsPanelTheme(styles)})
+	return termOutput(html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: toolsPanelTheme(styles)}))
 }
