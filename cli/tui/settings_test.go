@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	coreio "dappco.re/go/io"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/render/display/tui"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -120,7 +120,7 @@ func TestSettingsOverlay_Good(t *testing.T) {
 	a = m.(app)
 
 	// F2 opens the Settings overlay.
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyF2})
+	m, _ = a.Update(testKeyPress(tea.KeyF2))
 	a = m.(app)
 	if a.activeOverlay != overlaySettings {
 		t.Fatalf("F2 did not open the settings overlay: overlay=%d", a.activeOverlay)
@@ -128,15 +128,15 @@ func TestSettingsOverlay_Good(t *testing.T) {
 
 	// The form renders in the overlay layer — the KV-cache hint is unique to
 	// the settings form (it is not in the footer or any other screen).
-	if plain := ansi.Strip(a.View()); !strings.Contains(plain, "KV cache size") {
+	if plain := ansi.Strip(a.View().Content); !strings.Contains(plain, "KV cache size") {
 		t.Fatalf("settings form not rendered in the overlay layer:\n%s", plain)
 	}
 
 	// Navigate to the max-tokens row and bump it one step; the edit lands on
 	// a.cfg immediately, exactly as the value hint promises.
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = a.Update(testKeyPress(tea.KeyDown))
 	a = m.(app)
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m, _ = a.Update(testKeyPress(tea.KeyRight))
 	a = m.(app)
 	if a.cfg.maxTokens() != 8192 {
 		t.Fatalf("adjust did not raise max tokens live: %d", a.cfg.maxTokens())
@@ -144,7 +144,7 @@ func TestSettingsOverlay_Good(t *testing.T) {
 
 	// Ctrl+S commits the generation knobs through the same store the
 	// inspector writes; reopening the store proves the round-trip.
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ = a.Update(testModifiedKeyPress('s', tea.ModCtrl))
 	a = m.(app)
 	if a.errText != "" {
 		t.Fatalf("ctrl+s reported an error: %q", a.errText)
@@ -158,7 +158,7 @@ func TestSettingsOverlay_Good(t *testing.T) {
 	}
 
 	// Esc closes the overlay without disturbing the live edit.
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = a.Update(testKeyPress(tea.KeyEsc))
 	a = m.(app)
 	if a.activeOverlay != overlayNone {
 		t.Fatalf("esc did not close the settings overlay: overlay=%d", a.activeOverlay)
@@ -173,12 +173,12 @@ func TestSettingsOverlay_Good(t *testing.T) {
 // reason rather than silently discarding the change.
 func TestSettingsOverlay_Bad(t *testing.T) {
 	a := newApp("", 0, 4096)
-	m, _ := a.Update(tea.KeyMsg{Type: tea.KeyF2})
+	m, _ := a.Update(testKeyPress(tea.KeyF2))
 	a = m.(app)
 	if a.activeOverlay != overlaySettings {
 		t.Fatalf("F2 did not open the settings overlay: overlay=%d", a.activeOverlay)
 	}
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ = a.Update(testModifiedKeyPress('s', tea.ModCtrl))
 	a = m.(app)
 	if a.errText == "" {
 		t.Fatal("ctrl+s without a store did not surface an error")

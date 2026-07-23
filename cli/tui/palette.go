@@ -5,16 +5,16 @@ package tui
 import (
 	_ "embed"
 
-	tea "dappco.re/go/html/tui"
-	"dappco.re/go/html/tui/help"
-	"dappco.re/go/html/tui/list"
-	"dappco.re/go/html/tui/style"
-	"dappco.re/go/html/tui/textinput"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/help"
+	"dappco.re/go/render/display/tui/list"
+	"dappco.re/go/render/display/tui/style"
+	"dappco.re/go/render/display/tui/textinput"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
 	coreio "dappco.re/go/io"
+	"dappco.re/go/render/engine/ctml"
+	"dappco.re/go/render/engine/html"
 )
 
 type commandID string
@@ -868,7 +868,7 @@ func (search *historySearch) Update(message tea.Msg) tea.Cmd {
 	if search == nil {
 		return nil
 	}
-	if keyMessage, ok := message.(tea.KeyMsg); ok {
+	if keyMessage, ok := message.(tea.KeyPressMsg); ok {
 		switch keyMessage.String() {
 		case "up", "down", "pgup", "pgdown", "ctrl+u", "ctrl+d":
 			var command tea.Cmd
@@ -889,7 +889,7 @@ func (search *historySearch) View(width, height int) string {
 	if search == nil {
 		return ""
 	}
-	search.input.Width = max(12, width-4)
+	search.input.SetWidth(max(12, width-4))
 	search.list.SetSize(max(1, width), max(4, height-2))
 	return style.Column(style.Left, search.input.View(), search.list.View())
 }
@@ -934,7 +934,7 @@ func (overlay *helpOverlay) View(width int) string {
 	if overlay == nil {
 		return ""
 	}
-	overlay.model.Width = max(20, width)
+	overlay.model.SetWidth(max(20, width))
 	return style.Column(style.Left, "Keyboard help", "", overlay.model.View(overlay.keys), "", "esc closes help")
 }
 

@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
+	"dappco.re/go/render/display/tui/list"
 )
 
 func pickerWithItems(items ...list.Item) list.Model {

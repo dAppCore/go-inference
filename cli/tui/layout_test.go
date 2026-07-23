@@ -7,9 +7,10 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/render/engine/ctml"
+	"dappco.re/go/render/engine/html"
 )
 
 func TestChooseLayout_Good(t *testing.T) {
@@ -143,12 +144,13 @@ func TestWorkspaceFrame_Ugly(t *testing.T) {
 
 func assertFrameBasics(t *testing.T, view string, width int) {
 	t.Helper()
+	plain := ansi.Strip(view)
 	for _, text := range []string{"LEM", "Chat", "Work", "Models", "Data", "SESSIONS", "MAIN REGION", "FOOTER"} {
-		if !strings.Contains(view, text) {
+		if !strings.Contains(plain, text) {
 			t.Fatalf("frame missing %q\n%s", text, view)
 		}
 	}
-	if !strings.HasPrefix(view, "╭") || !strings.Contains(view, "╰") {
+	if !strings.HasPrefix(plain, "╭") || !strings.Contains(plain, "╰") {
 		t.Fatalf("frame missing stable rounded outer border\n%s", view)
 	}
 	assertFrameWidth(t, view, width)

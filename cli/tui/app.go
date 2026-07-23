@@ -8,20 +8,20 @@ import (
 	"sync"
 	"time"
 
-	tea "dappco.re/go/html/tui"
-	"dappco.re/go/html/tui/key"
-	"dappco.re/go/html/tui/list"
-	"dappco.re/go/html/tui/spinner"
-	"dappco.re/go/html/tui/style"
-	"dappco.re/go/html/tui/textarea"
-	"dappco.re/go/html/tui/viewport"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/key"
+	"dappco.re/go/render/display/tui/list"
+	"dappco.re/go/render/display/tui/spinner"
+	"dappco.re/go/render/display/tui/style"
+	"dappco.re/go/render/display/tui/textarea"
+	"dappco.re/go/render/display/tui/viewport"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/decode/parser"
+	"dappco.re/go/render/engine/ctml"
+	"dappco.re/go/render/engine/html"
 )
 
 // transcriptCTML is the chat panel's turn-list markup -- see transcript.ctml
@@ -1313,12 +1313,15 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.armAgentRefresh()
 
 	case tea.WindowSizeMsg:
-		offset := a.view.YOffset
+		offset := a.view.YOffset()
 		a.width, a.height = msg.Width, msg.Height
 		metrics := measureFrame(msg.Width, msg.Height, a.inspectorOpen)
 		a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
 		a.input.SetWidth(max(1, metrics.mainWidth-4))
-		a.view = viewport.New(max(1, metrics.mainWidth), a.transcriptHeight())
+		a.view = viewport.New(
+			viewport.WithWidth(max(1, metrics.mainWidth)),
+			viewport.WithHeight(a.transcriptHeight()),
+		)
 		a.view.SetContent(a.renderTranscript())
 		if a.follow {
 			a.view.GotoBottom()
@@ -1408,7 +1411,7 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return a.onKey(msg)
 
 	case tea.MouseMsg:
@@ -1427,12 +1430,17 @@ func (a app) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.boot.phase != bootReady || a.activeOverlay != overlayNone {
 		return a.route(msg)
 	}
-	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+	click, ok := msg.(tea.MouseClickMsg)
+	if !ok {
+		return a.route(msg)
+	}
+	mouse := click.Mouse()
+	if mouse.Button != tea.MouseLeft {
 		return a.route(msg)
 	}
 	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 	_, boxes := renderPanelBarBoxes(a.activePanel, metrics.innerWidth, metrics.kind, a.styles)
-	panel, ok := panelBarHit(boxes, msg.X-frameInsetCols, msg.Y-frameInsetRows, a.activePanel, metrics.kind)
+	panel, ok := panelBarHit(boxes, mouse.X-frameInsetCols, mouse.Y-frameInsetRows, a.activePanel, metrics.kind)
 	if !ok {
 		return a.route(msg)
 	}
@@ -1915,7 +1923,7 @@ func (a *app) persistSessionToolInteraction(
 	return a.repository.SaveEvent(event)
 }
 
-func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a app) onKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if a.boot.phase != bootReady {
 		return a.onBootKey(msg)
 	}
@@ -2178,10 +2186,10 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case panelChat:
-		if msg.Type == tea.KeyEnter && msg.Alt && !a.generating {
+		if msg.Code == tea.KeyEnter && msg.Mod.Contains(tea.ModAlt) && !a.generating {
 			// Textarea treats Enter as a newline; the app reserves plain Enter
 			// for send, so explicitly forward the modified form to the editor.
-			return a.route(tea.KeyMsg{Type: tea.KeyEnter})
+			return a.route(tea.KeyPressMsg{Code: tea.KeyEnter})
 		}
 		if msg.String() == "enter" && !a.generating && a.model != nil {
 			prompt := core.Trim(a.input.Value())
@@ -2211,8 +2219,8 @@ func (a *app) toggleInspector() {
 	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 	a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
 	a.input.SetWidth(max(1, metrics.mainWidth-4))
-	a.view.Width = max(1, metrics.mainWidth)
-	a.view.Height = a.transcriptHeight()
+	a.view.SetWidth(max(1, metrics.mainWidth))
+	a.view.SetHeight(a.transcriptHeight())
 	a.refreshTranscript()
 }
 
@@ -2345,7 +2353,7 @@ func (a *app) sendPrompt(prompt string) core.Result {
 	return core.Ok(waitEvent(generation))
 }
 
-func (a app) onBootKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a app) onBootKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch message.String() {
 	case "ctrl+c", "q":
 		_ = a.shutdown()
@@ -2457,7 +2465,7 @@ func (a *app) drainManagedGenerations() core.Result {
 	return core.Ok(nil)
 }
 
-func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (a app) onOverlayKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if message.String() == "esc" {
 		overlay := a.activeOverlay
 		if a.launchReview != nil {
@@ -2632,7 +2640,7 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 				offset := a.transcriptTurnOffset(a.search.MatchTurnID())
 				a.view.SetYOffset(offset)
 				a.follow = false
-				if result := a.sessions.SetViewport(a.sessionID, a.view.YOffset, false); !result.OK {
+				if result := a.sessions.SetViewport(a.sessionID, a.view.YOffset(), false); !result.OK {
 					a.errText = result.Error()
 				}
 				a.activeOverlay = overlayNone
@@ -2867,10 +2875,10 @@ func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *app) updateTranscriptViewport(msg tea.Msg) tea.Cmd {
-	before := a.view.YOffset
+	before := a.view.YOffset()
 	var cmd tea.Cmd
 	a.view, cmd = a.view.Update(msg)
-	if a.view.YOffset < before || scrollsTranscriptUp(msg) {
+	if a.view.YOffset() < before || scrollsTranscriptUp(msg) {
 		a.follow = false
 	}
 	if a.view.AtBottom() && scrollsTranscriptDown(msg) {
@@ -2878,7 +2886,7 @@ func (a *app) updateTranscriptViewport(msg tea.Msg) tea.Cmd {
 		a.newOutput = false
 	}
 	if a.sessions != nil {
-		if result := a.sessions.SetViewport(a.sessionID, a.view.YOffset, a.follow); !result.OK {
+		if result := a.sessions.SetViewport(a.sessionID, a.view.YOffset(), a.follow); !result.OK {
 			a.errText = result.Error()
 		}
 	}
@@ -2886,7 +2894,7 @@ func (a *app) updateTranscriptViewport(msg tea.Msg) tea.Cmd {
 }
 
 func isTranscriptPageKey(msg tea.Msg) bool {
-	keyMsg, ok := msg.(tea.KeyMsg)
+	keyMsg, ok := msg.(tea.KeyPressMsg)
 	if !ok {
 		return false
 	}
@@ -2900,26 +2908,28 @@ func isTranscriptPageKey(msg tea.Msg) bool {
 
 func scrollsTranscriptUp(msg tea.Msg) bool {
 	switch value := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch value.String() {
 		case "up", "k", "pgup", "ctrl+u":
 			return true
 		}
-	case tea.MouseMsg:
-		return value.Action == tea.MouseActionPress && value.Button == tea.MouseButtonWheelUp && !value.Shift
+	case tea.MouseWheelMsg:
+		mouse := value.Mouse()
+		return mouse.Button == tea.MouseWheelUp && !mouse.Mod.Contains(tea.ModShift)
 	}
 	return false
 }
 
 func scrollsTranscriptDown(msg tea.Msg) bool {
 	switch value := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch value.String() {
 		case "down", "j", "pgdown", "ctrl+d":
 			return true
 		}
-	case tea.MouseMsg:
-		return value.Action == tea.MouseActionPress && value.Button == tea.MouseButtonWheelDown && !value.Shift
+	case tea.MouseWheelMsg:
+		mouse := value.Mouse()
+		return mouse.Button == tea.MouseWheelDown && !mouse.Mod.Contains(tea.ModShift)
 	}
 	return false
 }
@@ -3036,8 +3046,8 @@ func (a *app) updateTranscript(hasOutput bool) {
 	if !a.ready {
 		return
 	}
-	offset := a.view.YOffset
-	a.view.Height = a.transcriptHeight()
+	offset := a.view.YOffset()
+	a.view.SetHeight(a.transcriptHeight())
 	a.view.SetContent(a.renderTranscript())
 	if a.follow {
 		a.view.GotoBottom()
@@ -3076,7 +3086,7 @@ func (a app) renderTranscript() string {
 	if err != nil {
 		return ""
 	}
-	return style.New().Width(a.view.Width).Render(html.RenderTerm(tree, html.NewContext()))
+	return style.New().Width(a.view.Width()).Render(html.RenderTerm(tree, html.NewContext()))
 }
 
 // transcriptBindings supplies transcript.ctml's two row sequences. notice is
@@ -3146,7 +3156,7 @@ func (a app) renderTranscriptTurn(i int, t turn, leadingBlank bool) string {
 				if turnID == "" {
 					turnID = core.Sprintf("transcript-%d", i)
 				}
-				b.WriteString(a.markdown.Render(turnID, t.text, max(1, a.view.Width-2)))
+				b.WriteString(a.markdown.Render(turnID, t.text, max(1, a.view.Width()-2)))
 			}
 		}
 		for _, c := range t.calls {
@@ -3239,9 +3249,9 @@ func (a app) statusLine() string {
 	return a.styles.status.Render(core.Join("  ·  ", parts...))
 }
 
-func (a app) View() string {
+func (a app) View() tea.View {
 	content := a.panelView()
-	return renderFrame(frameSpec{
+	view := tea.NewView(renderFrame(frameSpec{
 		Width:         a.width,
 		Height:        a.height,
 		Active:        a.activePanel,
@@ -3250,7 +3260,10 @@ func (a app) View() string {
 		Inspector:     a.inspectorView(),
 		Footer:        a.footerLine(),
 		InspectorOpen: a.inspectorOpen,
-	}, a.styles)
+	}, a.styles))
+	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
+	return view
 }
 
 func (a app) panelView() string {

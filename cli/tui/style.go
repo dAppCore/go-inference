@@ -5,33 +5,33 @@
 // built on Bubble Tea + Bubbles + Lip Gloss.
 package tui
 
-import "dappco.re/go/html/tui/style"
+import "dappco.re/go/render/display/tui/style"
 
 // theme contains semantic colours rather than component-specific paint. Every
 // colour is adaptive so the same hierarchy remains legible on light terminals.
 type theme struct {
 	name      string
-	text      style.Color
-	muted     style.Color
-	border    style.Color
-	focus     style.Color
-	assistant style.Color
-	attention style.Color
-	success   style.Color
-	error     style.Color
+	text      style.Paint
+	muted     style.Paint
+	border    style.Paint
+	focus     style.Paint
+	assistant style.Paint
+	attention style.Paint
+	success   style.Paint
+	error     style.Paint
 }
 
 func midnightTheme() theme {
 	return theme{
 		name:      "midnight",
-		text:      style.Color{Light: "#172033", Dark: "#E2E8F0"},
-		muted:     style.Color{Light: "#475569", Dark: "#718096"},
-		border:    style.Color{Light: "#94A3B8", Dark: "#334155"},
-		focus:     style.Color{Light: "#007A89", Dark: "#67E8F9"},
-		assistant: style.Color{Light: "#6D28D9", Dark: "#C4B5FD"},
-		attention: style.Color{Light: "#92400E", Dark: "#FBBF24"},
-		success:   style.Color{Light: "#047857", Dark: "#6EE7B7"},
-		error:     style.Color{Light: "#BE123C", Dark: "#FB7185"},
+		text:      style.AdaptiveColor{Light: "#172033", Dark: "#E2E8F0"}.Resolve(true),
+		muted:     style.AdaptiveColor{Light: "#475569", Dark: "#718096"}.Resolve(true),
+		border:    style.AdaptiveColor{Light: "#94A3B8", Dark: "#334155"}.Resolve(true),
+		focus:     style.AdaptiveColor{Light: "#007A89", Dark: "#67E8F9"}.Resolve(true),
+		assistant: style.AdaptiveColor{Light: "#6D28D9", Dark: "#C4B5FD"}.Resolve(true),
+		attention: style.AdaptiveColor{Light: "#92400E", Dark: "#FBBF24"}.Resolve(true),
+		success:   style.AdaptiveColor{Light: "#047857", Dark: "#6EE7B7"}.Resolve(true),
+		error:     style.AdaptiveColor{Light: "#BE123C", Dark: "#FB7185"}.Resolve(true),
 	}
 }
 
@@ -40,15 +40,15 @@ func themeForName(name string) theme {
 	case "aurora":
 		value := midnightTheme()
 		value.name = "aurora"
-		value.focus = style.Color{Light: "#047857", Dark: "#5EEAD4"}
-		value.assistant = style.Color{Light: "#7E22CE", Dark: "#E879F9"}
-		value.attention = style.Color{Light: "#B45309", Dark: "#FDE68A"}
+		value.focus = style.AdaptiveColor{Light: "#047857", Dark: "#5EEAD4"}.Resolve(true)
+		value.assistant = style.AdaptiveColor{Light: "#7E22CE", Dark: "#E879F9"}.Resolve(true)
+		value.attention = style.AdaptiveColor{Light: "#B45309", Dark: "#FDE68A"}.Resolve(true)
 		return value
 	case "daylight":
 		value := midnightTheme()
 		value.name = "daylight"
-		value.focus = style.Color{Light: "#0369A1", Dark: "#7DD3FC"}
-		value.assistant = style.Color{Light: "#5B21B6", Dark: "#DDD6FE"}
+		value.focus = style.AdaptiveColor{Light: "#0369A1", Dark: "#7DD3FC"}.Resolve(true)
+		value.assistant = style.AdaptiveColor{Light: "#5B21B6", Dark: "#DDD6FE"}.Resolve(true)
 		return value
 	default:
 		return midnightTheme()

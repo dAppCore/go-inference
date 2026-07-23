@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	core "dappco.re/go"
+	tea "dappco.re/go/render/display/tui"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestRunWithWorkspace_Good(t *testing.T) {
@@ -31,7 +31,7 @@ func TestRunWithWorkspace_Good(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("runWithWorkspace code = %d, stderr = %q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "LEM") || !strings.Contains(stdout.String(), "Chat") {
+	if plain := ansi.Strip(stdout.String()); !strings.Contains(plain, "LEM") || !strings.Contains(plain, "Chat") {
 		t.Fatalf("check frame did not render the chat workspace:\n%s", stdout.String())
 	}
 	if resources.Repository != nil || resources.State != nil {
@@ -233,7 +233,7 @@ func TestDataReviewApp_ConnectRendersDataPanelWithInitialSlugFilter(t *testing.T
 	if code != 0 {
 		t.Fatalf("runWorkspaceCheck code = %d, stderr=%s", code, stderr.String())
 	}
-	view := stdout.String()
+	view := ansi.Strip(stdout.String())
 	if !strings.Contains(view, "Data") {
 		t.Fatalf("check frame did not render the Data panel:\n%s", view)
 	}

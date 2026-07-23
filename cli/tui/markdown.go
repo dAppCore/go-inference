@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	tea "dappco.re/go/html/tui"
-	"dappco.re/go/html/tui/markdown"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/markdown"
 )
 
 type markdownCacheKey struct {

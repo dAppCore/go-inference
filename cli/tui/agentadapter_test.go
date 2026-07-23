@@ -10,8 +10,6 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-
 	core "dappco.re/go"
 	"dappco.re/go/inference/agent/gitserver"
 	"dappco.re/go/inference/agent/orchestrator"
@@ -21,6 +19,7 @@ import (
 	"dappco.re/go/inference/agent/workspace"
 	coreio "dappco.re/go/io"
 	commandexec "dappco.re/go/process/exec"
+	tea "dappco.re/go/render/display/tui"
 )
 
 func TestAgentAdapter_Capabilities_Good(t *testing.T) {
@@ -685,7 +684,7 @@ func TestAgentAdapter_DurableInterruptedResumeAfterRestartReceipt(t *testing.T) 
 	if len(beforeConfirm.Runs) != 1 {
 		t.Fatalf("interrupted Resume created child before confirmation: %#v", beforeConfirm.Runs)
 	}
-	model, command := restarted.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command := restarted.Update(testKeyPress(tea.KeyEnter))
 	restarted = model.(app)
 	next := driveCorrectiveCommand(t, &restarted, command)
 	if next != nil {
@@ -793,7 +792,7 @@ func TestAgentAdapterDurableAnsweredWaitingResumeAfterRestartReceipt(t *testing.
 	if len(beforeConfirm.Runs) != 1 {
 		t.Fatalf("answered Resume created child before confirmation: %#v", beforeConfirm.Runs)
 	}
-	model, confirm := restarted.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, confirm := restarted.Update(testKeyPress(tea.KeyEnter))
 	restarted = model.(app)
 	next := driveCorrectiveCommand(t, &restarted, confirm)
 	if next != nil {

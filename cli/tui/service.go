@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "dappco.re/go/html/tui"
+	tea "dappco.re/go/render/display/tui"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"

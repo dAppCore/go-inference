@@ -5,7 +5,7 @@ package tui
 import (
 	"context"
 
-	tea "dappco.re/go/html/tui"
+	tea "dappco.re/go/render/display/tui"
 
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/parser"

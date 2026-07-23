@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	tea "dappco.re/go/html/tui"
-	"dappco.re/go/html/tui/list"
-	"dappco.re/go/html/tui/style"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/list"
+	"dappco.re/go/render/display/tui/style"
 
 	core "dappco.re/go"
 )

@@ -4,9 +4,9 @@ package tui
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
-	"dappco.re/go/html/tui/style"
+	"dappco.re/go/render/engine/html"
+	"dappco.re/go/render/engine/ctml"
+	"dappco.re/go/render/display/tui/style"
 )
 
 // The overlay layer renders its text chrome through .ctml <layout>

@@ -12,8 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
@@ -24,6 +22,8 @@ import (
 	"dappco.re/go/inference/agent/workspace"
 	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/decode/parser"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/list"
 )
 
 func TestAppBootstrap_Good(t *testing.T) {
@@ -64,10 +64,10 @@ func TestAppBootstrap_Bad(t *testing.T) {
 	a := newWorkspaceApp("", 0, 64, loader)
 	m, _ := a.Update(workspaceBootstrap(loader)())
 	a = m.(app)
-	if a.boot.phase != bootFailed || !strings.Contains(a.View(), "/tmp/lem.duckdb") || !strings.Contains(a.View(), "Retry") {
-		t.Fatalf("blocking storage view:\n%s", a.View())
+	if a.boot.phase != bootFailed || !strings.Contains(a.View().Content, "/tmp/lem.duckdb") || !strings.Contains(a.View().Content, "Retry") {
+		t.Fatalf("blocking storage view:\n%s", a.View().Content)
 	}
-	m, command := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m, command := a.Update(testTextPress('r'))
 	a = m.(app)
 	if a.boot.phase != bootLoading || command == nil {
 		t.Fatalf("retry state = %#v command=%v", a.boot, command != nil)
@@ -86,7 +86,7 @@ func TestAppBootstrap_Ugly(t *testing.T) {
 	})
 	m, _ := a.Update(workspaceBootstrap(a.workspaceLoader)())
 	a = m.(app)
-	m, command := a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m, command := a.Update(testTextPress('q'))
 	a = m.(app)
 	if command == nil {
 		t.Fatal("quit from blocking storage screen returned no command")
@@ -185,7 +185,7 @@ func TestAppSessionGeneration_Good(t *testing.T) {
 	a = m.(app)
 	sessionA := a.sessions.Active().Record.ID
 	a.input.SetValue("alpha")
-	m, commandA := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, commandA := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if commandA == nil || a.sessionJobs[sessionA] == nil {
 		t.Fatal("session A did not enqueue generation")
@@ -194,14 +194,14 @@ func TestAppSessionGeneration_Good(t *testing.T) {
 		t.Fatalf("first prompt = %q", started)
 	}
 
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	m, _ = a.Update(testModifiedKeyPress('n', tea.ModCtrl))
 	a = m.(app)
 	sessionB := a.sessions.Active().Record.ID
 	if sessionB == sessionA {
 		t.Fatal("Ctrl+N did not create session B")
 	}
 	a.input.SetValue("beta")
-	m, commandB := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, commandB := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if commandB == nil || a.sessionJobs[sessionB] == nil || a.sessionJobs[sessionA] == nil {
 		t.Fatalf("independent jobs = A:%v B:%v", a.sessionJobs[sessionA] != nil, a.sessionJobs[sessionB] != nil)
@@ -260,7 +260,7 @@ func TestAppSessionPersistenceFailure_Bad(t *testing.T) {
 			a = model.(app)
 			sessionID := a.sessions.Active().Record.ID
 			a.input.SetValue("persist")
-			model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			model, command := a.Update(testKeyPress(tea.KeyEnter))
 			a = model.(app)
 			faults.failTurn = test.failTurn
 			driveAppGeneration(t, &a, sessionID, command)
@@ -296,7 +296,7 @@ func TestAppManagedStreamBatchesPersistence_Good(t *testing.T) {
 	a = model.(app)
 	sessionID := a.sessions.Active().Record.ID
 	a.input.SetValue("burst")
-	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	driveAppGeneration(t, &a, sessionID, command)
 
@@ -328,7 +328,7 @@ func TestAppSessionToolLoop_Good(t *testing.T) {
 	a = m.(app)
 	sessionID := a.sessions.Active().Record.ID
 	a.input.SetValue("please count")
-	m, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	driveAppGeneration(t, &a, sessionID, command)
 
@@ -380,7 +380,7 @@ func TestAppSharedServiceLane_Good(t *testing.T) {
 		t.Fatal("service did not start on the shared lane")
 	}
 	a.input.SetValue("chat")
-	m, chatCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, chatCommand := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if started := waitFakeStarted(t, base.started); started != "chat" {
 		t.Fatalf("first shared request = %q", started)
@@ -407,7 +407,7 @@ func TestAppSharedServiceLane_Good(t *testing.T) {
 		t.Fatalf("service stop closed base model %d times", base.closes.Load())
 	}
 	a.input.SetValue("later")
-	m, laterCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, laterCommand := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if laterCommand == nil {
 		t.Fatal("later chat did not start after service stop")
@@ -433,7 +433,7 @@ func TestAppModelSwap_Bad(t *testing.T) {
 	m, _ := a.Update(loadedMsg{model: base, name: "old"})
 	a = m.(app)
 	a.input.SetValue("busy")
-	m, generationCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, generationCommand := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	waitFakeStarted(t, base.started)
 	loads := 0
@@ -443,7 +443,7 @@ func TestAppModelSwap_Bad(t *testing.T) {
 	}
 	a.activePanel = panelModels
 	a.picker.SetItems([]list.Item{modelItem{path: "/models/new", name: "new", modelType: "fake"}})
-	m, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if command != nil || loads != 0 || base.closes.Load() != 0 || !strings.Contains(a.errText, "jobs are active") {
 		t.Fatalf("blocked swap = command=%v loads=%d closes=%d err=%q", command != nil, loads, base.closes.Load(), a.errText)
@@ -475,7 +475,7 @@ func TestAppModelSwap_Good(t *testing.T) {
 	}
 	a.activePanel = panelModels
 	a.picker.SetItems([]list.Item{modelItem{path: "/models/new", name: "new", modelType: "fake"}})
-	m, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if command != nil || !a.svc.stopping || a.pendingModel != "/models/new" || oldBase.closes.Load() != 0 {
 		t.Fatalf("draining swap = command=%v stopping=%v pending=%q closes=%d", command != nil, a.svc.stopping, a.pendingModel, oldBase.closes.Load())
@@ -499,7 +499,7 @@ func TestAppModelSwap_Good(t *testing.T) {
 
 	a.activePanel = panelModels
 	a.picker.SetItems([]list.Item{modelItem{path: "/models/broken", name: "broken", modelType: "fake"}})
-	m, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, command = a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if command == nil || newBase.closes.Load() != 1 {
 		t.Fatalf("failed-swap unload = command=%v closes=%d", command != nil, newBase.closes.Load())
@@ -556,13 +556,13 @@ func TestAppQuit_Ugly(t *testing.T) {
 		t.Fatal("service did not start")
 	}
 	a.input.SetValue("running")
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	waitFakeStarted(t, base.started)
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	m, _ = a.Update(testModifiedKeyPress('n', tea.ModCtrl))
 	a = m.(app)
 	a.input.SetValue("queued")
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if a.jobs.ActiveCount() != 2 {
 		t.Fatalf("queued job count = %d", a.jobs.ActiveCount())
@@ -574,7 +574,7 @@ func TestAppQuit_Ugly(t *testing.T) {
 	}
 	finished := make(chan quitResult, 1)
 	go func() {
-		model, command := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+		model, command := a.Update(testModifiedKeyPress('c', tea.ModCtrl))
 		finished <- quitResult{app: model.(app), command: command}
 	}()
 	select {
@@ -704,7 +704,7 @@ func TestAppQuitPersistsPartialGeneration_Ugly(t *testing.T) {
 	a = model.(app)
 	sessionID := a.sessions.Active().Record.ID
 	a.input.SetValue("quit during reply")
-	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, _ = a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	select {
 	case <-base.firstYielded:
@@ -712,7 +712,7 @@ func TestAppQuitPersistsPartialGeneration_Ugly(t *testing.T) {
 		t.Fatal("model did not yield partial output")
 	}
 
-	model, command := a.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	model, command := a.Update(testModifiedKeyPress('c', tea.ModCtrl))
 	a = model.(app)
 	if command == nil {
 		t.Fatal("quit returned no Bubble Tea command")
@@ -882,43 +882,43 @@ func TestAppUpdateTransitions(t *testing.T) {
 	}
 	// tab cycles through every pane and wraps
 	for i := 0; i < int(panelCount); i++ {
-		m, _ = a.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m, _ = a.Update(testKeyPress(tea.KeyTab))
 		a = m.(app)
 	}
 	if a.activePanel != panelModels {
 		t.Fatalf("panel cycle did not wrap: %d", a.activePanel)
 	}
 	// ctrl+t flips the thinking override to an explicit state
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	m, _ = a.Update(testModifiedKeyPress('t', tea.ModCtrl))
 	a = m.(app)
 	if a.cfg.thinking() == nil {
 		t.Fatal("ctrl+t left thinking on the model default")
 	}
-	if v := a.View(); !strings.Contains(v, "thinking") {
+	if v := a.View().Content; !strings.Contains(v, "thinking") {
 		t.Fatalf("status line missing thinking state: %q", v)
 	}
 	// inspector is a global surface, independent of the active primary panel.
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	m, _ = a.Update(testModifiedKeyPress('o', tea.ModCtrl))
 	a = m.(app)
-	if !a.inspectorOpen || !strings.Contains(a.View(), "INSPECTOR") {
+	if !a.inspectorOpen || !strings.Contains(a.View().Content, "INSPECTOR") {
 		t.Fatal("ctrl+o did not open the inspector")
 	}
 	// service: enter with no model declines with a note, never starts
 	a.inspectorOpen = false
 	a.activePanel = panelService
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if a.svc.running || a.svc.note == "" {
 		t.Fatalf("service start without a model: running=%v note=%q", a.svc.running, a.svc.note)
 	}
 	// address presets cycle while stopped and render in the tab
 	before := a.svc.addrIdx
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m, _ = a.Update(testKeyPress(tea.KeyRight))
 	a = m.(app)
 	if a.svc.addrIdx == before {
 		t.Fatal("service right-adjust did not change the address preset")
 	}
-	if v := a.View(); !strings.Contains(v, a.svc.addr()) {
+	if v := a.View().Content; !strings.Contains(v, a.svc.addr()) {
 		t.Fatalf("service tab does not render the listen address %q", a.svc.addr())
 	}
 }
@@ -927,7 +927,7 @@ func TestAppComposerNewline_Good(t *testing.T) {
 	a := newApp("", 0, 64)
 	a.input.SetValue("first line")
 
-	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	model, _ := a.Update(testModifiedKeyPress(tea.KeyEnter, tea.ModAlt))
 	a = model.(app)
 
 	if a.input.Value() != "first line\n" {
@@ -982,7 +982,7 @@ func TestTranscriptPreservesTurnModel_Good(t *testing.T) {
 	a := newApp("", 0, 64)
 	a.modelName = "current-model"
 	a.turns = []turn{{id: "answer-old", role: "assistant", model: "original-model", text: "historical answer"}}
-	a.view.Width = 72
+	a.view.SetWidth(72)
 	transcript := ansi.Strip(a.renderTranscript())
 	if !strings.Contains(transcript, "original-model") || strings.Contains(transcript, "current-model") {
 		t.Fatalf("historical model label:\n%s", transcript)
@@ -1018,7 +1018,7 @@ func TestAppLiveChatDrive(t *testing.T) {
 	}
 	a.cfg.thinkIdx = 2 // thinking off — deterministic short answers for the drive
 	a.input.SetValue("Say hello in exactly two words.")
-	m, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if !a.generating || cmd == nil {
 		t.Fatal("enter did not start a generation")
@@ -1070,12 +1070,12 @@ func TestAppLiveServiceAPI(t *testing.T) {
 	const addr = "127.0.0.1:36917"
 	a.svc.custom = addr
 	a.activePanel = panelService
-	m, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, cmd := a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if !a.svc.running || cmd == nil {
 		t.Fatalf("service did not start: running=%v note=%q", a.svc.running, a.svc.note)
 	}
-	if v := a.View(); !strings.Contains(v, addr) {
+	if v := a.View().Content; !strings.Contains(v, addr) {
 		t.Fatal("service tab does not render the live address")
 	}
 
@@ -1109,7 +1109,7 @@ func TestAppLiveServiceAPI(t *testing.T) {
 	t.Logf("live API: %d req · %s", a.svc.requests.Load(), payload)
 
 	// stop from the tab and drain Serve's return through the update loop
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if !a.svc.stopping {
 		t.Fatal("enter while running did not begin the stop")
@@ -1172,26 +1172,26 @@ func TestTranscriptFollow_Bad(t *testing.T) {
 	a.generating = true // keep the last assistant in streaming/plain render mode
 	a.follow = true
 	a.refreshTranscriptOutput()
-	if !a.view.AtBottom() || a.view.YOffset == 0 {
-		t.Fatalf("fixture did not overflow viewport: bottom=%v offset=%d", a.view.AtBottom(), a.view.YOffset)
+	if !a.view.AtBottom() || a.view.YOffset() == 0 {
+		t.Fatalf("fixture did not overflow viewport: bottom=%v offset=%d", a.view.AtBottom(), a.view.YOffset())
 	}
 
-	m, _ := a.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m, _ := a.Update(testKeyPress(tea.KeyUp))
 	a = m.(app)
 	if a.follow {
 		t.Fatal("scrolling upward left transcript follow enabled")
 	}
-	offset := a.view.YOffset
+	offset := a.view.YOffset()
 	a.turns[len(a.turns)-1].text += "\noutput while reading older text"
 	a.refreshTranscriptOutput()
-	if a.view.YOffset != offset || !a.newOutput {
-		t.Fatalf("scrolled refresh: offset=%d want=%d marker=%v", a.view.YOffset, offset, a.newOutput)
+	if a.view.YOffset() != offset || !a.newOutput {
+		t.Fatalf("scrolled refresh: offset=%d want=%d marker=%v", a.view.YOffset(), offset, a.newOutput)
 	}
-	if !strings.Contains(a.View(), "new output") {
+	if !strings.Contains(a.View().Content, "new output") {
 		t.Fatal("scrolled transcript did not render its new-output marker")
 	}
 
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m, _ = a.Update(testKeyPress(tea.KeyEnd))
 	a = m.(app)
 	if !a.follow || !a.view.AtBottom() || a.newOutput {
 		t.Fatalf("End: follow=%v bottom=%v marker=%v", a.follow, a.view.AtBottom(), a.newOutput)
@@ -1245,7 +1245,7 @@ func TestApp_AgentReviewLaunchesOnlyAfterBothConfirmations(t *testing.T) {
 	if a.activeOverlay != overlayProjectReview || len(provider.runs) != 0 {
 		t.Fatalf("project review state = overlay %d runs %d", a.activeOverlay, len(provider.runs))
 	}
-	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	if len(provider.runs) != 0 || command == nil {
 		t.Fatalf("registration confirmation = runs=%d command=%v", len(provider.runs), command != nil)
@@ -1255,7 +1255,7 @@ func TestApp_AgentReviewLaunchesOnlyAfterBothConfirmations(t *testing.T) {
 	if a.activeOverlay != overlayLaunchReview || len(provider.runs) != 1 {
 		t.Fatalf("launch review state = overlay %d runs %d", a.activeOverlay, len(provider.runs))
 	}
-	model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command = a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	if command == nil || len(provider.runs) != 1 {
 		t.Fatalf("launch confirmation = runs=%d command=%v", len(provider.runs), command != nil)
@@ -1648,7 +1648,7 @@ func TestApp_AgentResumeUsesNativeResumeAndInterruptedRetry(t *testing.T) {
 		if a.activeOverlay != overlayLaunchReview || countAgentCall(engine.calls, "resume") != 0 {
 			t.Fatalf("resume review = overlay %d calls %#v", a.activeOverlay, engine.calls)
 		}
-		model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		model, command := a.Update(testKeyPress(tea.KeyEnter))
 		a = model.(app)
 		driveCorrectiveCommand(t, &a, command)
 		want := work.ResumeRequest{
@@ -1674,7 +1674,7 @@ func TestApp_AgentResumeUsesNativeResumeAndInterruptedRetry(t *testing.T) {
 		if a.activeOverlay != overlayLaunchReview || countAgentCall(engine.calls, "retry") != 0 {
 			t.Fatalf("interrupted retry review = overlay %d calls %#v", a.activeOverlay, engine.calls)
 		}
-		model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		model, command := a.Update(testKeyPress(tea.KeyEnter))
 		a = model.(app)
 		driveCorrectiveCommand(t, &a, command)
 		if engine.retryParent != "run-interrupted" || engine.resumeRequest.ParentRunID != "" || engine.retryItem.ID != "work-1" {
@@ -1703,7 +1703,7 @@ func TestApp_AgentRunReplacementClearsRunScopedContinuation(t *testing.T) {
 			t.Fatalf("Answer: %v", result.Value)
 		}
 		a.answerOverlay.input.SetValue("Use child target")
-		model, answerCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		model, answerCommand := a.Update(testKeyPress(tea.KeyEnter))
 		a = model.(app)
 		model, snapshotCommand := a.Update(answerCommand())
 		a = model.(app)
@@ -1745,7 +1745,7 @@ func TestApp_AgentRunReplacementClearsRunScopedContinuation(t *testing.T) {
 			t.Fatalf("Answer: %v", result.Value)
 		}
 		a.answerOverlay.input.SetValue("Use child target")
-		model, answerCommand := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		model, answerCommand := a.Update(testKeyPress(tea.KeyEnter))
 		a = model.(app)
 		lateAnswer := answerCommand()
 		snapshotCommand := a.requestAgentSnapshot()
@@ -1810,7 +1810,7 @@ func TestAppRecoveryAbandonUsesReviewConfirmationAndRefreshesLedger(t *testing.T
 		t.Fatalf("recovery review = overlay %d calls %d err %q", a.activeOverlay, engine.abandonRecoveryCalls, a.errText)
 	}
 
-	model, confirmation := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, confirmation := a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	next := driveCorrectiveCommand(t, &a, confirmation)
 	if engine.abandonRecoveryCalls != 1 || engine.abandonRecoveryRunID != recovery.Receipt.RunID || engine.abandonRecoveryEventID != recovery.EventID {
@@ -1867,7 +1867,7 @@ func TestApp_AgentReviewPreparedSnapshotAndRejectPreserveLocalWork(t *testing.T)
 	if state.ReviewID != "review-prepared" || state.ReviewStatus != "prepared" || core.JSONMarshalString(state.Review.Payload) != core.JSONMarshalString(review) {
 		t.Fatalf("durable prepared review state = %#v", state)
 	}
-	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model, _ = a.Update(testKeyPress(tea.KeyEsc))
 	a = model.(app)
 	if command := a.palette.byID[agentCommandID(agentFeatureReject)]; !command.Available {
 		t.Fatalf("Reject unavailable after review escape: %#v", command)
@@ -1911,23 +1911,23 @@ func TestApp_AgentPreparedAcceptRequiresReviewAndFinalConfirmation(t *testing.T)
 				t.Fatalf("prepared Accept = overlay %d request %#v", a.activeOverlay, engine.acceptRequest)
 			}
 			if test.acknowledgement {
-				model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				model, command := a.Update(testKeyPress(tea.KeyEnter))
 				a = model.(app)
 				if command != nil || a.changeOverlay.final || engine.acceptRequest.Confirmed {
 					t.Fatalf("unacknowledged enter = command %v final %v accept %#v", command != nil, a.changeOverlay.final, engine.acceptRequest)
 				}
-				model, _ = a.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+				model, _ = a.Update(testTextPress('a'))
 				a = model.(app)
 				if !a.changeOverlay.acknowledged {
 					t.Fatal("a did not acknowledge missing validation")
 				}
 			}
-			model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			model, command := a.Update(testKeyPress(tea.KeyEnter))
 			a = model.(app)
 			if command != nil || !a.changeOverlay.final || engine.acceptRequest.Confirmed {
 				t.Fatalf("review confirmation = command %v final %v accept %#v", command != nil, a.changeOverlay.final, engine.acceptRequest)
 			}
-			model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			model, command = a.Update(testKeyPress(tea.KeyEnter))
 			a = model.(app)
 			if command == nil || engine.acceptRequest.Confirmed {
 				t.Fatalf("final confirmation scheduling = command %v accept %#v", command != nil, engine.acceptRequest)
@@ -1985,17 +1985,17 @@ func TestApp_AgentBlockedReviewStaysScrollableAndRejectable(t *testing.T) {
 			model, _ = a.Update(snapshotCommand())
 			a = model.(app)
 			a.changeOverlay.View(48, 12, a.styles)
-			model, _ = a.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+			model, _ = a.Update(testKeyPress(tea.KeyPgDown))
 			a = model.(app)
-			if a.changeOverlay.viewport.YOffset == 0 || a.changeOverlay.viewport.TotalLineCount() < len(lines) {
-				t.Fatalf("blocked review viewport = offset %d lines %d", a.changeOverlay.viewport.YOffset, a.changeOverlay.viewport.TotalLineCount())
+			if a.changeOverlay.viewport.YOffset() == 0 || a.changeOverlay.viewport.TotalLineCount() < len(lines) {
+				t.Fatalf("blocked review viewport = offset %d lines %d", a.changeOverlay.viewport.YOffset(), a.changeOverlay.viewport.TotalLineCount())
 			}
-			model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			model, command := a.Update(testKeyPress(tea.KeyEnter))
 			a = model.(app)
 			if command != nil || a.activeOverlay != overlayChangeReview || strings.Contains(core.JSONMarshalString(engine.calls), "accept") || !strings.Contains(a.errText, "prevent acceptance") {
 				t.Fatalf("blocked Accept = command %v overlay %d calls %#v error %q", command != nil, a.activeOverlay, engine.calls, a.errText)
 			}
-			model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			model, _ = a.Update(testKeyPress(tea.KeyEsc))
 			a = model.(app)
 			if result := a.palette.Invoke(agentCommandID(agentFeatureReject), &a); !result.OK {
 				t.Fatalf("Reject blocked review: %v", result.Value)
@@ -2052,7 +2052,7 @@ func TestApp_AgentReviewEscapeAbortsTransaction(t *testing.T) {
 			a.agentReview = agentReview{Title: "review"}
 			a.activeOverlay = overlay
 			a.launchReview = newAgentSelectionOverlay("codex", "gpt-5")
-			model, _ := a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+			model, _ := a.Update(testKeyPress(tea.KeyEsc))
 			a = model.(app)
 			if a.activeOverlay != overlayNone || a.agentStage != agentReviewNone || a.agentOperationID != 0 || a.agentRequest.Feature != "" || a.agentReview.Title != "" {
 				t.Fatalf("escape state = overlay=%d stage=%d id=%d request=%#v review=%#v", a.activeOverlay, a.agentStage, a.agentOperationID, a.agentRequest, a.agentReview)
@@ -2079,7 +2079,7 @@ func TestApp_AgentReviewNativeAdapterTransactions(t *testing.T) {
 	if !ok || core.JSONMarshalString(registration.Review) != core.JSONMarshalString(project) || registration.Provider != "codex" || registration.Model != "gpt-5" {
 		t.Fatalf("project payload = %#v", a.agentReview.Payload)
 	}
-	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	if command == nil || engine.registerCalls != 0 || engine.dispatchCalls != 0 || a.agentRequest.EnableGit {
 		t.Fatalf("clean project confirmation = command=%v register=%d dispatch=%d enableGit=%v", command != nil, engine.registerCalls, engine.dispatchCalls, a.agentRequest.EnableGit)
@@ -2097,7 +2097,7 @@ func TestApp_AgentReviewNativeAdapterTransactions(t *testing.T) {
 	}
 	for _, width := range []int{48, 120} {
 		a.width, a.height = width, 22
-		view := a.View()
+		view := a.View().Content
 		wants := []string{"Command:", "codex", "exec", "--api-key", "[REDACTED]", "--model", "gpt-5", "native host access"}
 		if width >= 100 {
 			wants = append(wants, "Command: codex exec --api-key [REDACTED] --model gpt-5")
@@ -2113,7 +2113,7 @@ func TestApp_AgentReviewNativeAdapterTransactions(t *testing.T) {
 			}
 		}
 	}
-	model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command = a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	if command == nil || engine.dispatchCalls != 0 {
 		t.Fatalf("launch confirmation = command=%v dispatch=%d", command != nil, engine.dispatchCalls)
@@ -2135,12 +2135,12 @@ func TestApp_AgentReviewNativeAdapterGitConfirmationAndFailure(t *testing.T) {
 		t.Fatalf("dispatch: %v", result.Value)
 	}
 	startAgentProjectReview(t, &a, "codex", "gpt-5")
-	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	if command != nil || a.activeOverlay != overlayGitEnableReview || engine.registerCalls != 0 {
 		t.Fatalf("ad-hoc project enter = command=%v overlay=%d register=%d", command != nil, a.activeOverlay, engine.registerCalls)
 	}
-	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model, _ = a.Update(testKeyPress(tea.KeyEsc))
 	a = model.(app)
 	if engine.registerCalls != 0 || a.agentStage != agentReviewNone {
 		t.Fatalf("Git cancel = register=%d stage=%d", engine.registerCalls, a.agentStage)
@@ -2150,9 +2150,9 @@ func TestApp_AgentReviewNativeAdapterGitConfirmationAndFailure(t *testing.T) {
 		t.Fatalf("fresh dispatch: %v", result.Value)
 	}
 	startAgentProjectReview(t, &a, "codex", "gpt-5")
-	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, _ = a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
-	model, command = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command = a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	if command == nil || !a.agentRequest.EnableGit || engine.registerCalls != 0 {
 		t.Fatalf("Git confirmation = command=%v enable=%v register=%d", command != nil, a.agentRequest.EnableGit, engine.registerCalls)
@@ -2170,9 +2170,9 @@ func TestApp_AgentReviewNativeAdapterGitConfirmationAndFailure(t *testing.T) {
 		t.Fatalf("failed dispatch: %v", result.Value)
 	}
 	startAgentProjectReview(t, &failedApp, "codex", "gpt-5")
-	model, _ = failedApp.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, _ = failedApp.Update(testKeyPress(tea.KeyEnter))
 	failedApp = model.(app)
-	model, command = failedApp.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command = failedApp.Update(testKeyPress(tea.KeyEnter))
 	failedApp = model.(app)
 	model, _ = failedApp.Update(command())
 	failedApp = model.(app)
@@ -2211,7 +2211,7 @@ func TestWorkEditor_CtrlSSavesAndEscapeCancels(t *testing.T) {
 	a.workEditor.title.SetValue("Keyboard save")
 	a.workEditor.task.SetValue("Complete task")
 	a.workEditor.repository.SetValue("/tmp/repository")
-	model, _ := a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	model, _ := a.Update(testModifiedKeyPress('s', tea.ModCtrl))
 	a = model.(app)
 	if a.activeOverlay != overlayNone || len(a.work.Items()) != 1 || len(provider.reviewRequests) != 0 || len(provider.runs) != 0 {
 		t.Fatalf("ctrl+s state = overlay=%d work=%#v", a.activeOverlay, a.work.Items())
@@ -2220,7 +2220,7 @@ func TestWorkEditor_CtrlSSavesAndEscapeCancels(t *testing.T) {
 		t.Fatalf("open cancellation editor: %v", result.Value)
 	}
 	a.workEditor.title.SetValue("Cancelled")
-	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model, _ = a.Update(testKeyPress(tea.KeyEsc))
 	a = model.(app)
 	if a.activeOverlay != overlayNone || len(a.work.Items()) != 1 {
 		t.Fatalf("escape state = overlay=%d work=%#v", a.activeOverlay, a.work.Items())
@@ -2430,7 +2430,7 @@ func TestApp_DataPanelHotkeys_EditAsDerivedFlow(t *testing.T) {
 	a.dataEditor.applyFocus()
 	a.dataEditor.response.SetValue("edited response")
 
-	model, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	model, _ = a.Update(testModifiedKeyPress('s', tea.ModCtrl))
 	a = model.(app)
 	if a.activeOverlay != overlayNone || a.dataEditor != nil {
 		t.Fatalf("ctrl+s did not close the editor: overlay=%d editor=%v", a.activeOverlay, a.dataEditor)
@@ -2567,7 +2567,7 @@ func TestApp_AgentReviewSelectsProviderAndModelBeforeProjectReview(t *testing.T)
 	}
 	a.launchReview.providerInput.SetValue("codex")
 	a.launchReview.modelInput.SetValue("gpt-5")
-	model, command := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model, command := a.Update(testKeyPress(tea.KeyEnter))
 	a = model.(app)
 	if command == nil {
 		t.Fatal("provider selection did not schedule a project review")
@@ -2610,7 +2610,7 @@ func startAgentProjectReview(t *testing.T, target *app, provider, model string) 
 	}
 	target.launchReview.providerInput.SetValue(provider)
 	target.launchReview.modelInput.SetValue(model)
-	next, command := target.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next, command := target.Update(testKeyPress(tea.KeyEnter))
 	*target = next.(app)
 	if command == nil {
 		t.Fatal("agent selection did not schedule project review")
@@ -2822,7 +2822,7 @@ func TestSelectPanel_Ugly(t *testing.T) {
 // tabClick builds the left-press message for the centre of one tab's hit
 // span — the native tabs-slot box plus the cell walk panelBarHit itself
 // uses — offset from strip-local to screen cells by the frame insets.
-func tabClick(t *testing.T, a app, panel panelID) tea.MouseMsg {
+func tabClick(t *testing.T, a app, panel panelID) tea.MouseClickMsg {
 	t.Helper()
 	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 	_, boxes := renderPanelBarBoxes(a.activePanel, metrics.innerWidth, metrics.kind, a.styles)
@@ -2830,11 +2830,10 @@ func tabClick(t *testing.T, a app, panel panelID) tea.MouseMsg {
 	if !ok {
 		t.Fatalf("no hit span for panel %v", panel)
 	}
-	return tea.MouseMsg{
+	return tea.MouseClickMsg{
 		X:      frameInsetCols + (start+end)/2,
 		Y:      frameInsetRows + boxes[tabsSlotID].Row,
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonLeft,
+		Button: tea.MouseLeft,
 	}
 }
 
@@ -2866,21 +2865,25 @@ func TestOnMouse_Bad(t *testing.T) {
 	a = model.(app)
 	press := func(x, y int, button tea.MouseButton) {
 		t.Helper()
-		model, _ = a.Update(tea.MouseMsg{X: x, Y: y, Action: tea.MouseActionPress, Button: button})
+		var message tea.Msg = tea.MouseClickMsg{X: x, Y: y, Button: button}
+		if button == tea.MouseWheelUp || button == tea.MouseWheelDown {
+			message = tea.MouseWheelMsg{X: x, Y: y, Button: button}
+		}
+		model, _ = a.Update(message)
 		a = model.(app)
 		if a.activePanel != panelChat {
 			t.Fatalf("press at (%d, %d) switched panel to %v", x, y, a.activePanel)
 		}
 	}
-	press(frameInsetCols+6, 0, tea.MouseButtonLeft)             // the border row above the strip
-	press(frameInsetCols, frameInsetRows, tea.MouseButtonLeft)  // the brand cell resolves to the strip, not a tab
-	press(frameInsetCols+8, frameInsetRows, tea.MouseButtonWheelUp) // wheel messages keep their transcript route
+	press(frameInsetCols+6, 0, tea.MouseLeft)                 // the border row above the strip
+	press(frameInsetCols, frameInsetRows, tea.MouseLeft)      // the brand cell resolves to the strip, not a tab
+	press(frameInsetCols+8, frameInsetRows, tea.MouseWheelUp) // wheel messages keep their transcript route
 }
 
 func TestOnMouse_Ugly(t *testing.T) {
 	// Before any WindowSizeMsg the frame has no geometry: no panic, no switch.
 	a := newApp("", 0, 64)
-	model, _ := a.Update(tea.MouseMsg{X: 8, Y: 1, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	model, _ := a.Update(tea.MouseClickMsg{X: 8, Y: 1, Button: tea.MouseLeft})
 	a = model.(app)
 	if a.activePanel != panelChat {
 		t.Fatalf("sizeless click switched panel to %v", a.activePanel)
