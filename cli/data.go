@@ -871,13 +871,13 @@ func runDataArchive(args []string, stdout, stderr io.Writer) int {
 // runDataReviewTUI is tui.RunDataReview by default — a package-level seam
 // tests substitute so runDataReview's own logic (slug/help parsing, the
 // headless-fallback message) can be proven without ever constructing a
-// real Bubble Tea program: tea.NewProgram's WithAltScreen opens /dev/tty
-// directly for raw terminal control regardless of the stdout/stderr
-// io.Writer passed in, so calling the real tui.RunDataReview from an
-// automated test would hang — or, on a box with a real controlling
-// terminal, open an actual interactive session — exactly the hazard
-// runWithWorkspace's --check mode exists to avoid for `lem tui` itself
-// (see cli/tui/tui_test.go; every existing TUI test drives only that
+// real Bubble Tea program: the root v2 View requests the alternate screen,
+// and the program opens /dev/tty directly for raw terminal control regardless
+// of the stdout/stderr io.Writer passed in, so calling the real
+// tui.RunDataReview from an automated test would hang — or, on a box with a
+// real controlling terminal, open an actual interactive session — exactly
+// the hazard runWithWorkspace's --check mode exists to avoid for `lem tui`
+// itself (see cli/tui/tui_test.go; every existing TUI test drives only that
 // headless path).
 var runDataReviewTUI = tui.RunDataReview
 

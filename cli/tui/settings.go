@@ -6,9 +6,9 @@ import (
 	_ "embed"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
-	"dappco.re/go/html/tui/style"
+	"dappco.re/go/render/engine/html"
+	"dappco.re/go/render/engine/ctml"
+	"dappco.re/go/render/display/tui/style"
 )
 
 // The Settings tab: a cursor list of knobs adjusted with ←/→ (or h/l). Values

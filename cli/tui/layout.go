@@ -6,9 +6,9 @@ import (
 	_ "embed"
 
 	core "dappco.re/go"
-	"dappco.re/go/html"
-	"dappco.re/go/html/ctml"
-	"dappco.re/go/html/tui/style"
+	"dappco.re/go/render/display/tui/style"
+	"dappco.re/go/render/engine/ctml"
+	"dappco.re/go/render/engine/html"
 )
 
 type layoutKind uint8
@@ -304,8 +304,8 @@ func renderFrame(spec frameSpec, styles uiStyles) string {
 	}
 
 	return styles.outerFrame.
-		Width(metrics.innerWidth).
-		Height(metrics.innerHeight).
+		Width(spec.Width).
+		Height(spec.Height).
 		MaxWidth(spec.Width).
 		MaxHeight(spec.Height).
 		Render(inside)

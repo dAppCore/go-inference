@@ -7,24 +7,24 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/dataset"
+	tea "dappco.re/go/render/display/tui"
 )
 
-func keyMsg(s string) tea.KeyMsg {
+func keyMsg(s string) tea.KeyPressMsg {
 	switch s {
 	case "enter":
-		return tea.KeyMsg{Type: tea.KeyEnter}
+		return testKeyPress(tea.KeyEnter)
 	case "tab":
-		return tea.KeyMsg{Type: tea.KeyTab}
+		return testKeyPress(tea.KeyTab)
 	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
+		return testKeyPress(tea.KeyEsc)
 	default:
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+		return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 	}
 }
 

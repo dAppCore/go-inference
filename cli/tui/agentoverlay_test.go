@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
+	tea "dappco.re/go/render/display/tui"
 )
 
 func TestWorkEditor_KeyboardAndLayout(t *testing.T) {
@@ -19,7 +19,11 @@ func TestWorkEditor_KeyboardAndLayout(t *testing.T) {
 	if editor.title.Value() != "Initial" || editor.task.Value() != "Full task" || editor.repository.Value() != "/tmp/repo with spaces" {
 		t.Fatalf("editor values = %#v", editor)
 	}
-	for _, message := range []tea.KeyMsg{{Type: tea.KeyTab}, {Type: tea.KeyTab}, {Type: tea.KeyShiftTab}} {
+	for _, message := range []tea.KeyPressMsg{
+		testKeyPress(tea.KeyTab),
+		testKeyPress(tea.KeyTab),
+		testModifiedKeyPress(tea.KeyTab, tea.ModShift),
+	} {
 		editor.Update(message)
 	}
 	for _, width := range []int{48, 120} {
@@ -39,7 +43,7 @@ func TestWorkEditor_MultilineValidation(t *testing.T) {
 	editor := newWorkEditor(workItemRecord{Title: "Title", Task: "First line", Repo: "/tmp/repo"})
 	editor.focus = 1
 	editor.applyFocus()
-	editor.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	editor.Update(testKeyPress(tea.KeyEnter))
 	if !strings.Contains(editor.task.Value(), "\n") {
 		t.Fatalf("task enter did not create a newline: %q", editor.task.Value())
 	}
@@ -122,22 +126,22 @@ func TestLaunchReview_ConfirmCancelAndRedaction(t *testing.T) {
 	if view := overlay.View(72, 18, newUIStyles(midnightTheme())); !strings.Contains(view, "Command: codex exec --token [REDACTED] --model gpt-5") || !strings.Contains(view, "Native agent execution has host access.") || strings.Contains(view, "token secret") {
 		t.Fatalf("launch review redaction:\n%s", view)
 	}
-	if accepted := overlay.Update(tea.KeyMsg{Type: tea.KeyEnter}); !accepted {
+	if accepted := overlay.Update(testKeyPress(tea.KeyEnter)); !accepted {
 		t.Fatal("enter did not confirm launch review")
 	}
 	if !overlay.confirmed {
 		t.Fatal("launch review confirmation was not retained")
 	}
-	if cancelled := overlay.Update(tea.KeyMsg{Type: tea.KeyEsc}); cancelled {
+	if cancelled := overlay.Update(testKeyPress(tea.KeyEsc)); cancelled {
 		t.Fatal("escape should cancel rather than confirm")
 	}
 }
 
 func TestLaunchReview_ProviderAndModelSelection(t *testing.T) {
 	overlay := newAgentSelectionOverlay("codex", "gpt-5")
-	overlay.Update(tea.KeyMsg{Type: tea.KeyTab})
-	overlay.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	overlay.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	overlay.Update(testKeyPress(tea.KeyTab))
+	overlay.Update(testKeyPress(tea.KeyBackspace))
+	overlay.Update(testTextPress('x'))
 	provider, model := overlay.selection()
 	if provider != "codex" || model != "gpt-x" {
 		t.Fatalf("launch selection = %q/%q", provider, model)
@@ -147,19 +151,19 @@ func TestLaunchReview_ProviderAndModelSelection(t *testing.T) {
 func TestAgentAnswerAndAcceptanceOverlays_RequireExplicitConfirmation(t *testing.T) {
 	answer := newAgentAnswerOverlay("run-9", "question-2", "Which target?")
 	answer.input.SetValue("release")
-	if accepted := answer.Update(tea.KeyMsg{Type: tea.KeyEnter}); !accepted || answer.answer() != "release" {
+	if accepted := answer.Update(testKeyPress(tea.KeyEnter)); !accepted || answer.answer() != "release" {
 		t.Fatalf("answer confirmation = %v/%q", accepted, answer.answer())
 	}
 	review := agentReview{Feature: agentFeatureChangesReview, Title: "Review agent changes", Body: "Diff:\n+change", Warning: "No validation command is configured; acknowledge this explicitly.", ConfirmRequired: true, NeedsAcknowledgement: true, AcceptanceAllowed: true}
 	confirm := newChangeAcceptanceOverlay(review)
-	if confirm.Update(tea.KeyMsg{Type: tea.KeyEnter}) {
+	if confirm.Update(testKeyPress(tea.KeyEnter)) {
 		t.Fatal("accepted without acknowledgement")
 	}
 	confirm.acknowledged = true
-	if confirm.Update(tea.KeyMsg{Type: tea.KeyEnter}) || !confirm.final {
+	if confirm.Update(testKeyPress(tea.KeyEnter)) || !confirm.final {
 		t.Fatal("acknowledged review did not open final confirmation")
 	}
-	if !confirm.Update(tea.KeyMsg{Type: tea.KeyEnter}) {
+	if !confirm.Update(testKeyPress(tea.KeyEnter)) {
 		t.Fatal("final confirmation was not explicit")
 	}
 }
@@ -177,15 +181,15 @@ func TestAgentOverlay_ChangeReviewViewportScrollsWithoutDroppingContent(t *testi
 	if got := overlay.viewport.TotalLineCount(); got != len(lines) {
 		t.Fatalf("viewport line count = %d, want %d", got, len(lines))
 	}
-	lineOffset := overlay.viewport.YOffset
-	overlay.Update(tea.KeyMsg{Type: tea.KeyDown})
-	if overlay.viewport.YOffset <= lineOffset {
-		t.Fatalf("line down offset = %d, want > %d", overlay.viewport.YOffset, lineOffset)
+	lineOffset := overlay.viewport.YOffset()
+	overlay.Update(testKeyPress(tea.KeyDown))
+	if overlay.viewport.YOffset() <= lineOffset {
+		t.Fatalf("line down offset = %d, want > %d", overlay.viewport.YOffset(), lineOffset)
 	}
-	pageOffset := overlay.viewport.YOffset
-	overlay.Update(tea.KeyMsg{Type: tea.KeyPgDown})
-	if overlay.viewport.YOffset <= pageOffset {
-		t.Fatalf("page down offset = %d, want > %d", overlay.viewport.YOffset, pageOffset)
+	pageOffset := overlay.viewport.YOffset()
+	overlay.Update(testKeyPress(tea.KeyPgDown))
+	if overlay.viewport.YOffset() <= pageOffset {
+		t.Fatalf("page down offset = %d, want > %d", overlay.viewport.YOffset(), pageOffset)
 	}
 	if got := overlay.viewport.TotalLineCount(); got != len(lines) {
 		t.Fatalf("scrolled viewport line count = %d, want %d", got, len(lines))
@@ -294,7 +298,7 @@ func TestRenderChangeReview_Ugly(t *testing.T) {
 		Feature: agentFeatureChangesReview, Title: "Review agent changes",
 		Body: "Diff:\n+change", AcceptanceAllowed: true,
 	})
-	overlay.Update(tea.KeyMsg{Type: tea.KeyEnter}) // arm the final confirmation
+	overlay.Update(testKeyPress(tea.KeyEnter)) // arm the final confirmation
 	plain := ansi.Strip(overlay.View(70, 16, styles))
 
 	if !strings.Contains(plain, "enter applies this exact reviewed receipt · esc cancels") {

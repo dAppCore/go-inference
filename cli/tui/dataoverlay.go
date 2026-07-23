@@ -5,13 +5,13 @@ package tui
 import (
 	_ "embed"
 
-	tea "dappco.re/go/html/tui"
-	"dappco.re/go/html/tui/textarea"
-	"dappco.re/go/html/tui/textinput"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/textarea"
+	"dappco.re/go/render/display/tui/textinput"
 
 	core "dappco.re/go"
-	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference/dataset"
+	"dappco.re/go/render/engine/ctml"
 )
 
 // dataItemEditor is the edit-as-derived editor seam — two text areas
@@ -49,7 +49,7 @@ func (editor *dataItemEditor) Update(message tea.Msg) tea.Cmd {
 	if editor == nil {
 		return nil
 	}
-	if key, ok := message.(tea.KeyMsg); ok {
+	if key, ok := message.(tea.KeyPressMsg); ok {
 		switch key.String() {
 		case "tab", "shift+tab":
 			editor.focus = (editor.focus + 1) % 2
@@ -154,7 +154,7 @@ func newDataNoteOverlay(action dataAction, itemID, title, prompt, placeholder st
 
 // Update reports whether key completed a submit — Enter with a non-empty
 // trimmed value. Any other key is forwarded to the text input.
-func (overlay *dataNoteOverlay) Update(message tea.KeyMsg) bool {
+func (overlay *dataNoteOverlay) Update(message tea.KeyPressMsg) bool {
 	if overlay == nil {
 		return false
 	}
@@ -202,7 +202,7 @@ func (overlay *dataNoteOverlay) View(width, height int, styles uiStyles) string 
 	if overlay == nil {
 		return ""
 	}
-	overlay.input.Width = max(12, width-6)
+	overlay.input.SetWidth(max(12, width-6))
 	head, foot := renderOverlayFrame(dataNoteCTML, width, styles, dataNoteBindings(overlay))
 	return fitPane(core.Join("\n", head, overlay.input.View(), foot), width, height, styles.panel)
 }
@@ -299,7 +299,7 @@ func newDataFilterOverlay(current string) *dataFilterOverlay {
 	return &dataFilterOverlay{input: input}
 }
 
-func (overlay *dataFilterOverlay) Update(message tea.KeyMsg) bool {
+func (overlay *dataFilterOverlay) Update(message tea.KeyPressMsg) bool {
 	if overlay == nil {
 		return false
 	}
@@ -330,7 +330,7 @@ func (overlay *dataFilterOverlay) View(width, height int, styles uiStyles) strin
 	if overlay == nil {
 		return ""
 	}
-	overlay.input.Width = max(12, width-6)
+	overlay.input.SetWidth(max(12, width-6))
 	head, foot := renderOverlayFrame(dataFilterCTML, width, styles)
 	return fitPane(core.Join("\n", head, overlay.input.View(), foot), width, height, styles.panel)
 }

@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/dataset"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/list"
 )
 
 // paletteWithCommands builds a commandPalette over an explicit command set —
@@ -200,12 +200,12 @@ func TestCommandPalette_Good(t *testing.T) {
 	}
 	model, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	a = model.(app)
-	beforeHeight := a.view.Height
+	beforeHeight := a.view.Height()
 	if result := palette.Invoke(commandToggleInspector, &a); !result.OK {
 		t.Fatalf("Invoke inspector: %v", result.Value)
 	}
-	if !a.inspectorOpen || a.view.Height == beforeHeight || a.view.Height != a.transcriptHeight() {
-		t.Fatalf("palette inspector layout = open %v height %d (before %d)", a.inspectorOpen, a.view.Height, beforeHeight)
+	if !a.inspectorOpen || a.view.Height() == beforeHeight || a.view.Height() != a.transcriptHeight() {
+		t.Fatalf("palette inspector layout = open %v height %d (before %d)", a.inspectorOpen, a.view.Height(), beforeHeight)
 	}
 }
 
@@ -510,7 +510,7 @@ func TestSessionSwitcher_Good(t *testing.T) {
 	}
 
 	switcher.list.Select(0)
-	switcher.Update(tea.KeyMsg{Type: tea.KeyDown})
+	switcher.Update(testKeyPress(tea.KeyDown))
 	if result := switcher.ActivateSelected(); !result.OK {
 		t.Fatalf("activate selected: %v", result.Value)
 	}
@@ -565,7 +565,7 @@ func TestHistorySearch_Good(t *testing.T) {
 
 func TestHistorySearchUsesRenderedTurnOffset_Ugly(t *testing.T) {
 	a := newApp("", 0, 64)
-	a.view.Width = 24
+	a.view.SetWidth(24)
 	a.turns = []turn{
 		{id: "turn-wrapped", role: "assistant", text: "This is a deliberately long markdown paragraph that wraps across several terminal lines before the next match."},
 		{id: "turn-match", role: "assistant", text: "durable needle"},
@@ -583,27 +583,27 @@ func TestOverlayRouting_Ugly(t *testing.T) {
 	a.activePanel = panelService
 	a.generating = true
 
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m, _ = a.Update(testModifiedKeyPress('k', tea.ModCtrl))
 	a = m.(app)
 	if a.activeOverlay != overlayCommands {
 		t.Fatalf("ctrl+k overlay = %d, want commands", a.activeOverlay)
 	}
 	a.palette.list.SetFilterText("models panel")
 	beforeAddress := a.svc.addrIdx
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m, _ = a.Update(testKeyPress(tea.KeyDown))
 	a = m.(app)
 	if a.activePanel != panelService || a.svc.addrIdx != beforeAddress {
 		t.Fatal("overlay arrow leaked into the Service panel")
 	}
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m, _ = a.Update(testKeyPress(tea.KeyEnter))
 	a = m.(app)
 	if a.activePanel != panelModels || a.svc.running || a.activeOverlay != overlayNone {
 		t.Fatalf("overlay Enter: panel=%d service=%v overlay=%d", a.activePanel, a.svc.running, a.activeOverlay)
 	}
 
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m, _ = a.Update(testModifiedKeyPress('k', tea.ModCtrl))
 	a = m.(app)
-	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m, _ = a.Update(testKeyPress(tea.KeyEsc))
 	a = m.(app)
 	if a.activeOverlay != overlayNone || !a.generating {
 		t.Fatalf("overlay Escape: overlay=%d generating=%v", a.activeOverlay, a.generating)

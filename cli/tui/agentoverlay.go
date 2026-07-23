@@ -5,13 +5,13 @@ package tui
 import (
 	_ "embed"
 
-	tea "dappco.re/go/html/tui"
-	"dappco.re/go/html/tui/textarea"
-	"dappco.re/go/html/tui/textinput"
-	"dappco.re/go/html/tui/viewport"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/textarea"
+	"dappco.re/go/render/display/tui/textinput"
+	"dappco.re/go/render/display/tui/viewport"
 
 	core "dappco.re/go"
-	"dappco.re/go/html/ctml"
+	"dappco.re/go/render/engine/ctml"
 )
 
 // workEditor keeps Work creation and editing local to the TUI. It deliberately
@@ -48,7 +48,7 @@ func (editor *workEditor) Update(message tea.Msg) tea.Cmd {
 	if editor == nil {
 		return nil
 	}
-	if key, ok := message.(tea.KeyMsg); ok {
+	if key, ok := message.(tea.KeyPressMsg); ok {
 		switch key.String() {
 		case "tab":
 			editor.focus = (editor.focus + 1) % 3
@@ -134,8 +134,8 @@ func (editor *workEditor) View(width, height int, styles uiStyles) string {
 		return ""
 	}
 	fieldWidth := max(12, width-6)
-	editor.title.Width = fieldWidth
-	editor.repository.Width = fieldWidth
+	editor.title.SetWidth(fieldWidth)
+	editor.repository.SetWidth(fieldWidth)
 	editor.task.SetWidth(fieldWidth)
 	head, foot := renderOverlayFrame(workEditorCTML, width, styles, workEditorBindings(editor))
 	return fitPane(core.Join("\n", head, editor.title.View(), "", "Full task", editor.task.View(), "", "Repository", editor.repository.View(), foot), width, height, styles.panel)
@@ -169,7 +169,7 @@ func newAgentAnswerOverlay(runID, questionID, question string) *agentAnswerOverl
 	return &agentAnswerOverlay{runID: core.Trim(runID), questionID: core.Trim(questionID), question: core.Trim(question), input: input}
 }
 
-func (overlay *agentAnswerOverlay) Update(message tea.KeyMsg) bool {
+func (overlay *agentAnswerOverlay) Update(message tea.KeyPressMsg) bool {
 	if overlay == nil {
 		return false
 	}
@@ -224,10 +224,16 @@ type changeAcceptanceOverlay struct {
 }
 
 func newChangeAcceptanceOverlay(review agentReview) *changeAcceptanceOverlay {
-	return &changeAcceptanceOverlay{review: review, viewport: viewport.New(1, 1)}
+	return &changeAcceptanceOverlay{
+		review: review,
+		viewport: viewport.New(
+			viewport.WithWidth(1),
+			viewport.WithHeight(1),
+		),
+	}
 }
 
-func (overlay *changeAcceptanceOverlay) Update(message tea.KeyMsg) bool {
+func (overlay *changeAcceptanceOverlay) Update(message tea.KeyPressMsg) bool {
 	if overlay == nil {
 		return false
 	}
@@ -296,7 +302,8 @@ func (overlay *changeAcceptanceOverlay) View(width, height int, styles uiStyles)
 	if overlay == nil {
 		return ""
 	}
-	overlay.viewport.Width, overlay.viewport.Height = max(1, width-4), max(1, height-6)
+	overlay.viewport.SetWidth(max(1, width-4))
+	overlay.viewport.SetHeight(max(1, height-6))
 	overlay.viewport.SetContent(overlay.review.Body)
 	head, foot := renderOverlayFrame(changeReviewCTML, width, styles, changeAcceptanceBindings(overlay))
 	return fitPane(core.Join("\n", head, overlay.viewport.View(), foot), width, height, styles.panel)
@@ -328,7 +335,7 @@ func newAgentSelectionOverlay(provider, model string) *launchReviewOverlay {
 
 // Update returns true only for an explicit confirmation; Escape is always a
 // cancellation and never starts a process.
-func (overlay *launchReviewOverlay) Update(message tea.KeyMsg) bool {
+func (overlay *launchReviewOverlay) Update(message tea.KeyPressMsg) bool {
 	if overlay == nil {
 		return false
 	}
@@ -465,8 +472,8 @@ func (overlay *launchReviewOverlay) View(width, height int, styles uiStyles) str
 		return fitPane(renderOverlayLayout(launchReviewCTML, width, styles, launchReviewBindings(overlay, provider, model)), width, height, styles.panel)
 	}
 	fieldWidth := max(12, width-6)
-	overlay.providerInput.Width = fieldWidth
-	overlay.modelInput.Width = fieldWidth
+	overlay.providerInput.SetWidth(fieldWidth)
+	overlay.modelInput.SetWidth(fieldWidth)
 	head, foot := renderOverlayFrame(agentSelectCTML, width, styles, agentSelectionBindings(overlay))
 	return fitPane(core.Join("\n", head, overlay.providerInput.View(), "Model", overlay.modelInput.View(), foot), width, height, styles.panel)
 }

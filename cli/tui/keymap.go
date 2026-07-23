@@ -2,7 +2,7 @@
 
 package tui
 
-import "dappco.re/go/html/tui/key"
+import "dappco.re/go/render/display/tui/key"
 
 type keyMap struct {
 	NewSession      key.Binding

@@ -8,8 +8,8 @@ import (
 
 	"dappco.re/go/inference/decode/parser"
 	coreio "dappco.re/go/io"
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/list"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -46,7 +46,7 @@ func TestInspector_Bad(t *testing.T) {
 	a = m.(app)
 	a.activePanel = panelWork
 	a.inspectorOpen = true
-	view := a.View()
+	view := a.View().Content
 	if !strings.Contains(view, "Work") || !strings.Contains(view, "AGENT CAPABILITY") {
 		t.Fatalf("overlay inspector did not retain main Work panel:\n%s", view)
 	}
@@ -58,7 +58,7 @@ func TestInspector_Ugly(t *testing.T) {
 	a = m.(app)
 	a.activePanel = panelChat
 	a.inspectorOpen = true
-	view := a.View()
+	view := a.View().Content
 	for _, section := range []string{"SESSION", "SETTINGS", "MODE", "TOOLS"} {
 		if !strings.Contains(view, section) {
 			t.Fatalf("narrow inspector missing %q:\n%s", section, view)
@@ -97,7 +97,7 @@ func TestInspectorPreferences_Good(t *testing.T) {
 		t.Fatalf("edited inspector: dirty=%v max=%d theme=%q", a.inspector.Dirty(), a.cfg.maxTokens(), a.inspector.Theme())
 	}
 
-	m, _ := a.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m, _ := a.Update(testModifiedKeyPress('s', tea.ModCtrl))
 	a = m.(app)
 	if a.inspector.Dirty() {
 		t.Fatal("Ctrl+S left inspector dirty")

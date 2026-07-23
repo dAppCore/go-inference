@@ -5,27 +5,27 @@ package tui
 import (
 	"testing"
 
-	"github.com/charmbracelet/bubbles/key"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/render/display/tui"
+	"dappco.re/go/render/display/tui/key"
 )
 
 func TestKeyMap_Good(t *testing.T) {
 	keys := newKeyMap()
 	tests := []struct {
 		name    string
-		message tea.KeyMsg
+		message tea.KeyPressMsg
 		binding key.Binding
 	}{
-		{"new session", tea.KeyMsg{Type: tea.KeyCtrlN}, keys.NewSession},
-		{"session switcher", tea.KeyMsg{Type: tea.KeyCtrlP}, keys.SwitchSession},
-		{"previous session", tea.KeyMsg{Type: tea.KeyLeft, Alt: true}, keys.PreviousSession},
-		{"next session", tea.KeyMsg{Type: tea.KeyRight, Alt: true}, keys.NextSession},
-		{"command palette", tea.KeyMsg{Type: tea.KeyCtrlK}, keys.CommandPalette},
-		{"inspector", tea.KeyMsg{Type: tea.KeyCtrlO}, keys.ToggleInspector},
-		{"search", tea.KeyMsg{Type: tea.KeyCtrlF}, keys.Search},
-		{"save", tea.KeyMsg{Type: tea.KeyCtrlS}, keys.Save},
-		{"settings", tea.KeyMsg{Type: tea.KeyF2}, keys.Settings},
-		{"help", tea.KeyMsg{Type: tea.KeyF1}, keys.Help},
+		{"new session", testModifiedKeyPress('n', tea.ModCtrl), keys.NewSession},
+		{"session switcher", testModifiedKeyPress('p', tea.ModCtrl), keys.SwitchSession},
+		{"previous session", testModifiedKeyPress(tea.KeyLeft, tea.ModAlt), keys.PreviousSession},
+		{"next session", testModifiedKeyPress(tea.KeyRight, tea.ModAlt), keys.NextSession},
+		{"command palette", testModifiedKeyPress('k', tea.ModCtrl), keys.CommandPalette},
+		{"inspector", testModifiedKeyPress('o', tea.ModCtrl), keys.ToggleInspector},
+		{"search", testModifiedKeyPress('f', tea.ModCtrl), keys.Search},
+		{"save", testModifiedKeyPress('s', tea.ModCtrl), keys.Save},
+		{"settings", testKeyPress(tea.KeyF2), keys.Settings},
+		{"help", testKeyPress(tea.KeyF1), keys.Help},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -34,4 +34,16 @@ func TestKeyMap_Good(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testKeyPress(code rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code}
+}
+
+func testModifiedKeyPress(code rune, mod tea.KeyMod) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Mod: mod}
+}
+
+func testTextPress(code rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Text: string(code)}
 }
