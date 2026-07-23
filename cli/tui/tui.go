@@ -7,7 +7,7 @@ import (
 	"flag"
 	"io"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/html/tui"
 
 	core "dappco.re/go"
 )

@@ -5,12 +5,11 @@ package tui
 import (
 	_ "embed"
 
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/help"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/style"
+	"dappco.re/go/html/tui/textinput"
 
 	core "dappco.re/go"
 	"dappco.re/go/html"
@@ -201,8 +200,8 @@ func commandPaletteBindings(palette *commandPalette, width int) ctml.Bindings {
 			"state":  state,
 			"marker": marker,
 			"id":     string(entry.command.ID),
-			"title":  ansi.Truncate(entry.Title(), budget, "…"),
-			"detail": ansi.Truncate(entry.Description(), budget, "…"),
+			"title":  style.Truncate(entry.Title(), budget, "…"),
+			"detail": style.Truncate(entry.Description(), budget, "…"),
 		})
 	}
 	if len(visible) == 0 && palette.list.FilterState() != list.Filtering {
@@ -230,9 +229,9 @@ func commandPaletteTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
 	theme.Heading = styles.title
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle().Padding(1, 0, 0, 0)
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Header = style.New()
+	theme.Footer = style.New().Padding(1, 0, 0, 0)
+	theme.Classes = map[string]style.Style{
 		"row-idle":      styles.answer,
 		"row-active":    styles.accent,
 		"row-hint":      styles.thought,
@@ -892,7 +891,7 @@ func (search *historySearch) View(width, height int) string {
 	}
 	search.input.Width = max(12, width-4)
 	search.list.SetSize(max(1, width), max(4, height-2))
-	return lipgloss.JoinVertical(lipgloss.Left, search.input.View(), search.list.View())
+	return style.Column(style.Left, search.input.View(), search.list.View())
 }
 
 type overlayKind uint8
@@ -936,7 +935,7 @@ func (overlay *helpOverlay) View(width int) string {
 		return ""
 	}
 	overlay.model.Width = max(20, width)
-	return lipgloss.JoinVertical(lipgloss.Left, "Keyboard help", "", overlay.model.View(overlay.keys), "", "esc closes help")
+	return style.Column(style.Left, "Keyboard help", "", overlay.model.View(overlay.keys), "", "esc closes help")
 }
 
 func renderOverlay(body string, width, height int, styles uiStyles) string {
@@ -952,7 +951,7 @@ func renderOverlay(body string, width, height int, styles uiStyles) string {
 		MaxWidth(overlayWidth).
 		MaxHeight(overlayHeight).
 		Render(body)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Top, box)
+	return style.Place(width, height, style.Center, style.Top, box)
 }
 
 // overlayEmpty keeps unavailable overlays legible without adding a component.

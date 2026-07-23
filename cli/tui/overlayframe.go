@@ -3,11 +3,10 @@
 package tui
 
 import (
-	"github.com/charmbracelet/lipgloss"
-
 	core "dappco.re/go"
 	"dappco.re/go/html"
 	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/tui/style"
 )
 
 // The overlay layer renders its text chrome through .ctml <layout>
@@ -80,9 +79,9 @@ func overlayFrameTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
 	theme.Heading = styles.title // the <h2> overlay titles
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle().Padding(1, 0, 0, 0)
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Header = style.New()
+	theme.Footer = style.New().Padding(1, 0, 0, 0)
+	theme.Classes = map[string]style.Style{
 		"overlay-hint":  styles.thought,
 		"overlay-warn":  styles.attention,
 		"overlay-error": styles.err,

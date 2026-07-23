@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/style"
 
 	core "dappco.re/go"
 )
@@ -358,13 +358,13 @@ func (panel *workPanel) View(width, height int, styles uiStyles) string {
 	var view string
 	if width >= 100 {
 		separator := fitPane("│", 1, height, styles.separator)
-		view = lipgloss.JoinHorizontal(lipgloss.Top,
+		view = style.Row(style.Top,
 			fitPane(listView, listWidth, height, styles.panel),
 			separator,
 			fitPane(detailView, detailWidth, height, styles.panel),
 		)
 	} else {
-		view = lipgloss.JoinVertical(lipgloss.Left,
+		view = style.Column(style.Left,
 			fitPane(listView, listWidth, listHeight, styles.panel),
 			"",
 			fitPane(detailView, detailWidth, detailHeight, styles.panel),

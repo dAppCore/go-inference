@@ -5,11 +5,10 @@ package tui
 import (
 	_ "embed"
 
-	"github.com/charmbracelet/lipgloss"
-
 	core "dappco.re/go"
 	"dappco.re/go/html"
 	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/tui/style"
 )
 
 // The Settings tab: a cursor list of knobs adjusted with ←/→ (or h/l). Values
@@ -142,7 +141,7 @@ func settingsFormTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
 	theme.Heading = styles.title // the <h2> form title
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Classes = map[string]style.Style{
 		"row-idle":   styles.answer,
 		"row-active": styles.accent,
 		"row-value":  styles.title,

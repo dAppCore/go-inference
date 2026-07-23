@@ -5,12 +5,11 @@ package tui
 import (
 	_ "embed"
 
-	"github.com/charmbracelet/lipgloss"
-
 	core "dappco.re/go"
 	"dappco.re/go/html"
 	"dappco.re/go/html/ctml"
 	"dappco.re/go/html/teabox"
+	"dappco.re/go/html/tui/style"
 )
 
 type panelID uint8
@@ -111,10 +110,10 @@ func panelBarBindings(active panelID, kind layoutKind) ctml.Bindings {
 func panelBarTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.header
-	theme.Sidebar = lipgloss.NewStyle().
-		Border(lipgloss.Border{Left: " ", Right: " "}).
+	theme.Sidebar = style.New().
+		Border(style.Border{Left: " ", Right: " "}).
 		BorderTop(false).BorderBottom(false)
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Classes = map[string]style.Style{
 		"brand":        styles.brand,
 		"nav-active":   styles.navActive,
 		"nav-inactive": styles.navInactive,
@@ -185,14 +184,14 @@ func panelBarHit(boxes html.BoxMap, x, y int, active panelID, kind layoutKind) (
 	pos := tabs.Col + 1 // the C content's one-column alignment gutter
 	for _, cell := range panelBarCells(active, kind) {
 		start := pos + cell.gap
-		end := min(pos+lipgloss.Width(cell.cell), edge)
+		end := min(pos+style.Measure(cell.cell), edge)
 		if start >= edge {
 			break
 		}
 		if x >= start && x < end {
 			return cell.panel, true
 		}
-		pos += lipgloss.Width(cell.cell)
+		pos += style.Measure(cell.cell)
 	}
 	return 0, false
 }

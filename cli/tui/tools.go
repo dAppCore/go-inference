@@ -6,11 +6,10 @@ import (
 	_ "embed"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
-
 	core "dappco.re/go"
 	"dappco.re/go/html"
 	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/tui/style"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/parser"
 )
@@ -152,7 +151,7 @@ func toolsPanelTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
 	theme.Heading = styles.title // the <h2> section titles
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Classes = map[string]style.Style{
 		"tool-label":   styles.accent,
 		"tool-state":   styles.answer,
 		"tool-name":    styles.answer,

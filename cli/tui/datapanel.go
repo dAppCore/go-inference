@@ -7,10 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/style"
 
 	core "dappco.re/go"
 	"dappco.re/go/html"
@@ -504,13 +503,13 @@ func (panel *dataPanel) View(width, height int, styles uiStyles) string {
 	var view string
 	if width >= 100 {
 		separator := fitPane("│", 1, height, styles.separator)
-		view = lipgloss.JoinHorizontal(lipgloss.Top,
+		view = style.Row(style.Top,
 			fitPane(listView, listWidth, height, styles.panel),
 			separator,
 			fitPane(detailView, detailWidth, height, styles.panel),
 		)
 	} else {
-		view = lipgloss.JoinVertical(lipgloss.Left,
+		view = style.Column(style.Left,
 			fitPane(listView, listWidth, listHeight, styles.panel),
 			"",
 			fitPane(detailView, detailWidth, detailHeight, styles.panel),
@@ -572,13 +571,13 @@ func dataListBindings(panel *dataPanel, width int) ctml.Bindings {
 		// The F band renders its blocks at width-2 (the frame's own inner
 		// margin), so the row budget subtracts that before the cursor, the
 		// two fixed segments, and their two 2-cell gaps.
-		budget := max(1, width-2-lipgloss.Width(cursor)-lipgloss.Width(status)-lipgloss.Width(meta)-4)
+		budget := max(1, width-2-style.Measure(cursor)-style.Measure(status)-style.Measure(meta)-4)
 		sequences["rows"] = append(sequences["rows"], map[string]any{
 			"state":  state,
 			"cursor": cursor,
 			"status": status,
 			"meta":   meta,
-			"slug":   ansi.Truncate(item.row.Dataset.Slug, budget, "…"),
+			"slug":   style.Truncate(item.row.Dataset.Slug, budget, "…"),
 		})
 	}
 	if len(visible) == 0 {
@@ -597,9 +596,9 @@ func dataListBindings(panel *dataPanel, width int) ctml.Bindings {
 func dataListTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle()
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Header = style.New()
+	theme.Footer = style.New()
+	theme.Classes = map[string]style.Style{
 		"list-title":  styles.title,
 		"list-meta":   styles.status,
 		"list-filter": styles.thought,
@@ -692,7 +691,7 @@ func (panel *dataPanel) dataDetailBindings(width int) ctml.Bindings {
 func dataDetailTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Classes = map[string]style.Style{
 		"detail-empty":   styles.status,
 		"detail-title":   styles.title,
 		"detail-status":  styles.status,

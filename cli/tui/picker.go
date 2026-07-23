@@ -6,10 +6,9 @@ import (
 	_ "embed"
 	"sort"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/style"
 
 	core "dappco.re/go"
 	"dappco.re/go/html"
@@ -83,7 +82,7 @@ func displayName(path string) string {
 // items, cursor, filter, pagination — and its default delegate survives as
 // the page-size driver (height 2 + spacing 1, the same three cells a
 // picker.ctml row occupies); rendering goes through renderPicker, so the
-// list carries no lipgloss styling of its own.
+// list carries no styling of its own.
 func newPicker() list.Model {
 	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
 	l.Title = "Models"
@@ -141,8 +140,8 @@ func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
 			"state":  state,
 			"marker": marker,
 			"id":     id,
-			"name":   ansi.Truncate(entry.Title(), budget, "…"),
-			"detail": ansi.Truncate(entry.Description(), budget, "…"),
+			"name":   style.Truncate(entry.Title(), budget, "…"),
+			"detail": style.Truncate(entry.Description(), budget, "…"),
 		})
 	}
 	if len(visible) == 0 && picker.FilterState() != list.Filtering {
@@ -162,7 +161,7 @@ func modelPickerTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
 	theme.Heading = styles.title // the <h2> panel title
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Classes = map[string]style.Style{
 		"row-idle":      styles.answer,
 		"row-active":    styles.accent,
 		"row-hint":      styles.thought,

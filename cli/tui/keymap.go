@@ -2,7 +2,7 @@
 
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import "dappco.re/go/html/tui/key"
 
 type keyMap struct {
 	NewSession      key.Binding
