@@ -42,6 +42,12 @@ type turn struct {
 	calls   []string // rendered tool-call receipts on an assistant turn
 }
 
+const (
+	chatEmptyNoModel = "○ no model loaded — open Models and choose one. The prompt below stays put either way."
+	chatNoModelNag   = "○ no model — pick one in Models to send. You can still type."
+	chatNoModelInput = "select a model to start chatting…"
+)
+
 type app struct {
 	boot               bootState
 	workspaceLoader    func() core.Result
@@ -380,9 +386,11 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 	sp.Spinner = spinner.MiniDot
 
 	in := textarea.New()
-	in.Placeholder = "ask… (enter sends · esc cancels a reply · tab switches tabs · ctrl+c quits)"
-	in.SetHeight(3)
+	in.Prompt = "› "
+	in.Placeholder = chatNoModelInput
+	in.SetHeight(1)
 	in.ShowLineNumbers = false
+	styleComposer(&in, styles, false)
 	in.Focus()
 
 	cfg := newSettings()
@@ -1184,6 +1192,7 @@ func (a *app) rebuildTheme(selected theme) {
 		return
 	}
 	a.styles = newUIStyles(selected)
+	styleComposer(&a.input, a.styles, a.model != nil)
 	a.markdown = newMarkdownRenderer(selected.name)
 	if a.switcher != nil {
 		a.switcher.list.Styles.Title = a.styles.title
@@ -1316,7 +1325,7 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		offset := a.view.YOffset()
 		a.width, a.height = msg.Width, msg.Height
 		metrics := measureFrame(msg.Width, msg.Height, a.inspectorOpen)
-		a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
+		resizeModelPicker(&a.picker, metrics.mainWidth, metrics.mainHeight)
 		a.input.SetWidth(max(1, metrics.mainWidth-4))
 		a.view = viewport.New(
 			viewport.WithWidth(max(1, metrics.mainWidth)),
@@ -1354,6 +1363,8 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.lane = laneResult.Value.(*modelLane)
 		a.model, a.modelName = a.lane.Model(), msg.name
+		a.input.Placeholder = "message " + msg.name + "…"
+		styleComposer(&a.input, a.styles, true)
 		a.loading = ""
 		a.errText = ""
 		a.activePanel = panelChat
@@ -2217,7 +2228,7 @@ func (a *app) toggleInspector() {
 		return
 	}
 	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
-	a.picker.SetSize(max(1, metrics.mainWidth), max(1, metrics.mainHeight))
+	resizeModelPicker(&a.picker, metrics.mainWidth, metrics.mainHeight)
 	a.input.SetWidth(max(1, metrics.mainWidth-4))
 	a.view.SetWidth(max(1, metrics.mainWidth))
 	a.view.SetHeight(a.transcriptHeight())
@@ -2259,6 +2270,8 @@ func (a *app) beginModelLoad(path string) tea.Cmd {
 	a.lane = nil
 	a.model = nil
 	a.modelName = ""
+	a.input.Placeholder = chatNoModelInput
+	styleComposer(&a.input, a.styles, false)
 	a.loading = path
 	a.activePanel = panelModels
 	loader := a.modelLoader
@@ -2266,6 +2279,27 @@ func (a *app) beginModelLoad(path string) tea.Cmd {
 		loader = loadModel
 	}
 	return a.lifecycle.command(loader(path, a.cfg.contextLen()))
+}
+
+// styleComposer applies the shell palette without replacing textarea state;
+// the prompt shifts from muted to teal once a model is ready.
+func styleComposer(input *textarea.Model, styles uiStyles, modelReady bool) {
+	if input == nil {
+		return
+	}
+	prompt := styles.status
+	if modelReady {
+		prompt = styles.accent
+	}
+	composerStyles := input.Styles()
+	composerStyles.Focused.Prompt = prompt
+	composerStyles.Blurred.Prompt = prompt
+	composerStyles.Focused.Placeholder = styles.status
+	composerStyles.Blurred.Placeholder = styles.status
+	composerStyles.Focused.Text = styles.answer
+	composerStyles.Blurred.Text = styles.answer
+	composerStyles.Cursor.Color = styles.theme.focus
+	input.SetStyles(composerStyles)
 }
 
 func (a *app) sendPrompt(prompt string) core.Result {
@@ -3277,17 +3311,15 @@ func (a app) panelView() string {
 	case panelModels:
 		return renderPicker(a.picker, measureFrame(a.width, a.height, a.inspectorOpen).mainWidth, a.styles)
 	case panelService:
-		return a.svc.view(a.modelName, a.width, a.styles)
+		return a.svc.view(a.modelName, measureFrame(a.width, a.height, a.inspectorOpen).mainWidth, a.styles)
 	case panelWork:
 		if a.work == nil {
 			return style.Column(style.Left,
-				a.styles.title.Render("Work"),
+				a.styles.title.Render("WORK")+"  "+a.styles.status.Render("ACTIVE 0 · WAITING 0 · DONE 0"),
+				a.styles.thought.Render("Select a work item for its timeline and context."),
 				"",
 				a.styles.status.Render("○ No work yet"),
-				a.styles.thought.Render("Local work becomes durable when the workspace store connects."),
-				"",
-				a.styles.attention.Render("Agent actions unavailable"),
-				a.styles.thought.Render(defaultAgentUnavailableReason),
+				a.styles.thought.Render("A connected provider or workspace action will create work here. Open the inspector and dispatch one."),
 			)
 		}
 		metrics := measureFrame(a.width, a.height, a.inspectorOpen)
@@ -3295,20 +3327,34 @@ func (a app) panelView() string {
 	case panelData:
 		if a.data == nil {
 			return style.Column(style.Left,
-				a.styles.title.Render("Data"),
+				a.styles.title.Render("DATA")+"  "+a.styles.status.Render("0 items · sort date"),
+				a.styles.thought.Render("Select an item for its content, scores, and lineage."),
 				"",
-				a.styles.status.Render("○ No dataset store connected"),
-				a.styles.thought.Render("datasets.duckdb becomes available when the workspace store connects."),
-				"",
-				a.styles.attention.Render("Review actions unavailable"),
-				a.styles.thought.Render("open ~/.lem/datasets.duckdb via `lem data create`/`lem data import` first"),
+				a.styles.status.Render("○ No items match this filter"),
+				a.styles.thought.Render("Import or capture data with ")+
+					a.styles.title.Render("lem data import")+
+					a.styles.thought.Render(" or ")+
+					a.styles.title.Render("lem serve --capture")+
+					a.styles.thought.Render("."),
 			)
 		}
 		metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 		return a.data.View(metrics.mainWidth, metrics.mainHeight, a.styles)
 	default: // chat
 		if a.model == nil && a.loading == "" {
-			return "\n  " + a.styles.status.Render("○ no model loaded — open Models and choose one")
+			metrics := measureFrame(a.width, a.height, a.inspectorOpen)
+			emptyHeight := max(1, metrics.mainHeight-a.input.Height()-3)
+			empty := fitPane("\n  "+a.styles.status.Render(chatEmptyNoModel), metrics.mainWidth, emptyHeight, a.styles.panel)
+			nagText := chatNoModelNag
+			if text, ok := core.CutPrefix(nagText, "○ "); ok {
+				nagText = text
+			}
+			nag := fitLine("  "+a.styles.attention.Render("○")+" "+a.styles.status.Render(nagText), metrics.mainWidth, a.styles.panel)
+			return style.Column(style.Left,
+				empty,
+				nag,
+				a.styles.inputBorder.Render(a.input.View()),
+			)
 		}
 		if a.model == nil {
 			return "\n  " + a.spin.View() + a.styles.status.Render(" loading "+displayName(a.loading)+" …")
@@ -3424,18 +3470,16 @@ func (a app) overlayView() string {
 
 func (a app) sessionStrip() string {
 	if a.sessions == nil || len(a.sessions.Recent()) == 0 {
-		title := newSessionTitle
 		for _, item := range a.turns {
 			if item.role == "user" && core.Trim(item.text) != "" {
-				title = compactStripTitle(item.text, 24)
-				break
+				marker := "●"
+				if a.generating {
+					marker = "◉"
+				}
+				return core.Concat(marker, " ", compactStripTitle(item.text, 24))
 			}
 		}
-		marker := "●"
-		if a.generating {
-			marker = "◉"
-		}
-		return core.Concat(marker, " ", title)
+		return "session 1"
 	}
 
 	recent := a.sessions.Recent()
@@ -3447,13 +3491,19 @@ func (a app) sessionStrip() string {
 	parts := make([]string, 0, shown+1)
 	for _, session := range recent[:shown] {
 		title := core.Trim(session.Record.Title)
-		if title == "" {
-			title = newSessionTitle
+		generic := title == "" || title == newSessionTitle
+		if generic {
+			title = core.Sprintf("session %d", sessionOrdinal(recent, session))
 		}
-		parts = append(parts, core.Concat(sessionStripMarker(session, a.sessions.activeID), " ", compactStripTitle(title, 24)))
+		marker := sessionStripMarker(session, a.sessions.activeID)
+		if generic && marker == "●" {
+			parts = append(parts, title)
+			continue
+		}
+		parts = append(parts, core.Concat(marker, " ", compactStripTitle(title, 24)))
 	}
 	hidden := len(recent) - shown
-	maxWidth := a.width - 14
+	maxWidth := a.width - 2 - style.Measure("SESSIONS  ● New session  ·  ")
 	if maxWidth < 20 {
 		maxWidth = 20
 	}
@@ -3472,6 +3522,23 @@ func (a app) sessionStrip() string {
 		parts = append(parts, core.Sprintf("+%d", hidden))
 	}
 	return core.Join("  ·  ", parts...)
+}
+
+func sessionOrdinal(recent []*chatSession, target *chatSession) int {
+	if target == nil {
+		return 1
+	}
+	ordinal := 1
+	for _, candidate := range recent {
+		if candidate == nil || candidate == target {
+			continue
+		}
+		if candidate.Record.CreatedAt.Before(target.Record.CreatedAt) ||
+			(candidate.Record.CreatedAt.Equal(target.Record.CreatedAt) && candidate.Record.ID < target.Record.ID) {
+			ordinal++
+		}
+	}
+	return ordinal
 }
 
 func sessionStripMarker(session *chatSession, activeID string) string {
@@ -3523,13 +3590,39 @@ func (a app) inspectorView() string {
 }
 
 func (a app) footerLine() string {
-	keys := "tab panels  ·  ctrl+k commands  ·  ctrl+o inspector  ·  f2 settings  ·  f1 help"
-	if chooseLayout(a.width) == layoutNarrow {
-		keys = "tab panels  ·  ^K commands  ·  ^O info  ·  F2 settings  ·  F1 help"
+	key := func(binding, label string) string {
+		return a.styles.title.Render(binding) + " " + a.styles.status.Render(label)
+	}
+	gap := " " + a.styles.separator.Render("·") + " "
+	fullKeys := core.Join(gap,
+		key("tab", "panels"),
+		key("ctrl+k", "commands"),
+		key("ctrl+o", "inspector"),
+		key("f1", "help"),
+	)
+	keys := fullKeys
+	if a.width > 0 && chooseLayout(a.width) != layoutWide {
+		keys = core.Join(gap,
+			a.styles.title.Render("tab"),
+			a.styles.title.Render("ctrl+k"),
+			a.styles.title.Render("ctrl+o"),
+			a.styles.title.Render("f1"),
+		)
 	}
 	status := a.statusLine()
 	if status == "" {
 		return keys
 	}
-	return status + "  │  " + keys
+	if a.width <= 0 {
+		return status + "  │  " + fullKeys
+	}
+	if chooseLayout(a.width) != layoutWide {
+		return status + "  │  " + keys
+	}
+	innerWidth := measureFrame(a.width, a.height, a.inspectorOpen).innerWidth
+	statusWidth := innerWidth - style.Measure(fullKeys) - style.Measure("  │  ")
+	if statusWidth <= 0 {
+		return fullKeys
+	}
+	return fitLine(status, statusWidth, a.styles.status) + "  │  " + fullKeys
 }

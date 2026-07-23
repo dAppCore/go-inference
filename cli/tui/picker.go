@@ -78,17 +78,33 @@ func displayName(path string) string {
 	return core.PathBase(path)
 }
 
+const modelPickerChromeRows = 3
+
 // newPicker builds the model list. The list.Model owns picker STATE only —
-// items, cursor, filter, pagination — and its default delegate survives as
-// the page-size driver (height 2 + spacing 1, the same three cells a
-// picker.ctml row occupies); rendering goes through renderPicker, so the
-// list carries no styling of its own.
+// items, cursor, filter, pagination — while picker.ctml renders the mockup's
+// dense one-line table rows.
 func newPicker() list.Model {
-	l := list.New(nil, list.NewDefaultDelegate(), 0, 0)
+	delegate := list.NewDefaultDelegate()
+	delegate.ShowDescription = false
+	delegate.SetSpacing(0)
+	l := list.New(nil, delegate, 0, 0)
 	l.Title = "Models"
+	l.SetShowTitle(false)
+	l.SetShowFilter(false)
 	l.SetShowStatusBar(false)
+	l.SetShowPagination(false)
+	l.SetShowHelp(false)
 	l.SetFilteringEnabled(true)
 	return l
+}
+
+// resizeModelPicker reserves the three structural rows owned by picker.ctml:
+// its toolbar, table heading, and optional page receipt.
+func resizeModelPicker(picker *list.Model, width, height int) {
+	if picker == nil {
+		return
+	}
+	picker.SetSize(max(1, width), max(1, height-modelPickerChromeRows))
 }
 
 // pickerCTML is the Models panel's markup — see picker.ctml for the seams it
@@ -98,61 +114,108 @@ func newPicker() list.Model {
 //go:embed picker.ctml
 var pickerCTML []byte
 
-// modelPickerBindings derives the panel's rows from the list model's own
-// state: the current page of visible items as ONE sequence — selection
-// styling rides the row-scoped class bind (class="{{row.state}}", go-html
-// v0.13.0) and the marker glyph rides the row, so no before/active/after
-// split is needed — plus the zero-or-one-row conditional sections for the
-// typed filter, the empty state, and the page position. Each row also
-// binds its box id (the model path — unique, discovery de-duplicates on
-// it). Name and hint are truncated host-side to the row budget because the
-// page math budgets exactly three cells per row — a <dt> wraps to the
-// render width, and a wrapped row would overflow the page the list
-// delegate sized.
+// modelPickerBindings derives the panel's toolbar and current page from the
+// list model. Table columns are padded host-side because terminal markup has
+// no borderless fixed-grid primitive; state, filtering, and pagination stay
+// entirely in list.Model.
 func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
 	sequences := map[string][]map[string]any{
-		"filter": {},
-		"rows":   {},
-		"empty":  {},
-		"page":   {},
+		"filterIdle":   {},
+		"filterActive": {},
+		"rows":         {},
+		"empty":        {},
+		"page":         {},
 	}
-	if picker.FilterState() == list.Filtering {
-		sequences["filter"] = append(sequences["filter"], map[string]any{"value": picker.FilterValue()})
+	filterValue := core.Trim(picker.FilterValue())
+	if filterValue == "" {
+		sequences["filterIdle"] = append(sequences["filterIdle"], map[string]any{})
+	} else {
+		sequences["filterActive"] = append(sequences["filterActive"], map[string]any{"value": filterValue})
 	}
+
 	visible := picker.VisibleItems()
+	count := core.Sprintf("%d local", len(picker.Items()))
+	if filterValue != "" {
+		count = core.Sprintf("%d of %d", len(visible), len(picker.Items()))
+	}
+
 	start, end := picker.Paginator.GetSliceBounds(len(visible))
 	active := picker.Index() - start
-	budget := max(1, width-2)
+	nameWidth, engineWidth, pathWidth := modelPickerColumnWidths(width)
 	for index, item := range visible[start:end] {
 		entry, ok := item.(list.DefaultItem)
 		if !ok {
 			continue
 		}
-		state, marker := "row-idle", "○"
+		state, marker := "row-idle", "  "
 		if index == active {
-			state, marker = "row-active", "›"
+			state, marker = "row-active", "│ "
 		}
 		id := entry.Title()
+		name, engine, path := entry.Title(), "", entry.Description()
 		if model, ok := item.(modelItem); ok {
 			id = model.path
+			name, engine, path = model.name, model.modelType, model.path
 		}
 		sequences["rows"] = append(sequences["rows"], map[string]any{
 			"state":  state,
 			"marker": marker,
 			"id":     id,
-			"name":   style.Truncate(entry.Title(), budget, "…"),
-			"detail": style.Truncate(entry.Description(), budget, "…"),
+			"name":   padPickerCell(style.Truncate(name, max(1, nameWidth-2), "…"), max(1, nameWidth-2)),
+			"engine": padPickerCell(style.Truncate(engine, engineWidth, "…"), engineWidth),
+			"path":   padPickerCell(truncatePickerTail(path, pathWidth), pathWidth),
 		})
 	}
-	if len(visible) == 0 && picker.FilterState() != list.Filtering {
-		sequences["empty"] = append(sequences["empty"], map[string]any{"text": "No items."})
+	if len(picker.Items()) == 0 {
+		sequences["empty"] = append(sequences["empty"], map[string]any{})
 	}
 	if picker.Paginator.TotalPages > 1 {
 		sequences["page"] = append(sequences["page"], map[string]any{
 			"label": core.Sprintf("page %d/%d", picker.Paginator.Page+1, picker.Paginator.TotalPages),
 		})
 	}
-	return ctml.Bindings{Sequences: sequences}
+	return ctml.Bindings{
+		Sequences: sequences,
+		Values: map[string]any{
+			"count":      count,
+			"headName":   "  " + padPickerCell("Model", max(1, nameWidth-2)),
+			"headEngine": padPickerCell("Engine", engineWidth),
+			"headPath":   padPickerCell("Snapshot path", pathWidth),
+		},
+	}
+}
+
+func modelPickerColumnWidths(width int) (name, engine, path int) {
+	width = max(1, width)
+	name = max(8, width*31/100)
+	engine = max(7, width*15/100)
+	if name+engine >= width {
+		name = max(1, width/2)
+		engine = max(1, min(7, width-name-1))
+	}
+	path = max(1, width-name-engine)
+	return name, engine, path
+}
+
+func padPickerCell(value string, width int) string {
+	width = max(1, width)
+	value = style.Truncate(value, width, "…")
+	return value + core.Repeat(" ", max(0, width-style.Measure(value)))
+}
+
+func truncatePickerTail(value string, width int) string {
+	width = max(1, width)
+	if style.Measure(value) <= width {
+		return value
+	}
+	if width == 1 {
+		return "…"
+	}
+	runes := []rune(value)
+	for len(runes) > 0 && style.Measure("…"+string(runes)) > width {
+		runes = runes[1:]
+	}
+	return "…" + string(runes)
 }
 
 // modelPickerTheme maps the markup's class tokens onto the existing palette,
@@ -160,27 +223,28 @@ func modelPickerBindings(picker list.Model, width int) ctml.Bindings {
 func modelPickerTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.answer
-	theme.Heading = styles.title // the <h2> panel title
 	theme.Classes = map[string]style.Style{
-		"row-idle":      styles.answer,
-		"row-active":    styles.accent,
-		"row-hint":      styles.thought,
+		"picker-title":  styles.title,
+		"picker-count":  styles.status,
+		"table-heading": styles.status,
+		"row-idle":      styles.title,
+		"row-active":    styles.accent.Bold(true),
+		"row-engine":    styles.status,
+		"row-path":      styles.thought,
 		"filter-prompt": styles.accent,
 		"filter-value":  styles.answer,
+		"filter-idle":   styles.status,
 		"picker-empty":  styles.status,
 		"picker-page":   styles.status,
-		"picker-keys":   styles.status,
 	}
 	return theme
 }
 
 // renderPicker parses picker.ctml with bindings derived from the list
-// model's current state and renders it through the go-html terminal
-// renderer: the panel title, the filter line while filtering, one <dl> row
-// per model on the current page (marker + name, indented type/path hint),
-// the empty and page states, and the key footer. Cursor movement, fuzzy
-// filtering, and pagination stay in list.Model — this is the render swap
-// over a.picker.Update.
+// model's current state and renders it through the go-html terminal renderer:
+// toolbar, borderless Model / Engine / Snapshot path table, empty state, and
+// page receipt. Cursor movement, fuzzy filtering, and pagination stay in
+// list.Model — this is the render swap over a.picker.Update.
 func renderPicker(picker list.Model, width int, styles uiStyles) string {
 	if width <= 0 {
 		return ""

@@ -206,14 +206,14 @@ func (inspector inspectorState) bindings(target app) ctml.Bindings {
 		}
 		sequences["modelsHead"] = modelsHead
 		loadedClass, loaded := "c-status", "○ none"
-		if target.modelName != "" {
-			loadedClass, loaded = "c-success", "● "+target.modelName
+		if selected, ok := target.picker.SelectedItem().(modelItem); ok && target.modelName == selected.name {
+			loadedClass, loaded = "c-success", "● loaded"
 		}
 		sequences["modelsBody"] = append(sequences["modelsBody"], map[string]any{"loadedClass": loadedClass, "loaded": loaded})
 	case panelService:
 		stateClass, state := "c-status", "○ stopped"
 		if target.svc.running {
-			stateClass, state = "c-success", "● serving"
+			stateClass, state = "c-success", "● listening"
 		}
 		sequences["serviceBody"] = append(sequences["serviceBody"], map[string]any{
 			"addr":       target.svc.addr(),
@@ -246,7 +246,7 @@ func (inspector inspectorState) chatBindings(target app, sequences map[string][]
 	}
 	generation := "○ idle"
 	if target.generating {
-		generation = "◉ generating"
+		generation = "● generating"
 	}
 	sequences["chatBody"] = append(sequences["chatBody"], map[string]any{"model": model, "generation": generation})
 	sequences["chatSettings"] = append(sequences["chatSettings"],

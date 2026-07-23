@@ -599,16 +599,17 @@ func dataListTheme(styles uiStyles) *html.TermTheme {
 	theme.Header = style.New()
 	theme.Footer = style.New()
 	theme.Classes = map[string]style.Style{
-		"list-title":  styles.title,
-		"list-meta":   styles.status,
-		"list-filter": styles.thought,
-		"row-active":  styles.accent,
-		"row-idle":    styles.answer,
-		"row-status":  styles.status,
-		"row-meta":    styles.thought,
-		"list-empty":  styles.status,
-		"list-hint":   styles.thought,
-		"list-keys":   styles.thought,
+		"list-title":   styles.title,
+		"list-meta":    styles.status,
+		"list-filter":  styles.thought,
+		"row-active":   styles.accent,
+		"row-idle":     styles.answer,
+		"row-status":   styles.status,
+		"row-meta":     styles.thought,
+		"list-empty":   styles.status,
+		"list-hint":    styles.thought,
+		"list-command": styles.title,
+		"list-keys":    styles.thought,
 	}
 	return theme
 }

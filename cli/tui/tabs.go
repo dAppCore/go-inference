@@ -24,7 +24,6 @@ const (
 )
 
 var panelNames = [panelCount]string{"Chat", "Work", "Models", "Service", "Data"}
-var compactPanelNames = [panelCount]string{"Chat", "Work", "Models", "API", "Data"}
 
 func (panel panelID) next() panelID { return (panel + 1) % panelCount }
 func (panel panelID) prev() panelID { return (panel + panelCount - 1) % panelCount }
@@ -43,12 +42,9 @@ const (
 	tabsSlotID  = "C"
 )
 
-// panelBarNames picks the label set for the layout. Compact labels preserve
-// all destinations on narrow terminals without squeezing or clipping.
-func panelBarNames(kind layoutKind) [panelCount]string {
-	if kind == layoutNarrow {
-		return compactPanelNames
-	}
+// panelBarNames keeps the canonical panel labels at every width. Narrow
+// terminals may clip the right edge, but never rename a destination.
+func panelBarNames(_ layoutKind) [panelCount]string {
 	return panelNames
 }
 

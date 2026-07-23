@@ -1,48 +1,28 @@
 <!-- SPDX-Licence-Identifier: EUPL-1.2 -->
 <!--
-  picker.ctml : the Models panel (discovered checkpoints, one row per
-  model, with filter, empty, and page state).
+  picker.ctml : the Models panel's borderless Model / Engine / Snapshot path
+  table, with its always-visible filter, empty state, and page receipt.
 
   Host seams (picker.go):
     - Sequence  rows : the current PAGE of the Bubbles list model's
-      visible items, ONE row per model {state, marker, name, detail, id}
-      — selection styling rides the row-scoped class bind
-      class="{{row.state}}" (go-html v0.13.0) and the marker glyph rides
-      the row (› active, ○ idle), so the before/active/after sequence
-      split this file previously needed is retired; the host re-binds on
-      every update. State stays in list.Model — this file only draws it.
-    - Sequences filter / empty / page : zero-or-one-row conditional
-      sections — the typed filter while filtering, the "No items." text
-      when nothing is discovered, and "page x/y" when the list paginates.
-    - Classes   row-idle / row-active / row-hint / filter-prompt /
-      filter-value / picker-empty / picker-page / picker-keys : mapped
-      onto the existing uiStyles palette by modelPickerTheme.
+      visible items, ONE line per model {state, marker, name, engine, path,
+      id}. The active row carries the mockup's "│ " selection rule; idle
+      rows carry the same-width blank gutter.
+    - Sequences filterIdle / filterActive / empty / page : zero-or-one-row
+      conditional sections for the filter placeholder/value, honest
+      discovery-empty message, and "page x/y" receipt.
+    - Values count / headName / headEngine / headPath : toolbar count and
+      host-padded table headings.
     - id="model-{{row.id}}" : each row records its own box under a
       box-recording render, keyed by the model's path (unique — discovery
       de-duplicates on it); inert under RenderTerm today, ready for a
       mouse consumer. id="model-picker" is the enclosing block.
 
-  Row shape: <dt> is the marker + model name, <dd> the "type  path" hint
-  the renderer indents beneath it, and each <dl> closes with the blank
-  separator — three cells per row, the same density the list model's
-  default delegate paginates by (height 2 + spacing 1), so a bound page
-  always fits the pane. The host truncates name and hint to the row
-  budget because the page math requires exactly one line per <dt> — a
-  <dt> wraps to the render width, and a wrapped row would overflow the
-  page the delegate sized. Selection gutters are marker glyphs
-  (› active, ○ idle): the parser drops whitespace-only runs between
-  siblings, so a plain gutter cannot be expressed in markup. Single-row
-  constructs stay on one source line so a text run's edge whitespace
-  ("Filter: ") survives.
+  Adjacent table lines ride one <p> with <br> separators, avoiding the
+  block renderer's blank paragraph rows. The host pads and truncates each
+  field to fixed terminal-cell widths; Snapshot path keeps its tail, like
+  the mockup's rtl-overflow column.
 -->
 <section id="model-picker">
-<h2>Models</h2>
-<each items="filter" as="row"><p><span class="filter-prompt">Filter: </span><span class="filter-value">{{row.value}}</span></p></each>
-<each items="rows" as="row"><dl id="model-{{row.id}}">
-  <dt><span class="{{row.state}}">{{row.marker}} {{row.name}}</span></dt>
-  <dd><span class="row-hint">{{row.detail}}</span></dd>
-</dl></each>
-<each items="empty" as="row"><p class="picker-empty">{{row.text}}</p></each>
-<each items="page" as="row"><p class="picker-page">{{row.label}}</p></each>
-<p class="picker-keys">↑/↓ select · / filter · enter load</p>
+<p><span class="picker-title">MODELS</span><span class="picker-count">  {{count}}</span><each items="filterIdle" as="row"><span class="filter-prompt">    / </span><span class="filter-idle">filter by name…</span></each><each items="filterActive" as="row"><span class="filter-prompt">    / </span><span class="filter-value">{{row.value}}</span></each><br></br><span class="table-heading">{{headName}}{{headEngine}}{{headPath}}</span><br></br><each items="rows" as="row"><span id="model-{{row.id}}" class="{{row.state}}">{{row.marker}}{{row.name}}</span><span class="row-engine">{{row.engine}}</span><span class="row-path">{{row.path}}</span><br></br></each><each items="empty" as="row"><span class="picker-empty">○ No local models found</span><br></br></each><each items="page" as="row"><span class="picker-page">{{row.label}}</span><br></br></each></p>
 </section>

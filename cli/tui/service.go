@@ -20,12 +20,12 @@ import (
 // hitting the API and a turn typed in Chat queue behind each other instead of
 // racing the engine. The service owns only its listener and context.
 
-// serviceAddrs are the listen presets cycled with ←/→ while stopped.
+// serviceAddrs are the listen presets cycled with ‹/› while stopped.
 var serviceAddrs = []struct{ addr, hint string }{
-	{":36911", "Lethean's own port — the default the client hints below use"},
-	{":11434", "Ollama's port — drop-in for clients hard-wired to an Ollama install"},
-	{":8080", "plain local HTTP port"},
-	{"0.0.0.0:36911", "every interface — reachable from other machines on your network"},
+	{":36911", "Lethean's own port — the default the client hints below use."},
+	{":11434", "Ollama's port — drop-in for clients hard-wired to an Ollama install."},
+	{":8080", "plain local HTTP port."},
+	{"0.0.0.0:36911", "every interface — reachable from other machines on your network."},
 }
 
 type serviceState struct {
@@ -152,35 +152,22 @@ func serviceTick() tea.Cmd {
 	return tea.Tick(time.Second, func(time.Time) tea.Msg { return serviceTickMsg{} })
 }
 
-func (s serviceState) view(modelName string, width int, styles uiStyles) string {
+func (s serviceState) view(_ string, width int, styles uiStyles) string {
 	var b core.Builder
-	b.WriteString(styles.title.Render("service") + "  " +
+	b.WriteString(styles.title.Render("SERVICE") + "  " +
 		styles.thought.Render("OpenAI · Anthropic · Ollama HTTP API for the loaded model") + "\n\n")
 
 	state := styles.status.Render("○ stopped")
 	if s.running {
-		label := "● serving on " + s.addr()
-		if modelName != "" {
-			label = "● serving " + modelName + " on " + s.addr()
-		}
-		state = styles.success.Render(label)
+		state = styles.success.Render("● listening")
 	}
 	b.WriteString("  " + state + "\n\n")
 
-	addrLabel := styles.answer.Render("address")
+	addrLabel := styles.accent.Render("address")
 	value := "‹ " + s.addr() + " ›"
 	hint := serviceAddrs[s.addrIdx].hint
-	if s.running {
-		value = s.addr()
-		hint = "locked while serving — stop first to change it"
-	}
 	b.WriteString("  " + addrLabel + "  " + styles.title.Render(value) + "\n")
 	b.WriteString("    " + styles.thought.Render(hint) + "\n\n")
-
-	if s.running || s.requests.Load() > 0 {
-		b.WriteString("  " + styles.answer.Render("requests") + "  " +
-			styles.title.Render(core.Sprintf("%d", s.requests.Load())) + "\n\n")
-	}
 
 	base := s.baseURL()
 	b.WriteString(styles.title.Render("point a client here") + "  " +
@@ -190,15 +177,15 @@ func (s serviceState) view(modelName string, width int, styles uiStyles) string 
 	b.WriteString("  " + styles.answer.Render("Ollama clients                ") + "   " + styles.accent.Render(base) + "\n\n")
 
 	b.WriteString(styles.title.Render("smoke") + "\n")
-	b.WriteString("  " + styles.thought.Render("curl -s "+base+"/v1/chat/completions \\") + "\n")
-	b.WriteString("  " + styles.thought.Render(`    -d '{"model":"lem","messages":[{"role":"user","content":"hello"}]}'`) + "\n\n")
+	b.WriteString("  " + styles.accent.Render("curl") + styles.answer.Render(" -s "+base+"/v1/chat/completions \\") + "\n")
+	b.WriteString("  " + styles.answer.Render(`  -d '{"model":"lem","messages":[{"role":"user","content":"hello"}]}'`) + "\n\n")
 
-	b.WriteString("  " + styles.thought.Render("TUI chat and API requests share the model through one serial lane —") + "\n")
-	b.WriteString("  " + styles.thought.Render("turns queue behind each other, nothing races the engine.") + "\n\n")
+	laneHint := "TUI chat and API requests share the model through one serial lane — turns queue behind each other, nothing races the engine."
+	b.WriteString("  " + styles.thought.Width(max(1, width-2)).Render(laneHint) + "\n\n")
 
-	if s.note != "" {
+	if s.note != "" && s.note != "stopped" {
 		b.WriteString("  " + styles.err.Render(s.note) + "\n\n")
 	}
-	b.WriteString(styles.status.Render("enter start/stop · ←/→ address (while stopped)"))
+	b.WriteString(styles.status.Render("enter start/stop · ‹/› address (while stopped)"))
 	return b.String()
 }

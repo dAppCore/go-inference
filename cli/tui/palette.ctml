@@ -23,8 +23,8 @@
       visible commands, ONE row per command {state, marker, id, title,
       detail} — selection styling rides the row-scoped class bind
       class="{{row.state}}" (go-html v0.13.0) and the marker glyph
-      rides the row (› active, ○ idle), the same idiom picker.ctml
-      established. detail already carries the "— unavailable: reason"
+      rides the row (› active, ○ idle), the same form-row idiom
+      settings.ctml uses. detail already carries the "— unavailable: reason"
       suffix (commandListItem.Description), so an unavailable command
       paints identically to an available one — matching the original
       list.DefaultDelegate, which never styled the two states apart.

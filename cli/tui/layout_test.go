@@ -88,12 +88,15 @@ func TestWorkspaceFrame_Good(t *testing.T) {
 		Width:        140,
 		Height:       26,
 		Active:       panelChat,
-		SessionStrip: "● New session   ○ Refactor scheduler",
+		SessionStrip: "session 1",
 		Main:         "MAIN REGION\nchat transcript",
 		Inspector:    "INSPECTOR\nmodel ready",
 		Footer:       "FOOTER ctrl+k commands",
 	}, styles)
 	assertFrameBasics(t, view, 140)
+	if plain := ansi.Strip(view); !strings.Contains(plain, "SESSIONS  ● New session  ·  session 1") {
+		t.Fatalf("frame missing the canonical New session action and current session chip:\n%s", plain)
+	}
 	if !strings.Contains(view, "INSPECTOR") {
 		t.Fatal("wide frame did not render its permanent inspector")
 	}

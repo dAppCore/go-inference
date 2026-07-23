@@ -32,44 +32,53 @@ func TestRenderPicker_Good(t *testing.T) {
 	plain := ansi.Strip(view)
 	lines := strings.Split(plain, "\n")
 
-	if strings.TrimSpace(lines[0]) != "Models" {
-		t.Fatalf("panel must open with its title line: %q", lines[0])
+	if !strings.Contains(lines[0], "MODELS  3 local") || !strings.Contains(lines[0], "/ filter by name…") {
+		t.Fatalf("panel must open with its canonical toolbar: %q", lines[0])
 	}
-	if strings.TrimSpace(lines[1]) != "" {
-		t.Fatalf("title must be followed by a blank separator: %q", lines[1])
+	if !strings.Contains(plain, "/ filter by name…") {
+		t.Fatalf("panel must keep the canonical filter prompt visible: %q", plain)
 	}
-	if !strings.Contains(plain, "› beta") {
-		t.Fatalf("selected row must carry the active marker: %q", plain)
-	}
-	for _, text := range []string{"○ alpha", "○ gamma"} {
-		if !strings.Contains(plain, text) {
-			t.Fatalf("unselected row missing the idle marker %q: %q", text, plain)
+	header := ""
+	for _, line := range lines {
+		if strings.Contains(line, "Model") && strings.Contains(line, "Engine") && strings.Contains(line, "Snapshot path") {
+			header = line
+			break
 		}
 	}
-	for _, text := range []string{"fake  /models/alpha", "fake  /models/beta", "fake  /models/gamma"} {
-		if !strings.Contains(plain, text) {
-			t.Fatalf("row missing the type/path hint %q: %q", text, plain)
-		}
+	if header == "" || strings.Index(header, "Model") >= strings.Index(header, "Engine") || strings.Index(header, "Engine") >= strings.Index(header, "Snapshot path") {
+		t.Fatalf("canonical table headings missing or out of order: %q", plain)
 	}
-	if !strings.Contains(plain, "↑/↓ select · / filter · enter load") {
-		t.Fatalf("panel missing the key footer: %q", plain)
+	if !strings.Contains(plain, "│ beta") {
+		t.Fatalf("selected row must carry the table selection rule: %q", plain)
 	}
 	if strings.Contains(plain, "No items.") || strings.Contains(plain, "page ") {
 		t.Fatalf("a populated single page must carry no empty or page state: %q", plain)
 	}
 
-	row := -1
-	for index, line := range lines {
-		if strings.Contains(line, "› beta") {
-			row = index
-			break
+	for _, model := range []struct {
+		name, engine, path string
+	}{
+		{"alpha", "fake", "/models/alpha"},
+		{"beta", "fake", "/models/beta"},
+		{"gamma", "fake", "/models/gamma"},
+	} {
+		row := ""
+		for _, line := range lines {
+			if strings.Contains(line, model.name) {
+				row = line
+				break
+			}
+		}
+		if row == "" {
+			t.Fatalf("table row for %q missing: %q", model.name, plain)
+		}
+		nameAt, engineAt, pathAt := strings.Index(row, model.name), strings.Index(row, model.engine), strings.Index(row, model.path)
+		if nameAt < 0 || engineAt <= nameAt || pathAt <= engineAt {
+			t.Fatalf("table row %q does not keep Model / Engine / Snapshot path order", row)
 		}
 	}
-	if row < 0 || row+1 >= len(lines) {
-		t.Fatalf("selected row not found in the rendered lines: %q", plain)
-	}
-	if !strings.Contains(lines[row+1], "fake  /models/beta") {
-		t.Fatalf("hint must sit directly beneath its name line: %q", lines[row+1])
+	if strings.Contains(plain, "○ alpha") || strings.Contains(plain, "○ gamma") {
+		t.Fatalf("table rows must not retain the old list-item circle markers: %q", plain)
 	}
 
 	first := strings.Index(plain, "alpha")
@@ -103,7 +112,7 @@ func TestRenderPicker_Ugly(t *testing.T) {
 	empty := newPicker()
 	empty.SetSize(40, 20)
 	plain := ansi.Strip(renderPicker(empty, 40, styles))
-	if !strings.Contains(plain, "No items.") {
+	if !strings.Contains(plain, "MODELS  0 local") || !strings.Contains(plain, "/ filter by name…") || !strings.Contains(plain, "No local models found") {
 		t.Fatalf("an empty picker must render its empty state: %q", plain)
 	}
 
@@ -116,17 +125,17 @@ func TestRenderPicker_Ugly(t *testing.T) {
 	filtered.SetFilterText("beta")
 	filtered.SetFilterState(list.Filtering)
 	plain = ansi.Strip(renderPicker(filtered, 80, styles))
-	if !strings.Contains(plain, "Filter: beta") {
+	if !strings.Contains(plain, "/ beta") || !strings.Contains(plain, "1 of 2") {
 		t.Fatalf("filtering must surface the typed filter: %q", plain)
 	}
-	if !strings.Contains(plain, "› beta") || strings.Contains(plain, "alpha") {
+	if !strings.Contains(plain, "│ beta") || strings.Contains(plain, "alpha") {
 		t.Fatalf("filtering must render matches only, cursor on the first: %q", plain)
 	}
 	filtered.SetFilterText("zzz")
 	filtered.SetFilterState(list.Filtering)
 	plain = ansi.Strip(renderPicker(filtered, 80, styles))
-	if strings.Contains(plain, "No items.") || strings.Contains(plain, "○ ") {
-		t.Fatalf("a match-free filter renders no rows and no empty mislabel: %q", plain)
+	if !strings.Contains(plain, "0 of 2") || strings.Contains(plain, "No local models found") || strings.Contains(plain, "○ ") {
+		t.Fatalf("a match-free filter renders its count but no discovery-empty mislabel: %q", plain)
 	}
 
 	// A long snapshot path truncates to the row budget instead of wrapping,
@@ -140,7 +149,10 @@ func TestRenderPicker_Ugly(t *testing.T) {
 	view := renderPicker(long, 40, styles)
 	plain = ansi.Strip(view)
 	if !strings.Contains(plain, "…") {
-		t.Fatalf("an over-budget hint must truncate with an ellipsis: %q", plain)
+		t.Fatalf("an over-budget path must truncate with an ellipsis: %q", plain)
+	}
+	if !strings.Contains(plain, "0123456789abcdef") {
+		t.Fatalf("the truncated Snapshot path must retain its identifying tail: %q", plain)
 	}
 	for index, line := range strings.Split(plain, "\n") {
 		if got := lipgloss.Width(line); got > 40 {
@@ -166,7 +178,7 @@ func TestRenderPicker_Ugly(t *testing.T) {
 	if !strings.Contains(plain, "page 1/") {
 		t.Fatalf("a paginated list must state its page position: %q", plain)
 	}
-	if !strings.Contains(plain, "› m00") {
+	if !strings.Contains(plain, "│ m00") {
 		t.Fatalf("the first page must open on the first item: %q", plain)
 	}
 	if strings.Contains(plain, "m29") {

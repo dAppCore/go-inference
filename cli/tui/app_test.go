@@ -935,7 +935,86 @@ func TestAppComposerNewline_Good(t *testing.T) {
 	}
 }
 
+func TestAppPanelView_ChatEmptyStateMatchesCanonicalCopy(t *testing.T) {
+	a := newApp("", 0, 64)
+	model, _ := a.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	a = model.(app)
+
+	view := ansi.Strip(a.panelView())
+	compact := strings.Join(strings.Fields(view), " ")
+	for _, want := range []string{
+		"○ no model loaded — open Models and choose one. The prompt below stays put either way.",
+		"○ no model — pick one in Models to send. You can still type.",
+		"›",
+		"select a model to start chatting…",
+	} {
+		if !strings.Contains(compact, want) {
+			t.Fatalf("empty Chat panel missing %q:\n%s", want, view)
+		}
+	}
+
+	model, _ = a.Update(testTextPress('x'))
+	a = model.(app)
+	if got := a.input.Value(); got != "x" {
+		t.Fatalf("no-model composer value = %q, want typing to remain available", got)
+	}
+}
+
+func TestAppPanelView_WorkAndDataEmptyStatesMatchCanonicalCopy(t *testing.T) {
+	a := newApp("", 0, 64)
+
+	a.activePanel = panelWork
+	workView := ansi.Strip(a.panelView())
+	for _, want := range []string{
+		"WORK  ACTIVE 0 · WAITING 0 · DONE 0",
+		"○ No work yet",
+		"A connected provider or workspace action will create work here. Open the inspector and dispatch one.",
+	} {
+		if !strings.Contains(workView, want) {
+			t.Fatalf("empty Work panel missing %q:\n%s", want, workView)
+		}
+	}
+
+	a.activePanel = panelData
+	dataView := ansi.Strip(a.panelView())
+	for _, want := range []string{
+		"DATA  0 items · sort date",
+		"○ No items match this filter",
+		"Import or capture data with lem data import or lem serve --capture.",
+	} {
+		if !strings.Contains(dataView, want) {
+			t.Fatalf("empty Data panel missing %q:\n%s", want, dataView)
+		}
+	}
+}
+
+func TestAppFooterLine_Good(t *testing.T) {
+	a := newApp("", 0, 64)
+	footer := ansi.Strip(a.footerLine())
+	want := "tab panels · ctrl+k commands · ctrl+o inspector · f1 help"
+	if !strings.Contains(footer, want) || strings.Contains(footer, "settings") {
+		t.Fatalf("footer = %q, want canonical key strip %q", footer, want)
+	}
+
+	a.width, a.height = 140, 30
+	footer = ansi.Strip(a.footerLine())
+	if !strings.HasSuffix(footer, want) {
+		t.Fatalf("sized footer must preserve its right-hand key strip: %q", footer)
+	}
+	if got, limit := lipgloss.Width(footer), measureFrame(a.width, a.height, a.inspectorOpen).innerWidth; got > limit {
+		t.Fatalf("footer width = %d, exceeds frame inner width %d: %q", got, limit, footer)
+	}
+	if frame := ansi.Strip(a.View().Content); !strings.Contains(frame, want) {
+		t.Fatalf("rendered wide frame clipped the canonical key strip:\n%s", frame)
+	}
+}
+
 func TestAppSessionStrip_Good(t *testing.T) {
+	unmanaged := newApp("", 0, 64)
+	if strip := unmanaged.sessionStrip(); strip != "session 1" {
+		t.Fatalf("initial session chip = %q, want %q", strip, "session 1")
+	}
+
 	manager := openTestSessionManager(t, sequenceIDs("session-one", "session-two", "session-three"))
 	first := manager.Create().Value.(*chatSession)
 	second := manager.Create().Value.(*chatSession)
@@ -2251,7 +2330,7 @@ func TestApp_AttachDataWiresPanelAndPalette(t *testing.T) {
 	}
 }
 
-func TestApp_AttachDataNilStoreLeavesPanelHonestlyUnavailable(t *testing.T) {
+func TestApp_AttachDataNilStoreLeavesCanonicalEmptyPanel(t *testing.T) {
 	a := newApp("", 0, 64)
 	if result := a.attachData(nil); !result.OK {
 		t.Fatalf("attachData(nil): %v", result.Value)
@@ -2260,8 +2339,11 @@ func TestApp_AttachDataNilStoreLeavesPanelHonestlyUnavailable(t *testing.T) {
 		t.Fatalf("attachData(nil) left a.data non-nil: %#v", a.data)
 	}
 	a.activePanel = panelData
-	view := a.panelView()
-	if !strings.Contains(view, "No dataset store connected") {
+	view := ansi.Strip(a.panelView())
+	compact := strings.Join(strings.Fields(view), " ")
+	if !strings.Contains(compact, "DATA 0 items · sort date") ||
+		!strings.Contains(compact, "○ No items match this filter") ||
+		!strings.Contains(compact, "Import or capture data with lem data import or lem serve --capture.") {
 		t.Fatalf("panelView with no data store:\n%s", view)
 	}
 }

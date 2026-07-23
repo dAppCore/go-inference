@@ -17,6 +17,7 @@ func TestInspector_Good(t *testing.T) {
 	a := newApp("", 0, 64)
 	a.modelName = "gemma-4"
 	a.generating = true
+	a.svc.running = true
 	a.svc.requests.Store(7)
 	a.picker.SetItems([]list.Item{modelItem{path: "/models/qwen", name: "qwen", modelType: "qwen3"}})
 
@@ -24,10 +25,10 @@ func TestInspector_Good(t *testing.T) {
 		panel panelID
 		want  []string
 	}{
-		{panelChat, []string{"SESSION", "MODEL", "GENERATION", "SETTINGS", "MODE", "TOOLS", "gemma-4"}},
+		{panelChat, []string{"SESSION", "MODEL", "GENERATION", "● generating", "SETTINGS", "MODE", "TOOLS", "gemma-4"}},
 		{panelWork, []string{"WORK DETAIL", "RUNTIME", "AGENT CAPABILITY", "not installed"}},
-		{panelModels, []string{"MODEL DETAIL", "qwen", "/models/qwen"}},
-		{panelService, []string{"ADDRESS", "REQUESTS", a.svc.addr(), "7"}},
+		{panelModels, []string{"MODEL DETAIL", "qwen", "/models/qwen", "LOADED", "○ none"}},
+		{panelService, []string{"ADDRESS", "REQUESTS", "STATE", a.svc.addr(), "7", "● listening"}},
 	}
 	for _, test := range tests {
 		a.activePanel = test.panel
@@ -38,6 +39,12 @@ func TestInspector_Good(t *testing.T) {
 			}
 		}
 	}
+
+	a.activePanel = panelModels
+	a.modelName = "qwen"
+	if view := a.inspector.View(a, 36, 20); !strings.Contains(view, "● loaded") {
+		t.Fatalf("selected loaded model must use the canonical loaded receipt:\n%s", view)
+	}
 }
 
 func TestInspector_Bad(t *testing.T) {
@@ -47,7 +54,7 @@ func TestInspector_Bad(t *testing.T) {
 	a.activePanel = panelWork
 	a.inspectorOpen = true
 	view := a.View().Content
-	if !strings.Contains(view, "Work") || !strings.Contains(view, "AGENT CAPABILITY") {
+	if !strings.Contains(view, "WORK") || !strings.Contains(view, "AGENT CAPABILITY") {
 		t.Fatalf("overlay inspector did not retain main Work panel:\n%s", view)
 	}
 }
