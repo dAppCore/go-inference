@@ -665,8 +665,13 @@ func TestDataPanel_View_Empty(t *testing.T) {
 	store := dataset.NewMemoryStore()
 	opened := newDataPanel(store, nil, nil, nil)
 	panel := opened.Value.(*dataPanel)
-	view := panel.View(100, 24, newUIStyles(midnightTheme()))
-	if !strings.Contains(view, "No items match this filter") || !strings.Contains(view, "Select an item") {
+	view := ansi.Strip(panel.View(100, 24, newUIStyles(midnightTheme())))
+	compact := strings.Join(strings.Fields(view), " ")
+	wantHint := "Import or capture data with lem data import or lem serve --capture."
+	if !strings.Contains(compact, "DATA 0 items · sort date") ||
+		!strings.Contains(compact, "○ No items match this filter") ||
+		!strings.Contains(compact, wantHint) ||
+		!strings.Contains(compact, "Select an item for its content, scores, and lineage.") {
 		t.Fatalf("empty view:\n%s", view)
 	}
 }

@@ -263,7 +263,7 @@ func renderWideLayout(src []byte, width int, theme *html.TermTheme, bindings ...
 // pair's divider too. See shellinspectorpair.ctml's header comment and
 // renderInspectorStack's own comment for the full account.
 //
-// The tab strip and session strip (both already fully styled, single-line,
+// The tab strip and the composed SESSIONS action/chip band (both single-line,
 // pre-fitted to metrics.innerWidth) join as the shell's one "header" value;
 // the status/key-hint line is the "footer" value. Verbatim is emitted
 // exactly as supplied with no added blank, so the "\n" join building header
@@ -278,7 +278,16 @@ func renderFrame(spec frameSpec, styles uiStyles) string {
 	}
 	metrics := measureFrame(spec.Width, spec.Height, spec.InspectorOpen)
 	tabstrip := renderPanelBar(spec.Active, metrics.innerWidth, metrics.kind, styles)
-	sessions := fitLine(styles.title.Render("SESSIONS")+"  "+styles.session.Render(spec.SessionStrip), metrics.innerWidth, styles.session)
+	sessionLine := styles.title.Render("SESSIONS") +
+		"  " + styles.accent.Render("●") + " " + styles.session.Render("New session")
+	if core.Trim(spec.SessionStrip) != "" {
+		chipStyle := styles.session
+		if core.Trim(spec.SessionStrip) == "session 1" {
+			chipStyle = styles.accent
+		}
+		sessionLine += "  " + styles.separator.Render("·") + "  " + chipStyle.Render(spec.SessionStrip)
+	}
+	sessions := fitLine(sessionLine, metrics.innerWidth, styles.session)
 	header := core.Join("\n", tabstrip, sessions)
 	footer := fitLine(spec.Footer, metrics.innerWidth, styles.footer)
 

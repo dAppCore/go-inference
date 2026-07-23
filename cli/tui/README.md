@@ -32,7 +32,7 @@ providers, mutate private/source Git, or admit or change native queue work.
 | **Chat** | Durable multi-session transcript, Bubbles viewport and composer, streamed thought/answer channels, cached Glamour Markdown, per-session draft/scroll state, tool receipts, and hidden-session attention. |
 | **Work** | Durable Work CRUD, native provider dispatch, queue controls, ordered process output, blocked questions, retry/resume, and reviewed acceptance through the connected `go/agent/*` engine. Future actions remain visible with an exact unavailable reason. |
 | **Models** | Asynchronous discovery from the Hugging Face cache and `LEM_MODELS_DIR`, fuzzy filtering, explicit loading, and loaded-model detail. A swap is refused while any chat job is active and drains the HTTP listener before replacing an idle model. |
-| **Service** | Start or stop the API over the exact serial model lane used by Chat; inspect address, model, request count, client URLs, and listener errors. Stopping the service never closes the model. |
+| **Service** | Start or stop the API over the exact serial model lane used by Chat; inspect address, request count, client URLs, and listener errors. Stopping the service never closes the model. |
 | **Data** | Review surface for the `lem data` training-data loop (`~/.lem/datasets.duckdb`): item list with dataset/status/kind/source/score filters, side-by-side detail (rendered content, score breakdown, lineage, welfare flags), and the review actions — approve, reject, quarantine-clear (note required), edit-as-derived (original archived), tag — each with an uppercase bulk form across the current filter behind a count confirmation. Every action has a mirrored palette entry; unavailable states render honestly. |
 
 Settings, sampling modes, built-in tools, local knowledge, runtime detection,
@@ -142,11 +142,11 @@ The Models panel (`picker.go` + `picker.ctml`) and the Tools tab
 - **A Bubbles-list screen keeps its state in `list.Model`** (items, cursor,
   fuzzy filter, pagination through `Update`) and derives its row bindings
   from it — the current page as one sequence, each row carrying its
-  selection class, marker, and box id (`id="model-{{row.id}}"`, keyed by
-  the model path discovery already de-duplicates on); the host truncates
-  each field to the row budget because the page math requires exactly one
-  line per `<dt>` (a `<dt>` wraps to the render width, and a wrapped row
-  would overflow the page the list delegate sized).
+  selection class, table-rule marker, and box id
+  (`id="model-{{row.id}}"`, keyed by the model path discovery already
+  de-duplicates on). The host pads Model / Engine / Snapshot path to fixed
+  terminal-cell widths and truncates each field so every model remains one
+  table line; Snapshot path keeps its tail, matching the canonical mockup.
 - **Adjacent single-line rows ride ONE `<p>` with a `<br>` closing each
   `<each>` row** — separate block elements would gain blank separators.
 - **A section that appears only with data is an `<each>` over a
@@ -240,12 +240,12 @@ mirrored — its "render" builds the export document, not a screen). None
 composes a screen — like `preferences.go`, `markdown.go`, and
 `agentcap.go` before them, they have no rendering to migrate.
 
-No TUI screen is genuinely columnar today. When one arrives, the
-terminal renderer has a real table path — `<table>`/`<tr>`/`<td>` (and
-`thead`/`th`) render through lipgloss/table as a bordered,
-content-sized grid, and none of those tags is reserved by ctml — but a
-label+detail row list is not a table: it stays on the `<dl>` idiom
-settings and the picker established.
+Models is genuinely columnar, but the canonical design is a borderless,
+full-width table. The terminal renderer's `<table>`/`<tr>`/`<td>` path uses
+lipgloss/table's bordered, content-sized grid, so `picker.ctml` instead
+renders host-padded columns as adjacent spans in one `<p>` with `<br>` row
+separators. Label+detail forms remain on the `<dl>` idiom used by Settings
+and command-palette rows.
 
 ### The app shell
 
@@ -362,10 +362,10 @@ list for the first time.
   `Filtering`, and Enter/Esc close the overlay before either ever
   reaches `list.Model`), so a header that vanished the instant the
   overlay opened would rarely be seen.
-- **Rows are Picker's `<dl>` idiom, not the Data list's dense `<p>`+`<br>`
-  rows**: each command is a two-line block (marker + title, indented
-  description), matching Picker's value-line/hint-line shape rather than
-  Data's one-line-per-item density. Selection styling rides the
+- **Rows use the Settings-style `<dl>` idiom, not the Data/Models dense
+  `<p>`+`<br>` rows**: each command is a two-line block (marker + title,
+  indented description), matching a value-line/hint-line form rather than
+  the primary lists' one-line-per-item density. Selection styling rides the
   row-scoped class bind (`class="{{row.state}}"`) with the marker glyph
   on the row; an unavailable command's "— unavailable: reason" suffix
   already lives in its description text (`commandListItem.Description`),
@@ -380,7 +380,7 @@ list for the first time.
   `core.Command`/`CommandAction` at all. Adapting one to the other would
   mean building a registry bridge that does not exist, for a
   rendering-only slice; the palette instead composes the same generic
-  row-list idiom `picker.ctml` and `datalist.ctml` already established.
+  bound-row idioms the other `.ctml` screens established.
 - Bubbles' own chrome — the auto-generated help line, the dot pagination
   bar, the title-vs-filter swap — is replaced wholesale with host-owned
   markup, the same trade every earlier screen made: a literal "page x/y"

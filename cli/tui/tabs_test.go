@@ -45,8 +45,8 @@ func TestRenderPanelBar_Ugly(t *testing.T) {
 	styles := newUIStyles(midnightTheme())
 	view := renderPanelBar(panelData, 72, layoutNarrow, styles)
 	plain := ansi.Strip(view)
-	if !strings.Contains(plain, "○ API") || strings.Contains(plain, "Service") {
-		t.Fatalf("narrow bar must use compact labels: %q", plain)
+	if !strings.Contains(plain, "○ Service") || strings.Contains(plain, "○ API") {
+		t.Fatalf("narrow bar must preserve the canonical Service label: %q", plain)
 	}
 	if !strings.Contains(plain, "● Data") || strings.Contains(plain, "○ Data") {
 		t.Fatalf("last tab active must carry the active marker: %q", plain)

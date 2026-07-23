@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	core "dappco.re/go"
 )
@@ -279,7 +280,9 @@ func TestWorkPanel_Ugly(t *testing.T) {
 	}
 	panel := opened.Value.(*workPanel)
 	empty := panel.View(72, 18, newUIStyles(midnightTheme()))
-	if !strings.Contains(empty, "No work yet") || !strings.Contains(empty, "workspace action") || strings.Contains(empty, "command palette") {
+	compact := strings.Join(strings.Fields(ansi.Strip(empty)), " ")
+	wantEmpty := "A connected provider or workspace action will create work here. Open the inspector and dispatch one."
+	if !strings.Contains(compact, "○ No work yet") || !strings.Contains(compact, wantEmpty) || strings.Contains(compact, "command palette") {
 		t.Fatalf("empty work view:\n%s", empty)
 	}
 	fixtures := []workItemRecord{

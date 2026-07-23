@@ -165,8 +165,8 @@ var paletteCTML []byte
 // commandPaletteBindings derives the palette's rows from the list model's
 // own state: the current page of visible commands as ONE sequence —
 // selection styling rides the row-scoped class bind (class="{{row.state}}",
-// go-html v0.13.0) and the marker glyph rides the row, the same idiom
-// picker.ctml established — plus the zero-or-one-row conditional sections
+// go-html v0.13.0) and the marker glyph rides the row, the same form-row
+// idiom settings.ctml uses — plus the zero-or-one-row conditional sections
 // for the empty and page states. detail already carries the
 // "— unavailable: reason" suffix (commandListItem.Description), so an
 // unavailable command renders with the same row-idle/row-active paint an
@@ -219,7 +219,7 @@ func commandPaletteBindings(palette *commandPalette, width int) ctml.Bindings {
 // palette. It carries the same band chrome every overlay uses
 // (overlayFrameTheme's blank header / one-row-padded footer, so the
 // palette's key-hint line keeps the same gap every overlay draws above its
-// footer) plus the row-selection classes picker.ctml established, since
+// footer) plus the shared row-selection classes, since
 // the palette is the first overlay to carry a selectable row list — a
 // plain renderOverlayFrame call has no seam for those extra classes, so
 // this theme is built directly and rendered through renderBandFrame, the
