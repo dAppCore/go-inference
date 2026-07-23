@@ -5,7 +5,7 @@ package tui
 import (
 	"context"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/html/tui"
 
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/parser"

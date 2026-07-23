@@ -33,10 +33,11 @@ require (
 	charm.land/log/v2 v2.0.0 // indirect
 	charm.land/wish/v2 v2.0.0 // indirect
 	dappco.re/go/cgo v0.11.2 // indirect
-	dappco.re/go/html v0.11.0 // direct: cli/tui renders .ctml (tabs.go)
+	dappco.re/go/html v0.16.0 // direct: cli/tui renders .ctml (tabs.go)
 	dappco.re/go/i18n v0.12.1 // indirect
 	dappco.re/go/log v0.13.1 // indirect
 	dappco.re/go/ratelimit v0.12.1 // indirect
+	dappco.re/go/update v0.13.0
 	forge.lthn.ai/Snider/Enchantrix v0.0.5 // indirect
 	github.com/99designs/gqlgen v0.17.88 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect

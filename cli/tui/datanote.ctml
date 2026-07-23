@@ -1,0 +1,20 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  datanote.ctml : the one-line note/label overlay (Data panel) — a
+  quarantine-clear justification or tag label for one item or a bulk set.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the live textinput
+  emits pre-styled ANSI, which cannot ride a .ctml document, so the
+  layout renders the header and footer bands and the host composes the
+  input between them (renderOverlayFrame splits at the H box height).
+
+  Host seams (dataoverlay.go):
+    - Sequence  note : one row {title, prompt} — both caller-supplied,
+      so neither can live as static markup text.
+    - Classes   overlay-keys : mapped onto the existing uiStyles palette
+      by overlayFrameTheme.
+-->
+<layout variant="HF">
+<h><each items="note" as="row"><h2>{{row.title}}</h2><p>{{row.prompt}}</p></each></h>
+<f><p class="overlay-keys">enter submits · esc cancels</p></f>
+</layout>

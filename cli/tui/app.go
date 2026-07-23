@@ -4,22 +4,33 @@ package tui
 
 import (
 	"context"
+	_ "embed"
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/key"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/spinner"
+	"dappco.re/go/html/tui/style"
+	"dappco.re/go/html/tui/textarea"
+	"dappco.re/go/html/tui/viewport"
 
 	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/decode/parser"
 )
+
+// transcriptCTML is the chat panel's turn-list markup -- see transcript.ctml
+// for the row-scoped verbatim idiom it exposes and why per-turn STRUCTURE
+// stays host-decided (renderTranscriptTurn) while the row LIST itself is
+// declarative.
+//
+//go:embed transcript.ctml
+var transcriptCTML []byte
 
 // turn is one rendered element in the transcript.
 type turn struct {
@@ -402,7 +413,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		help:               newHelpOverlay(keys, styles),
 		inspector:          newInspector(),
 		agent:              agent,
-		picker:             newPicker(styles),
+		picker:             newPicker(),
 		spin:               sp,
 		input:              in,
 		cfg:                cfg,
@@ -1174,10 +1185,6 @@ func (a *app) rebuildTheme(selected theme) {
 	}
 	a.styles = newUIStyles(selected)
 	a.markdown = newMarkdownRenderer(selected.name)
-	a.picker.Styles.Title = a.styles.title
-	if a.palette != nil {
-		a.palette.list.Styles.Title = a.styles.title
-	}
 	if a.switcher != nil {
 		a.switcher.list.Styles.Title = a.styles.title
 	}
@@ -1188,6 +1195,31 @@ func (a *app) rebuildTheme(selected theme) {
 	if a.ready {
 		a.refreshTranscript()
 	}
+}
+
+// commitGenerationSettings persists the three generation knobs the Settings
+// overlay edits (context length, max tokens, thinking) to the SAME preference
+// store the inspector's Save writes through — a.cfg is the single live source
+// of truth for these values, so the overlay and the inspector never diverge.
+func (a *app) commitGenerationSettings() core.Result {
+	if a == nil || a.preferences == nil {
+		return core.Fail(core.E("tui.app.commitGenerationSettings", "preference store is unavailable", nil))
+	}
+	thinking := []string{"model", "on", "off"}[a.cfg.thinkIdx]
+	entries := []struct {
+		key   string
+		value any
+	}{
+		{preferenceContextLength, a.cfg.contextLen()},
+		{preferenceMaxTokens, a.cfg.maxTokens()},
+		{preferenceThinking, thinking},
+	}
+	for _, entry := range entries {
+		if result := a.preferences.Set(entry.key, entry.value); !result.OK {
+			return result
+		}
+	}
+	return a.preferences.Commit()
 }
 
 func (a app) Init() tea.Cmd {
@@ -1400,7 +1432,7 @@ func (a app) onMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 	_, boxes := renderPanelBarBoxes(a.activePanel, metrics.innerWidth, metrics.kind, a.styles)
-	panel, ok := panelBarHit(boxes, msg.X-frameInsetCols, msg.Y-frameInsetRows)
+	panel, ok := panelBarHit(boxes, msg.X-frameInsetCols, msg.Y-frameInsetRows, a.activePanel, metrics.kind)
 	if !ok {
 		return a.route(msg)
 	}
@@ -1917,6 +1949,13 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if key.Matches(msg, a.keys.Help) {
 		a.activeOverlay = overlayHelp
+		return a, nil
+	}
+	if key.Matches(msg, a.keys.Settings) {
+		// The Settings form edits a.cfg live — the same value the inspector
+		// edits and generation reads — and opens fresh at the first knob.
+		a.cfg.cursor = 0
+		a.activeOverlay = overlaySettings
 		return a, nil
 	}
 	if key.Matches(msg, a.keys.NewSession) {
@@ -2457,6 +2496,28 @@ func (a app) onOverlayKey(message tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.activeOverlay, a.dataEditor = overlayNone, nil
+		return a, nil
+	}
+	if a.activeOverlay == overlaySettings {
+		// Cursor and knob adjustments run against a.cfg — the single live
+		// source of truth these values share with the inspector — so the two
+		// screens never diverge. Esc (handled above) closes without reverting
+		// the live edits, exactly as closing the inspector does; ctrl+s
+		// persists the three generation.* knobs to the same preference store.
+		switch message.String() {
+		case "ctrl+s":
+			if result := a.commitGenerationSettings(); !result.OK {
+				a.errText = result.Error()
+			}
+		case "up", "k":
+			a.cfg = a.cfg.move(-1)
+		case "down", "j":
+			a.cfg = a.cfg.move(1)
+		case "left", "h":
+			a.cfg = a.cfg.adjust(-1)
+		case "right", "l":
+			a.cfg = a.cfg.adjust(1)
+		}
 		return a, nil
 	}
 	if a.activeOverlay == overlayGitEnableReview && message.String() != "enter" {
@@ -3001,62 +3062,101 @@ func (a app) transcriptHeight() int {
 	return h
 }
 
+// renderTranscript renders transcript.ctml: a zero-or-one-row "notice"
+// sequence (the session status banner) followed by one row per turn, each
+// row's verbatim "body" the complete pre-formatted turn (renderTranscriptTurn)
+// -- go-html owns the row iteration and the byte-exact verbatim passthrough,
+// the host still owns every turn's own content (transcript.ctml's header
+// comment has the full account of why). A parse failure never happens
+// against this embedded, static markup outside a build defect (the same
+// assumption renderBandFrame/renderBandLayout make, overlayframe.go) and
+// degrades to an empty transcript rather than panicking.
 func (a app) renderTranscript() string {
-	var b core.Builder
+	tree, err := ctml.Parse(transcriptCTML, a.transcriptBindings())
+	if err != nil {
+		return ""
+	}
+	return style.New().Width(a.view.Width).Render(html.RenderTerm(tree, html.NewContext()))
+}
+
+// transcriptBindings supplies transcript.ctml's two row sequences. notice is
+// zero-or-one row so an absent banner renders nothing (not an empty line);
+// every turn row's own leadingBlank folds in the "\n" go-html's own
+// block-level join does not supply a second one of, reproducing the
+// original "\n\n" turn gap byte-for-byte (transcript.ctml's header comment).
+func (a app) transcriptBindings() ctml.Bindings {
 	notice := a.sessionTranscriptNotice()
+	var noticeRows []map[string]any
 	if notice != "" {
-		b.WriteString(a.styles.attention.Render(notice))
+		noticeRows = []map[string]any{{"text": a.styles.attention.Render(notice)}}
 	}
+	turnRows := make([]map[string]any, 0, len(a.turns))
 	for i, t := range a.turns {
-		if i > 0 || notice != "" {
-			b.WriteString("\n\n")
+		leadingBlank := i > 0 || notice != ""
+		turnRows = append(turnRows, map[string]any{"body": a.renderTranscriptTurn(i, t, leadingBlank)})
+	}
+	return ctml.Bindings{Sequences: map[string][]map[string]any{
+		"notice": noticeRows,
+		"turns":  turnRows,
+	}}
+}
+
+// renderTranscriptTurn formats exactly one turn -- byte-for-byte what the
+// pre-.ctml renderTranscript loop wrote inline for the same turn, role
+// branching included (transcript.ctml's header comment explains why that
+// branching stays here rather than in markup). leadingBlank prepends the
+// single "\n" this row owes the inter-turn gap; blocks() (go-html) supplies
+// the other half of the "\n\n" via its own row-to-row join.
+func (a app) renderTranscriptTurn(i int, t turn, leadingBlank bool) string {
+	var b core.Builder
+	if leadingBlank {
+		b.WriteString("\n")
+	}
+	switch t.role {
+	case "user":
+		b.WriteString(a.styles.user.Render("you ") + a.styles.answer.Render(t.text))
+	case "tool":
+		label := "tool result"
+		if len(t.calls) > 0 {
+			label = core.Concat("tool · ", t.calls[0])
 		}
-		switch t.role {
-		case "user":
-			b.WriteString(a.styles.user.Render("you ") + a.styles.answer.Render(t.text))
-		case "tool":
-			label := "tool result"
-			if len(t.calls) > 0 {
-				label = core.Concat("tool · ", t.calls[0])
-			}
-			b.WriteString(a.styles.thought.Render(label))
-			if result := visibleToolResult(t.text); result != "" {
-				b.WriteString("\n" + a.styles.answer.Render(result))
-			}
-		default:
-			if t.thought != "" {
-				b.WriteString(a.styles.thought.Render("· thinking · "+core.Trim(t.thought)) + "\n")
-			}
-			label := t.model
-			if label == "" {
-				label = a.modelName
-			}
-			if label == "" {
-				label = "assistant"
-			}
-			b.WriteString(a.styles.assistant.Render(label))
-			streaming := a.generating && i == len(a.turns)-1
-			if t.text != "" {
-				b.WriteString("\n")
-				if streaming {
-					b.WriteString(a.styles.answer.Render(t.text))
-				} else {
-					turnID := t.id
-					if turnID == "" {
-						turnID = core.Sprintf("transcript-%d", i)
-					}
-					b.WriteString(a.markdown.Render(turnID, t.text, max(1, a.view.Width-2)))
+		b.WriteString(a.styles.thought.Render(label))
+		if result := visibleToolResult(t.text); result != "" {
+			b.WriteString("\n" + a.styles.answer.Render(result))
+		}
+	default:
+		if t.thought != "" {
+			b.WriteString(a.styles.thought.Render("· thinking · "+core.Trim(t.thought)) + "\n")
+		}
+		label := t.model
+		if label == "" {
+			label = a.modelName
+		}
+		if label == "" {
+			label = "assistant"
+		}
+		b.WriteString(a.styles.assistant.Render(label))
+		streaming := a.generating && i == len(a.turns)-1
+		if t.text != "" {
+			b.WriteString("\n")
+			if streaming {
+				b.WriteString(a.styles.answer.Render(t.text))
+			} else {
+				turnID := t.id
+				if turnID == "" {
+					turnID = core.Sprintf("transcript-%d", i)
 				}
+				b.WriteString(a.markdown.Render(turnID, t.text, max(1, a.view.Width-2)))
 			}
-			for _, c := range t.calls {
-				b.WriteString("\n" + a.styles.thought.Render("→ "+c))
-			}
-			if t.text == "" && t.thought == "" && a.generating && i == len(a.turns)-1 {
-				b.WriteString(a.styles.thought.Render(a.spin.View() + " …"))
-			}
+		}
+		for _, c := range t.calls {
+			b.WriteString("\n" + a.styles.thought.Render("→ "+c))
+		}
+		if t.text == "" && t.thought == "" && a.generating && i == len(a.turns)-1 {
+			b.WriteString(a.styles.thought.Render(a.spin.View() + " …"))
 		}
 	}
-	return lipgloss.NewStyle().Width(a.view.Width).Render(b.String())
+	return b.String()
 }
 
 func (a app) transcriptTurnOffset(turnID string) int {
@@ -3162,12 +3262,12 @@ func (a app) panelView() string {
 	}
 	switch a.activePanel {
 	case panelModels:
-		return a.picker.View()
+		return renderPicker(a.picker, measureFrame(a.width, a.height, a.inspectorOpen).mainWidth, a.styles)
 	case panelService:
 		return a.svc.view(a.modelName, a.width, a.styles)
 	case panelWork:
 		if a.work == nil {
-			return lipgloss.JoinVertical(lipgloss.Left,
+			return style.Column(style.Left,
 				a.styles.title.Render("Work"),
 				"",
 				a.styles.status.Render("○ No work yet"),
@@ -3181,7 +3281,7 @@ func (a app) panelView() string {
 		return a.work.View(metrics.mainWidth, metrics.mainHeight, a.styles)
 	case panelData:
 		if a.data == nil {
-			return lipgloss.JoinVertical(lipgloss.Left,
+			return style.Column(style.Left,
 				a.styles.title.Render("Data"),
 				"",
 				a.styles.status.Render("○ No dataset store connected"),
@@ -3200,7 +3300,7 @@ func (a app) panelView() string {
 		if a.model == nil {
 			return "\n  " + a.spin.View() + a.styles.status.Render(" loading "+displayName(a.loading)+" …")
 		}
-		return lipgloss.JoinVertical(lipgloss.Left,
+		return style.Column(style.Left,
 			a.view.View(),
 			a.styles.inputBorder.Render(a.input.View()),
 		)
@@ -3213,7 +3313,7 @@ func (a app) bootView() string {
 		if a.boot.err != nil {
 			reason = a.boot.err.Error()
 		}
-		return lipgloss.JoinVertical(lipgloss.Left,
+		return style.Column(style.Left,
 			a.styles.err.Render("Workspace could not open"),
 			"",
 			a.styles.answer.Render(reason),
@@ -3222,7 +3322,7 @@ func (a app) bootView() string {
 			a.styles.status.Render("Q  Quit without changing storage"),
 		)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
+	return style.Column(style.Left,
 		a.spin.View()+a.styles.title.Render(" Opening ~/.lem workspace"),
 		"",
 		a.styles.status.Render("Preparing durable sessions, preferences, work, and local knowledge…"),
@@ -3238,7 +3338,7 @@ func (a app) overlayView() string {
 	var body string
 	switch a.activeOverlay {
 	case overlayCommands:
-		body = a.palette.View(bodyWidth, bodyHeight)
+		body = a.palette.View(bodyWidth, bodyHeight, a.styles)
 	case overlaySessions:
 		if a.switcher == nil {
 			body = overlayEmpty("Recent sessions", "session workspace is not connected")
@@ -3295,6 +3395,8 @@ func (a app) overlayView() string {
 		} else {
 			body = a.changeOverlay.View(bodyWidth, bodyHeight, a.styles)
 		}
+	case overlaySettings:
+		body = renderSettings(a.cfg, bodyWidth, a.styles)
 	case overlayProjectReview:
 		body = newLaunchReviewOverlay(a.agentReview, a.agentRequest.Provider, a.agentRequest.Model).View(bodyWidth, bodyHeight, a.styles)
 	case overlayGitEnableReview, overlayLaunchReview, overlayAgentSelection:
@@ -3347,7 +3449,7 @@ func (a app) sessionStrip() string {
 		if hidden > 0 {
 			candidate = append(candidate, core.Sprintf("+%d", hidden))
 		}
-		if lipgloss.Width(core.Join("  ·  ", candidate...)) <= maxWidth {
+		if style.Measure(core.Join("  ·  ", candidate...)) <= maxWidth {
 			break
 		}
 		parts = parts[:len(parts)-1]
@@ -3384,11 +3486,11 @@ func sessionStripMarker(session *chatSession, activeID string) string {
 
 func compactStripTitle(value string, maxCells int) string {
 	value = core.Trim(value)
-	if maxCells < 2 || lipgloss.Width(value) <= maxCells {
+	if maxCells < 2 || style.Measure(value) <= maxCells {
 		return value
 	}
 	runes := []rune(value)
-	for len(runes) > 1 && lipgloss.Width(string(runes)+"…") > maxCells {
+	for len(runes) > 1 && style.Measure(string(runes)+"…") > maxCells {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes) + "…"
@@ -3408,9 +3510,9 @@ func (a app) inspectorView() string {
 }
 
 func (a app) footerLine() string {
-	keys := "tab panels  ·  ctrl+k commands  ·  ctrl+o inspector  ·  f1 help"
+	keys := "tab panels  ·  ctrl+k commands  ·  ctrl+o inspector  ·  f2 settings  ·  f1 help"
 	if chooseLayout(a.width) == layoutNarrow {
-		keys = "tab panels  ·  ^K commands  ·  ^O info  ·  F1 help"
+		keys = "tab panels  ·  ^K commands  ·  ^O info  ·  F2 settings  ·  F1 help"
 	}
 	status := a.statusLine()
 	if status == "" {

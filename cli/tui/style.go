@@ -5,33 +5,33 @@
 // built on Bubble Tea + Bubbles + Lip Gloss.
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import "dappco.re/go/html/tui/style"
 
 // theme contains semantic colours rather than component-specific paint. Every
 // colour is adaptive so the same hierarchy remains legible on light terminals.
 type theme struct {
 	name      string
-	text      lipgloss.AdaptiveColor
-	muted     lipgloss.AdaptiveColor
-	border    lipgloss.AdaptiveColor
-	focus     lipgloss.AdaptiveColor
-	assistant lipgloss.AdaptiveColor
-	attention lipgloss.AdaptiveColor
-	success   lipgloss.AdaptiveColor
-	error     lipgloss.AdaptiveColor
+	text      style.Color
+	muted     style.Color
+	border    style.Color
+	focus     style.Color
+	assistant style.Color
+	attention style.Color
+	success   style.Color
+	error     style.Color
 }
 
 func midnightTheme() theme {
 	return theme{
 		name:      "midnight",
-		text:      lipgloss.AdaptiveColor{Light: "#172033", Dark: "#E2E8F0"},
-		muted:     lipgloss.AdaptiveColor{Light: "#475569", Dark: "#718096"},
-		border:    lipgloss.AdaptiveColor{Light: "#94A3B8", Dark: "#334155"},
-		focus:     lipgloss.AdaptiveColor{Light: "#007A89", Dark: "#67E8F9"},
-		assistant: lipgloss.AdaptiveColor{Light: "#6D28D9", Dark: "#C4B5FD"},
-		attention: lipgloss.AdaptiveColor{Light: "#92400E", Dark: "#FBBF24"},
-		success:   lipgloss.AdaptiveColor{Light: "#047857", Dark: "#6EE7B7"},
-		error:     lipgloss.AdaptiveColor{Light: "#BE123C", Dark: "#FB7185"},
+		text:      style.Color{Light: "#172033", Dark: "#E2E8F0"},
+		muted:     style.Color{Light: "#475569", Dark: "#718096"},
+		border:    style.Color{Light: "#94A3B8", Dark: "#334155"},
+		focus:     style.Color{Light: "#007A89", Dark: "#67E8F9"},
+		assistant: style.Color{Light: "#6D28D9", Dark: "#C4B5FD"},
+		attention: style.Color{Light: "#92400E", Dark: "#FBBF24"},
+		success:   style.Color{Light: "#047857", Dark: "#6EE7B7"},
+		error:     style.Color{Light: "#BE123C", Dark: "#FB7185"},
 	}
 }
 
@@ -40,15 +40,15 @@ func themeForName(name string) theme {
 	case "aurora":
 		value := midnightTheme()
 		value.name = "aurora"
-		value.focus = lipgloss.AdaptiveColor{Light: "#047857", Dark: "#5EEAD4"}
-		value.assistant = lipgloss.AdaptiveColor{Light: "#7E22CE", Dark: "#E879F9"}
-		value.attention = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FDE68A"}
+		value.focus = style.Color{Light: "#047857", Dark: "#5EEAD4"}
+		value.assistant = style.Color{Light: "#7E22CE", Dark: "#E879F9"}
+		value.attention = style.Color{Light: "#B45309", Dark: "#FDE68A"}
 		return value
 	case "daylight":
 		value := midnightTheme()
 		value.name = "daylight"
-		value.focus = lipgloss.AdaptiveColor{Light: "#0369A1", Dark: "#7DD3FC"}
-		value.assistant = lipgloss.AdaptiveColor{Light: "#5B21B6", Dark: "#DDD6FE"}
+		value.focus = style.Color{Light: "#0369A1", Dark: "#7DD3FC"}
+		value.assistant = style.Color{Light: "#5B21B6", Dark: "#DDD6FE"}
 		return value
 	default:
 		return midnightTheme()
@@ -60,53 +60,53 @@ func themeForName(name string) theme {
 type uiStyles struct {
 	theme theme
 
-	title     lipgloss.Style
-	user      lipgloss.Style
-	answer    lipgloss.Style
-	thought   lipgloss.Style
-	err       lipgloss.Style
-	status    lipgloss.Style
-	accent    lipgloss.Style
-	assistant lipgloss.Style
-	attention lipgloss.Style
-	success   lipgloss.Style
+	title     style.Style
+	user      style.Style
+	answer    style.Style
+	thought   style.Style
+	err       style.Style
+	status    style.Style
+	accent    style.Style
+	assistant style.Style
+	attention style.Style
+	success   style.Style
 
-	brand       lipgloss.Style
-	navActive   lipgloss.Style
-	navInactive lipgloss.Style
-	header      lipgloss.Style
-	session     lipgloss.Style
-	panel       lipgloss.Style
-	inspector   lipgloss.Style
-	footer      lipgloss.Style
-	separator   lipgloss.Style
-	outerFrame  lipgloss.Style
-	inputBorder lipgloss.Style
+	brand       style.Style
+	navActive   style.Style
+	navInactive style.Style
+	header      style.Style
+	session     style.Style
+	panel       style.Style
+	inspector   style.Style
+	footer      style.Style
+	separator   style.Style
+	outerFrame  style.Style
+	inputBorder style.Style
 }
 
 func newUIStyles(t theme) uiStyles {
 	return uiStyles{
 		theme:       t,
-		title:       lipgloss.NewStyle().Bold(true).Foreground(t.text),
-		user:        lipgloss.NewStyle().Bold(true).Foreground(t.focus),
-		answer:      lipgloss.NewStyle().Foreground(t.text),
-		thought:     lipgloss.NewStyle().Italic(true).Foreground(t.muted),
-		err:         lipgloss.NewStyle().Foreground(t.error),
-		status:      lipgloss.NewStyle().Foreground(t.muted),
-		accent:      lipgloss.NewStyle().Foreground(t.focus),
-		assistant:   lipgloss.NewStyle().Bold(true).Foreground(t.assistant),
-		attention:   lipgloss.NewStyle().Bold(true).Foreground(t.attention),
-		success:     lipgloss.NewStyle().Foreground(t.success),
-		brand:       lipgloss.NewStyle().Bold(true).Foreground(t.focus),
-		navActive:   lipgloss.NewStyle().Bold(true).Foreground(t.text).Underline(true).UnderlineSpaces(false),
-		navInactive: lipgloss.NewStyle().Foreground(t.muted),
-		header:      lipgloss.NewStyle().Foreground(t.text),
-		session:     lipgloss.NewStyle().Foreground(t.muted),
-		panel:       lipgloss.NewStyle().Foreground(t.text),
-		inspector:   lipgloss.NewStyle().Foreground(t.muted),
-		footer:      lipgloss.NewStyle().Foreground(t.muted),
-		separator:   lipgloss.NewStyle().Foreground(t.border),
-		outerFrame:  lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.border),
-		inputBorder: lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(t.border).Padding(0, 1),
+		title:       style.New().Bold(true).Foreground(t.text),
+		user:        style.New().Bold(true).Foreground(t.focus),
+		answer:      style.New().Foreground(t.text),
+		thought:     style.New().Italic(true).Foreground(t.muted),
+		err:         style.New().Foreground(t.error),
+		status:      style.New().Foreground(t.muted),
+		accent:      style.New().Foreground(t.focus),
+		assistant:   style.New().Bold(true).Foreground(t.assistant),
+		attention:   style.New().Bold(true).Foreground(t.attention),
+		success:     style.New().Foreground(t.success),
+		brand:       style.New().Bold(true).Foreground(t.focus),
+		navActive:   style.New().Bold(true).Foreground(t.text).Underline(true).UnderlineSpaces(false),
+		navInactive: style.New().Foreground(t.muted),
+		header:      style.New().Foreground(t.text),
+		session:     style.New().Foreground(t.muted),
+		panel:       style.New().Foreground(t.text),
+		inspector:   style.New().Foreground(t.muted),
+		footer:      style.New().Foreground(t.muted),
+		separator:   style.New().Foreground(t.border),
+		outerFrame:  style.New().Border(style.Rounded()).BorderForeground(t.border),
+		inputBorder: style.New().Border(style.Rounded()).BorderForeground(t.border).Padding(0, 1),
 	}
 }

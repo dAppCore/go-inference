@@ -18,8 +18,13 @@ vars:
   VERSION: dev
   GO_VERSION_LDFLAGS: '-X main.version={{.VERSION}}'
   GO_DARWIN_LDFLAGS: '-extldflags=-mmacosx-version-min=26.0'
+  # Core count for cmake --parallel (metallib:mlx only). go-task evaluates global
+  # sh-vars eagerly on every invocation, so this must succeed on EVERY platform:
+  # getconf/nproc cover Linux, sysctl -n hw.ncpu is the macOS path, and the `echo 4`
+  # floor keeps it green where none of the three exist (Windows, task's internal
+  # POSIX shell has no such binaries) — a bare `sysctl -n hw.ncpu` was the CI failure.
   NCPU:
-    sh: getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu
+    sh: getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
 env:
   MLX_METALLIB_PATH: '{{.ROOT_DIR}}/build/dist/lib/mlx.metallib'
 

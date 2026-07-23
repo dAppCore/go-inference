@@ -1,0 +1,45 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  transcript.ctml : the chat panel's turn list. go-html v0.14.0's row-scoped
+  verbatim (<verbatim value="{{row.field}}"/>, resolved per row at
+  materialise time against the enclosing <each> row, docs/ctml.md S:6.5)
+  lets each turn's pre-styled ANSI bind per row, so the old renderTranscript
+  accumulation loop (app.go) becomes a row sequence instead of a hand-grown
+  core.Builder.
+
+  Per-turn STRUCTURE still branches in Go (renderTranscriptTurn, app.go):
+  go-html's <switch>/<if>/<unless> compile to a func(*Context) closure and
+  resolve against Context.Data at RENDER time (docs/ctml.md S:7) — the same
+  Context for every row an <each> produces, not a per-row scope the way a
+  {{path}} bind is. So a turn's role (user / tool / assistant, each with a
+  different line shape: inline "you "+text, a label-then-result pair, or an
+  optional thinking line + label + body + tool calls + a live spinner)
+  cannot be selected per row in markup — only a row's VALUES vary, never
+  its STRUCTURE. This is the documented boundary (S:1.1's closed vocabulary:
+  a named lookup, never an expression), not a workaround; see the
+  go-inference receipt for this slice for the friction in full.
+
+  Each row's own body is therefore the COMPLETE formatted turn — prefix,
+  thinking line, label, Glamour/streaming content, tool calls, spinner —
+  rendered by renderTranscriptTurn exactly as the pre-.ctml loop rendered it
+  inline. <each> concatenates rows with no separator of its own, and
+  go-html's own block join contributes exactly one "\n" between adjacent
+  rows, so each row's own leading "\n" (folded in by renderTranscriptTurn
+  for every turn but the first, i.e. i>0 or a notice precedes it) reproduces
+  the original blank-line gap between turns byte-for-byte (confirmed by a
+  throwaway probe during this slice, not part of the shipped diff).
+
+  Host seams (app.go, transcriptBindings):
+    - Sequences notice : zero rows when no session banner applies, one row
+      {"text": ...} (already styled) otherwise — the established
+      zero-or-one-row idiom for a section that appears only with data
+      (README's "Leaf widgets" section) — verbatim, byte-exact.
+    - Sequences turns  : one row per turn; row field "body" is that turn's
+      complete pre-rendered output (renderTranscriptTurn) — row-scoped
+      verbatim, byte-exact. A row miss renders empty, never a panel gap
+      silently eaten, because the host always supplies "body" per row.
+-->
+<div>
+<each items="notice" as="row"><verbatim value="{{row.text}}"/></each>
+<each items="turns" as="turn"><verbatim value="{{turn.body}}"/></each>
+</div>

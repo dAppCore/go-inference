@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/markdown"
 )
 
 type markdownCacheKey struct {
@@ -30,7 +30,7 @@ type markdownRenderer struct {
 	mu        sync.Mutex
 	theme     string
 	cache     map[markdownCacheKey]string
-	renderers map[int]*glamour.TermRenderer
+	renderers map[int]*markdown.Renderer
 	stats     markdownStats
 }
 
@@ -38,7 +38,7 @@ func newMarkdownRenderer(theme string) *markdownRenderer {
 	return &markdownRenderer{
 		theme:     theme,
 		cache:     make(map[markdownCacheKey]string),
-		renderers: make(map[int]*glamour.TermRenderer),
+		renderers: make(map[int]*markdown.Renderer),
 	}
 }
 
@@ -63,12 +63,12 @@ func (renderer *markdownRenderer) Render(turnID, content string, width int) stri
 	renderer.stats.Misses++
 	term := renderer.renderers[width]
 	if term == nil {
-		built, err := glamour.NewTermRenderer(
-			glamour.WithStandardStyle("dark"),
-			glamour.WithWordWrap(width),
-			glamour.WithTableWrap(true),
-			glamour.WithPreservedNewLines(),
-			glamour.WithEmoji(),
+		built, err := markdown.New(
+			markdown.WithStandardStyle("dark"),
+			markdown.WithWordWrap(width),
+			markdown.WithTableWrap(true),
+			markdown.WithPreservedNewLines(),
+			markdown.WithEmoji(),
 		)
 		if err != nil {
 			renderer.cache[key] = content

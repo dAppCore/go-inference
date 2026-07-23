@@ -45,6 +45,14 @@ var commandName = "lem"
 // an unstamped build reports "dev".
 var version = "dev"
 
+// backend is stamped by the build (-ldflags "-X main.backend=<cpu|metal|amd|cuda>"),
+// naming the GPU backend this binary was compiled for (docs/release-artifacts.md's
+// {os}-{arch}-lem-{backend}-... grid). It has no locally meaningful default: `lem
+// update`'s asset-selection needs the real value to find this platform's release
+// asset, so an unstamped build reports "" and fails loudly there rather than
+// silently guessing a backend.
+var backend = ""
+
 func cliName() string {
 	name := core.Trim(commandName)
 	if name == "" {
@@ -92,6 +100,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runSpecCommand(ctx, args[1:], stdout, stderr)
 	case "ebook":
 		return runEbookCommand(ctx, args[1:], stdout, stderr)
+	case "update":
+		return runUpdateCommand(ctx, args[1:], stdout, stderr)
 	case "tui":
 		return tui.Run(ctx, args[1:], stdout, stderr)
 	case "version", "-v", "--version":
@@ -127,6 +137,7 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "  pack                build/inspect/list/extract .model containers (no weights loaded)\n")
 	core.WriteString(w, "  ebook               render a model directory as a valid EPUB3 (weights as base64 plates)\n")
 	core.WriteString(w, "  version             print the binary name and stamped version\n")
+	core.WriteString(w, "  update              self-update from GitHub releases (channel derived from the stamped version)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Convert\n")
 	core.WriteString(w, "  quant               quantise a dense model dir (MLX, GPTQ, FP8, NF4, or GGUF)\n")

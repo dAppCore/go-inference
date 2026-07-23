@@ -3,13 +3,17 @@
 package tui
 
 import (
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	_ "embed"
+
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/help"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/style"
+	"dappco.re/go/html/tui/textinput"
 
 	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 	coreio "dappco.re/go/io"
 )
 
@@ -79,7 +83,6 @@ func newCommandPalette(styles uiStyles) *commandPalette {
 	model.Title = "Commands"
 	model.SetShowStatusBar(false)
 	model.SetFilteringEnabled(true)
-	model.Styles.Title = styles.title
 	model.SetFilterState(list.Filtering)
 	return &commandPalette{commands: commands, byID: byID, list: model}
 }
@@ -152,12 +155,112 @@ func (palette *commandPalette) Update(message tea.Msg) tea.Cmd {
 	return command
 }
 
-func (palette *commandPalette) View(width, height int) string {
+// paletteCTML is the command palette overlay's markup — see palette.ctml
+// for the seams it exposes (row/empty/page sequences, class tokens, the
+// row box ids).
+//
+//go:embed palette.ctml
+var paletteCTML []byte
+
+// commandPaletteBindings derives the palette's rows from the list model's
+// own state: the current page of visible commands as ONE sequence —
+// selection styling rides the row-scoped class bind (class="{{row.state}}",
+// go-html v0.13.0) and the marker glyph rides the row, the same idiom
+// picker.ctml established — plus the zero-or-one-row conditional sections
+// for the empty and page states. detail already carries the
+// "— unavailable: reason" suffix (commandListItem.Description), so an
+// unavailable command renders with the same row-idle/row-active paint an
+// available one gets — matching the original list.DefaultDelegate, which
+// never styled the two states apart. Title and detail truncate to the F
+// band's own row budget (width-2, docs/ctml.md S:15.5) because a wrapped
+// row would overflow the page the list delegate sized.
+func commandPaletteBindings(palette *commandPalette, width int) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"rows":  {},
+		"empty": {},
+		"page":  {},
+	}
+	if palette == nil {
+		return ctml.Bindings{Sequences: sequences}
+	}
+	visible := palette.list.VisibleItems()
+	start, end := palette.list.Paginator.GetSliceBounds(len(visible))
+	active := palette.list.Index() - start
+	budget := max(1, width-2)
+	for index, raw := range visible[start:end] {
+		entry, ok := raw.(commandListItem)
+		if !ok {
+			continue
+		}
+		state, marker := "row-idle", "○"
+		if index == active {
+			state, marker = "row-active", "›"
+		}
+		sequences["rows"] = append(sequences["rows"], map[string]any{
+			"state":  state,
+			"marker": marker,
+			"id":     string(entry.command.ID),
+			"title":  style.Truncate(entry.Title(), budget, "…"),
+			"detail": style.Truncate(entry.Description(), budget, "…"),
+		})
+	}
+	if len(visible) == 0 && palette.list.FilterState() != list.Filtering {
+		sequences["empty"] = append(sequences["empty"], map[string]any{"text": "No items."})
+	}
+	if palette.list.Paginator.TotalPages > 1 {
+		sequences["page"] = append(sequences["page"], map[string]any{
+			"label": core.Sprintf("page %d/%d", palette.list.Paginator.Page+1, palette.list.Paginator.TotalPages),
+		})
+	}
+	return ctml.Bindings{Sequences: sequences}
+}
+
+// commandPaletteTheme maps the markup's class tokens onto the existing
+// palette. It carries the same band chrome every overlay uses
+// (overlayFrameTheme's blank header / one-row-padded footer, so the
+// palette's key-hint line keeps the same gap every overlay draws above its
+// footer) plus the row-selection classes picker.ctml established, since
+// the palette is the first overlay to carry a selectable row list — a
+// plain renderOverlayFrame call has no seam for those extra classes, so
+// this theme is built directly and rendered through renderBandFrame, the
+// same bypass datalist.ctml uses to borrow the overlay band chrome from a
+// primary panel.
+func commandPaletteTheme(styles uiStyles) *html.TermTheme {
+	theme := html.DefaultTermTheme()
+	theme.Text = styles.answer
+	theme.Heading = styles.title
+	theme.Header = style.New()
+	theme.Footer = style.New().Padding(1, 0, 0, 0)
+	theme.Classes = map[string]style.Style{
+		"row-idle":      styles.answer,
+		"row-active":    styles.accent,
+		"row-hint":      styles.thought,
+		"palette-empty": styles.status,
+		"palette-page":  styles.status,
+		"overlay-keys":  styles.status,
+	}
+	return theme
+}
+
+// View renders the palette overlay through palette.ctml: the fixed
+// "Commands" header, the live Bubbles filter input composed between the
+// bands while filtering (the overlays' HF chrome+widget idiom, exactly
+// datalist.ctml's own borrowing of it, lent back to an actual overlay),
+// and the row/empty/page/key-hint footer beneath it. Cursor movement,
+// fuzzy filtering, and pagination stay in list.Model — this is the render
+// swap over the old palette.list.View().
+func (palette *commandPalette) View(width, height int, styles uiStyles) string {
 	if palette == nil {
 		return ""
 	}
 	palette.list.SetSize(max(1, width), max(6, height))
-	return palette.list.View()
+	head, foot := renderBandFrame(paletteCTML, width, commandPaletteTheme(styles), commandPaletteBindings(palette, width))
+	parts := []string{head}
+	if palette.list.SettingFilter() {
+		parts = append(parts, palette.list.FilterInput.View())
+	}
+	parts = append(parts, foot)
+	return fitPane(core.Join("\n", parts...), width, height, styles.panel)
 }
 
 func (palette *commandPalette) SetAgentCapabilities(capabilities []agentCapability) {
@@ -788,7 +891,7 @@ func (search *historySearch) View(width, height int) string {
 	}
 	search.input.Width = max(12, width-4)
 	search.list.SetSize(max(1, width), max(4, height-2))
-	return lipgloss.JoinVertical(lipgloss.Left, search.input.View(), search.list.View())
+	return style.Column(style.Left, search.input.View(), search.list.View())
 }
 
 type overlayKind uint8
@@ -810,6 +913,7 @@ const (
 	overlayDataNote
 	overlayDataFilter
 	overlayDataBulk
+	overlaySettings
 )
 
 type helpOverlay struct {
@@ -831,7 +935,7 @@ func (overlay *helpOverlay) View(width int) string {
 		return ""
 	}
 	overlay.model.Width = max(20, width)
-	return lipgloss.JoinVertical(lipgloss.Left, "Keyboard help", "", overlay.model.View(overlay.keys), "", "esc closes help")
+	return style.Column(style.Left, "Keyboard help", "", overlay.model.View(overlay.keys), "", "esc closes help")
 }
 
 func renderOverlay(body string, width, height int, styles uiStyles) string {
@@ -847,7 +951,7 @@ func renderOverlay(body string, width, height int, styles uiStyles) string {
 		MaxWidth(overlayWidth).
 		MaxHeight(overlayHeight).
 		Render(body)
-	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Top, box)
+	return style.Place(width, height, style.Center, style.Top, box)
 }
 
 // overlayEmpty keeps unavailable overlays legible without adding a component.

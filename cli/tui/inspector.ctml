@@ -1,0 +1,54 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  inspector.ctml : the contextual inspector — one document holding all four
+  panel-shaped bodies (Chat, Work, Models, Service); the active body's
+  zero-or-one-row gate sequence holds a row, every other body's is empty,
+  so exactly one renders.
+
+  Idiom: a plain document (ctml.Parse + RenderTerm). The inspector is a
+  dense strip of single-line rows in a height-budgeted pane, so section
+  labels ride the first line of their section's own <p> and rows close
+  with <br> (the launch-review body idiom) — consecutive <p> blocks
+  separate with exactly one blank line, reproducing the pane's existing
+  vertical rhythm without <h2> paragraph spacing the budget cannot afford.
+
+  Host seams (inspector.go):
+    - Sequences chatBody / workBody / modelsBody / serviceBody : the
+      zero-or-one-row body gates; their row also carries the body's lone
+      values (model, generation, loaded, addr, ...).
+    - Sequences chatSettings / chatMode / chatTools : one row per knob
+      {state, cursor, label, value} — selection styling rides the
+      row-scoped class bind class="{{row.state}}" (go-html v0.13.0), no
+      before/active/after split; the two-space idle cursor survives
+      because every knob row is interior to its <p> (only a <p>'s first
+      line loses a leading gutter).
+    - Sequences chatKnowledge / workHead / workRuntime / workCap /
+      workFeatures / modelsHead : flattened {class, text} line rows —
+      state lines, capability lines, group headings, and the blank
+      separators between feature groups all ride one sequence, each line
+      choosing its own palette class per row. Leading indents travel in
+      the bound text (interior lines keep them).
+    - Sequence  chatDirty : zero-or-one row — the unsaved marker.
+    - Classes   inspector-title / label / control-active / control-idle /
+      control-value / c-title / c-status / c-thought / c-attention /
+      c-success / c-answer : mapped onto the existing uiStyles palette by
+      inspectorTheme.
+-->
+<section id="inspector">
+<p class="inspector-title">INSPECTOR</p>
+<each items="chatBody" as="body"><p><span class="label">SESSION</span><span>  ● active</span><br></br><span class="label">MODEL</span><span>  {{body.model}}</span><br></br><span class="label">GENERATION</span><span>  {{body.generation}}</span></p>
+<p><span class="label">SETTINGS</span><br></br><each items="chatSettings" as="row"><span class="{{row.state}}">{{row.cursor}}{{row.label}}</span><span class="control-value">  ‹ {{row.value}} ›</span><br></br></each></p>
+<p><span class="label">MODE</span><br></br><each items="chatMode" as="row"><span class="{{row.state}}">{{row.cursor}}{{row.label}}</span><span class="control-value">  ‹ {{row.value}} ›</span><br></br></each></p>
+<p><span class="label">TOOLS</span><br></br><each items="chatTools" as="row"><span class="{{row.state}}">{{row.cursor}}{{row.label}}</span><span class="control-value">  ‹ {{row.value}} ›</span><br></br></each></p>
+<p><span class="label">KNOWLEDGE</span><br></br><each items="chatKnowledge" as="row"><span class="{{row.class}}">{{row.text}}</span><br></br></each></p></each>
+<each items="chatDirty" as="row"><p class="c-attention">● unsaved · ctrl+s</p></each>
+<each items="workBody" as="body"><p><span class="label">WORK DETAIL</span><br></br><each items="workHead" as="row"><span class="{{row.class}}">{{row.text}}</span><br></br></each></p>
+<p><span class="label">RUNTIME</span><br></br><each items="workRuntime" as="row"><span class="{{row.class}}">{{row.text}}</span><br></br></each></p>
+<p><span class="label">AGENT CAPABILITY</span><br></br><each items="workCap" as="row"><span class="{{row.class}}">{{row.text}}</span><br></br></each></p>
+<p><each items="workFeatures" as="row"><span class="{{row.class}}">{{row.text}}</span><br></br></each></p></each>
+<each items="modelsBody" as="body"><p><span class="label">MODEL DETAIL</span><br></br><each items="modelsHead" as="row"><span class="{{row.class}}">{{row.text}}</span><br></br></each></p>
+<p><span class="label">LOADED</span><span class="{{body.loadedClass}}">  {{body.loaded}}</span></p></each>
+<each items="serviceBody" as="body"><p><span class="label">ADDRESS</span><br></br><span class="c-title">{{body.addr}}</span></p>
+<p><span class="label">REQUESTS</span><span class="c-title">  {{body.requests}}</span></p>
+<p><span class="label">STATE</span><span class="{{body.stateClass}}">  {{body.state}}</span></p></each>
+</section>

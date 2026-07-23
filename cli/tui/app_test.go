@@ -2819,19 +2819,20 @@ func TestSelectPanel_Ugly(t *testing.T) {
 	}
 }
 
-// tabClick builds the left-press message for the centre of one derived tab
-// box, offset from strip-local to screen cells by the frame insets.
+// tabClick builds the left-press message for the centre of one tab's hit
+// span — the native tabs-slot box plus the cell walk panelBarHit itself
+// uses — offset from strip-local to screen cells by the frame insets.
 func tabClick(t *testing.T, a app, panel panelID) tea.MouseMsg {
 	t.Helper()
 	metrics := measureFrame(a.width, a.height, a.inspectorOpen)
 	_, boxes := renderPanelBarBoxes(a.activePanel, metrics.innerWidth, metrics.kind, a.styles)
-	box, ok := boxes[panelTabBlockID(panel)]
+	start, end, ok := panelTabSpan(boxes, a.activePanel, metrics.kind, panel)
 	if !ok {
-		t.Fatalf("box map missing %s", panelTabBlockID(panel))
+		t.Fatalf("no hit span for panel %v", panel)
 	}
 	return tea.MouseMsg{
-		X:      frameInsetCols + box.Col + box.Width/2,
-		Y:      frameInsetRows + box.Row,
+		X:      frameInsetCols + (start+end)/2,
+		Y:      frameInsetRows + boxes[tabsSlotID].Row,
 		Action: tea.MouseActionPress,
 		Button: tea.MouseButtonLeft,
 	}

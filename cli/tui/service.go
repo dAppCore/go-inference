@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/html/tui"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"

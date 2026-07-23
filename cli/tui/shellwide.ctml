@@ -1,0 +1,60 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  shellwide.ctml : the lem workspace shell for the Wide layout kind (>=120
+  cols) — the main panel and the permanent inspector side by side. One
+  <layout variant="HCRF"> rendered in one RenderTerm call (renderWideLayout):
+  C carries the main panel body, R the inspector, replacing renderFrame's old
+  lipgloss.JoinHorizontal plus a manual one-column "|" separator pane
+  (layout.go's pre-.ctml renderWorkspaceRegion).
+
+  Both C and R are zero-chrome (shellWideTheme: theme.Content AND
+  theme.Aside stripped) so each pane's pre-fitted content passes through
+  byte-exact — go-html v0.14.0's TermTheme.Content lever plus the
+  pre-existing themeable Aside field, docs/ctml.md S:15.2.
+
+  WIDTH CONTRACT — go-html's non-FitSlots middle band gives R a FIXED
+  28-column outer budget by default whenever R is present at >=80 cols (the
+  unexported termAsideWidth constant; docs/ctml.md S:15.1). go-html v0.15.0
+  adds TermOptions.AsideWidth as a width REQUEST that overrides that default
+  per render; renderWideLayout (layout.go) is the one render path in this
+  package that sets it, requesting wideInspectorWidth (32) — restoring the
+  pre-.ctml inspector width and name (git history: renderWorkspaceRegion).
+  go-html exports no accessor for its own unrequested default (docs/ctml.md
+  S:15.5: "the budgets stay unexported"), so wideInspectorWidth documents the
+  REQUEST rather than mirroring that default; TestWideInspectorWidth_
+  MatchesRequest pins the request against a live RenderTermBoxes call on
+  this file's own render path, so any upstream regression in honouring
+  AsideWidth fails loudly there rather than silently reflowing this frame
+  back to 28.
+
+  The main panel gains its historic width back too (measureFrame's
+  layoutWide case: metrics.mainWidth = innerWidth - wideInspectorWidth - 1) —
+  a real, visible width delta, tied to this one doctrine clause, not a
+  silent rewrap. A zero-chrome C does not collapse the C/R junction either:
+  go-html always inserts its own single-column gutter before R when R is
+  present (S:15.1); shellWideTheme now sets GutterRule = "│" (go-html
+  v0.15.0, docs/ctml.md S:15.6) so that gutter paints the historic visible
+  rule again, in the Rule style (repointed at styles.separator's own colour)
+  — metrics.mainWidth already reserves that one column (measureFrame), so
+  the rule is paint, not a layout change.
+
+  See shellregion.ctml for the single-pane sibling shape (Narrow, and
+  Overlay with the inspector closed).
+
+  Host seams (layout.go, shellWideBindings):
+    - Values  header    : tab strip + session strip, pre-fitted to
+      metrics.innerWidth — verbatim, byte-exact.
+    - Values  main      : the active main panel body, pre-fitted to
+      metrics.mainWidth x metrics.regionHeight — verbatim, byte-exact.
+    - Values  inspector : the inspector body, pre-fitted to
+      metrics.inspectorWidth (wideInspectorWidth) x metrics.regionHeight —
+      verbatim, byte-exact.
+    - Values  footer    : the status/key-hint line, pre-fitted to
+      metrics.innerWidth — verbatim, byte-exact.
+-->
+<layout variant="HCRF">
+<h><verbatim value="header"/></h>
+<c><verbatim value="main"/></c>
+<r><verbatim value="inspector"/></r>
+<f><verbatim value="footer"/></f>
+</layout>

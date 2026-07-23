@@ -1,0 +1,42 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  shellinspectorpair.ctml : the mid-page vertical pane pair for the Overlay
+  layout kind (80-119 cols) with the inspector toggled open — the
+  full-width inspector stacked above a compact main-panel preview, with a
+  rule between. One <layout variant="HC"> rendered in one RenderTerm call
+  (renderInspectorStack, layout.go): H the inspector (its own bottom border
+  IS the divider rule), C the main panel preview — go-html's documented
+  mid-page vertical-pair idiom (docs/ctml.md S:15.7: "an HC layout renders H
+  (upper pane) over C (lower pane) with H's bottom border as the rule"),
+  go-html v0.15.0. Replaces the pre-.ctml lipgloss.JoinVertical(inspector,
+  separator, main) plus a manually core.Repeat("─", ...) rule line.
+
+  This layout renders STANDALONE, not nested inside shell.ctml's own H/F
+  bands in the same RenderTerm call: TermTheme is one flat struct threaded
+  through every nested Layout in a single render (term_layout.go's
+  termRenderer carries exactly one theme field, confirmed by reading
+  term_layout.go's RenderTerm and by a throwaway probe during this slice,
+  not part of the shipped diff), so one call spanning the page header
+  (needing a zero-chrome H, pre-fitted byte-exact like every sibling shell)
+  and this pair's own H (needing its natural bordered chrome, since that
+  border IS the rule) cannot give the same H role two different styles at
+  once — zeroing Header for the page header silently zeroed the pair's
+  divider too. inspectorPairTheme (layout.go) is scoped to this file only,
+  so its Header keeps a border while shell.ctml's Header stays zeroed.
+
+  See shell.ctml for the outer H/F bands this pair sits between (still a
+  separate renderBandFrame call, joined host-side by renderFrame), and
+  shellwide.ctml/shellregion.ctml for the OTHER region shapes that do join
+  header+region+footer into one call.
+
+  Host seams (layout.go, inspectorPairBindings):
+    - Values  inspector : the inspector body, pre-fitted by renderFrame to
+      metrics.inspectorWidth x metrics.inspectorHeight — verbatim,
+      byte-exact.
+    - Values  main      : the main panel preview, pre-fitted to
+      metrics.mainWidth x metrics.mainHeight — verbatim, byte-exact.
+-->
+<layout variant="HC">
+<h><verbatim value="inspector"/></h>
+<c><verbatim value="main"/></c>
+</layout>

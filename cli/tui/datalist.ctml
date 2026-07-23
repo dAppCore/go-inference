@@ -1,0 +1,41 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  datalist.ctml : the Data panel's list pane (header, one row per filtered
+  item, empty state, and the key footer).
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the Bubbles filter
+  textinput emits pre-styled ANSI, which cannot ride a .ctml document, so
+  the layout renders the header and footer bands and the host composes the
+  input between them (renderBandFrame splits at the H box height). This is
+  the overlays' HF seam applied to a primary panel: dataListTheme keeps
+  both bands plain (no footer top padding), so with no filter input the
+  bands join back into the contiguous list the panel always drew.
+
+  Host seams (datapanel.go):
+    - Value     meta : the always-present "N items · sort X" line — a lone
+      scalar rides Bindings.Values.
+    - Sequence  filterNote : zero-or-one row {expr} — the structural
+      filter, only when one is set (an empty sequence renders nothing).
+    - Sequence  rows : ONE row per visible item {state, cursor, status,
+      meta, slug} — selection styling rides the row-scoped class binds
+      class="{{row.state}}" (go-html v0.13.0), so the before/active/after
+      sequence split earlier screens needed is not used here. The cursor
+      marker is bound ("› " active, "○ " idle): a row is the F band's
+      first flush line, whose leading edge trims, so a bare two-space
+      gutter cannot open a row. Segment gaps travel in the bound values.
+      The host truncates the slug to the row budget — a wrapped row would
+      break the one-line-per-item list shape.
+    - Sequence  empty : zero-or-one row — the honest empty state.
+    - Classes   list-title / list-meta / list-filter / row-active /
+      row-idle / row-status / row-meta / list-empty / list-hint /
+      list-keys : mapped onto the existing uiStyles palette by
+      dataListTheme.
+
+  Single-row constructs stay on one source line so a text run's edge
+  whitespace survives; adjacent single-line rows ride ONE <p> with a <br>
+  closing each row, so no blank separators appear between them.
+-->
+<layout variant="HF">
+<h><p><span class="list-title">DATA</span><span class="list-meta">  {{meta}}</span><each items="filterNote" as="row"><span class="list-filter">  filter {{row.expr}}</span></each></p></h>
+<f><p><each items="rows" as="row"><span class="{{row.state}}">{{row.cursor}}</span><span class="row-status">{{row.status}}</span><span class="row-meta">  {{row.meta}}</span><span class="{{row.state}}">  {{row.slug}}</span><br></br></each><each items="empty" as="row"><span class="list-empty">○ No items match this filter</span><br></br><span class="list-hint">Import or capture data with `lem data import` / `lem serve --capture`.</span><br></br></each><span class="list-keys">/ filter · j/k select · f filters · s sort · a/r/c/e/t act · A/R/C/T bulk</span></p></f>
+</layout>

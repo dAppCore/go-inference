@@ -3,14 +3,17 @@
 package tui
 
 import (
+	_ "embed"
 	"sort"
 	"time"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/style"
 
 	core "dappco.re/go"
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 	"dappco.re/go/inference/dataset"
 )
 
@@ -500,13 +503,13 @@ func (panel *dataPanel) View(width, height int, styles uiStyles) string {
 	var view string
 	if width >= 100 {
 		separator := fitPane("│", 1, height, styles.separator)
-		view = lipgloss.JoinHorizontal(lipgloss.Top,
+		view = style.Row(style.Top,
 			fitPane(listView, listWidth, height, styles.panel),
 			separator,
 			fitPane(detailView, detailWidth, height, styles.panel),
 		)
 	} else {
-		view = lipgloss.JoinVertical(lipgloss.Left,
+		view = style.Column(style.Left,
 			fitPane(listView, listWidth, listHeight, styles.panel),
 			"",
 			fitPane(detailView, detailWidth, detailHeight, styles.panel),
@@ -515,109 +518,207 @@ func (panel *dataPanel) View(width, height int, styles uiStyles) string {
 	return fitPane(view, width, height, styles.panel)
 }
 
-func (panel *dataPanel) renderList(width, height int, styles uiStyles) string {
-	builder := core.NewBuilder()
-	builder.WriteString(styles.title.Render("DATA"))
-	builder.WriteString("  ")
+// dataListCTML is the list pane's markup — see datalist.ctml for the seams
+// it exposes (the meta value, the row/filter/empty sequences, class tokens).
+//
+//go:embed datalist.ctml
+var dataListCTML []byte
+
+// dataDetailCTML is the detail pane's markup — see datadetail.ctml for the
+// seams it exposes (the head gate, field/review/lineage sequences, the
+// content/scores verbatim values, class tokens).
+//
+//go:embed datadetail.ctml
+var dataDetailCTML []byte
+
+// dataListBindings binds the list pane: the always-present meta line
+// (Bindings.Values), the conditional filter note, and ONE row per visible
+// item — selection styling rides the row-scoped class bind
+// (class="{{row.state}}"), so no before/active/after sequence split is
+// needed. The cursor marker is bound ("› " active, "○ " idle: a row can
+// open the F band, whose leading edge trims, so a bare two-space gutter
+// cannot survive there); the slug is truncated to the remaining row budget
+// because a wrapped row would break the one-line-per-item list shape.
+func dataListBindings(panel *dataPanel, width int) ctml.Bindings {
 	sortLabel := "date"
 	if panel.sort == dataSortScore {
 		sortLabel = "score"
 	}
-	builder.WriteString(styles.status.Render(core.Sprintf("%d items · sort %s", len(panel.rows), sortLabel)))
-	if filterExpr := panel.filter.String(); filterExpr != "" {
-		builder.WriteString("  ")
-		builder.WriteString(styles.thought.Render("filter " + filterExpr))
+	sequences := map[string][]map[string]any{
+		"filterNote": {},
+		"rows":       {},
+		"empty":      {},
 	}
-	builder.WriteString("\n")
-	if panel.list.SettingFilter() || panel.list.FilterState() == list.FilterApplied {
-		builder.WriteString(panel.list.FilterInput.View())
-		builder.WriteString("\n")
+	if filterExpr := panel.filter.String(); filterExpr != "" {
+		sequences["filterNote"] = append(sequences["filterNote"], map[string]any{"expr": filterExpr})
 	}
 	visible := panel.list.VisibleItems()
-	if len(visible) == 0 {
-		builder.WriteString("\n")
-		builder.WriteString(styles.status.Render("○ No items match this filter"))
-		builder.WriteString("\n")
-		builder.WriteString(styles.thought.Render("Import or capture data with `lem data import` / `lem serve --capture`."))
-		return fitPane(builder.String(), width, height, styles.panel)
-	}
 	for index, raw := range visible {
 		item, ok := raw.(dataListItem)
 		if !ok {
 			continue
 		}
-		cursor := "  "
-		rowStyle := styles.answer
+		state, cursor := "row-idle", "○ "
 		if index == panel.list.Index() {
-			cursor = "› "
-			rowStyle = styles.accent
+			state, cursor = "row-active", "› "
 		}
 		score := "—"
 		if item.row.HasScore {
 			score = core.Sprintf("%.0f", item.row.TopScore.Value)
 		}
-		builder.WriteString(cursor)
-		builder.WriteString(styles.status.Render(dataStatusGlyph(item.row.Review.Status) + " " + core.Upper(string(item.row.Review.Status))))
-		builder.WriteString("  ")
-		builder.WriteString(styles.thought.Render(string(item.row.Item.Kind) + " · " + score))
-		builder.WriteString("  ")
-		builder.WriteString(rowStyle.Render(item.row.Dataset.Slug))
-		builder.WriteString("\n")
+		status := dataStatusGlyph(item.row.Review.Status) + " " + core.Upper(string(item.row.Review.Status))
+		meta := string(item.row.Item.Kind) + " · " + score
+		// The F band renders its blocks at width-2 (the frame's own inner
+		// margin), so the row budget subtracts that before the cursor, the
+		// two fixed segments, and their two 2-cell gaps.
+		budget := max(1, width-2-style.Measure(cursor)-style.Measure(status)-style.Measure(meta)-4)
+		sequences["rows"] = append(sequences["rows"], map[string]any{
+			"state":  state,
+			"cursor": cursor,
+			"status": status,
+			"meta":   meta,
+			"slug":   style.Truncate(item.row.Dataset.Slug, budget, "…"),
+		})
 	}
-	builder.WriteString(styles.thought.Render("/ filter · j/k select · f filters · s sort · a/r/c/e/t act · A/R/C/T bulk"))
-	return fitPane(builder.String(), width, height, styles.panel)
+	if len(visible) == 0 {
+		sequences["empty"] = append(sequences["empty"], map[string]any{})
+	}
+	return ctml.Bindings{
+		Sequences: sequences,
+		Values:    map[string]any{"meta": core.Sprintf("%d items · sort %s", len(panel.rows), sortLabel)},
+	}
 }
 
-func (panel *dataPanel) renderDetail(width, height int, styles uiStyles) string {
+// dataListTheme maps the list markup's class tokens onto the existing
+// palette. Both bands render plain — no border, no footer top padding — so
+// with no filter widget between them the bands join back into the
+// contiguous list this panel always drew.
+func dataListTheme(styles uiStyles) *html.TermTheme {
+	theme := html.DefaultTermTheme()
+	theme.Text = styles.answer
+	theme.Header = style.New()
+	theme.Footer = style.New()
+	theme.Classes = map[string]style.Style{
+		"list-title":  styles.title,
+		"list-meta":   styles.status,
+		"list-filter": styles.thought,
+		"row-active":  styles.accent,
+		"row-idle":    styles.answer,
+		"row-status":  styles.status,
+		"row-meta":    styles.thought,
+		"list-empty":  styles.status,
+		"list-hint":   styles.thought,
+		"list-keys":   styles.thought,
+	}
+	return theme
+}
+
+// renderList renders the list pane through datalist.ctml: the header band,
+// the live Bubbles filter input composed between the bands while filtering
+// (the overlays' HF chrome+widget idiom applied to a panel), and the
+// row/empty/footer band beneath it.
+func (panel *dataPanel) renderList(width, height int, styles uiStyles) string {
+	head, foot := renderBandFrame(dataListCTML, width, dataListTheme(styles), dataListBindings(panel, width))
+	parts := []string{head}
+	if panel.list.SettingFilter() || panel.list.FilterState() == list.FilterApplied {
+		parts = append(parts, panel.list.FilterInput.View())
+	}
+	parts = append(parts, foot)
+	return fitPane(core.Join("\n", parts...), width, height, styles.panel)
+}
+
+// dataDetailBindings binds the detail pane: the zero-or-one-row head gate
+// (its absence renders the no-selection hint instead), the non-empty
+// metadata fields, the welfare flag, the review and lineage line triples,
+// and the two always-present verbatim values carrying the pre-styled
+// Glamour CONTENT/SCORES bodies (empty when nothing is selected — a
+// <verbatim> value must exist at parse time).
+func (panel *dataPanel) dataDetailBindings(width int) ctml.Bindings {
+	sequences := map[string][]map[string]any{
+		"noselect":     {},
+		"head":         {},
+		"fields":       {},
+		"welfare":      {},
+		"reviewRows":   {},
+		"reviewNote":   {},
+		"lineageRows":  {},
+		"lineageEmpty": {},
+	}
+	values := map[string]any{"content": "", "scores": ""}
 	row, ok := panel.Selected()
 	if !ok {
-		return styles.status.Render("Select an item for its content, scores, and lineage.")
+		sequences["noselect"] = append(sequences["noselect"], map[string]any{})
+		return ctml.Bindings{Sequences: sequences, Values: values}
 	}
-	builder := core.NewBuilder()
-	builder.WriteString(styles.title.Render(row.Dataset.Slug))
-	builder.WriteString("  ")
-	builder.WriteString(styles.status.Render(dataStatusGlyph(row.Review.Status) + " " + core.Upper(string(row.Review.Status))))
-	builder.WriteString("\n\n")
-	dataDetailRow(builder, styles, "kind", string(row.Item.Kind))
-	dataDetailRow(builder, styles, "source", string(row.Item.Source))
-	dataDetailRow(builder, styles, "source ref", row.Item.SourceRef)
-	dataDetailRow(builder, styles, "fingerprint", row.Item.ModelFingerprint)
-	dataDetailRow(builder, styles, "created", row.Item.CreatedAt.Format(time.RFC3339))
+	sequences["head"] = append(sequences["head"], map[string]any{
+		"slug":   row.Dataset.Slug,
+		"status": dataStatusGlyph(row.Review.Status) + " " + core.Upper(string(row.Review.Status)),
+	})
+	field := func(label, value string) {
+		if value == "" {
+			return
+		}
+		sequences["fields"] = append(sequences["fields"], map[string]any{"label": label + "  ", "value": value})
+	}
+	field("kind", string(row.Item.Kind))
+	field("source", string(row.Item.Source))
+	field("source ref", row.Item.SourceRef)
+	field("fingerprint", row.Item.ModelFingerprint)
+	field("created", row.Item.CreatedAt.Format(time.RFC3339))
 
 	if row.Review.Reviewer == dataset.ReviewerAutoWelfare {
-		builder.WriteString("\n")
-		builder.WriteString(styles.attention.Render("! WELFARE FLAG"))
-		builder.WriteString("\n")
 		note := "the welfare screen quarantined this item at ingest"
 		if row.Review.Note != "" {
 			note = core.Concat(note, " — ", row.Review.Note)
 		}
-		builder.WriteString(styles.answer.Render(note))
-		builder.WriteString("\n")
+		sequences["welfare"] = append(sequences["welfare"], map[string]any{"note": note})
 	}
 
-	builder.WriteString("\n")
-	builder.WriteString(styles.accent.Render("CONTENT"))
-	builder.WriteString("\n")
-	builder.WriteString(panel.renderContent(row.Item, width))
-	builder.WriteString("\n")
+	// The trailing newline is the blank line separating each body from the
+	// next section heading — it travels inside the verbatim bytes because
+	// the caller owns them.
+	values["content"] = panel.renderContent(row.Item, width) + "\n"
+	values["scores"] = panel.renderScores(row.Item.ID, width) + "\n"
 
-	builder.WriteString("\n")
-	builder.WriteString(styles.accent.Render("SCORES"))
-	builder.WriteString("\n")
-	builder.WriteString(panel.renderScores(row.Item.ID, width))
+	sequences["reviewRows"], sequences["reviewNote"] = panel.reviewHistoryRows(row.Item.ID)
+	sequences["lineageRows"], sequences["lineageEmpty"] = panel.lineageRows(row.Item)
+	return ctml.Bindings{Sequences: sequences, Values: values}
+}
 
-	builder.WriteString("\n")
-	builder.WriteString(styles.accent.Render("REVIEW"))
-	builder.WriteString("\n")
-	builder.WriteString(panel.renderReviewHistory(row.Item.ID, styles))
+// dataDetailTheme maps the detail markup's class tokens onto the existing
+// palette, so the .ctml render reuses uiStyles paint exactly — no colours
+// of its own.
+func dataDetailTheme(styles uiStyles) *html.TermTheme {
+	theme := html.DefaultTermTheme()
+	theme.Text = styles.answer
+	theme.Classes = map[string]style.Style{
+		"detail-empty":   styles.status,
+		"detail-title":   styles.title,
+		"detail-status":  styles.status,
+		"detail-section": styles.accent,
+		"detail-warn":    styles.attention,
+		"field-label":    styles.status,
+		"field-value":    styles.answer,
+		"row-status":     styles.status,
+		"row-thought":    styles.thought,
+		"row-answer":     styles.answer,
+	}
+	return theme
+}
 
-	builder.WriteString("\n")
-	builder.WriteString(styles.accent.Render("LINEAGE"))
-	builder.WriteString("\n")
-	builder.WriteString(panel.renderLineage(row.Item, styles))
-
-	return fitPane(builder.String(), width, height, styles.panel)
+// renderDetail renders the detail pane through datadetail.ctml: the item
+// header and metadata, the welfare flag, the Glamour CONTENT/SCORES bodies
+// passing through <verbatim> byte-for-byte, and the review/lineage lines.
+func (panel *dataPanel) renderDetail(width, height int, styles uiStyles) string {
+	tree, err := ctml.Parse(dataDetailCTML, panel.dataDetailBindings(width))
+	if err != nil {
+		// datadetail.ctml is embedded and static, so a parse failure is a
+		// build defect; TestDataPanel_View_Ugly pins the markup as
+		// parseable.
+		return ""
+	}
+	rendered := html.RenderTerm(tree, html.NewContext(), html.TermOptions{Width: width, Theme: dataDetailTheme(styles)})
+	return fitPane(rendered, width, height, styles.panel)
 }
 
 // renderContent renders an item's prompt/response (or, for a KindTrace
@@ -708,52 +809,62 @@ func prettyJSON(raw []byte) string {
 	return core.AsString(raw)
 }
 
-// renderReviewHistory prefers the full append-only history (see
+// reviewHistoryRows prefers the full append-only history (see
 // [ReviewHistoryStore], a CLI-side optional capability duckDatasetStore
 // implements) and falls back to ReviewLatest — the one call every
 // dataset.Store implementation (including the root-module MemoryStore)
-// supports — when the connected store does not expose it.
-func (panel *dataPanel) renderReviewHistory(itemID string, styles uiStyles) string {
+// supports — when the connected store does not expose it. Each review is
+// one {s, t, v} line row (status-styled head, thought-styled timestamp)
+// plus, when it carries a note, a follow-on row whose indent travels in
+// the bound value; the second sequence is the zero-or-one-row
+// pending/unavailable state.
+func (panel *dataPanel) reviewHistoryRows(itemID string) (rows, note []map[string]any) {
+	rows, note = []map[string]any{}, []map[string]any{}
+	appendReview := func(review dataset.Review) {
+		rows = append(rows, map[string]any{
+			"s": core.Sprintf("· %-12s %-14s ", review.Status, review.Reviewer),
+			"t": review.CreatedAt.Format(time.RFC3339),
+			"v": "",
+		})
+		if review.Note != "" {
+			rows = append(rows, map[string]any{"s": "", "t": "", "v": "  " + review.Note})
+		}
+	}
 	if historyStore, ok := panel.store.(ReviewHistoryStore); ok {
 		if historyResult := historyStore.ReviewHistory(itemID); historyResult.OK {
 			if history, ok := historyResult.Value.([]dataset.Review); ok && len(history) > 0 {
-				lines := make([]string, 0, len(history))
 				for _, review := range history {
-					lines = append(lines, dataReviewLine(review, styles))
+					appendReview(review)
 				}
-				return core.Join("\n", lines...) + "\n"
+				return rows, note
 			}
 		}
 	}
 	latestResult := panel.store.ReviewLatest(itemID)
 	if !latestResult.OK {
-		return styles.status.Render("○ review unavailable: " + latestResult.Error())
+		note = append(note, map[string]any{"text": "○ review unavailable: " + latestResult.Error()})
+		return rows, note
 	}
 	latest, ok := latestResult.Value.(dataset.Review)
 	if !ok || latest.Status == "" || latest.Status == dataset.StatusPending {
-		return styles.status.Render("○ pending review")
+		note = append(note, map[string]any{"text": "○ pending review"})
+		return rows, note
 	}
-	return dataReviewLine(latest, styles) + "\n"
+	appendReview(latest)
+	return rows, note
 }
 
-func dataReviewLine(review dataset.Review, styles uiStyles) string {
-	line := styles.status.Render(core.Sprintf("· %-12s %-14s ", review.Status, review.Reviewer)) +
-		styles.thought.Render(review.CreatedAt.Format(time.RFC3339))
-	if review.Note != "" {
-		line = core.Concat(line, "\n  ", styles.answer.Render(review.Note))
-	}
-	return line
-}
-
-// renderLineage shows the item's parent (if edit-as-derived produced it)
+// lineageRows shows the item's parent (if edit-as-derived produced it)
 // and any derived children — items in the SAME dataset whose
 // ParentItemID names this one. dataset.Store has no "children of X"
 // query, so children are found by scanning the dataset's full item list
 // (including archived — the original is archived once superseded); an
 // honest O(dataset size) scan, acceptable for a human review surface, not
-// a hot path.
-func (panel *dataPanel) renderLineage(item dataset.Item, styles uiStyles) string {
-	lines := make([]string, 0, 2)
+// a hot path. Each line is one {s, v, t} row (status label, answer id,
+// thought note); the second sequence is the zero-or-one-row no-lineage
+// state.
+func (panel *dataPanel) lineageRows(item dataset.Item) (rows, empty []map[string]any) {
+	rows, empty = []map[string]any{}, []map[string]any{}
 	if item.ParentItemID != "" {
 		if parentResult := panel.store.Item(item.ParentItemID); parentResult.OK {
 			if parent, ok := parentResult.Value.(dataset.Item); ok {
@@ -761,7 +872,7 @@ func (panel *dataPanel) renderLineage(item dataset.Item, styles uiStyles) string
 				if parent.Archived {
 					note = "  (archived)"
 				}
-				lines = append(lines, styles.status.Render("parent  ")+styles.answer.Render(parent.ID)+styles.thought.Render(note))
+				rows = append(rows, map[string]any{"s": "parent  ", "v": parent.ID, "t": note})
 			}
 		}
 	}
@@ -769,24 +880,15 @@ func (panel *dataPanel) renderLineage(item dataset.Item, styles uiStyles) string
 		if siblings, ok := childrenResult.Value.([]dataset.Item); ok {
 			for _, candidate := range siblings {
 				if candidate.ParentItemID == item.ID {
-					lines = append(lines, styles.status.Render("derived ")+styles.answer.Render(candidate.ID))
+					rows = append(rows, map[string]any{"s": "derived ", "v": candidate.ID, "t": ""})
 				}
 			}
 		}
 	}
-	if len(lines) == 0 {
-		return styles.status.Render("○ no lineage — an original item")
+	if len(rows) == 0 {
+		empty = append(empty, map[string]any{})
 	}
-	return core.Join("\n", lines...) + "\n"
-}
-
-func dataDetailRow(builder *core.Builder, styles uiStyles, label, value string) {
-	if value == "" {
-		return
-	}
-	builder.WriteString(styles.status.Render(label + "  "))
-	builder.WriteString(styles.answer.Render(value))
-	builder.WriteString("\n")
+	return rows, empty
 }
 
 // currentReviewer identifies the human reviewer a manual Approve/Reject/

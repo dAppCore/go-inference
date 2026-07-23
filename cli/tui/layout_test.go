@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"dappco.re/go/html"
+	"dappco.re/go/html/ctml"
 )
 
 func TestChooseLayout_Good(t *testing.T) {
@@ -30,6 +33,30 @@ func TestChooseLayout_Ugly(t *testing.T) {
 		if got := chooseLayout(width); got != layoutNarrow {
 			t.Fatalf("chooseLayout(%d) = %d, want narrow", width, got)
 		}
+	}
+}
+
+// TestWideInspectorWidth_MatchesRequest pins wideInspectorWidth (layout.go)
+// against a live render of the REAL shellwide.ctml shell path: since go-html
+// v0.15.0, R's outer width is a REQUEST (TermOptions.AsideWidth, docs/ctml.md
+// S:15.1) the caller makes going in, not a fixed upstream constant to mirror
+// -- S:15.5's own doctrine is "the box map is the render-time source of
+// truth", so this test reads the requested width back from the render's own
+// BoxMap rather than asserting a hardcoded upstream default. If go-html ever
+// stops honouring the AsideWidth request, this fails loudly here instead of
+// shellwide.ctml's frame silently reflowing back to go-html's unrequested
+// 28-column default.
+func TestWideInspectorWidth_MatchesRequest(t *testing.T) {
+	styles := newUIStyles(midnightTheme())
+	layout, err := ctml.ParseLayout(shellWideCTML, shellWideBindings("HEADER", "FOOTER", "MAIN", "INSPECTOR"))
+	if err != nil {
+		t.Fatalf("parse shellwide.ctml: %v", err)
+	}
+	_, boxes := layout.RenderTermBoxes(html.NewContext(), html.TermOptions{
+		Width: 140, Theme: shellWideTheme(styles), AsideWidth: wideInspectorWidth,
+	})
+	if got := boxes["R"].Width; got != wideInspectorWidth {
+		t.Fatalf("shellwide.ctml's live R box width = %d, want the requested wideInspectorWidth = %d (ctml.md S:15.1) -- go-html stopped honouring the AsideWidth request", got, wideInspectorWidth)
 	}
 }
 

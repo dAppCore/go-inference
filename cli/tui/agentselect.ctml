@@ -1,0 +1,25 @@
+<!-- SPDX-Licence-Identifier: EUPL-1.2 -->
+<!--
+  agentselect.ctml : the editable agent-selection overlay — provider and
+  model inputs ahead of project registration review.
+
+  Idiom: <layout variant="HF"> via ctml.ParseLayout — the live provider
+  and model textinputs emit pre-styled ANSI, which cannot ride a .ctml
+  document, so the layout renders the header and footer bands and the
+  host composes the inputs between them (renderOverlayFrame splits at
+  the H box height). The "Model" caption sits BETWEEN the two inputs —
+  chrome trapped between two live ANSI regions stays host-side, because
+  a .ctml document renders contiguously.
+
+  Host seams (agentoverlay.go):
+    - Sequence  review : one row {title} — the review title.
+    - Sequence  body : one row per receipt line (see launchreview.ctml —
+      the host splits the body; each row closes with <br>).
+    - Sequence  warn : zero-or-one row {text} — the review warning.
+    - Classes   overlay-warn / overlay-keys : mapped onto the existing
+      uiStyles palette by overlayFrameTheme.
+-->
+<layout variant="HF">
+<h><each items="review" as="row"><h2>{{row.title}}</h2></each><p>Provider</p></h>
+<f><p><each items="body" as="row"><span>{{row.line}}</span><br></br></each></p><each items="warn" as="row"><p class="overlay-warn">{{row.text}}</p></each><p class="overlay-keys">tab selects provider/model · enter confirms · esc cancels</p></f>
+</layout>

@@ -2,7 +2,7 @@
 
 package tui
 
-import "github.com/charmbracelet/bubbles/key"
+import "dappco.re/go/html/tui/key"
 
 type keyMap struct {
 	NewSession      key.Binding
@@ -13,6 +13,7 @@ type keyMap struct {
 	ToggleInspector key.Binding
 	Search          key.Binding
 	Save            key.Binding
+	Settings        key.Binding
 	Help            key.Binding
 }
 
@@ -26,6 +27,7 @@ func newKeyMap() keyMap {
 		ToggleInspector: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "inspector")),
 		Search:          key.NewBinding(key.WithKeys("ctrl+f"), key.WithHelp("ctrl+f", "search")),
 		Save:            key.NewBinding(key.WithKeys("ctrl+s"), key.WithHelp("ctrl+s", "save")),
+		Settings:        key.NewBinding(key.WithKeys("f2"), key.WithHelp("f2", "settings")),
 		Help:            key.NewBinding(key.WithKeys("f1"), key.WithHelp("f1", "help")),
 	}
 }
@@ -37,6 +39,6 @@ func (keys keyMap) ShortHelp() []key.Binding {
 func (keys keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{keys.NewSession, keys.SwitchSession, keys.PreviousSession, keys.NextSession},
-		{keys.CommandPalette, keys.ToggleInspector, keys.Search, keys.Save, keys.Help},
+		{keys.CommandPalette, keys.ToggleInspector, keys.Search, keys.Save, keys.Settings, keys.Help},
 	}
 }
