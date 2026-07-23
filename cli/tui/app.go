@@ -8,13 +8,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/key"
+	"dappco.re/go/html/tui/list"
+	"dappco.re/go/html/tui/spinner"
+	"dappco.re/go/html/tui/style"
+	"dappco.re/go/html/tui/textarea"
+	"dappco.re/go/html/tui/viewport"
 
 	core "dappco.re/go"
 	"dappco.re/go/html"
@@ -3076,7 +3076,7 @@ func (a app) renderTranscript() string {
 	if err != nil {
 		return ""
 	}
-	return lipgloss.NewStyle().Width(a.view.Width).Render(html.RenderTerm(tree, html.NewContext()))
+	return style.New().Width(a.view.Width).Render(html.RenderTerm(tree, html.NewContext()))
 }
 
 // transcriptBindings supplies transcript.ctml's two row sequences. notice is
@@ -3267,7 +3267,7 @@ func (a app) panelView() string {
 		return a.svc.view(a.modelName, a.width, a.styles)
 	case panelWork:
 		if a.work == nil {
-			return lipgloss.JoinVertical(lipgloss.Left,
+			return style.Column(style.Left,
 				a.styles.title.Render("Work"),
 				"",
 				a.styles.status.Render("○ No work yet"),
@@ -3281,7 +3281,7 @@ func (a app) panelView() string {
 		return a.work.View(metrics.mainWidth, metrics.mainHeight, a.styles)
 	case panelData:
 		if a.data == nil {
-			return lipgloss.JoinVertical(lipgloss.Left,
+			return style.Column(style.Left,
 				a.styles.title.Render("Data"),
 				"",
 				a.styles.status.Render("○ No dataset store connected"),
@@ -3300,7 +3300,7 @@ func (a app) panelView() string {
 		if a.model == nil {
 			return "\n  " + a.spin.View() + a.styles.status.Render(" loading "+displayName(a.loading)+" …")
 		}
-		return lipgloss.JoinVertical(lipgloss.Left,
+		return style.Column(style.Left,
 			a.view.View(),
 			a.styles.inputBorder.Render(a.input.View()),
 		)
@@ -3313,7 +3313,7 @@ func (a app) bootView() string {
 		if a.boot.err != nil {
 			reason = a.boot.err.Error()
 		}
-		return lipgloss.JoinVertical(lipgloss.Left,
+		return style.Column(style.Left,
 			a.styles.err.Render("Workspace could not open"),
 			"",
 			a.styles.answer.Render(reason),
@@ -3322,7 +3322,7 @@ func (a app) bootView() string {
 			a.styles.status.Render("Q  Quit without changing storage"),
 		)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
+	return style.Column(style.Left,
 		a.spin.View()+a.styles.title.Render(" Opening ~/.lem workspace"),
 		"",
 		a.styles.status.Render("Preparing durable sessions, preferences, work, and local knowledge…"),
@@ -3449,7 +3449,7 @@ func (a app) sessionStrip() string {
 		if hidden > 0 {
 			candidate = append(candidate, core.Sprintf("+%d", hidden))
 		}
-		if lipgloss.Width(core.Join("  ·  ", candidate...)) <= maxWidth {
+		if style.Measure(core.Join("  ·  ", candidate...)) <= maxWidth {
 			break
 		}
 		parts = parts[:len(parts)-1]
@@ -3486,11 +3486,11 @@ func sessionStripMarker(session *chatSession, activeID string) string {
 
 func compactStripTitle(value string, maxCells int) string {
 	value = core.Trim(value)
-	if maxCells < 2 || lipgloss.Width(value) <= maxCells {
+	if maxCells < 2 || style.Measure(value) <= maxCells {
 		return value
 	}
 	runes := []rune(value)
-	for len(runes) > 1 && lipgloss.Width(string(runes)+"…") > maxCells {
+	for len(runes) > 1 && style.Measure(string(runes)+"…") > maxCells {
 		runes = runes[:len(runes)-1]
 	}
 	return string(runes) + "…"

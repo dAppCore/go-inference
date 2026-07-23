@@ -5,11 +5,10 @@ package tui
 import (
 	_ "embed"
 
-	"github.com/charmbracelet/lipgloss"
-
 	core "dappco.re/go"
 	"dappco.re/go/html"
 	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/tui/style"
 )
 
 type layoutKind uint8
@@ -145,8 +144,8 @@ var shellWideCTML []byte
 // it byte-exact.
 func shellFrameTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Header = lipgloss.NewStyle()
-	theme.Footer = lipgloss.NewStyle()
+	theme.Header = style.New()
+	theme.Footer = style.New()
 	return theme
 }
 
@@ -159,7 +158,7 @@ func shellFrameTheme(styles uiStyles) *html.TermTheme {
 // and gets word-wrapped onto a spurious extra row (S:15.5).
 func shellRegionTheme(styles uiStyles) *html.TermTheme {
 	theme := shellFrameTheme(styles)
-	theme.Content = lipgloss.NewStyle()
+	theme.Content = style.New()
 	return theme
 }
 
@@ -176,7 +175,7 @@ func shellRegionTheme(styles uiStyles) *html.TermTheme {
 // default border colour.
 func shellWideTheme(styles uiStyles) *html.TermTheme {
 	theme := shellRegionTheme(styles)
-	theme.Aside = lipgloss.NewStyle()
+	theme.Aside = style.New()
 	theme.GutterRule = "│"
 	theme.Rule = styles.separator
 	return theme
@@ -245,7 +244,7 @@ func renderWideLayout(src []byte, width int, theme *html.TermTheme, bindings ...
 //
 // The ONE shape that still cannot join header+region+footer into a single
 // call -- Overlay with the inspector open -- stays a host-side
-// lipgloss.JoinVertical of three independently rendered pieces: shell.ctml's
+// style.Column of three independently rendered pieces: shell.ctml's
 // H/F-only layout (split by renderBandFrame, unchanged), and
 // renderInspectorStack's own region render sat between them. What changed
 // this slice (docs/ctml.md S:15.7, go-html v0.15.0) is that the REGION
@@ -288,7 +287,7 @@ func renderFrame(spec frameSpec, styles uiStyles) string {
 	case metrics.kind == layoutOverlay && spec.InspectorOpen:
 		region := renderInspectorStack(spec, metrics, styles)
 		head, foot := renderBandFrame(shellCTML, metrics.innerWidth, shellFrameTheme(styles), shellBindings(header, footer))
-		inside = lipgloss.JoinVertical(lipgloss.Left, head, region, foot)
+		inside = style.Column(style.Left, head, region, foot)
 	case metrics.kind == layoutWide:
 		main := fitPane(spec.Main, metrics.mainWidth, metrics.mainHeight, styles.panel)
 		inspector := fitPane(spec.Inspector, metrics.inspectorWidth, metrics.inspectorHeight, styles.inspector)
@@ -332,10 +331,10 @@ var shellInspectorPairCTML []byte
 // history), not go-html's own similar-but-different default border colour.
 func inspectorPairTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
-	theme.Header = lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, true, false).
+	theme.Header = style.New().
+		Border(style.Normal(), false, false, true, false).
 		BorderForeground(styles.theme.border)
-	theme.Content = lipgloss.NewStyle()
+	theme.Content = style.New()
 	return theme
 }
 
@@ -362,7 +361,7 @@ func inspectorPairBindings(inspector, main string) ctml.Bindings {
 // (zero-chrome) and this pair's own H (bordered) different styles from the
 // one flat TermTheme a render call threads through every nested Layout.
 // renderFrame still joins this function's output between the (unchanged,
-// separately rendered) header/footer bands with lipgloss.JoinVertical --
+// separately rendered) header/footer bands with style.Column --
 // that outer join, not this region's own composition, is what remains
 // host-side.
 func renderInspectorStack(spec frameSpec, metrics frameMetrics, styles uiStyles) string {
@@ -371,14 +370,14 @@ func renderInspectorStack(spec frameSpec, metrics frameMetrics, styles uiStyles)
 	return renderBandLayout(shellInspectorPairCTML, metrics.innerWidth, inspectorPairTheme(styles), inspectorPairBindings(inspector, main))
 }
 
-func fitLine(content string, width int, style lipgloss.Style) string {
+func fitLine(content string, width int, style style.Style) string {
 	if width <= 0 {
 		return ""
 	}
 	return style.Width(width).MaxWidth(width).MaxHeight(1).Render(content)
 }
 
-func fitPane(content string, width, height int, style lipgloss.Style) string {
+func fitPane(content string, width, height int, style style.Style) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}

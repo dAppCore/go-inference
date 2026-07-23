@@ -5,11 +5,10 @@ package tui
 import (
 	_ "embed"
 
-	"github.com/charmbracelet/lipgloss"
-
 	core "dappco.re/go"
 	"dappco.re/go/html"
 	"dappco.re/go/html/ctml"
+	"dappco.re/go/html/tui/style"
 )
 
 type inspectorControl uint8
@@ -164,7 +163,7 @@ func (inspector inspectorState) View(target app, width, height int) string {
 func inspectorTheme(styles uiStyles) *html.TermTheme {
 	theme := html.DefaultTermTheme()
 	theme.Text = styles.inspector
-	theme.Classes = map[string]lipgloss.Style{
+	theme.Classes = map[string]style.Style{
 		"inspector-title": styles.title,
 		"label":           styles.accent,
 		"control-active":  styles.accent,

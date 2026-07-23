@@ -5,10 +5,10 @@ package tui
 import (
 	_ "embed"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/textarea"
+	"dappco.re/go/html/tui/textinput"
+	"dappco.re/go/html/tui/viewport"
 
 	core "dappco.re/go"
 	"dappco.re/go/html/ctml"

@@ -5,9 +5,9 @@ package tui
 import (
 	_ "embed"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "dappco.re/go/html/tui"
+	"dappco.re/go/html/tui/textarea"
+	"dappco.re/go/html/tui/textinput"
 
 	core "dappco.re/go"
 	"dappco.re/go/html/ctml"
