@@ -40,7 +40,7 @@ jobs:
         with:
           ref: dev
 
-      - uses: dAppCore/build/actions/deps@dev
+      - uses: dAppCore/build/actions/deps@v4
         with:
           go-mod-dir: go
           dry-run: ${{ github.event.inputs.dry-run || 'false' }}
