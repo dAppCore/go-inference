@@ -677,10 +677,10 @@ func TestMemory_InMemoryStore_Concurrent_Good(t *testing.T) {
 	const opsPerWorker = 200
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		go func(w int) {
 			defer wg.Done()
-			for i := 0; i < opsPerWorker; i++ {
+			for i := range opsPerWorker {
 				uri := "mem://c/" + core.Itoa(w) + "/" + core.Itoa(i)
 				if i%2 == 0 {
 					store.Put(ctx, "text", PutOptions{URI: uri})

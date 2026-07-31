@@ -289,7 +289,7 @@ func TestAutoregress_Good(t *testing.T) {
 // quality: the drafter can be arbitrarily wrong and the output never changes.
 func TestGenerate_LosslessInvariantFuzz(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	for iter := 0; iter < 20000; iter++ {
+	for iter := range 20000 {
 		vocab := 2 + rng.Intn(6)
 		next := windowOracle(vocab, rng.Intn(97), 1+rng.Intn(31), 1+rng.Intn(4))
 		blockSize := 1 + rng.Intn(8)
@@ -301,7 +301,7 @@ func TestGenerate_LosslessInvariantFuzz(t *testing.T) {
 			n := rng.Intn(blockSize + 1)
 			b := make([]int, n)
 			tmp := append([]int(nil), ctx...)
-			for k := 0; k < n; k++ {
+			for k := range n {
 				tk := next(tmp)
 				tmp = append(tmp, tk)
 				b[k] = tk

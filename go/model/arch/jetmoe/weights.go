@@ -3,6 +3,8 @@
 package jetmoe
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -12,9 +14,7 @@ import (
 // the checkpoint's [experts, 2*ff, hidden] or [experts, hidden, ff] tensor.
 func adaptFFNWeights(tensors map[string]safetensors.Tensor, cfg Config) (map[string]safetensors.Tensor, error) {
 	adapted := make(map[string]safetensors.Tensor, len(tensors)+cfg.NumHiddenLayers*(3*cfg.MoENumExperts+1))
-	for name, tensor := range tensors {
-		adapted[name] = tensor
-	}
+	maps.Copy(adapted, tensors)
 	for layer := 0; layer < cfg.NumHiddenLayers; layer++ {
 		prefix := core.Sprintf("model.layers.%d.mlp.", layer)
 		input, inputOK := tensors[prefix+"input_linear.weight"]

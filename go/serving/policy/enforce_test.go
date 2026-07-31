@@ -214,7 +214,7 @@ func TestPolicy_Enforcer_Differential(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			want, _, _ := runChunks(pol, []string{text}) // whole-string reference
 			r := rand.New(rand.NewSource(1))
-			for iter := 0; iter < 1000; iter++ {
+			for iter := range 1000 {
 				got, _, _ := runChunks(pol, randomChunks(r, text))
 				if got != want {
 					t.Fatalf("chunking %d diverged\n  want %q\n  got  %q", iter, want, got)
@@ -231,7 +231,7 @@ func TestPolicy_Enforcer_Differential_Refuse(t *testing.T) {
 	text := "we are close but v1.0.0-rc1 is unreleased so nothing after this appears"
 	want, _, wantStop := runChunks(pol, []string{text})
 	r := rand.New(rand.NewSource(7))
-	for iter := 0; iter < 1000; iter++ {
+	for iter := range 1000 {
 		got, _, stop := runChunks(pol, randomChunks(r, text))
 		if got != want || stop != wantStop {
 			t.Fatalf("chunking %d diverged: got %q stop=%v, want %q stop=%v", iter, got, stop, want, wantStop)
@@ -385,7 +385,7 @@ func TestPolicy_Enforcer_Rewrite_Differential(t *testing.T) {
 	text := "intro PROJECT-X then rc42 and more PROJECT-X talk near rc9 end"
 	want, _, _ := runChunksMediated(pol, markSpan, []string{text})
 	r := rand.New(rand.NewSource(3))
-	for iter := 0; iter < 1000; iter++ {
+	for iter := range 1000 {
 		got, _, _ := runChunksMediated(pol, markSpan, randomChunks(r, text))
 		if got != want {
 			t.Fatalf("chunking %d diverged\n  want %q\n  got  %q", iter, want, got)
@@ -485,7 +485,7 @@ func TestPolicy_Enforcer_Rewrite_ReEnforced_Differential(t *testing.T) {
 		t.Fatal("a residual refuse must not stop the whole-string reference stream")
 	}
 	r := rand.New(rand.NewSource(5))
-	for iter := 0; iter < 1000; iter++ {
+	for iter := range 1000 {
 		got, _, stop := runChunksMediated(pol, inject, randomChunks(r, text))
 		if got != want || stop != wantStop {
 			t.Fatalf("chunking %d diverged\n  want %q stop=%v\n  got  %q stop=%v", iter, want, wantStop, got, stop)

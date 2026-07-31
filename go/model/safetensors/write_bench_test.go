@@ -16,7 +16,7 @@ import (
 func benchSubsetRefs(n int) []TensorRef {
 	refs := make([]TensorRef, n)
 	var off int64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		bytes := int64(4096 * 2048 * 2)
 		refs[i] = TensorRef{
 			Name:  "model.layers." + core.Sprintf("%d", i) + ".self_attn.q_proj.weight",

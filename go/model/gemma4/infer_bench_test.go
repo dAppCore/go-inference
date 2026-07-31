@@ -18,7 +18,7 @@ import (
 
 func benchGemma4Weights() map[string]safetensors.Tensor {
 	w := make(map[string]safetensors.Tensor, 64)
-	for i := 0; i < 34; i++ {
+	for i := range 34 {
 		p := "model.layers." + itoa(i)
 		w[p+".self_attn.q_proj.weight"] = safetensors.Tensor{Shape: []int{8 * 256, 2560}}
 	}

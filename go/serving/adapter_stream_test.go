@@ -10,7 +10,7 @@ package serving
 
 import (
 	"math/rand"
-	"sort"
+	"slices"
 	"testing"
 
 	core "dappco.re/go"
@@ -152,7 +152,7 @@ func splitBytesRandom(rng *rand.Rand, b []byte, parts int) []inference.Token {
 	for range parts - 1 {
 		cuts = append(cuts, rng.Intn(len(b)+1))
 	}
-	sort.Ints(cuts)
+	slices.Sort(cuts)
 	out := make([]inference.Token, 0, parts)
 	prev := 0
 	for _, c := range cuts {

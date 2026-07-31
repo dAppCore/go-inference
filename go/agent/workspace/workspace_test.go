@@ -4,6 +4,7 @@ package workspace
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -192,12 +193,7 @@ func (medium *workspaceFaultMedium) Exists(path string) bool {
 }
 
 func workspaceContainsArgument(arguments []string, expected string) bool {
-	for _, argument := range arguments {
-		if argument == expected {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(arguments, expected)
 }
 
 func workspaceCommandContains(command Command, fragment string) bool {

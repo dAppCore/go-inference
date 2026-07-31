@@ -56,11 +56,11 @@ func tinyRealLayoutTensors(blocks int) map[string]safetensors.Tensor {
 	t := map[string]safetensors.Tensor{
 		// >2-D dense patch_embed — the real layout's [Hidden,T,P,P,C] shape whose row-major flatten
 		// is byte-identical to [Hidden,PatchDim] (the _Ugly shape, exercised on the happy path).
-		"vision_tower.patch_embed.proj.weight": tvTensor([]int{tvHidden, 2, 2, 2, 3}, 1),
-		"vision_tower.patch_embed.proj.bias":   tvTensor([]int{tvHidden}, 2),
-		"vision_tower.pos_embed.weight":        tvTensor([]int{tvPositions, tvHidden}, 3),
-		"vision_tower.merger.norm.weight":      tvTensor([]int{tvHidden}, 4),
-		"vision_tower.merger.norm.bias":        tvTensor([]int{tvHidden}, 5),
+		"vision_tower.patch_embed.proj.weight":  tvTensor([]int{tvHidden, 2, 2, 2, 3}, 1),
+		"vision_tower.patch_embed.proj.bias":    tvTensor([]int{tvHidden}, 2),
+		"vision_tower.pos_embed.weight":         tvTensor([]int{tvPositions, tvHidden}, 3),
+		"vision_tower.merger.norm.weight":       tvTensor([]int{tvHidden}, 4),
+		"vision_tower.merger.norm.bias":         tvTensor([]int{tvHidden}, 5),
 		"vision_tower.merger.linear_fc1.weight": tvTensor([]int{tvMergeIn, tvMergeIn}, 6),
 		"vision_tower.merger.linear_fc1.bias":   tvTensor([]int{tvMergeIn}, 7),
 		"vision_tower.merger.linear_fc2.weight": tvTensor([]int{tvTextHidden, tvMergeIn}, 8),

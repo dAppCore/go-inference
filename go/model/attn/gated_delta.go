@@ -115,15 +115,15 @@ func matNTBF16Host(out, x []float32, bw *model.BF16Weight, M, K, N int) []float3
 		out = out[:M*N]
 	}
 	row := make([]float32, K)
-	for n := 0; n < N; n++ {
-		for k := 0; k < K; k++ {
+	for n := range N {
+		for k := range K {
 			u := uint32(bw.Data[(n*K+k)*2]) | uint32(bw.Data[(n*K+k)*2+1])<<8
 			row[k] = math.Float32frombits(u << 16)
 		}
-		for m := 0; m < M; m++ {
+		for m := range M {
 			xr := x[m*K : m*K+K]
 			var acc float64
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += float64(xr[k]) * float64(row[k])
 			}
 			out[m*N+n] = float32(acc)
@@ -192,17 +192,11 @@ func matNTInto(out, in, w []float32, M, K, N int) []float32 {
 		matNTCols(out, in, w, M, K, N, 0, N)
 		return out
 	}
-	workers := runtime.GOMAXPROCS(0)
-	if workers > N {
-		workers = N
-	}
+	workers := min(runtime.GOMAXPROCS(0), N)
 	span := (N + workers - 1) / workers
 	var wg core.WaitGroup
 	for lo := 0; lo < N; lo += span {
-		hi := lo + span
-		if hi > N {
-			hi = N
-		}
+		hi := min(lo+span, N)
 		wg.Add(1)
 		go func(lo, hi int) {
 			defer wg.Done()

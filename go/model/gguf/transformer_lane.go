@@ -5,6 +5,7 @@ package gguf
 import (
 	"encoding/binary"
 	"math"
+	"slices"
 	"strconv"
 
 	core "dappco.re/go"
@@ -43,12 +44,7 @@ type transformerLaneConfig struct {
 // llama.cpp architecture declaration.
 func NewTransformerQuantizeLane(spec TransformerLaneSpec) QuantizeLane {
 	matches := func(modelType string) bool {
-		for _, candidate := range spec.ModelTypes {
-			if modelType == candidate {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(spec.ModelTypes, modelType)
 	}
 	return QuantizeLane{
 		Detect: func(data []byte) bool {

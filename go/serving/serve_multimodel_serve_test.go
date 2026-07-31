@@ -36,7 +36,7 @@ func TestRunServe_MultiModel_ListsModelsAndAdmin_Good(t *testing.T) {
 			AdminToken: "test-token",
 			Loader:     loader,
 			Models: []ModelSpec{
-				{ID: "qwen3", Path: "/m/qwen3", Aliases: []string{"qwen"}, Profiles: map[string]ProfileConfig{"creative": {Temperature: ptrFloat32(0.9)}}},
+				{ID: "qwen3", Path: "/m/qwen3", Aliases: []string{"qwen"}, Profiles: map[string]ProfileConfig{"creative": {Temperature: new(float32(0.9))}}},
 				{ID: "bge", Path: "/m/bge", Pinned: true},
 			},
 			MemoryCeiling: 1 << 30,

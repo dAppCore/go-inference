@@ -3,6 +3,8 @@
 package gpt2
 
 import (
+	"maps"
+
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -10,9 +12,7 @@ import (
 // NormalizeWeights applies the HF Conv1D [in,out] convention and exposes fused QKV by role.
 func NormalizeWeights(in map[string]safetensors.Tensor) map[string]safetensors.Tensor {
 	out := make(map[string]safetensors.Tensor, len(in)+16)
-	for name, tensor := range in {
-		out[name] = tensor
-	}
+	maps.Copy(out, in)
 	for name, tensor := range in {
 		if !(hasSuffix(name, ".attn.c_attn.weight") || hasSuffix(name, ".attn.c_proj.weight") || hasSuffix(name, ".mlp.c_fc.weight") || hasSuffix(name, ".mlp.c_proj.weight")) {
 			continue

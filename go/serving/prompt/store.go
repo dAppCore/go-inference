@@ -3,7 +3,7 @@
 package prompt
 
 import (
-	"sort"
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -122,7 +122,7 @@ func (s *MemoryStore) List(id string) ([]Template, error) {
 	for v := range byVer {
 		vers = append(vers, v)
 	}
-	sort.Ints(vers)
+	slices.Sort(vers)
 	out := make([]Template, 0, len(vers))
 	for _, v := range vers {
 		out = append(out, cloneTemplate(byVer[v]))

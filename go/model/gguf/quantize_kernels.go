@@ -107,14 +107,8 @@ func appendQuantizeQ4_0(out []byte, values []float32) []byte {
 		for i := range 16 {
 			x0 := block[i] * invScale
 			x1 := block[i+16] * invScale
-			q0 := int(x0 + 8.5)
-			if q0 > 15 {
-				q0 = 15
-			}
-			q1 := int(x1 + 8.5)
-			if q1 > 15 {
-				q1 = 15
-			}
+			q0 := min(int(x0+8.5), 15)
+			q1 := min(int(x1+8.5), 15)
 			packed[i] = byte(q0) | byte(q1)<<4
 		}
 		out = append(out, packed[:]...)
@@ -150,14 +144,8 @@ func appendQuantizeQ5_0(out []byte, values []float32) []byte {
 		for j := range 16 {
 			x0 := block[j] * invScale
 			x1 := block[j+16] * invScale
-			q0 := int(x0 + 16.5)
-			if q0 > 31 {
-				q0 = 31
-			}
-			q1 := int(x1 + 16.5)
-			if q1 > 31 {
-				q1 = 31
-			}
+			q0 := min(int(x0+16.5), 31)
+			q1 := min(int(x1+16.5), 31)
 			qs[j] = byte(q0&0xF) | byte(q1&0xF)<<4
 			qh |= uint32((q0>>4)&1) << uint(j)
 			qh |= uint32((q1>>4)&1) << uint(j+16)
@@ -383,7 +371,7 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 	iscale := float32(nmax) / (maxv - minv)
 	scale = 1 / iscale
 	var bestMad float32
-	for i := 0; i < n; i++ {
+	for i := range n {
 		l := clampInt(nearestIntGGML(iscale*(x[i]-minv)), 0, nmax)
 		levels[i] = uint8(l)
 		diff := scale*float32(l) + minv - x[i]
@@ -401,7 +389,7 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 	for is := 0; is <= nstep; is++ {
 		iscale = (rmin + rdelta*float32(is) + float32(nmax)) / (maxv - minv)
 		var sumL, sumL2, sumXL float32
-		for i := 0; i < n; i++ {
+		for i := range n {
 			l := clampInt(nearestIntGGML(iscale*(x[i]-minv)), 0, nmax)
 			laux[i] = uint8(l)
 			w := weights[i]
@@ -419,7 +407,7 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 				thisScale = sumXL / sumL2
 			}
 			var mad float32
-			for i := 0; i < n; i++ {
+			for i := range n {
 				diff := thisScale*float32(laux[i]) + thisMin - x[i]
 				if useMad {
 					diff = absFloat32(diff)
@@ -429,7 +417,7 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 				mad += weights[i] * diff
 			}
 			if mad < bestMad {
-				for i := 0; i < n; i++ {
+				for i := range n {
 					levels[i] = laux[i]
 				}
 				bestMad = mad
@@ -684,10 +672,7 @@ func appendQuantizeQ6_K(out []byte, values []float32) []byte {
 			iscale := float32(-128) / maxScale
 			d = 1 / iscale
 			for sb := range qkSubBlocks {
-				l := nearestIntGGML(iscale * scratch.scales[sb])
-				if l > 127 {
-					l = 127
-				}
+				l := min(nearestIntGGML(iscale*scratch.scales[sb]), 127)
 				scales[sb] = int8(l)
 			}
 		} else {

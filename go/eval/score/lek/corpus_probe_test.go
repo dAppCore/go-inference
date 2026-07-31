@@ -5,6 +5,7 @@ package lek
 import (
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"testing"
 
@@ -196,7 +197,7 @@ func (s *probeStats) emitSummary(t *testing.T) {
 	for k := range s.dims {
 		names = append(names, k)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	t.Logf("%-22s %10s %10s %10s %10s %10s %10s %10s",
 		"dim", "min", "p10", "median", "mean", "p90", "p95", "max")
 	for _, n := range names {
@@ -206,7 +207,7 @@ func (s *probeStats) emitSummary(t *testing.T) {
 		}
 		vals := make([]float64, len(d.values))
 		copy(vals, d.values)
-		sort.Float64s(vals)
+		slices.Sort(vals)
 		min := vals[0]
 		max := vals[len(vals)-1]
 		p10 := percentile(vals, 0.10)
@@ -224,7 +225,7 @@ func (s *probeStats) emitOutliers(t *testing.T) {
 	for k := range s.dims {
 		names = append(names, k)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	for _, n := range names {
 		d := s.dims[n]
 		if len(d.withID) == 0 {

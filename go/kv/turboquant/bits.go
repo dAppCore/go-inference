@@ -17,7 +17,7 @@ func packBits(values []int, bits int) []byte {
 	out := make([]byte, (total+7)/8)
 	pos := 0
 	for _, v := range values {
-		for b := 0; b < bits; b++ {
+		for b := range bits {
 			if v&(1<<uint(b)) != 0 {
 				out[pos/8] |= 1 << uint(pos%8)
 			}
@@ -41,9 +41,9 @@ func unpackBits(data []byte, n, bits int) []int {
 		return out
 	}
 	pos := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		var v int
-		for b := 0; b < bits; b++ {
+		for b := range bits {
 			byteIdx := pos / 8
 			if byteIdx < len(data) && data[byteIdx]&(1<<uint(pos%8)) != 0 {
 				v |= 1 << uint(b)

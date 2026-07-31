@@ -17,7 +17,7 @@ func TestGemma4Types_gemma4UseMoreBits_Gemma4E2B(t *testing.T) {
 	for _, i := range []int{0, 1, 2, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 31, 32, 33, 34} {
 		want[i] = true
 	}
-	for i := 0; i < layerCount; i++ {
+	for i := range layerCount {
 		if got := gemma4UseMoreBits(i, layerCount); got != want[i] {
 			t.Errorf("gemma4UseMoreBits(%d, %d) = %v, want %v", i, layerCount, got, want[i])
 		}

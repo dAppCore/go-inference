@@ -1835,10 +1835,10 @@ func TestTokenizer_nextSpecialBoundary_AnchorScanMatchesNaive_Good(t *testing.T)
 		return state >> 1
 	}
 
-	for iter := 0; iter < 40000; iter++ {
+	for range 40000 {
 		parts := int(nextRand()%14) + 1
 		b := core.NewBuilder()
-		for p := 0; p < parts; p++ {
+		for range parts {
 			b.WriteString(alphabet[nextRand()%uint64(len(alphabet))])
 		}
 		input := b.String()

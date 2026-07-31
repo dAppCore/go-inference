@@ -20,11 +20,11 @@ var (
 // boundary lands inside a 3-byte rune, so warmPrefix must run its UTF-8 backoff.
 func benchLongMultibytePrompt() string {
 	buf := make([]byte, 0, warmPrefixChars+1200)
-	for i := 0; i < warmPrefixChars-1; i++ {
+	for range warmPrefixChars - 1 {
 		buf = append(buf, 'a')
 	}
 	buf = append(buf, "日"...) // 3-byte rune straddling the warmPrefixChars cut
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		buf = append(buf, 'b')
 	}
 	return string(buf)

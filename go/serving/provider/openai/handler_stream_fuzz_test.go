@@ -12,7 +12,7 @@ package openai
 
 import (
 	"math/rand"
-	"sort"
+	"slices"
 	"testing"
 
 	core "dappco.re/go"
@@ -159,7 +159,7 @@ func randomByteSplit(rng *rand.Rand, b []byte, parts int) []string {
 	for range parts - 1 {
 		cuts = append(cuts, rng.Intn(len(b)+1))
 	}
-	sort.Ints(cuts)
+	slices.Sort(cuts)
 	out := make([]string, 0, parts)
 	prev := 0
 	for _, c := range cuts {

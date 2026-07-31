@@ -229,7 +229,7 @@ type NextToken func(prefix []int) int
 //	commit, accepted := dflash.AcceptBlock(prefix, proposed, next)
 func AcceptBlock(prefix, proposed []int, next NextToken) (commit []int, acceptedDraft int) {
 	seq := append([]int(nil), prefix...)
-	for i := 0; i < len(proposed); i++ {
+	for i := range proposed {
 		t := next(seq)
 		seq = append(seq, t)
 		commit = append(commit, t)
@@ -323,7 +323,7 @@ func Autoregress(prompt []int, maxTokens int, next NextToken) []int {
 	}
 	seq := append([]int(nil), prompt...)
 	out := make([]int, 0, maxTokens)
-	for i := 0; i < maxTokens; i++ {
+	for range maxTokens {
 		t := next(seq)
 		seq = append(seq, t)
 		out = append(out, t)

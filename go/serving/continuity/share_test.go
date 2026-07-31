@@ -191,7 +191,7 @@ func synthSnapshot(n int) *kv.Snapshot {
 	key := make([]float32, n*2)
 	val := make([]float32, n*2)
 	toks := make([]int32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		toks[i] = int32(i + 1)
 		key[2*i], key[2*i+1] = float32(i), float32(i)+0.5
 		val[2*i], val[2*i+1] = float32(i)+10, float32(i)+10.5

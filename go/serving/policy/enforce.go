@@ -184,10 +184,7 @@ func (p *Policy) process(buf string, holdFrom int, e *Enforcer) (out string, eve
 	}
 	// A match settled before holdFrom may have consumed PAST it; the settle
 	// point is whichever is later.
-	settle := holdFrom
-	if lastEmit > settle {
-		settle = lastEmit
-	}
+	settle := max(lastEmit, holdFrom)
 	if !rewrote {
 		return buf[:settle], nil, settle, false
 	}
@@ -220,10 +217,7 @@ func (p *Policy) longestMatchAt(buf string, i, n int) (match, bool) {
 	// bounds the slice the regexp sees.
 	for _, idx := range p.patternIdx {
 		r := &p.rules[idx]
-		end := i + r.window
-		if end > n {
-			end = n
-		}
+		end := min(i+r.window, n)
 		loc := r.re.FindStringIndex(buf[i:end])
 		if loc == nil || loc[0] != 0 {
 			continue
@@ -257,10 +251,7 @@ func (p *Policy) holdFrom(buf string) int {
 	hold := n
 
 	if p.maxTermLen > 1 {
-		start := n - (p.maxTermLen - 1)
-		if start < 0 {
-			start = 0
-		}
+		start := max(n-(p.maxTermLen-1), 0)
 		for j := start; j < n; j++ {
 			if p.termPrefixAt(buf, j, n) {
 				hold = j
@@ -270,10 +261,7 @@ func (p *Policy) holdFrom(buf string) int {
 	}
 
 	if p.maxWindow > 0 {
-		ph := n - (p.maxWindow - 1)
-		if ph < 0 {
-			ph = 0
-		}
+		ph := max(n-(p.maxWindow-1), 0)
 		if ph < hold {
 			hold = ph
 		}

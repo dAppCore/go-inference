@@ -107,7 +107,7 @@ func TestMHACore_Good(t *testing.T) {
 	v := []float32{1, 1, 3, 3, 5, 5}
 	out := mhaCore(q, k, v, 3, 3, 1, 2, 0, false)
 	wantMean := float32(3) // mean of {1,3,5}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if math.Abs(float64(out[i*2]-wantMean)) > 1e-4 {
 			t.Fatalf("mhaCore non-causal row %d = %v, want mean-of-V %v (uniform attention)", i, out[i*2], wantMean)
 		}

@@ -92,10 +92,10 @@ var equivFuzzTokens = []string{
 func buildFuzzCorpus(n int) []string {
 	r := rand.New(rand.NewSource(0x1EC1))
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		ntok := 1 + r.Intn(24)
 		buf := make([]byte, 0, 128)
-		for j := 0; j < ntok; j++ {
+		for range ntok {
 			tok := equivFuzzTokens[r.Intn(len(equivFuzzTokens))]
 			buf = append(buf, tok...)
 			// Half the time no separator at all → adjacency stress.
@@ -176,15 +176,15 @@ func refLekCreativeForm(text string) int {
 func buildPoetryCorpus(n int) []string {
 	r := rand.New(rand.NewSource(0x9E77))
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		nlines := r.Intn(12)
 		buf := make([]byte, 0, 256)
-		for l := 0; l < nlines; l++ {
+		for l := range nlines {
 			if l > 0 {
 				buf = append(buf, '\n')
 			}
 			llen := r.Intn(80)
-			for c := 0; c < llen; c++ {
+			for range llen {
 				buf = append(buf, byte('a'+r.Intn(26)))
 			}
 		}

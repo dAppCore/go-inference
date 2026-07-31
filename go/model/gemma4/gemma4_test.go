@@ -10,7 +10,9 @@ import (
 
 // i32p returns a pointer to an int32 literal — the shape NumExperts/TopKExperts take on
 // Gemma4TextConfig (a nil pointer means "the config didn't declare it").
-func i32p(v int32) *int32 { return &v }
+//
+//go:fix inline
+func i32p(v int32) *int32 { return new(v) }
 
 // TestFeaturesOf covers the single "what is this model" reader in both directions of every
 // feature it decodes: the nil-config zero surface, a dense text-only build, a MoE build with

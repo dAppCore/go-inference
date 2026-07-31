@@ -241,7 +241,7 @@ func cubicKernel(x float64) float64 {
 	case x < 1:
 		return ((a+2)*x-(a+3))*x*x + 1
 	case x < 2:
-		return (((x-5)*x+8)*x-4)*a
+		return (((x-5)*x+8)*x - 4) * a
 	default:
 		return 0
 	}

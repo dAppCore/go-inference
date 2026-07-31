@@ -189,8 +189,8 @@ func TestAssemble_TieWordEmbeddings_Good(t *testing.T) {
 		includeHead, tied bool
 	}{
 		{name: "unspecified remains compatible", declaration: nil, tied: true},
-		{name: "declared tied", declaration: boolPointer(true), tied: true},
-		{name: "declared untied", declaration: boolPointer(false), includeHead: true, tied: false},
+		{name: "declared tied", declaration: new(true), tied: true},
+		{name: "declared untied", declaration: new(false), includeHead: true, tied: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tensors := minimalDenseTensors("BF16")
@@ -233,7 +233,8 @@ func TestAssemble_TieWordEmbeddings_Bad(t *testing.T) {
 	}
 }
 
-func boolPointer(value bool) *bool { return &value }
+//go:fix inline
+func boolPointer(value bool) *bool { return new(value) }
 
 // kEqVNames extends the minimal dense names with a value-projection suffix, so a fixture can choose
 // to carry or omit the v_proj — the input to Assemble's per-layer K==V op-selection resolution.

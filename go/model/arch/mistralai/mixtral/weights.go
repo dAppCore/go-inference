@@ -3,6 +3,8 @@
 package mixtral
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
@@ -71,10 +73,8 @@ func packExperts(in map[string]safetensors.Tensor, numLayers, numExperts int) (m
 		return nil, core.NewError("mixtral.packExperts: num_hidden_layers and num_local_experts must be > 0")
 	}
 	out := make(map[string]safetensors.Tensor, len(in)+numLayers*len(expertRoles)*3)
-	for name, tensor := range in {
-		out[name] = tensor
-	}
-	for layer := 0; layer < numLayers; layer++ {
+	maps.Copy(out, in)
+	for layer := range numLayers {
 		prefix := core.Sprintf("model.layers.%d.block_sparse_moe.experts.", layer)
 		for _, role := range expertRoles {
 			weight, scales, biases, err := packExpertRole(in, prefix, role.hfSuffix, numExperts)
@@ -139,7 +139,7 @@ func packExpertComponent(in map[string]safetensors.Tensor, prefix, hfSuffix, com
 	outDim, lastDim := first.Shape[0], first.Shape[1]
 	rowBytes := len(first.Data)
 	data := make([]byte, 0, rowBytes*numExperts)
-	for e := 0; e < numExperts; e++ {
+	for e := range numExperts {
 		name := core.Sprintf("%s%d.%s.%s", prefix, e, hfSuffix, component)
 		t, ok := in[name]
 		if !ok {

@@ -5,6 +5,7 @@ package conformance_test
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	core "dappco.re/go"
@@ -102,12 +103,7 @@ func TestBuiltinFamiliesConformance(t *testing.T) {
 }
 
 func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 type prng struct{ state uint32 }
@@ -125,7 +121,7 @@ func (p *prng) tensor(rows, cols int) safetensors.Tensor {
 func (p *prng) norm(n int) safetensors.Tensor {
 	values := p.tensor(1, n)
 	values.Shape = []int{n}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		bits := math.Float32bits(1 + float32(i+1)/100)
 		values.Data[4*i], values.Data[4*i+1], values.Data[4*i+2], values.Data[4*i+3] = byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24)
 	}

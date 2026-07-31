@@ -247,10 +247,7 @@ func (s *Sampler) sampleTopKFirst(logits []byte, ids []int32, vocab int, temp fl
 	if allowed == 0 {
 		return 0, core.NewError("model.Sample: all tokens are suppressed")
 	}
-	keep := p.TopK
-	if keep > vocab {
-		keep = vocab
-	}
+	keep := min(p.TopK, vocab)
 	order := s.order[:keep]
 	selectTopKDesc(order, vals, vocab)
 	// exp the survivors, stabilised by the global max (the top-ranked survivor).
@@ -339,7 +336,7 @@ func sampleRankFilterNeeded(p SampleParams, vocab int) bool {
 // Callers must ensure 0 < k <= vocab.
 func selectTopKDesc(dst []int, probs []float32, vocab int) {
 	k := len(dst)
-	for i := 0; i < k; i++ {
+	for i := range k {
 		dst[i] = i
 	}
 	// Min-heap by rank (root = lowest-ranked kept), so the weakest survivor evicts first.

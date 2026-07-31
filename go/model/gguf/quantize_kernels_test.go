@@ -312,17 +312,17 @@ func testDequantQ4_K(data []byte) []float32 {
 		var levels [qkBlockSize]uint8
 		li := 0
 		for j := 0; j < qkBlockSize; j += 64 {
-			for l := 0; l < 32; l++ {
+			for l := range 32 {
 				levels[j+l] = qs[li] & 0xF
 				levels[j+l+32] = qs[li] >> 4
 				li++
 			}
 		}
-		for j := 0; j < kQuantSubBlocks; j++ {
+		for j := range kQuantSubBlocks {
 			sc, m := getScaleMinK4(j, &packed)
 			dl := d * float32(sc)
 			ml := dmin * float32(m)
-			for ii := 0; ii < kQuantSubBlockSize; ii++ {
+			for ii := range kQuantSubBlockSize {
 				out = append(out, dl*float32(levels[j*kQuantSubBlockSize+ii])-ml)
 			}
 		}
@@ -398,7 +398,7 @@ func testDequantQ5_K(data []byte) []float32 {
 		qi := 0
 		u1, u2 := uint8(1), uint8(2)
 		for n := 0; n < qkBlockSize; n += 64 {
-			for j := 0; j < 32; j++ {
+			for j := range 32 {
 				v1 := qs[qi+j] & 0xF
 				v2 := qs[qi+j] >> 4
 				if qh[j]&u1 != 0 {
@@ -414,11 +414,11 @@ func testDequantQ5_K(data []byte) []float32 {
 			u2 <<= 2
 			qi += 32
 		}
-		for j := 0; j < kQuantSubBlocks; j++ {
+		for j := range kQuantSubBlocks {
 			sc, m := getScaleMinK4(j, &packed)
 			dl := d * float32(sc)
 			ml := dmin * float32(m)
-			for ii := 0; ii < kQuantSubBlockSize; ii++ {
+			for ii := range kQuantSubBlockSize {
 				out = append(out, dl*float32(levels[j*kQuantSubBlockSize+ii])-ml)
 			}
 		}

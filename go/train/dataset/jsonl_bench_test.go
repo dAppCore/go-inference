@@ -24,7 +24,7 @@ func mixedCorpus(rows int) string {
 		`{"problem":"Sum the first ten integers.","thinking":"Pair them: 1+10, 2+9 ... five pairs of 11.","solution":"55"}`,
 	}
 	var b strings.Builder
-	for i := 0; i < rows; i++ {
+	for i := range rows {
 		b.WriteString(shapes[i%len(shapes)])
 		b.WriteByte('\n')
 	}

@@ -3,6 +3,8 @@
 package model
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -50,9 +52,7 @@ func NormalizeWrapperNames(t map[string]safetensors.Tensor) map[string]safetenso
 		return t
 	}
 	out := make(map[string]safetensors.Tensor, len(t))
-	for k, v := range t {
-		out[k] = v
-	}
+	maps.Copy(out, t)
 	for k, v := range t {
 		if alias, ok := wrapperStripped(k); ok {
 			if _, present := out[alias]; !present {

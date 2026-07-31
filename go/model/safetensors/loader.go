@@ -8,7 +8,7 @@
 package safetensors
 
 import (
-	"sort"
+	"slices"
 
 	core "dappco.re/go"
 	coreio "dappco.re/go/io"
@@ -133,7 +133,7 @@ func Encode(tensors map[string]Tensor) ([]byte, error) {
 		names = append(names, n)
 		totalData += len(t.Data)
 	}
-	sort.Strings(names) // deterministic layout
+	slices.Sort(names) // deterministic layout
 
 	// Emit the JSON header directly with the package's hand-rolled emitter (shared with
 	// WriteSubset's subsetHeaderEncoded) rather than building a map[string]entry and handing it

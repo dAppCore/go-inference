@@ -16,7 +16,7 @@ const benchDecodeElems = 1 << 20 // 1M elements — a realistic per-tensor decod
 // benchF16Bytes fills n F16 elements as little-endian raw bytes with a deterministic spread.
 func benchF16Bytes(n int) []byte {
 	raw := make([]byte, n*2)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := uint16(i * 137) // full pattern spread (finite, inf and nan all exercised)
 		raw[2*i], raw[2*i+1] = byte(v), byte(v>>8)
 	}

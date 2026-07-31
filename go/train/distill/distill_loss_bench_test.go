@@ -8,11 +8,11 @@ import "testing"
 // deterministic, non-degenerate pattern (so the softmax has real spread).
 func makeBenchLogits(batch, seq, vocab int, seed float32) Logits {
 	out := make(Logits, batch)
-	for b := 0; b < batch; b++ {
+	for b := range batch {
 		row := make([][]float32, seq)
-		for s := 0; s < seq; s++ {
+		for s := range seq {
 			cell := make([]float32, vocab)
-			for v := 0; v < vocab; v++ {
+			for v := range vocab {
 				cell[v] = seed + float32((v*7+s*3+b)%13)*0.1
 			}
 			row[s] = cell

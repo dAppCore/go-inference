@@ -55,10 +55,10 @@ func TestPhraseScan_Count_DifferentialFuzz(t *testing.T) {
 	}
 	rng := rand.New(rand.NewSource(0x5CA9))
 	var sb []byte
-	for it := 0; it < fuzzIters; it++ {
+	for range fuzzIters {
 		sb = sb[:0]
 		n := rng.Intn(8)
-		for j := 0; j < n; j++ {
+		for range n {
 			sb = append(sb, frags[rng.Intn(len(frags))]...)
 		}
 		s := string(sb)

@@ -94,7 +94,7 @@ func TestTinyQwen2MoEFactoryLoad_Good(t *testing.T) {
 	// index order (packExperts' contract, already unit-tested directly in weights_test.go — this proves
 	// the SAME contract holds end-to-end through model.Load).
 	var wantGate, wantUp, wantDown []byte
-	for e := 0; e < experts; e++ {
+	for e := range experts {
 		wantGate = append(wantGate, tensors[core.Sprintf("model.layers.0.mlp.experts.%d.gate_proj.weight", e)].Data...)
 		wantUp = append(wantUp, tensors[core.Sprintf("model.layers.0.mlp.experts.%d.up_proj.weight", e)].Data...)
 		wantDown = append(wantDown, tensors[core.Sprintf("model.layers.0.mlp.experts.%d.down_proj.weight", e)].Data...)

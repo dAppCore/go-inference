@@ -3,6 +3,8 @@
 package llama4
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
@@ -109,9 +111,7 @@ func packExperts(in map[string]safetensors.Tensor, arch model.Arch) (map[string]
 	}
 	in = model.NormalizeWrapperNames(in)
 	out := make(map[string]safetensors.Tensor, len(in)+len(arch.Layer)*len(expertRoles))
-	for name, tensor := range in {
-		out[name] = tensor
-	}
+	maps.Copy(out, in)
 	for layer, spec := range arch.Layer {
 		if !spec.MoE {
 			continue // dense layer (llama4's interleaved moe_layers) — nothing to pack
@@ -145,7 +145,7 @@ func packExpertRole(in map[string]safetensors.Tensor, prefix, role string, numEx
 	outDim, inDim := first.Shape[0], first.Shape[1]
 	rowBytes := len(first.Data)
 	data := make([]byte, 0, rowBytes*numExperts)
-	for e := 0; e < numExperts; e++ {
+	for e := range numExperts {
 		name := core.Sprintf("%s%d.%s.weight", prefix, e, role)
 		t, ok := in[name]
 		if !ok {

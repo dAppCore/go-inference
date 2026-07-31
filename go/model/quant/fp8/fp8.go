@@ -61,10 +61,7 @@ func encodeE4M3(value float32) byte {
 		return sign | 0x7e
 	}
 	if value < 1.0/64 {
-		mantissa := int(math.Round(float64(value * 512)))
-		if mantissa < 0 {
-			mantissa = 0
-		}
+		mantissa := max(int(math.Round(float64(value*512))), 0)
 		if mantissa > 7 {
 			mantissa = 7
 		}

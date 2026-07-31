@@ -430,10 +430,7 @@ func (c *contentStreamer) step(contentDelta string) streamOutcome {
 	if c.inTool {
 		return streamOutcome{swallow: true} // CASE A: buffering the tool span
 	}
-	windowStart := emittedLen - c.window
-	if windowStart < 0 {
-		windowStart = 0
-	}
+	windowStart := max(emittedLen-c.window, 0)
 	scan := c.content.String()[windowStart:] // == oldTail + contentDelta, zero-copy
 	boundary := emittedLen - windowStart     // emitted/new split, in scan coords
 	// CASE B: the tool-call open marker (idx > len(emittedContent) ⟺ rel > boundary).

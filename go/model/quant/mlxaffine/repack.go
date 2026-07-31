@@ -42,8 +42,8 @@ func RepackB1ToB2(packed, scales, biases []byte, outDim, inDim, groupSize int) (
 	}
 
 	packed2 = make([]byte, outDim*wordsPerRow2*4)
-	for r := 0; r < outDim; r++ {
-		for j := 0; j < inDim; j++ {
+	for r := range outDim {
+		for j := range inDim {
 			w1 := binary.LittleEndian.Uint32(packed[(r*wordsPerRow1+j/32)*4:])
 			code := (w1 >> uint(j%32)) & 1
 			if code == 0 {

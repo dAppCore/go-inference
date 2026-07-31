@@ -79,10 +79,10 @@ func TestHeuristicScan_DifferentialFuzz(t *testing.T) {
 	}
 	rng := rand.New(rand.NewSource(0xC1AD11))
 	var sb []byte
-	for it := 0; it < scanFuzzIters; it++ {
+	for range scanFuzzIters {
 		sb = sb[:0]
 		n := rng.Intn(8)
-		for j := 0; j < n; j++ {
+		for range n {
 			sb = append(sb, frags[rng.Intn(len(frags))]...)
 		}
 		s := string(sb)

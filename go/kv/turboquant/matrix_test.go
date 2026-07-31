@@ -68,7 +68,7 @@ func TestSplitmix64_Good(t *testing.T) {
 		t.Fatal("splitmix64(42) is not deterministic")
 	}
 	seen := map[uint64]bool{}
-	for i := uint64(0); i < 1000; i++ {
+	for i := range uint64(1000) {
 		h := splitmix64(i)
 		if seen[h] {
 			t.Fatalf("splitmix64 collided within the first 1000 inputs at %d", i)
@@ -115,10 +115,10 @@ func TestHouseholderQR_Good(t *testing.T) {
 	for _, d := range []int{2, 3, 4, 8, 16, 64} {
 		a := gaussianMatrix(uint64(d)*97+1, d)
 		q := householderQR(a)
-		for i := 0; i < d; i++ {
-			for j := 0; j < d; j++ {
+		for i := range d {
+			for j := range d {
 				var dot float64
-				for k := 0; k < d; k++ {
+				for k := range d {
 					dot += q.at(k, i) * q.at(k, j)
 				}
 				want := 0.0

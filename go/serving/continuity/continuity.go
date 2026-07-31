@@ -561,10 +561,7 @@ func (m *Manager) graftConversation(ctx context.Context, entry prefixindex.Entry
 	if blockSize <= 0 {
 		return nil, core.E("continuity", "shared bundle carries no block size", nil)
 	}
-	span := matched
-	if span > blocks.TokenCount {
-		span = blocks.TokenCount
-	}
+	span := min(matched, blocks.TokenCount)
 	span -= span % blockSize
 	// Keep at least one token for the tail so the decode boundary is rebuilt,
 	// even when a prior identical conversation shares the whole prompt.

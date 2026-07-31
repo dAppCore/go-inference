@@ -20,10 +20,7 @@ func referenceLookup(context []int, maxNgram, maxDraft int) []int {
 	if L < 2 {
 		return nil
 	}
-	maxN := maxNgram
-	if maxN > L-1 {
-		maxN = L - 1
-	}
+	maxN := min(maxNgram, L-1)
 	for n := maxN; n >= 1; n-- {
 		suffixStart := L - n
 		for i := suffixStart - n; i >= 0; i-- {
@@ -38,10 +35,7 @@ func referenceLookup(context []int, maxNgram, maxDraft int) []int {
 				continue
 			}
 			from := i + n
-			end := from + maxDraft
-			if end > L {
-				end = L
-			}
+			end := min(from+maxDraft, L)
 			out := make([]int, end-from)
 			copy(out, context[from:end])
 			return out
@@ -57,7 +51,7 @@ func referenceLookup(context []int, maxNgram, maxDraft int) []int {
 // every (MaxNgram, MaxDraft) pair. A single divergence fails the pass.
 func TestNgram_Lookup_MatchesReferenceFuzz(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	for iter := 0; iter < 20000; iter++ {
+	for range 20000 {
 		L := rng.Intn(40)
 		alphabet := 1 + rng.Intn(4) // 1..4 distinct ids → frequent collisions
 		ctx := make([]int, L)

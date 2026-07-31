@@ -38,7 +38,7 @@ func quantiseGroupSymmetric(x []float64, maxCode float64) (codes []float64, scal
 	numGroups := (d + GroupSize - 1) / GroupSize
 	codes = make([]float64, d)
 	scales = make([]float64, numGroups)
-	for g := 0; g < numGroups; g++ {
+	for g := range numGroups {
 		lo := g * GroupSize
 		hi := min(lo+GroupSize, d)
 		scale := groupScale(x[lo:hi], maxCode)
@@ -137,12 +137,12 @@ func UnmarshalGroupQuantInt8(data []byte, d int) GroupQuantInt8Encoded {
 		return GroupQuantInt8Encoded{D: d}
 	}
 	codes := make([]int8, d)
-	for i := 0; i < d; i++ {
+	for i := range d {
 		codes[i] = int8(data[i])
 	}
 	scales := make([]float32, numGroups)
 	off := d
-	for g := 0; g < numGroups; g++ {
+	for g := range numGroups {
 		scales[g] = getFloat32LE(data[off:])
 		off += 4
 	}
@@ -228,7 +228,7 @@ func UnmarshalGroupQuantInt4(data []byte, d int) GroupQuantInt4Encoded {
 	}
 	scales := make([]float32, numGroups)
 	off := packedLen
-	for g := 0; g < numGroups; g++ {
+	for g := range numGroups {
 		scales[g] = getFloat32LE(data[off:])
 		off += 4
 	}

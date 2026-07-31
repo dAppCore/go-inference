@@ -170,7 +170,7 @@ func dispatch(ctx context.Context, requests []any, opts Options) <-chan ItemResu
 
 	var wg sync.WaitGroup
 	wg.Add(cap)
-	for w := 0; w < cap; w++ {
+	for range cap {
 		go func() {
 			defer wg.Done()
 			for i := range feed {

@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -39,10 +40,8 @@ func orchestratorWaitRunStatus(t *testing.T, store *orchestratorTestStore, runID
 		result := store.Run(runID)
 		if result.OK {
 			run := result.Value.(work.Run)
-			for _, status := range statuses {
-				if run.Status == status {
-					return run
-				}
+			if slices.Contains(statuses, run.Status) {
+				return run
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -203,25 +202,13 @@ func orchestratorRepositoryControlFiles(root string) core.Result {
 			return nil
 		}
 		extension := core.Lower(core.PathExt(name))
-		allowedExtension := false
-		for _, allowed := range []string{".md", ".json", ".yaml", ".yml", ".status"} {
-			if extension == allowed {
-				allowedExtension = true
-				break
-			}
-		}
+		allowedExtension := slices.Contains([]string{".md", ".json", ".yaml", ".yml", ".status"}, extension)
 		if !allowedExtension {
 			return nil
 		}
 		stem := core.TrimPrefix(core.TrimSuffix(name, extension), ".")
 		stem = core.Replace(core.Replace(stem, "_", "-"), ".", "-")
-		controlName := false
-		for _, exact := range []string{"lem", "question", "answer", "status", "state", "control"} {
-			if stem == exact {
-				controlName = true
-				break
-			}
-		}
+		controlName := slices.Contains([]string{"lem", "question", "answer", "status", "state", "control"}, stem)
 		if !controlName && core.HasPrefix(stem, "lem-") {
 			controlName = true
 		}
@@ -1530,7 +1517,7 @@ func TestRunOrchestratorPreparationCleanupRecoveryFailsClosedUntilCloseRetry(t *
 	fixture.store.mu.Unlock()
 
 	core.AssertTrue(t, fixture.orchestrator.StartQueue(context.Background()).OK)
-	for attempt := 0; attempt < retainedEventAttempts; attempt++ {
+	for range retainedEventAttempts {
 		select {
 		case <-attempted:
 		case <-time.After(5 * time.Second):

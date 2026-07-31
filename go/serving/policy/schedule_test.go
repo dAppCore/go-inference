@@ -45,9 +45,7 @@ func (f *policyFakeScheduler) Schedule(ctx context.Context, req inference.Schedu
 	f.mu.Unlock()
 
 	out := make(chan inference.ScheduledToken) // unbuffered: exercises real backpressure
-	f.wg.Add(1)
-	go func() {
-		defer f.wg.Done()
+	f.wg.Go(func() {
 		defer close(out)
 		defer cancel()
 		for i, t := range f.tokens {
@@ -60,7 +58,7 @@ func (f *policyFakeScheduler) Schedule(ctx context.Context, req inference.Schedu
 		if f.hang {
 			<-rctx.Done()
 		}
-	}()
+	})
 	return inference.RequestHandle{ID: id}, out, nil
 }
 

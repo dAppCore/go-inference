@@ -37,7 +37,7 @@ func pool(mode Pooling, hidden [][]float32) ([]float32, error) {
 		dim := len(hidden[0])
 		out := make([]float32, dim)
 		for _, row := range hidden {
-			for j := 0; j < dim; j++ {
+			for j := range dim {
 				out[j] += row[j]
 			}
 		}

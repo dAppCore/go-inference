@@ -18,7 +18,7 @@ import (
 
 func benchInferWeights() map[string]safetensors.Tensor {
 	m := make(map[string]safetensors.Tensor, 256)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		p := "model.layers." + core.Sprintf("%d", i)
 		m[p+".self_attn.q_proj.weight"] = safetensors.Tensor{Shape: []int{8 * 128, 2048}}
 		m[p+".self_attn.k_proj.weight"] = safetensors.Tensor{Shape: []int{2 * 128, 2048}}

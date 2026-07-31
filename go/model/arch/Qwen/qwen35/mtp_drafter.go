@@ -110,7 +110,7 @@ const (
 func DrafterTensorNames(nLayers int) []string {
 	w := DrafterWeightNames()
 	names := []string{DrafterFCWeight, DrafterEmbedNormWeight, DrafterHiddenNormWeight, w.FinalNorm}
-	for i := 0; i < nLayers; i++ {
+	for i := range nLayers {
 		prefix := core.Sprintf(w.LayerPrefix, i)
 		for _, suffix := range []string{
 			w.AttnNorm, w.MLPNorm, // already carry ".weight"

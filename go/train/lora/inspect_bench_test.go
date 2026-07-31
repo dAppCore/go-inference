@@ -225,7 +225,7 @@ func BenchmarkAdapter_HashAdapter_MultiShard(b *testing.B) {
 	for i := range shard {
 		shard[i] = byte(i)
 	}
-	for s := 0; s < 3; s++ {
+	for s := range 3 {
 		name := core.PathJoin(dir, "adapter-0000"+string(rune('1'+s))+"-of-00003.safetensors")
 		if result := core.WriteFile(name, shard, 0o600); !result.OK {
 			b.Fatalf("WriteFile shard %d: %v", s, result.Value)

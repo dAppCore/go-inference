@@ -3,6 +3,8 @@
 package granitemoe
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
@@ -12,9 +14,7 @@ import (
 // neutral composed MoE roles without copying their backing bytes.
 func NormalizeWeights(in map[string]safetensors.Tensor, cfg *Config) (map[string]safetensors.Tensor, error) {
 	out := make(map[string]safetensors.Tensor, len(in)+cfg.NumHiddenLayers*(3*cfg.NumLocalExperts+1))
-	for name, tensor := range in {
-		out[name] = tensor
-	}
+	maps.Copy(out, in)
 	for layer := range cfg.NumHiddenLayers {
 		base := core.Sprintf("model.layers.%d.block_sparse_moe.", layer)
 		input, inputOK := in[base+"input_linear.weight"]

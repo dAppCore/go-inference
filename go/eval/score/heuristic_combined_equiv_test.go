@@ -87,10 +87,10 @@ var heurFuzzTokens = []string{
 func buildHeurFuzzCorpus(n int) []string {
 	r := rand.New(rand.NewSource(0xC0FFEE))
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		ntok := 1 + r.Intn(24)
 		buf := make([]byte, 0, 128)
-		for j := 0; j < ntok; j++ {
+		for range ntok {
 			tok := heurFuzzTokens[r.Intn(len(heurFuzzTokens))]
 			buf = append(buf, tok...)
 			if r.Intn(2) == 0 {
@@ -167,15 +167,15 @@ func refScoreCreativeForm(response string) int {
 func buildHeurPoetryCorpus(n int) []string {
 	r := rand.New(rand.NewSource(0x5EED))
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		nlines := r.Intn(12)
 		buf := make([]byte, 0, 256)
-		for l := 0; l < nlines; l++ {
+		for l := range nlines {
 			if l > 0 {
 				buf = append(buf, '\n')
 			}
 			llen := r.Intn(80)
-			for c := 0; c < llen; c++ {
+			for range llen {
 				buf = append(buf, byte('a'+r.Intn(26)))
 			}
 		}
@@ -236,10 +236,10 @@ func buildDegenCorpus(n int) []string {
 	r := rand.New(rand.NewSource(0xDE6E))
 	pool := []string{"the cat sat", "hello world", "same", "same", "again and again", "", " ", "a"}
 	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		nsent := r.Intn(10)
 		buf := make([]byte, 0, 128)
-		for s := 0; s < nsent; s++ {
+		for range nsent {
 			buf = append(buf, pool[r.Intn(len(pool))]...)
 			if r.Intn(3) != 0 {
 				buf = append(buf, '.')

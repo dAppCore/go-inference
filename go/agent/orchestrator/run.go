@@ -1623,7 +1623,7 @@ func (orchestrator *Orchestrator) waitTerminalRetry() bool {
 }
 
 func (orchestrator *Orchestrator) persistWorkspaceRetained(run work.Run, reason string) {
-	for attempt := 0; attempt < retainedEventAttempts; attempt++ {
+	for range retainedEventAttempts {
 		eventResult := orchestrator.newEvent(run, "workspace_retained", "captured worktree retained after cleanup failure", reason)
 		if !eventResult.OK {
 			continue
@@ -1739,7 +1739,7 @@ func (orchestrator *Orchestrator) flushPendingCleanupRecoveryLocked(key string, 
 		commit.ExpectedStatus = &expected
 	}
 	var committed core.Result
-	for attempt := 0; attempt < retainedEventAttempts; attempt++ {
+	for range retainedEventAttempts {
 		committed = commitStore(orchestrator.store, commit)
 		if committed.OK {
 			return orchestrator.completePendingCleanupRecoveryLocked(key, pending, event)

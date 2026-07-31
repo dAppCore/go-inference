@@ -142,7 +142,7 @@ func TestSelectTopKDescMatchesStableSort(t *testing.T) {
 		return int(z % uint64(n))
 	}
 	for _, vocab := range []int{1, 2, 5, 8, 33, 64, 257, 1000} {
-		for trial := 0; trial < 40; trial++ {
+		for range 40 {
 			probs := make([]float32, vocab)
 			for i := range probs {
 				probs[i] = float32(nextInt(5)) // 0..4 → many collisions → tie-break coverage
@@ -158,7 +158,7 @@ func TestSelectTopKDescMatchesStableSort(t *testing.T) {
 				}
 				got := make([]int, k)
 				selectTopKDesc(got, probs, vocab)
-				for i := 0; i < k; i++ {
+				for i := range k {
 					if got[i] != ref[i] {
 						t.Fatalf("vocab=%d k=%d pos=%d: got %d, want %d (full-sort prefix %v; probs=%v)",
 							vocab, k, i, got[i], ref[i], ref[:k], probs)
@@ -551,7 +551,7 @@ func referenceTopKSample(s *Sampler, logits []byte, vocab int, p SampleParams) i
 	}
 	probs := make([]float32, vocab)
 	maxL := float32(math.Inf(-1))
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(int32(i), p.SuppressTokens) {
 			continue
 		}
@@ -561,7 +561,7 @@ func referenceTopKSample(s *Sampler, logits []byte, vocab int, p SampleParams) i
 		}
 	}
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(int32(i), p.SuppressTokens) {
 			probs[i] = 0
 			continue
@@ -571,10 +571,7 @@ func referenceTopKSample(s *Sampler, logits []byte, vocab int, p SampleParams) i
 		probs[i] = e
 		sum += e
 	}
-	keep := p.TopK
-	if keep > vocab {
-		keep = vocab
-	}
+	keep := min(p.TopK, vocab)
 	order := make([]int, keep)
 	selectTopKDesc(order, probs, vocab)
 	tok, _ := s.drawFromRanked(order, probs, nil, keep, vocab, sum, p)
@@ -601,7 +598,7 @@ func TestSampleTopKFirst_ParityWithFullExp(t *testing.T) {
 	nextInt := func(n int) int { return int(next() % uint64(n)) }
 	nextF := func() float32 { return float32(next()>>40) / float32(1<<24) }
 
-	for c := 0; c < 4000; c++ {
+	for c := range 4000 {
 		vocab := 16 + nextInt(2048)
 		vals := make([]float32, vocab)
 		switch c % 5 {

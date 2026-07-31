@@ -59,10 +59,10 @@ func TestLekScan_DifferentialFuzz(t *testing.T) {
 	}
 	rng := rand.New(rand.NewSource(0x1EC5CA))
 	var sb []byte
-	for it := 0; it < lekScanFuzzIters; it++ {
+	for range lekScanFuzzIters {
 		sb = sb[:0]
 		n := rng.Intn(8)
-		for j := 0; j < n; j++ {
+		for range n {
 			sb = append(sb, frags[rng.Intn(len(frags))]...)
 		}
 		s := string(sb)

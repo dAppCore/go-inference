@@ -240,7 +240,7 @@ func draftSyntheticTensors() map[string]safetensors.Tensor {
 		DrafterHiddenNormWeight: draftVec(d),
 		"norm.weight":           draftVec(d),
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		p := core.Sprintf("layers.%d.", i)
 		t[p+"input_layernorm.weight"] = draftVec(d)
 		t[p+"post_attention_layernorm.weight"] = draftVec(d)

@@ -118,7 +118,7 @@ func TestQProdOracle_Good(t *testing.T) {
 
 	for bits := 1; bits <= 4; bits++ {
 		var sumDelta, sumDeltaSq float64
-		for i := 0; i < samples; i++ {
+		for i := range samples {
 			e := EncodeQProd(xs[i], bits, 42)
 			xHat := DecodeQProd(e, 42)
 			exact := dot(toFloat64(ys[i]), toFloat64(xs[i]))

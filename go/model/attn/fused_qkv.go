@@ -2,6 +2,8 @@
 
 package attn
 
+import "maps"
+
 import "dappco.re/go/inference/model/safetensors"
 
 // SplitContiguousGateUp exposes a fused [gate; up] row tensor under the two
@@ -12,9 +14,7 @@ func SplitContiguousGateUp(tensors map[string]safetensors.Tensor, fused, gate, u
 		return tensors
 	}
 	out := make(map[string]safetensors.Tensor, len(tensors)+2)
-	for name, tensor := range tensors {
-		out[name] = tensor
-	}
+	maps.Copy(out, tensors)
 	rows, size := t.Shape[0]/2, len(t.Data)/2
 	shape := append([]int(nil), t.Shape...)
 	shape[0] = rows
@@ -30,9 +30,7 @@ func SplitContiguousQKV(tensors map[string]safetensors.Tensor, fused, query, key
 		return tensors
 	}
 	out := make(map[string]safetensors.Tensor, len(tensors)+3)
-	for name, tensor := range tensors {
-		out[name] = tensor
-	}
+	maps.Copy(out, tensors)
 	rowBytes := len(t.Data) / t.Shape[0]
 	makePart := func(start, rows int) safetensors.Tensor {
 		data := make([]byte, rows*rowBytes)
@@ -53,12 +51,10 @@ func SplitGroupedQKV(tensors map[string]safetensors.Tensor, fused, query, key, v
 		return tensors
 	}
 	out := make(map[string]safetensors.Tensor, len(tensors)+3)
-	for name, tensor := range tensors {
-		out[name] = tensor
-	}
+	maps.Copy(out, tensors)
 	rowBytes, qPerGroup := len(t.Data)/t.Shape[0], heads/kvHeads
 	q, k, v := make([]byte, heads*headDim*rowBytes), make([]byte, kvHeads*headDim*rowBytes), make([]byte, kvHeads*headDim*rowBytes)
-	for group := 0; group < kvHeads; group++ {
+	for group := range kvHeads {
 		base := group * (qPerGroup + 2) * headDim * rowBytes
 		qBytes := qPerGroup * headDim * rowBytes
 		copy(q[group*qBytes:(group+1)*qBytes], t.Data[base:base+qBytes])
@@ -79,13 +75,11 @@ func SplitInterleavedQKV(tensors map[string]safetensors.Tensor, fused, query, ke
 		return tensors
 	}
 	out := make(map[string]safetensors.Tensor, len(tensors)+6)
-	for name, tensor := range tensors {
-		out[name] = tensor
-	}
+	maps.Copy(out, tensors)
 	split := func(source safetensors.Tensor, columns int) (safetensors.Tensor, safetensors.Tensor, safetensors.Tensor) {
 		rowBytes := len(source.Data) / source.Shape[0]
 		parts := [3][]byte{make([]byte, heads*headDim*rowBytes), make([]byte, heads*headDim*rowBytes), make([]byte, heads*headDim*rowBytes)}
-		for h := 0; h < heads; h++ {
+		for h := range heads {
 			for part := range 3 {
 				src := (h*3 + part) * headDim * rowBytes
 				dst := h * headDim * rowBytes

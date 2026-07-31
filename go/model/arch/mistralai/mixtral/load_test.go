@@ -80,7 +80,7 @@ func TestTinyMixtralFactoryLoad_Good(t *testing.T) {
 	// "same tensor maps": packed bytes == the source per-expert tensors, concatenated in index order.
 	tensors := tinyMixtralWeights()
 	var wantGate, wantUp, wantDown []byte
-	for e := 0; e < experts; e++ {
+	for e := range experts {
 		wantGate = append(wantGate, tensors[core.Sprintf("model.layers.0.block_sparse_moe.experts.%d.w1.weight", e)].Data...)
 		wantUp = append(wantUp, tensors[core.Sprintf("model.layers.0.block_sparse_moe.experts.%d.w3.weight", e)].Data...)
 		wantDown = append(wantDown, tensors[core.Sprintf("model.layers.0.block_sparse_moe.experts.%d.w2.weight", e)].Data...)
