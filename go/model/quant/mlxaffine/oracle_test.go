@@ -79,10 +79,7 @@ func TestByteOracle_MLXCommunityGemma4_12B(t *testing.T) {
 			t.Fatalf("%s: expected a 2-D weight, got shape %v", name, bf16Ref.Shape)
 		}
 		outDim, inDim := int(bf16Ref.Shape[0]), int(bf16Ref.Shape[1])
-		rows := oracleSampleRows
-		if rows > outDim {
-			rows = outDim
-		}
+		rows := min(oracleSampleRows, outDim)
 
 		// Read the leading `rows` of the bf16 weight (row-major → a leading byte
 		// prefix) and decode to float32.

@@ -3,6 +3,8 @@
 package queue
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	coreconfig "dappco.re/go/config"
 	coreio "dappco.re/go/io"
@@ -242,15 +244,11 @@ func clonePolicy(policy Policy) Policy {
 	cloned.Concurrency = make(map[string]ConcurrencyLimit, len(policy.Concurrency))
 	for provider, limit := range policy.Concurrency {
 		models := make(map[string]int, len(limit.Models))
-		for model, modelLimit := range limit.Models {
-			models[model] = modelLimit
-		}
+		maps.Copy(models, limit.Models)
 		cloned.Concurrency[provider] = ConcurrencyLimit{Total: limit.Total, Models: models}
 	}
 	cloned.Rates = make(map[string]RateConfig, len(policy.Rates))
-	for provider, rate := range policy.Rates {
-		cloned.Rates[provider] = rate
-	}
+	maps.Copy(cloned.Rates, policy.Rates)
 	cloned.Providers = make(map[string]NativeConfig, len(policy.Providers))
 	for provider, native := range policy.Providers {
 		native.CredentialEnv = append([]string(nil), native.CredentialEnv...)

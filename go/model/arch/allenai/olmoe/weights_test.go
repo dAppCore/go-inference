@@ -78,8 +78,8 @@ func TestFactoryWeightNames_Ugly(t *testing.T) {
 // bf16) mirrors this package's own integration_test.go fixture dtype.
 func f32Tensor2D(rows, cols int, seed uint32) safetensors.Tensor {
 	data := make([]byte, rows*cols*4)
-	for r := 0; r < rows; r++ {
-		for c := 0; c < cols; c++ {
+	for r := range rows {
+		for c := range cols {
 			v := seed + uint32(r*cols+c)
 			i := (r*cols + c) * 4
 			data[i], data[i+1], data[i+2], data[i+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
@@ -93,8 +93,8 @@ func f32Tensor2D(rows, cols int, seed uint32) safetensors.Tensor {
 // role) so packExperts' concatenation ORDER is provable, not just its total byte count.
 func expertCheckpoint(numLayers, numExperts, ff, hidden int) map[string]safetensors.Tensor {
 	out := make(map[string]safetensors.Tensor)
-	for layer := 0; layer < numLayers; layer++ {
-		for e := 0; e < numExperts; e++ {
+	for layer := range numLayers {
+		for e := range numExperts {
 			base := uint32(layer*100 + e*10)
 			prefix := core.Sprintf("model.layers.%d.mlp.experts.%d.", layer, e)
 			out[prefix+"gate_proj.weight"] = f32Tensor2D(ff, hidden, base+1)
@@ -128,11 +128,11 @@ func TestPackExperts_Good(t *testing.T) {
 		}
 	}
 
-	for layer := 0; layer < numLayers; layer++ {
+	for layer := range numLayers {
 		for _, role := range expertRoles {
 			var want []byte
 			var outDim, inDim int
-			for e := 0; e < numExperts; e++ {
+			for e := range numExperts {
 				src := in[core.Sprintf("model.layers.%d.mlp.experts.%d.%s.weight", layer, e, role)]
 				want = append(want, src.Data...)
 				outDim = src.Shape[0]
@@ -164,7 +164,7 @@ func TestPackExperts_Good(t *testing.T) {
 func TestPackExperts_QuantisedScalesAndBiases_Good(t *testing.T) {
 	const numLayers, numExperts, ff, hidden, groups = 1, 3, 8, 4, 2
 	in := expertCheckpoint(numLayers, numExperts, ff, hidden)
-	for e := 0; e < numExperts; e++ {
+	for e := range numExperts {
 		base := uint32(e * 10)
 		prefix := core.Sprintf("model.layers.0.mlp.experts.%d.", e)
 		in[prefix+"gate_proj.scales"], in[prefix+"gate_proj.biases"] = f32Tensor2D(ff, groups, base+201), f32Tensor2D(ff, groups, base+202)
@@ -179,7 +179,7 @@ func TestPackExperts_QuantisedScalesAndBiases_Good(t *testing.T) {
 	for _, role := range expertRoles {
 		var wantScales, wantBiases []byte
 		var outDim int
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			sSrc := in[core.Sprintf("model.layers.0.mlp.experts.%d.%s.scales", e, role)]
 			bSrc := in[core.Sprintf("model.layers.0.mlp.experts.%d.%s.biases", e, role)]
 			wantScales = append(wantScales, sSrc.Data...)

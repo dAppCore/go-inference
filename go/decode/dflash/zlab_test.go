@@ -68,7 +68,7 @@ func zlabSyntheticWeights() dflash.ZLabWeights {
 	w["hidden_norm.weight"] = next(zlHidden)
 	w["norm.weight"] = next(zlHidden)
 	qDim, kvDim := zlHeads*zlHeadDim, zlKV*zlHeadDim
-	for li := 0; li < zlLayers; li++ {
+	for li := range zlLayers {
 		p := core.Sprintf("layers.%d.", li)
 		w[p+"input_layernorm.weight"] = next(zlHidden)
 		w[p+"post_attention_layernorm.weight"] = next(zlHidden)

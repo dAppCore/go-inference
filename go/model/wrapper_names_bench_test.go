@@ -17,7 +17,7 @@ import (
 
 func benchTensorSet(n int, prefix string) map[string]safetensors.Tensor {
 	m := make(map[string]safetensors.Tensor, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := prefix + "model.layers." + core.Sprintf("%d", i) + ".self_attn.q_proj.weight"
 		m[name] = safetensors.Tensor{Shape: []int{4096, 4096}}
 	}

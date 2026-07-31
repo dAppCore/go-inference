@@ -6,7 +6,7 @@ package lora
 
 import (
 	"context"
-	"sort"
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -274,6 +274,6 @@ func (p *Pool) Resident() []string {
 	for _, name := range p.resident {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }

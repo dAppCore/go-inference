@@ -104,9 +104,9 @@ func QuantizeTensor(values []float32, outDim, inDim, bits, groupSize int) (packe
 	scales = make([]byte, outDim*groupsPerRow*2)
 	biases = make([]byte, outDim*groupsPerRow*2)
 
-	for r := 0; r < outDim; r++ {
+	for r := range outDim {
 		rowBase := r * inDim
-		for g := 0; g < groupsPerRow; g++ {
+		for g := range groupsPerRow {
 			grp := values[rowBase+g*groupSize : rowBase+(g+1)*groupSize]
 			scale, bias := affineGroup(grp, nBins)
 
@@ -114,9 +114,9 @@ func QuantizeTensor(values []float32, outDim, inDim, bits, groupSize int) (packe
 			binary.LittleEndian.PutUint16(scales[sbi:], float32ToBFloat16(scale))
 			binary.LittleEndian.PutUint16(biases[sbi:], float32ToBFloat16(bias))
 
-			for wg := 0; wg < wordsPerGroup; wg++ {
+			for wg := range wordsPerGroup {
 				var word uint32
-				for p := 0; p < elemsPerWord; p++ {
+				for p := range elemsPerWord {
 					code := quantiseCode(grp[wg*elemsPerWord+p], bias, scale, nBins)
 					word |= code << (uint(p) * uint(bits))
 				}
@@ -193,8 +193,8 @@ func DequantizeTensor(packed, scales, biases []byte, outDim, inDim, bits, groupS
 	}
 	mask := uint32((1 << bits) - 1)
 	out := make([]float32, outDim*inDim)
-	for r := 0; r < outDim; r++ {
-		for j := 0; j < inDim; j++ {
+	for r := range outDim {
+		for j := range inDim {
 			wordIdx := r*wordsPerRow + j/elemsPerWord
 			shift := uint(j%elemsPerWord) * uint(bits)
 			code := (binary.LittleEndian.Uint32(packed[wordIdx*4:]) >> shift) & mask

@@ -94,7 +94,7 @@ func TestReasoning_FindReasoningStart_AnchorMatchesNaive_Good(t *testing.T) {
 	rnd := func() uint64 { st = st*6364136223846793005 + 1442695040888963407; return st >> 1 }
 	for _, markers := range sets {
 		leads := reasoningMarkerLeadBytes(markers)
-		for iter := 0; iter < 60000; iter++ {
+		for range 60000 {
 			b := core.NewBuilder()
 			for k := int(rnd()%10) + 1; k > 0; k-- {
 				b.WriteString(frags[rnd()%uint64(len(frags))])

@@ -89,10 +89,7 @@ func decoderAttnCore(q, k, v []float32, tq, tk, numHeads, headDim, offset int) [
 	parallelFor(numHeads*tq, func(unit int) {
 		h, i := unit/tq, unit%tq
 		off := h * headDim
-		limit := offset + i + 1
-		if limit > tk {
-			limit = tk
-		}
+		limit := min(offset+i+1, tk)
 		scores := make([]float64, limit)
 		qi := q[i*hidden+off : i*hidden+off+headDim]
 		maxScore := math.Inf(-1)

@@ -23,7 +23,7 @@ func TestLloydMax_Good(t *testing.T) {
 				t.Errorf("levels=%d: centroids not strictly sorted at %d: %v >= %v", levels, i, c[i-1], c[i])
 			}
 		}
-		for i := 0; i < len(c); i++ {
+		for i := range c {
 			mirror := c[len(c)-1-i]
 			if !approxEqual(c[i], -mirror, 1e-4) {
 				t.Errorf("levels=%d: centroid[%d]=%v is not the mirror of centroid[%d]=%v", levels, i, c[i], len(c)-1-i, mirror)
@@ -142,7 +142,7 @@ func expectedQuantisationMSE(table *densityTable, centroids []float64) float64 {
 		n := int((hi-lo)/step) + 1
 		h := (hi - lo) / float64(n)
 		var x2f float64
-		for i := 0; i < n; i++ {
+		for i := range n {
 			x := lo + (float64(i)+0.5)*h
 			x2f += x * x * sphereMarginalDensity(x, 128, logConst) * h
 		}

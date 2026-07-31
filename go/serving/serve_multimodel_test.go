@@ -228,7 +228,7 @@ func TestMultiModelResolver_Route_Profile_Good(t *testing.T) {
 	spy := newPresetSpy()
 	r := mustResolver(t, []ModelSpec{
 		{ID: "qwen3", Path: "/m/qwen3", Profiles: map[string]ProfileConfig{
-			"creative": {Temperature: ptrFloat32(0.9)},
+			"creative": {Temperature: new(float32(0.9))},
 		}},
 	}, MultiModelOptions{})
 	r.setLoader(func(string, ...inference.LoadOption) (inference.TextModel, error) { return spy, nil })
@@ -477,8 +477,8 @@ func TestMultiModelResolver_SetPinned_Good(t *testing.T) {
 func TestMultiModelResolver_ListedModelIDs_Good(t *testing.T) {
 	r := mustResolver(t, []ModelSpec{
 		{ID: "qwen3", Path: "/m/qwen3", Profiles: map[string]ProfileConfig{
-			"creative": {Temperature: ptrFloat32(0.9)},
-			"precise":  {Temperature: ptrFloat32(0.0)},
+			"creative": {Temperature: new(float32(0.9))},
+			"precise":  {Temperature: new(float32(0.0))},
 		}},
 		{ID: "bge", Path: "/m/bge"},
 	}, MultiModelOptions{})
@@ -553,13 +553,13 @@ func TestMultiModelResolver_ConcurrentResolve_Race(t *testing.T) {
 	r := mustResolver(t, []ModelSpec{
 		{ID: "a", Path: "/m/a", EstBytes: 100},
 		{ID: "b", Path: "/m/b", EstBytes: 100},
-		{ID: "c", Path: "/m/c", EstBytes: 100, Profiles: map[string]ProfileConfig{"fast": {MaxTokens: ptrInt(16)}}},
+		{ID: "c", Path: "/m/c", EstBytes: 100, Profiles: map[string]ProfileConfig{"fast": {MaxTokens: new(16)}}},
 	}, MultiModelOptions{MemoryCeiling: 250, IdleTTL: time.Millisecond})
 	r.setLoader(loader)
 
 	names := []string{"a", "b", "c", "c:fast", "unknown"}
 	var wg sync.WaitGroup
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -693,7 +693,7 @@ func TestMultiModelResolver_Scheduler_ProfileRouting_Good(t *testing.T) {
 	spy := newPresetSpy()
 	r := mustResolver(t, []ModelSpec{
 		{ID: "a", Path: "/m/a", Profiles: map[string]ProfileConfig{
-			"creative": {Temperature: ptrFloat32(0.9)},
+			"creative": {Temperature: new(float32(0.9))},
 		}},
 	}, MultiModelOptions{})
 	r.setLoader(func(string, ...inference.LoadOption) (inference.TextModel, error) { return spy, nil })

@@ -234,7 +234,7 @@ func TestTensors_GgufDequantizeQ8_0ToF16_Good(t *testing.T) {
 	for i, p := range []uint16{0x0000, 0x3C00, 0x4000, 0x4200, 0xBC00, 0xC000, 0x4400, 0xC400} {
 		want[i] = p
 	}
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		got := binary.LittleEndian.Uint16(out[i*2 : i*2+2])
 		if got != want[i] {
 			t.Fatalf("Q8_0 element %d = %#04x, want %#04x", i, got, want[i])
@@ -281,7 +281,7 @@ func TestTensors_GgufDequantizeQ4_0ToF16_Good(t *testing.T) {
 	want[0] = 0x3C00  // +1
 	want[1] = 0x4000  // +2
 	want[17] = 0xC000 // -2
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		got := binary.LittleEndian.Uint16(out[i*2 : i*2+2])
 		if got != want[i] {
 			t.Fatalf("Q4_0 element %d = %#04x, want %#04x", i, got, want[i])

@@ -51,7 +51,8 @@ func (c *Config) Arch() (model.Arch, error) {
 		HeadDim: c.Hidden / c.Heads, GlobalHeadDim: c.Hidden / c.Heads, FF: ff, Vocab: c.Vocab, Eps: eps,
 		AttnScale: float32(1 / math.Sqrt(float64(c.Hidden/c.Heads))), EmbedScale: 1,
 		LearnedAbsolutePositions: true, MultiQueryAttention: c.MultiQuery, Activation: c.Activation,
-		TieWordEmbeddings: boolPtr(true), Layer: layers}, nil
+		TieWordEmbeddings: new(true), Layer: layers}, nil
 }
 
-func boolPtr(v bool) *bool { return &v }
+//go:fix inline
+func boolPtr(v bool) *bool { return new(v) }

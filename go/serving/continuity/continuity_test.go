@@ -270,7 +270,7 @@ func TestManagerChat_ThinkingOverride_RepeatDeclines(t *testing.T) {
 
 	req := []inference.Message{{Role: "user", Content: "Write the integers from 1 to 800"}}
 	off := false
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, ok := m.Chat(ctx, req, inference.WithMaxTokens(48), inference.WithEnableThinking(&off)); ok {
 			t.Fatalf("repeat %d: a deterministic override request must decline to stateless, not be served by the lane", i)
 		}

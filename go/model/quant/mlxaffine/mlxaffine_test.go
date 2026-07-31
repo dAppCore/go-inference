@@ -15,10 +15,10 @@ import (
 // max-edge-dominant branches of the affine derivation.
 func synthWeight(outDim, inDim int) []float32 {
 	w := make([]float32, outDim*inDim)
-	for r := 0; r < outDim; r++ {
+	for r := range outDim {
 		amp := 0.01 + 0.5*float32(r+1)/float32(outDim)
 		bias := 0.1 * float32(r%3-1) // -0.1, 0, +0.1 across rows
-		for c := 0; c < inDim; c++ {
+		for c := range inDim {
 			w[r*inDim+c] = bias + amp*float32(math.Sin(float64(r*7+c)*0.013))
 		}
 	}
@@ -52,7 +52,7 @@ func TestQuantizeTensor_RoundTripWithinGroupBound(t *testing.T) {
 		nBins := float32(int(1<<uint(tc.bits)) - 1)
 		groups := tc.inDim / tc.groupSize
 		for r := 0; r < tc.outDim; r++ {
-			for g := 0; g < groups; g++ {
+			for g := range groups {
 				lo, hi := float32(math.Inf(1)), float32(math.Inf(-1))
 				var maxAbs float32
 				for c := g * tc.groupSize; c < (g+1)*tc.groupSize; c++ {

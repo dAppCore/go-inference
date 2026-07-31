@@ -86,8 +86,8 @@ func TestFactoryWeightNames_Ugly(t *testing.T) {
 // shape/length probe.
 func bf16Tensor2D(rows, cols int, seed uint16) safetensors.Tensor {
 	data := make([]byte, rows*cols*2)
-	for r := 0; r < rows; r++ {
-		for c := 0; c < cols; c++ {
+	for r := range rows {
+		for c := range cols {
 			v := seed + uint16(r*cols+c)
 			i := (r*cols + c) * 2
 			data[i], data[i+1] = byte(v), byte(v>>8)
@@ -107,11 +107,11 @@ func bf16Tensor2D(rows, cols int, seed uint16) safetensors.Tensor {
 // wrapper prefix (see FactoryWeightNames' doc) — packExperts must resolve it itself.
 func llama4NormalisedCheckpoint(numLayers, numExperts, ff, hidden int, moeLayers map[int]bool) map[string]safetensors.Tensor {
 	out := make(map[string]safetensors.Tensor)
-	for layer := 0; layer < numLayers; layer++ {
+	for layer := range numLayers {
 		if !moeLayers[layer] {
 			continue
 		}
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			base := uint16(layer*100 + e*10)
 			prefix := core.Sprintf("language_model.model.layers.%d.mlp.experts.%d.", layer, e)
 			out[prefix+"gate_proj.weight"] = bf16Tensor2D(ff, hidden, base+1)
@@ -166,7 +166,7 @@ func TestPackExperts_Good(t *testing.T) {
 		for _, role := range expertRoles {
 			var want []byte
 			var outDim, inDim int
-			for e := 0; e < numExperts; e++ {
+			for e := range numExperts {
 				src := in[core.Sprintf("language_model.model.layers.%d.mlp.experts.%d.%s.weight", layer, e, role)]
 				want = append(want, src.Data...)
 				outDim, inDim = src.Shape[0], src.Shape[1]

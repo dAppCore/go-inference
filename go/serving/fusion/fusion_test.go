@@ -5,7 +5,6 @@ package fusion
 import (
 	"context"
 	"slices"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -462,7 +461,7 @@ func panelIDs(prs []PanelResponse) []string {
 	for _, pr := range prs {
 		ids = append(ids, pr.ModelID)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }
 

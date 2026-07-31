@@ -88,7 +88,7 @@ func TestTinyOLMoEFactoryLoad_Good(t *testing.T) {
 	// "same tensor maps": packed bytes == the source per-expert tensors, concatenated in index order.
 	tensors := tinyOLMoEWeights()
 	var wantGate, wantUp, wantDown []byte
-	for e := 0; e < experts; e++ {
+	for e := range experts {
 		wantGate = append(wantGate, tensors[core.Sprintf("model.layers.0.mlp.experts.%d.gate_proj.weight", e)].Data...)
 		wantUp = append(wantUp, tensors[core.Sprintf("model.layers.0.mlp.experts.%d.up_proj.weight", e)].Data...)
 		wantDown = append(wantDown, tensors[core.Sprintf("model.layers.0.mlp.experts.%d.down_proj.weight", e)].Data...)

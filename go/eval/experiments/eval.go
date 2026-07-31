@@ -3,7 +3,7 @@
 package experiments
 
 import (
-	"sort"
+	"slices"
 
 	core "dappco.re/go"
 )
@@ -114,7 +114,7 @@ func (e *Eval) Snapshot(datasetID, tag string) core.Result {
 	for _, ex := range exs {
 		ids = append(ids, ex.ID)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return core.Ok(Version{DatasetID: datasetID, Tag: tag, ExampleIDs: ids})
 }
 

@@ -5,7 +5,7 @@ package gguf
 import (
 	"encoding/binary"
 	"math"
-	"sort"
+	"slices"
 	"strconv"
 
 	core "dappco.re/go"
@@ -64,7 +64,7 @@ func ggufQuantizeMetadata(source Source, format QuantizeFormat, labels map[strin
 		for key := range labels {
 			keys = append(keys, key)
 		}
-		sort.Strings(keys)
+		slices.Sort(keys)
 		for _, key := range keys {
 			metadata = append(metadata, MetadataEntry{Key: "gguf.label." + key, ValueType: ValueTypeString, Value: labels[key]})
 		}

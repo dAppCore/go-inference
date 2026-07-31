@@ -63,7 +63,7 @@ func (m *matrix) mulVecT(v []float64) []float64 {
 // and directly as the degenerate d==1 rotation.
 func identityMatrix(d int) *matrix {
 	m := newMatrix(d)
-	for i := 0; i < d; i++ {
+	for i := range d {
 		m.set(i, i, 1)
 	}
 	return m
@@ -172,7 +172,7 @@ func householderQR(a *matrix) *matrix {
 		}
 		// Q := Q · H_k (H_k symmetric, so this accumulates the product that
 		// makes A = Q·R hold).
-		for i := 0; i < d; i++ {
+		for i := range d {
 			var dot float64
 			for j := k; j < d; j++ {
 				dot += q.at(i, j) * v[j]
@@ -186,9 +186,9 @@ func householderQR(a *matrix) *matrix {
 
 	// Mezzadri sign correction: flip Q's column i if R's diagonal entry i is
 	// negative, so R would have a non-negative diagonal.
-	for i := 0; i < d; i++ {
+	for i := range d {
 		if r.at(i, i) < 0 {
-			for row := 0; row < d; row++ {
+			for row := range d {
 				q.set(row, i, -q.at(row, i))
 			}
 		}

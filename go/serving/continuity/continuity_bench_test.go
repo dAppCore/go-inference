@@ -35,7 +35,7 @@ func benchConversation(turns int) []inference.Message {
 		"you are actually serving in production rather than a synthetic micro-bench."
 	msgs := make([]inference.Message, 0, turns*2+1)
 	msgs = append(msgs, inference.Message{Role: "system", Content: "You are a careful assistant."})
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		msgs = append(msgs, inference.Message{Role: "user", Content: "Question " + strconv.Itoa(i) + ": " + body})
 		msgs = append(msgs, inference.Message{Role: "assistant", Content: "Answer " + strconv.Itoa(i) + ": " + body})
 	}

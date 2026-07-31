@@ -363,7 +363,7 @@ func (service *softServe) acquireOwner() core.Result {
 	record := ownerRecord{PID: pid, StartedAt: core.Now().UTC()}
 	receipt := core.JSONMarshalString(record)
 	ownerPath := core.PathJoin(service.options.DataPath, ownerFilename)
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		opened := service.runOperation("owner-open", func() core.Result {
 			return core.OpenFile(ownerPath, core.O_CREATE|core.O_EXCL|core.O_NOFOLLOW|core.O_WRONLY, 0o600)
 		})

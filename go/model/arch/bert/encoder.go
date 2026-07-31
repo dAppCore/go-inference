@@ -124,7 +124,7 @@ func (w *Weights) forwardSegments(cfg Config, ids, tokenTypes []int32) ([][]floa
 		}
 		typeRow := w.typeEmbeddings[int(typeID)*hiddenSize : (int(typeID)+1)*hiddenSize]
 		summed := make([]float32, hiddenSize)
-		for j := 0; j < hiddenSize; j++ {
+		for j := range hiddenSize {
 			summed[j] = wordRow[j] + posRow[j] + typeRow[j]
 		}
 		hidden[pos] = layerNorm(summed, w.embLNW, w.embLNB, cfg.LayerNormEps)
@@ -150,24 +150,24 @@ func encoderLayer(cfg Config, layer *layerWeights, hidden [][]float32) [][]float
 	value := linearBatch(hidden, layer.valueW, layer.valueB, hiddenSize, hiddenSize)
 
 	context := make([][]float32, seqLen)
-	for i := 0; i < seqLen; i++ {
+	for i := range seqLen {
 		context[i] = make([]float32, hiddenSize)
 	}
 	scores := make([]float64, seqLen)
-	for h := 0; h < heads; h++ {
+	for h := range heads {
 		off := h * headDim
-		for i := 0; i < seqLen; i++ {
-			for j := 0; j < seqLen; j++ {
+		for i := range seqLen {
+			for j := range seqLen {
 				var dot float64
-				for d := 0; d < headDim; d++ {
+				for d := range headDim {
 					dot += float64(query[i][off+d]) * float64(key[j][off+d])
 				}
 				scores[j] = dot * scale
 			}
 			softmax(scores)
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				var acc float64
-				for j := 0; j < seqLen; j++ {
+				for j := range seqLen {
 					acc += scores[j] * float64(value[j][off+d])
 				}
 				context[i][off+d] = float32(acc)
@@ -180,7 +180,7 @@ func encoderLayer(cfg Config, layer *layerWeights, hidden [][]float32) [][]float
 	attnDense := query
 	linearBatchInto(attnDense, context, layer.attnDenseW, layer.attnDenseB, hiddenSize, hiddenSize)
 	attnNorm := key
-	for i := 0; i < seqLen; i++ {
+	for i := range seqLen {
 		addInPlace(attnDense[i], hidden[i])
 		layerNormInto(attnNorm[i], attnDense[i], layer.attnLNW, layer.attnLNB, cfg.LayerNormEps)
 	}
@@ -196,7 +196,7 @@ func encoderLayer(cfg Config, layer *layerWeights, hidden [][]float32) [][]float
 	ffn := value
 	linearBatchInto(ffn, intermediate, layer.outW, layer.outB, cfg.IntermediateSize, hiddenSize)
 	out := context
-	for i := 0; i < seqLen; i++ {
+	for i := range seqLen {
 		addInPlace(ffn[i], attnNorm[i])
 		layerNormInto(out[i], ffn[i], layer.outLNW, layer.outLNB, cfg.LayerNormEps)
 	}
@@ -215,10 +215,10 @@ func linearBatchInto(out, x [][]float32, weight, bias []float32, inDim, outDim i
 	for m := range x {
 		xRow := x[m]
 		outRow := out[m]
-		for o := 0; o < outDim; o++ {
+		for o := range outDim {
 			row := weight[o*inDim : (o+1)*inDim]
 			var acc float64
-			for i := 0; i < inDim; i++ {
+			for i := range inDim {
 				acc += float64(xRow[i]) * float64(row[i])
 			}
 			if bias != nil {
@@ -243,10 +243,10 @@ func makeRows(rowCount, columnCount int) [][]float32 {
 // The dot product accumulates in float64 to stay close to the reference.
 func linear(x, weight, bias []float32, inDim, outDim int) []float32 {
 	out := make([]float32, outDim)
-	for o := 0; o < outDim; o++ {
+	for o := range outDim {
 		row := weight[o*inDim : (o+1)*inDim]
 		var acc float64
-		for i := 0; i < inDim; i++ {
+		for i := range inDim {
 			acc += float64(x[i]) * float64(row[i])
 		}
 		if bias != nil {

@@ -4,6 +4,7 @@ package orchestrator
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -70,13 +71,7 @@ func (runner *orchestratorTestGitRunner) Run(ctx context.Context, command worksp
 	if !result.OK {
 		return result
 	}
-	push := false
-	for _, argument := range command.Args {
-		if argument == "push" {
-			push = true
-			break
-		}
-	}
+	push := slices.Contains(command.Args, "push")
 	if push {
 		runner.mu.Lock()
 		hook := runner.afterPush
@@ -132,12 +127,7 @@ func (runner *orchestratorTestGitRunner) setPause(predicate func(workspace.Comma
 }
 
 func orchestratorWorkspaceCommandHasArgument(command workspace.Command, expected string) bool {
-	for _, argument := range command.Args {
-		if argument == expected {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(command.Args, expected)
 }
 
 type orchestratorTestStore struct {
@@ -1052,7 +1042,7 @@ func TestOrchestratorRecoveryInterruptsUnsafeRuns(t *testing.T) {
 	})
 	core.AssertTrue(t, result.OK, result.Error())
 	recovered := result.Value.(*Orchestrator)
-	for index := 0; index < 4; index++ {
+	for index := range 4 {
 		run := fixture.store.Run(core.Sprintf("recovery-%d", index))
 		core.AssertTrue(t, run.OK, run.Error())
 		core.AssertEqual(t, work.RunInterrupted, run.Value.(work.Run).Status)

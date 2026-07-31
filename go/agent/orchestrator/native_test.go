@@ -262,7 +262,7 @@ func TestNativeEnvironmentIsolationAndRedaction(t *testing.T) {
 func TestNativeFastOutputIsBuffered(t *testing.T) {
 	launcher := nativeTestLauncher(t, "PATH")
 	script := nativeTestScript(t, "printf 'early-one\\n'\nprintf 'early-two\\n'\n")
-	for attempt := 0; attempt < 10; attempt++ {
+	for range 10 {
 		var mu sync.Mutex
 		lines := make([]string, 0, 2)
 		started := launcher.Start(context.Background(), provider.Command{

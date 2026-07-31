@@ -45,12 +45,12 @@ func lloydMax(table *densityTable, levels int) []float64 {
 
 	boundaries := make([]float64, levels+1)
 	boundaries[0], boundaries[levels] = -1, 1
-	for iter := 0; iter < lloydMaxMaxIters; iter++ {
+	for range lloydMaxMaxIters {
 		for i := 1; i < levels; i++ {
 			boundaries[i] = (centroids[i-1] + centroids[i]) / 2
 		}
 		maxDelta := 0.0
-		for i := 0; i < levels; i++ {
+		for i := range levels {
 			mass, moment := table.integrate(boundaries[i], boundaries[i+1])
 			next := centroids[i]
 			if mass > 0 {

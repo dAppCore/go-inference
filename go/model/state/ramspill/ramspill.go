@@ -280,7 +280,7 @@ func (s *Store) access(ctx context.Context, chunkID int) ([]byte, state.ChunkRef
 	}
 
 	blockID := strconv.Itoa(chunkID)
-	for attempt := 0; attempt < reviveAttempts; attempt++ {
+	for range reviveAttempts {
 		if err := s.tier.Access(ctx, blockID); err != nil && !core.Is(err, kvtier.ErrUnknownBlock) {
 			return nil, state.ChunkRef{}, core.E("ramspill.Store", "revive chunk "+blockID, err)
 		}

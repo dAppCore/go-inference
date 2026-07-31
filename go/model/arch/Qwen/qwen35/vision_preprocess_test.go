@@ -206,11 +206,11 @@ func TestResizeBicubicRGB_Upscale_Good(t *testing.T) {
 		y, x int
 		want [3]float64
 	}{
-		{0, 0, [3]float64{16, 16, 24}},     // deep background, untouched
+		{0, 0, [3]float64{16, 16, 24}},       // deep background, untouched
 		{128, 128, [3]float64{230, 220, 40}}, // deep foreground, untouched
-		{70, 70, [3]float64{230, 220, 40}},  // just inside the foreground edge, still exact
-		{128, 64, [3]float64{156, 149, 34}}, // genuinely blended — edge transition row
-		{128, 67, [3]float64{246, 235, 41}}, // genuinely blended — edge transition row
+		{70, 70, [3]float64{230, 220, 40}},   // just inside the foreground edge, still exact
+		{128, 64, [3]float64{156, 149, 34}},  // genuinely blended — edge transition row
+		{128, 67, [3]float64{246, 235, 41}},  // genuinely blended — edge transition row
 	}
 	for _, c := range cases {
 		base := (c.y*256 + c.x) * 3

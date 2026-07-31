@@ -7,7 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"io"
-	"sort"
+	"slices"
 	"time"
 
 	core "dappco.re/go"
@@ -126,7 +126,7 @@ func BuildModelBook(opts ModelBookOptions) core.Result {
 			names = append(names, e.Name())
 		}
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	if len(names) == 0 {
 		return core.Fail(core.E("modelmgmt.BuildModelBook", "no .safetensors files found in "+opts.ModelDir, nil))
 	}

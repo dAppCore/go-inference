@@ -20,7 +20,7 @@ package probe
 
 import (
 	"net/http"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -164,7 +164,7 @@ func (s *LineProtocolSink) emitScore(step int, score *Score) {
 	for dim := range score.Values {
 		dims = append(dims, dim)
 	}
-	sort.Strings(dims)
+	slices.Sort(dims)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

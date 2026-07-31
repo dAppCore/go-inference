@@ -12,7 +12,7 @@ import (
 // requested channels.
 func TestNewMixedSplitDescriptor_Good(t *testing.T) {
 	split := NewMixedSplitDescriptor(16, []int{0, 5, 15}, 2, 3)
-	for ch := 0; ch < 16; ch++ {
+	for ch := range 16 {
 		want := ch == 0 || ch == 5 || ch == 15
 		if got := split.isOutlier(ch); got != want {
 			t.Errorf("isOutlier(%d) = %v, want %v", ch, got, want)

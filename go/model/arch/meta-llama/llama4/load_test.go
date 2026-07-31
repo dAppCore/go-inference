@@ -109,7 +109,7 @@ func TestTinyLlama4FactoryLoad_Good(t *testing.T) {
 		t.Fatalf("NormalizeWeights: %v", err)
 	}
 	var wantGate, wantUp, wantDown []byte
-	for e := 0; e < experts; e++ {
+	for e := range experts {
 		wantGate = append(wantGate, normalised[core.Sprintf("language_model.model.layers.1.mlp.experts.%d.gate_proj.weight", e)].Data...)
 		wantUp = append(wantUp, normalised[core.Sprintf("language_model.model.layers.1.mlp.experts.%d.up_proj.weight", e)].Data...)
 		wantDown = append(wantDown, normalised[core.Sprintf("language_model.model.layers.1.mlp.experts.%d.down_proj.weight", e)].Data...)

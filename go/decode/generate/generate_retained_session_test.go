@@ -72,9 +72,11 @@ func (f *retainedFakeTextModel) ChatRetained(ctx context.Context, rs any, messag
 	return fakeRetainedTokenStream(cfg.MaxTokens)
 }
 
-func (f *retainedFakeTextModel) Err() core.Result                   { return core.Ok(nil) }
-func (f *retainedFakeTextModel) Close() core.Result                 { return core.Ok(nil) }
-func (f *retainedFakeTextModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
+func (f *retainedFakeTextModel) Err() core.Result   { return core.Ok(nil) }
+func (f *retainedFakeTextModel) Close() core.Result { return core.Ok(nil) }
+func (f *retainedFakeTextModel) Metrics() inference.GenerateMetrics {
+	return inference.GenerateMetrics{}
+}
 
 // retainedFakeBackend registers retainedFakeTextModel behind a unique test-
 // only backend name (routed to via inference.WithBackend), so RunGenerate's
@@ -174,9 +176,11 @@ func (f *chatOnlyFakeTextModel) Chat(ctx context.Context, messages []inference.M
 	return fakeRetainedTokenStream(cfg.MaxTokens)
 }
 
-func (f *chatOnlyFakeTextModel) Err() core.Result                   { return core.Ok(nil) }
-func (f *chatOnlyFakeTextModel) Close() core.Result                 { return core.Ok(nil) }
-func (f *chatOnlyFakeTextModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
+func (f *chatOnlyFakeTextModel) Err() core.Result   { return core.Ok(nil) }
+func (f *chatOnlyFakeTextModel) Close() core.Result { return core.Ok(nil) }
+func (f *chatOnlyFakeTextModel) Metrics() inference.GenerateMetrics {
+	return inference.GenerateMetrics{}
+}
 
 // chatOnlyFakeBackend is path-gated on stubModelPath for the same reason as
 // retainedFakeBackend above — see its comment.

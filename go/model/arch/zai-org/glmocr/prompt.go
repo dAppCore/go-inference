@@ -157,10 +157,7 @@ func PositionIDs(mmType []int32, gridT, gridH, gridW, spatialMerge int) (tPos, h
 				}
 			}
 		}
-		maxDim := gridH
-		if gridW > maxDim {
-			maxDim = gridW
-		}
+		maxDim := max(gridW, gridH)
 		current += maxDim / spatialMerge
 		imageUsed = true
 		i = j

@@ -40,10 +40,7 @@ func parallelFor(n int, fn func(i int)) {
 		}
 		return
 	}
-	workers := runtime.GOMAXPROCS(0)
-	if workers > n {
-		workers = n
-	}
+	workers := min(runtime.GOMAXPROCS(0), n)
 	if workers <= 1 {
 		for i := range n {
 			fn(i)

@@ -107,10 +107,7 @@ func mhaCore(q, k, v []float32, Tq, Tk, H, headDim, offset int, causal bool) []f
 		for i := range Tq {
 			limit := Tk
 			if causal {
-				limit = offset + i + 1
-				if limit > Tk {
-					limit = Tk
-				}
+				limit = min(offset+i+1, Tk)
 			}
 			qi := q[i*D+off : i*D+off+headDim]
 			var maxScore float64 = math.Inf(-1)

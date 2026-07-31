@@ -347,7 +347,7 @@ func TestThinking_FindStartTerminator_AnchorMatchesNaive_Good(t *testing.T) {
 	rnd := func() uint64 { st = st*6364136223846793005 + 1442695040888963407; return st >> 1 }
 	for _, hint := range hints {
 		p := NewProcessor(Config{Mode: Hide}, hint)
-		for iter := 0; iter < 50000; iter++ {
+		for range 50000 {
 			b := core.NewBuilder()
 			for k := int(rnd()%9) + 1; k > 0; k-- {
 				b.WriteString(frags[rnd()%uint64(len(frags))])

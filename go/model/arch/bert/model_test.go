@@ -84,7 +84,7 @@ func buildSyntheticSnapshot(dir string, seed int) error {
 	add("embeddings.token_type_embeddings.weight", []int{synTypeVocab, synHidden})
 	add("embeddings.LayerNorm.weight", []int{synHidden})
 	add("embeddings.LayerNorm.bias", []int{synHidden})
-	for l := 0; l < synLayers; l++ {
+	for l := range synLayers {
 		p := "encoder.layer." + itoa(l) + "."
 		add(p+"attention.self.query.weight", []int{synHidden, synHidden})
 		add(p+"attention.self.query.bias", []int{synHidden})

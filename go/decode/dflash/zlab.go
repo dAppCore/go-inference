@@ -110,7 +110,7 @@ const zlabBF16Size = 2
 func ZLabWidenBF16(raw []byte) []float32 {
 	n := len(raw) / zlabBF16Size
 	out := make([]float32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i] = math.Float32frombits(uint32(uint16(raw[2*i])|uint16(raw[2*i+1])<<8) << 16)
 	}
 	return out
@@ -274,12 +274,12 @@ func zlabAttention(w ZLabWeights, li int, normedHidden, targetHidden []float32, 
 	scale := float32(1.0 / math.Sqrt(float64(arch.HeadDim)))
 	attnOut := make([]float32, blockLen*qDim)
 	scores := make([]float32, totalKV)
-	for r := 0; r < blockLen; r++ {
+	for r := range blockLen {
 		for h := 0; h < arch.Heads; h++ {
 			kvh := h / group
 			qVec := q[(r*arch.Heads+h)*arch.HeadDim : (r*arch.Heads+h+1)*arch.HeadDim]
 			maxS := float32(math.Inf(-1))
-			for t := 0; t < totalKV; t++ {
+			for t := range totalKV {
 				kVec := k[(t*arch.KVHeads+kvh)*arch.HeadDim : (t*arch.KVHeads+kvh+1)*arch.HeadDim]
 				var dot float32
 				for d := 0; d < arch.HeadDim; d++ {
@@ -292,7 +292,7 @@ func zlabAttention(w ZLabWeights, li int, normedHidden, targetHidden []float32, 
 				}
 			}
 			var sum float32
-			for t := 0; t < totalKV; t++ {
+			for t := range totalKV {
 				e := float32(math.Exp(float64(scores[t] - maxS)))
 				scores[t] = e
 				sum += e
@@ -300,7 +300,7 @@ func zlabAttention(w ZLabWeights, li int, normedHidden, targetHidden []float32, 
 			outBase := (r*arch.Heads + h) * arch.HeadDim
 			for d := 0; d < arch.HeadDim; d++ {
 				var acc float32
-				for t := 0; t < totalKV; t++ {
+				for t := range totalKV {
 					acc += (scores[t] / sum) * v[(t*arch.KVHeads+kvh)*arch.HeadDim+d]
 				}
 				attnOut[outBase+d] = acc
@@ -342,7 +342,7 @@ func zlabMLP(w ZLabWeights, li int, x []float32, rows int, arch ZLabArch) ([]flo
 // is bias-free).
 func zlabLinear(x, weight []float32, outDim, inDim int) []float32 {
 	out := make([]float32, outDim)
-	for o := 0; o < outDim; o++ {
+	for o := range outDim {
 		row := weight[o*inDim : (o+1)*inDim]
 		var acc float32
 		for i, xv := range x {
@@ -357,7 +357,7 @@ func zlabLinear(x, weight []float32, outDim, inDim int) []float32 {
 // matrix, yielding a [rows, outDim] matrix (both flattened row-major).
 func zlabLinearRows(x []float32, rows int, weight []float32, outDim, inDim int) []float32 {
 	out := make([]float32, rows*outDim)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		y := zlabLinear(x[r*inDim:(r+1)*inDim], weight, outDim, inDim)
 		copy(out[r*outDim:(r+1)*outDim], y)
 	}
@@ -369,14 +369,14 @@ func zlabLinearRows(x []float32, rows int, weight []float32, outDim, inDim int) 
 // rows rows of a [rows, dim] matrix.
 func zlabRMSNormRows(x []float32, rows, dim int, weight []float32, eps float32) []float32 {
 	out := make([]float32, rows*dim)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		row := x[r*dim : (r+1)*dim]
 		var ss float64
 		for _, v := range row {
 			ss += float64(v) * float64(v)
 		}
 		inv := float32(1.0 / math.Sqrt(ss/float64(dim)+float64(eps)))
-		for i := 0; i < dim; i++ {
+		for i := range dim {
 			out[r*dim+i] = row[i] * inv * weight[i]
 		}
 	}
@@ -401,11 +401,11 @@ func zlabRopeCosSin(total, headDim int, theta float32) (cos, sin []float32) {
 	cos = make([]float32, total*headDim)
 	sin = make([]float32, total*headDim)
 	invFreq := make([]float64, half)
-	for i := 0; i < half; i++ {
+	for i := range half {
 		invFreq[i] = 1.0 / math.Pow(float64(theta), float64(2*i)/float64(headDim))
 	}
-	for t := 0; t < total; t++ {
-		for i := 0; i < half; i++ {
+	for t := range total {
+		for i := range half {
 			th := float64(t) * invFreq[i]
 			c := float32(math.Cos(th))
 			s := float32(math.Sin(th))
@@ -426,12 +426,12 @@ func zlabRopeCosSin(total, headDim int, theta float32) (cos, sin []float32) {
 func zlabApplyRope(x []float32, rows, heads, headDim int, cos, sin []float32, rowOffset int) []float32 {
 	out := make([]float32, len(x))
 	half := headDim / 2
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		cRow := cos[(rowOffset+r)*headDim : (rowOffset+r)*headDim+half]
 		sRow := sin[(rowOffset+r)*headDim : (rowOffset+r)*headDim+half]
-		for h := 0; h < heads; h++ {
+		for h := range heads {
 			base := (r*heads + h) * headDim
-			for d := 0; d < half; d++ {
+			for d := range half {
 				x1 := x[base+d]
 				x2 := x[base+half+d]
 				c := cRow[d]

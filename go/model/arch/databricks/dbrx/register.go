@@ -3,6 +3,8 @@
 package dbrx
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/attn"
@@ -12,9 +14,7 @@ import (
 // NormalizeWeights aliases the published DBRX checkpoint layout to neutral composed roles.
 func NormalizeWeights(in map[string]safetensors.Tensor, cfg Config) map[string]safetensors.Tensor {
 	out := make(map[string]safetensors.Tensor, len(in)+cfg.Layers*(8+3*cfg.FFN.Experts))
-	for name, tensor := range in {
-		out[name] = tensor
-	}
+	maps.Copy(out, in)
 	alias := func(dst, src string) {
 		if tensor, ok := in[src]; ok {
 			out[dst] = tensor

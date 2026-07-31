@@ -5,7 +5,7 @@ package merge
 import (
 	"context"
 	"math"
-	"sort"
+	"slices"
 
 	core "dappco.re/go"
 
@@ -301,7 +301,7 @@ func normalizedWeights(sources []Source) ([]float64, error) {
 // sorting SkippedTensors for deterministic output.
 func writeProvenance(path string, provenance Provenance) error {
 	sorted := core.SliceClone(provenance.SkippedTensors)
-	sort.Strings(sorted)
+	slices.Sort(sorted)
 	provenance.SkippedTensors = sorted
 	data := core.JSONMarshal(provenance)
 	if !data.OK {

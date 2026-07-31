@@ -163,7 +163,7 @@ func (cfg *FeatureConfig) ExtractLogMel(samples []float32) ([][]float32, error) 
 	segment := make([]float64, cfg.NFFT)
 	power := make([]float64, bins)
 	globalMax := math.Inf(-1)
-	for f := 0; f < frames; f++ {
+	for f := range frames {
 		start := f * cfg.HopLength
 		for n := range cfg.NFFT {
 			segment[n] = padded[start+n] * window[n]

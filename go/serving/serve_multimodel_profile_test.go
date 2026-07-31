@@ -13,9 +13,15 @@ import (
 
 // ptrFloat32 / ptrInt / ptrUint64 build the pointer fields ProfileConfig uses to
 // distinguish "set" from "unset".
-func ptrFloat32(v float32) *float32 { return &v }
-func ptrInt(v int) *int             { return &v }
-func ptrUint64(v uint64) *uint64    { return &v }
+//
+//go:fix inline
+func ptrFloat32(v float32) *float32 { return new(v) }
+
+//go:fix inline
+func ptrInt(v int) *int { return new(v) }
+
+//go:fix inline
+func ptrUint64(v uint64) *uint64 { return new(v) }
 
 // applyOpts folds a slice of GenerateOptions onto a default config so a test can
 // read back the resolved knobs a preset+caller pair produced.
@@ -76,13 +82,13 @@ func drain(seq iter.Seq[inference.Token]) {
 // resolved config carries the intended values.
 func TestProfileConfig_Options_Good(t *testing.T) {
 	p := ProfileConfig{
-		Temperature:   ptrFloat32(0.9),
-		TopP:          ptrFloat32(0.95),
-		TopK:          ptrInt(40),
-		MinP:          ptrFloat32(0.05),
-		MaxTokens:     ptrInt(512),
-		RepeatPenalty: ptrFloat32(1.1),
-		Seed:          ptrUint64(7),
+		Temperature:   new(float32(0.9)),
+		TopP:          new(float32(0.95)),
+		TopK:          new(40),
+		MinP:          new(float32(0.05)),
+		MaxTokens:     new(512),
+		RepeatPenalty: new(float32(1.1)),
+		Seed:          new(uint64(7)),
 	}
 	cfg := applyOpts(p.Options())
 	if cfg.Temperature != 0.9 || cfg.TopP != 0.95 || cfg.TopK != 40 || cfg.MinP != 0.05 || cfg.MaxTokens != 512 || cfg.RepeatPenalty != 1.1 || cfg.Seed != 7 {
@@ -94,7 +100,7 @@ func TestProfileConfig_Options_Good(t *testing.T) {
 // the model/engine default is left in place (a preset overrides only what it
 // names — the pointer-field contract).
 func TestProfileConfig_Options_Unset_Good(t *testing.T) {
-	p := ProfileConfig{MaxTokens: ptrInt(64)} // only max tokens set
+	p := ProfileConfig{MaxTokens: new(64)} // only max tokens set
 	opts := p.Options()
 	if len(opts) != 1 {
 		t.Fatalf("ProfileConfig{MaxTokens} emitted %d options, want 1 (only the set field)", len(opts))
@@ -123,7 +129,7 @@ func TestWrapProfile_EmptyPreset_ReturnsBase_Good(t *testing.T) {
 // wrapped model on a Chat call.
 func TestProfileModel_Chat_AppliesPreset_Good(t *testing.T) {
 	spy := newPresetSpy()
-	preset := ProfileConfig{MaxTokens: ptrInt(7), Temperature: ptrFloat32(0.3)}.Options()
+	preset := ProfileConfig{MaxTokens: new(7), Temperature: new(float32(0.3))}.Options()
 	wrapped := wrapProfile(spy, preset)
 
 	drain(wrapped.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}))
@@ -141,7 +147,7 @@ func TestProfileModel_Chat_AppliesPreset_Good(t *testing.T) {
 // request can still override — the subtle correctness the whole design rests on.
 func TestProfileModel_CallerWins_WrapProfile_Ugly(t *testing.T) {
 	spy := newPresetSpy()
-	preset := ProfileConfig{Temperature: ptrFloat32(0.2), MaxTokens: ptrInt(100)}.Options()
+	preset := ProfileConfig{Temperature: new(float32(0.2)), MaxTokens: new(100)}.Options()
 	wrapped := wrapProfile(spy, preset)
 
 	// Caller overrides Temperature; leaves MaxTokens to the preset.
@@ -159,7 +165,7 @@ func TestProfileModel_CallerWins_WrapProfile_Ugly(t *testing.T) {
 // streaming paths.
 func TestProfileModel_ClassifyBatch_ApplyPreset_WrapProfile_Good(t *testing.T) {
 	spy := newPresetSpy()
-	wrapped := wrapProfile(spy, ProfileConfig{MaxTokens: ptrInt(11)}.Options())
+	wrapped := wrapProfile(spy, ProfileConfig{MaxTokens: new(11)}.Options())
 
 	wrapped.Classify(context.Background(), []string{"a"})
 	if spy.lastCall != "classify" || spy.lastCfg.MaxTokens != 11 {
@@ -184,7 +190,7 @@ func (mediaCapableFake) AcceptsAudio() bool  { return true }
 // decorator's method set by itself.
 func TestProfileModel_ForwardsCapabilityGates_WrapProfile_Good(t *testing.T) {
 	inner := mediaCapableFake{TextModel: &mockTextModel{}}
-	wrapped := wrapProfile(inner, ProfileConfig{MaxTokens: ptrInt(4)}.Options())
+	wrapped := wrapProfile(inner, ProfileConfig{MaxTokens: new(4)}.Options())
 	v, ok := wrapped.(inference.VisionModel)
 	if !ok || !v.AcceptsImages() {
 		t.Fatalf("profile wrap hides AcceptsImages (ok=%v) — image serve gate 400s", ok)
@@ -213,7 +219,7 @@ func (e *embedCapableFake) Embed(context.Context, inference.EmbeddingRequest) (*
 // Unwrap the embedder is invisible and the embeddings route 404s.
 func TestProfileModel_Unwrap_ReachesEmbedding_Ugly(t *testing.T) {
 	base := &embedCapableFake{TextModel: &mockTextModel{}}
-	wrapped := wrapProfile(base, ProfileConfig{Temperature: ptrFloat32(0.1)}.Options())
+	wrapped := wrapProfile(base, ProfileConfig{Temperature: new(float32(0.1))}.Options())
 
 	// Direct assertion fails (the decorator does not carry EmbeddingModel)...
 	if _, ok := wrapped.(inference.EmbeddingModel); ok {

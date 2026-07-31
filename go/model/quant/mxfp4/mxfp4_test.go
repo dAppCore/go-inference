@@ -86,7 +86,7 @@ func TestEncodeE2M1_Ugly(t *testing.T) {
 // TestDecodeE2M1_Good — all 16 codes decode without panicking, matching the
 // magnitude table plus sign bit.
 func TestDecodeE2M1_Good(t *testing.T) {
-	for code := 0; code < 16; code++ {
+	for code := range 16 {
 		want := magnitudes[code&0x7]
 		if code&0x8 != 0 {
 			want = -want

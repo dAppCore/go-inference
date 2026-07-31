@@ -267,18 +267,12 @@ func metricsPtr(m inference.TextModel) *inference.GenerateMetrics {
 func streamStopWindow(seq iter.Seq[inference.Token], stops []string, cb TokenCallback) error {
 	full := core.NewBuilder()
 	emitted := 0
-	window := maxStopLen(stops) - 1
-	if window < 0 {
-		window = 0
-	}
+	window := max(maxStopLen(stops)-1, 0)
 	for tok := range seq {
 		prevLen := full.Len()
 		full.WriteString(tok.Text)
 		s := full.String()
-		windowStart := prevLen - window
-		if windowStart < 0 {
-			windowStart = 0
-		}
+		windowStart := max(prevLen-window, 0)
 		scan := s[windowStart:] // == oldTail + tok.Text, zero-copy view
 		kept := applyStopSequences(scan, stops)
 		if len(kept) < len(scan) {

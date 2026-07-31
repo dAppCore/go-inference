@@ -54,7 +54,7 @@ func LoadRealKVRows(path string) (rows [][]float32, d int, ok bool, err error) {
 	}
 	n := len(payload) / rowBytes
 	rows = make([][]float32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		row := make([]float32, d)
 		base := i * rowBytes
 		for j := 0; j < d; j++ {
@@ -135,7 +135,7 @@ func attnOutput(weights []float64, rows [][]float32) []float64 {
 	out := make([]float64, d)
 	for i, w := range weights {
 		row := rows[i]
-		for j := 0; j < d; j++ {
+		for j := range d {
 			out[j] += w * float64(row[j])
 		}
 	}
@@ -263,10 +263,7 @@ func MeasureCodecs(d int, seed uint64, samplesPerSource int, realKVPath string) 
 	rng := rand.New(rand.NewPCG(seed, splitmix64(seed)))
 	// The attention window draws one extra row (see measureAttention) beyond
 	// attentionN for the query, when available.
-	poolSize := samplesPerSource
-	if poolSize < attentionN+1 {
-		poolSize = attentionN + 1
-	}
+	poolSize := max(samplesPerSource, attentionN+1)
 	gaussian := generateGaussianRows(rng, poolSize, d)
 	sphere := generateSphereUniformRows(rng, poolSize, d)
 

@@ -103,12 +103,12 @@ func TestIndex_Evict_Ugly(t *testing.T) {
 func TestIndex_Concurrent(t *testing.T) {
 	ix := prefixindex.New(prefixindex.Config{MaxEntries: 256})
 	var wg sync.WaitGroup
-	for g := 0; g < 16; g++ {
+	for g := range 16 {
 		wg.Add(1)
 		go func(g int) {
 			defer wg.Done()
 			base := []int32{int32(g), int32(g + 1), int32(g + 2), int32(g + 3)}
-			for i := 0; i < 200; i++ {
+			for i := range 200 {
 				toks := append(append([]int32{}, base...), int32(i))
 				ix.Publish(toks, prefixindex.Entry{BundleURI: "state://x", BlockSize: 2, TokenCount: len(toks)})
 				ix.Match(base)

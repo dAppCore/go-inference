@@ -183,7 +183,7 @@ func tinyTensors() map[string]safetensors.Tensor {
 	ts["hidden_norm.weight"] = next(tHidden)
 	ts["norm.weight"] = next(tHidden)
 	qDim, kvDim := tHeads*tHD, tKV*tHD
-	for li := 0; li < tLayers; li++ {
+	for li := range tLayers {
 		p := core.Sprintf("layers.%d.", li)
 		ts[p+"input_layernorm.weight"] = next(tHidden)
 		ts[p+"post_attention_layernorm.weight"] = next(tHidden)
