@@ -4,7 +4,7 @@
 // inference.ModelPackInspector) into a Trix container with magic "MDL1",
 // and round-trips back to disk.
 //
-// Container layout (delegated to forge.lthn.ai/Snider/Enchantrix/pkg/trix):
+// Container layout (delegated to github.com/Snider/Enchantrix/pkg/trix):
 //
 //	[Magic "MDL1" (4)] [Version (1)] [Header Length (4)] [JSON Header] [Payload]
 //

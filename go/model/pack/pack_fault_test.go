@@ -10,7 +10,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/pack"
 
-	"forge.lthn.ai/Snider/Enchantrix/pkg/trix"
+	"github.com/Snider/Enchantrix/pkg/trix"
 )
 
 // writeMaliciousContainer encodes a .model Trix container whose payload tar

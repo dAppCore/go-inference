@@ -17,7 +17,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 
-	"forge.lthn.ai/Snider/Enchantrix/pkg/trix"
+	"github.com/Snider/Enchantrix/pkg/trix"
 )
 
 // sharedFs returns a process-wide cached unrestricted Fs handle.
