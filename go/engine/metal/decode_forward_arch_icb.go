@@ -1728,7 +1728,7 @@ func recordArchICB(
 		// for the 2-pass lane, which still stages Πq into it before pass 1.
 		// There is no rotated-OUTPUT scratch any more: pass 2
 		// (lthn_sdpa_vector_2pass_2_tq) folds the unrotation into its own
-		// epilogue and writes attn directly (kernels/lthn_tq_kv.metal's header
+		// epilogue and writes attn directly (kernels/quant/lthn_tq_kv.metal's header
 		// has the full reasoning). Shared across TQ layers — the recorded
 		// barriers serialise the stack on them, exactly as the attention
 		// scratch. Π and centroid tables are process-resident.
@@ -2187,7 +2187,7 @@ func recordArchICB(
 				kCent, vCent := tqKVCentroidsBuffer(hd, kvTQ.kBits), tqKVCentroidsBuffer(hd, kvTQ.vBits)
 				if sdpa2PassICBBlocks > 0 && specs[li].Attention == model.GlobalAttention {
 					// 2-pass: the q pre-rotation stays a SEPARATE dispatch before
-					// pass 1 (#48 perf recovery, reasoned in kernels/lthn_tq_kv.metal's
+					// pass 1 (#48 perf recovery, reasoned in kernels/quant/lthn_tq_kv.metal's
 					// header): pass 1 runs `blocks` threadgroups per kv-head (up to
 					// 512, sdpa2PassBlocks), so folding Πq there would redo that
 					// O(d²) work once per BLOCK instead of once per head. Pass 2

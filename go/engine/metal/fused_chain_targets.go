@@ -257,7 +257,7 @@ func chainAttnGateSilu(t *chainTarget, out, gate metal.MTLBuffer, total int) err
 
 // chainAttnVAppend lands the L freshly-projected V rows into the cache at the position row —
 // the compute twin of the blit copy (an ICB carries compute commands only, and the position
-// must come from the bumpable buffer). See kernels/lthn_attn_vappend_f32.metal.
+// must come from the bumpable buffer). See kernels/attention/lthn_attn_vappend_f32.metal.
 func chainAttnVAppend(t *chainTarget, v, cacheV metal.MTLBuffer, posBuf metal.MTLBuffer, L, rowDim, pos0 int) error {
 	pso, err := t.customPSO(attnVAppendPipeline, "lthn_attn_vappend_f32")
 	if err != nil {

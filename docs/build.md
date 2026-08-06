@@ -29,7 +29,7 @@ source in this repo** — there is no go-mlx dependency:
 | Library | Built from | Contents |
 |---------|-----------|----------|
 | `mlx.metallib` | Apple MLX (`external/mlx`) + the lthn patches, via CMake | Apple MLX's own kernels: `steel_gemm`, `affine_qmv`, `vv_*`, rms, rope, sdpa |
-| `lthn_kernels.metallib` | `go/engine/metal/kernels/*.metal`, via `xcrun` | go-inference's own fused kernels (39 `.metal` sources: the FFN/attention/layer megakernels, gelu-gate-mul, qgemv, rmsnorm-residual, sdpa variants, MoE router, …) |
+| `lthn_kernels.metallib` | `go/engine/metal/kernels/<family>/*.metal`, via `xcrun` | go-inference's own fused kernels, sorted into the `engine/hip` family taxonomy (`attention/`, `quant/`, `moe/`, `norms/`, `megakernel/`, …): the FFN/attention/layer megakernels, gelu-gate-mul, qgemv, rmsnorm-residual, sdpa variants, MoE router, … |
 
 At runtime the engine loads `mlx.metallib` (named by `MLX_METALLIB_PATH`) and
 then looks for `lthn_kernels.metallib` **as a sibling in the same directory**.
@@ -74,10 +74,14 @@ clean again.
 
 ### `task metallib:kernels`
 
-Compiles each `go/engine/metal/kernels/*.metal` to a `.air` object with
+Collects every `.metal` under `go/engine/metal/kernels/` **recursively** (the
+`<family>/` tree described in `go/engine/metal/kernels/README.md`; only
+`experimental/` is excluded), compiles each to a `.air` object with
 `xcrun -sdk macosx metal -std=metal4.0 -I external/mlx` (the MLX headers are on
 the include path), then links them with `xcrun -sdk macosx metallib` into
-`lthn_kernels.metallib`.
+`lthn_kernels.metallib`. Each `.metal` is an independent compilation unit, so
+the directory shape carries no ordering meaning — adding a family directory
+needs no build change.
 
 ### Output paths
 

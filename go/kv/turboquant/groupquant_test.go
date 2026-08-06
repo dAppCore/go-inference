@@ -10,7 +10,7 @@ import (
 )
 
 // TestGroupScale_Good checks the scale formula matches engine/metal's
-// `scale = m / 127.0f` exactly (kernels/lthn_sdpa_paged.metal,
+// `scale = m / 127.0f` exactly (kernels/attention/lthn_sdpa_paged.metal,
 // lthn_kv_q8_store_bf16) for a known absmax.
 func TestGroupScale_Good(t *testing.T) {
 	got := groupScale([]float64{1, -4, 2}, 127)

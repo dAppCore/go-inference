@@ -15,7 +15,7 @@ import (
 
 // attn_core_backend.go — the attention core's device kernels (#26 / #18 S6a):
 // resolvers + encoder emits for lthn_attn_{qprep,kprep,sdpa,gate_silu}_f32
-// (kernels/lthn_attn_core.metal, ported from composed's continueFromQKV), plus the test-facing
+// (kernels/attention/lthn_attn_core.metal, ported from composed's continueFromQKV), plus the test-facing
 // one-CB wrapper the parity gate drives. Integration (the device-resident KV handle inside the
 // attention fold) binds the emits directly.
 

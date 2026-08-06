@@ -11,7 +11,7 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// The staged sliding tail's batched lane (kernels/lthn_sdpa_multiq_ring.metal): when a big batch
+// The staged sliding tail's batched lane (kernels/attention/lthn_sdpa_multiq_ring.metal): when a big batch
 // evicts through a FULL ring, the per-row landing+SDPA interleave is replaced by — per layer —
 // staged K/V (roped/normed in the stage), ONE two-segment multi-query SDPA reading the pre-batch
 // ring (minus each query's evicted run) plus the staged causal rows, and a deferred bulk landing

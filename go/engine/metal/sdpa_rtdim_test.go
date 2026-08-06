@@ -13,7 +13,7 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// sdpa_rtdim_test.go gates kernels/lthn_sdpa_rtdim.metal + sdpa_rtdim.go — the runtime-head-dim
+// sdpa_rtdim_test.go gates kernels/attention/lthn_sdpa_rtdim.metal + sdpa_rtdim.go — the runtime-head-dim
 // decode SDPA fallback (#28). Three layers: the kernel itself against the host float reference and
 // against the FIXED kernel it stands in for (byte-band idiom, matching sdpa_sinks_test.go /
 // sdpa_vector_q8_test.go), the dispatch wrapper's decisions, and the end-to-end #28 repro — a real
@@ -252,7 +252,7 @@ func TestSdpaRTDim_EmitSDPA2Pass1RTDimAt_Good(t *testing.T) {
 }
 
 // TestSdpaRTDim_EmitSDPA2Pass1RTDimAt_Bad proves the batch=1 constraint refuses rather than
-// silently mis-addressing a batch>1 dispatch (kernels/lthn_sdpa_rtdim.metal's 2-pass kernel has no
+// silently mis-addressing a batch>1 dispatch (kernels/attention/lthn_sdpa_rtdim.metal's 2-pass kernel has no
 // batch grid axis — see the doc comment above emitSDPA2Pass1RTDimAt).
 func TestSdpaRTDim_EmitSDPA2Pass1RTDimAt_Bad(t *testing.T) {
 	rec := &recordingDispatchSink{}

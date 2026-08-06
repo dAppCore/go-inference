@@ -14,7 +14,7 @@ import (
 	"dappco.re/go/inference/kv/turboquant"
 )
 
-// turboquant_device_test.go proves the S2 device kernels (kernels/lthn_turboquant.metal) against the
+// turboquant_device_test.go proves the S2 device kernels (kernels/quant/lthn_turboquant.metal) against the
 // S1 host reference (kv/turboquant) — the same Π and centroids on both sides, via the additive
 // kv/turboquant.RotationMatrix/Centroids/UnpackIndices accessors, so any divergence is the kernels'
 // own arithmetic, not a different random matrix or a different Lloyd-Max solve.
