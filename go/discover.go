@@ -9,33 +9,6 @@ import (
 	core "dappco.re/go"
 )
 
-// discoverCore is a package-level Core handle reused across
-// Discover calls. Profiling (alpha.95 era) showed core.New() per
-// call burned ~51 allocs / ~13% of Discover's total cost — every
-// invocation spun up a fresh ServiceRuntime + Registry pair just
-// to get an Fs() handle, when the same Fs serves every call
-// identically. sync.Once initialises on first use so test code
-// that monkey-patches the global Core via core.New() before any
-// Discover call still sees a usable instance.
-//
-// Risk: this couples Discover to the package-level Core lifetime
-// (process-wide). Acceptable here because Fs() is stateless — no
-// per-call state, no cancellation, no auth scope. If Fs() ever
-// grows per-caller context, replace this with an option-pattern
-// override on Discover (`WithCore(c)`) without breaking the
-// existing zero-arg API.
-var (
-	discoverCoreOnce sync.Once
-	discoverCore     *core.Core
-)
-
-func sharedDiscoverCore() *core.Core {
-	discoverCoreOnce.Do(func() {
-		discoverCore = core.New()
-	})
-	return discoverCore
-}
-
 //	for m := range inference.Discover("/Volumes/Data/models") {
 //	    fmt.Printf("%s  arch=%s  quant=%dbit\n", m.Path, m.ModelType, m.QuantBits)
 //	}
@@ -60,26 +33,42 @@ type DiscoveredModel struct {
 //	for m := range inference.Discover(dir) {
 //	    if m.ModelType == "gemma3" { use(m); break }
 //	}
+//
+// The walk reads the host filesystem through core's package-level
+// primitives (core.ReadDir over core.DirFS, core.ReadFile) rather
+// than a *core.Fs handle. Those two calls are EXACTLY what
+// Fs.List/Fs.Read run once validatePath has cleared a path — and with
+// the unrestricted "/" root a plain core.New() hands out, validatePath
+// is a pass-through, so no sandbox is lost here.
+//
+// Dropping the handle also drops Fs.path's unconditional "/" prefix
+// (core's fs.go: CleanPath("/"+p, PathSeparator)). That is harmless
+// for a POSIX absolute path but corrupts a drive-letter one —
+// filepath.Clean(`/C:\models\x`) is `\C:\models\x` on Windows, which
+// no Win32 open can resolve. It is why every absolute-path Discover
+// returned nothing on the windows runner while macOS and linux stayed
+// green (run 31101973970). It removes the package-level core.New()
+// with it — a sync.Once handle that existed only to reach Fs().
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
-		discoverDir(sharedDiscoverCore().Fs(), absolutePath(baseDir), yield)
+		discoverDir(absolutePath(baseDir), yield)
 	}
 }
 
-func discoverDir(fsys *core.Fs, dir string, yield func(DiscoveredModel) bool) bool {
+func discoverDir(dir string, yield func(DiscoveredModel) bool) bool {
 	// Single readDir per directory — the entries feed both
 	// probeModelDir's safetensors count AND the recursion. Previously
 	// each directory was listed THREE times (probe → countSafetensors
 	// → discoverDir's own readDir), with each listing also paying
 	// reflect-based conversion. Now once, no reflect.
-	entries, ok := readDir(fsys, dir)
+	entries, ok := readDir(dir)
 	if !ok {
 		// We can still try to probe the directory even if listing
 		// fails — config.json read may succeed independently.
 		entries = nil
 	}
 
-	if m, ok := probeModelDir(fsys, dir, entries); ok {
+	if m, ok := probeModelDir(dir, entries); ok {
 		if !yield(m) {
 			return false
 		}
@@ -89,7 +78,7 @@ func discoverDir(fsys *core.Fs, dir string, yield func(DiscoveredModel) bool) bo
 		if !entry.IsDir() {
 			continue
 		}
-		if !discoverDir(fsys, joinPath(dir, entry.Name()), yield) {
+		if !discoverDir(joinPath(dir, entry.Name()), yield) {
 			return false
 		}
 	}
@@ -105,8 +94,8 @@ func discoverDir(fsys *core.Fs, dir string, yield func(DiscoveredModel) bool) bo
 // AND verify config.json exists. Only then read config.json. This
 // short-circuits the wasted disk Read for junk directories that have
 // neither — see Discover_NoModels_TenJunkDirs which used to pay one
-// fsys.Read per dir before this gate.
-func probeModelDir(fsys *core.Fs, dir string, entries []core.FsDirEntry) (DiscoveredModel, bool) {
+// read per dir before this gate.
+func probeModelDir(dir string, entries []core.FsDirEntry) (DiscoveredModel, bool) {
 	numFiles := 0
 	hasConfig := false
 	for _, entry := range entries {
@@ -124,8 +113,12 @@ func probeModelDir(fsys *core.Fs, dir string, entries []core.FsDirEntry) (Discov
 		return DiscoveredModel{}, false
 	}
 
-	config := fsys.Read(joinPath(dir, "config.json"))
+	config := core.ReadFile(joinPath(dir, "config.json"))
 	if !config.OK {
+		return DiscoveredModel{}, false
+	}
+	raw, ok := config.Value.([]byte)
+	if !ok {
 		return DiscoveredModel{}, false
 	}
 
@@ -146,7 +139,10 @@ func probeModelDir(fsys *core.Fs, dir string, entries []core.FsDirEntry) (Discov
 			GroupSize int `json:"group_size"`
 		} `json:"quantization_config"`
 	}
-	if data := config.String(); core.JSONUnmarshalString(data, &probe).OK {
+	// AsString over the freshly-read bytes — they become unreachable
+	// after this, so the copy is dead weight (same contract Fs.Read
+	// uses internally).
+	if data := core.AsString(raw); core.JSONUnmarshalString(data, &probe).OK {
 		model.ModelType = probe.ModelType
 		if probe.Quantization != nil {
 			model.QuantBits = probe.Quantization.Bits
@@ -161,10 +157,10 @@ func probeModelDir(fsys *core.Fs, dir string, entries []core.FsDirEntry) (Discov
 }
 
 // readDir returns the directory's entries sorted by name. The result
-// is the raw []core.FsDirEntry from core.Fs.List — no reflect, no
+// is the raw []core.FsDirEntry from core.ReadDir — no reflect, no
 // adapter allocation.
-func readDir(fsys *core.Fs, dir string) ([]core.FsDirEntry, bool) {
-	result := fsys.List(dir)
+func readDir(dir string) ([]core.FsDirEntry, bool) {
+	result := core.ReadDir(core.DirFS(dir), ".")
 	if !result.OK {
 		return nil, false
 	}
