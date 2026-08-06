@@ -16,7 +16,7 @@ import (
 	"dappco.re/go/inference/model/attn"
 )
 
-// lthn_gated_delta_test.go proves the S1 device recurrence (kernels/lthn_gated_delta.metal) against
+// lthn_gated_delta_test.go proves the S1 device recurrence (kernels/attention/lthn_gated_delta.metal) against
 // the host reference deltanet.GatedDeltaRuleF32 — the campaign's parity gate before any wiring
 // (docs/design-hybrid-recurrence.md). The two sides factor the same math differently by contract:
 // the host repeats q/k to value heads, ℓ2-norms k internally and scales q by 1/√Dk inside; the

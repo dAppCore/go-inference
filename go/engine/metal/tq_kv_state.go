@@ -191,7 +191,7 @@ func allocArchStateKVTQ(specs []model.LayerSpec, lb []archLayerBufs, nHeads, nKV
 	t.vStage = device.NewBufferWithLengthOptions(uint(maxKvd*bf16Size), metal.MTLResourceStorageModeShared)
 	if maxLen >= sdpa2PassMinKV {
 		// the 2-pass lane stages Πq (the O(output) once-per-step fold — fusing
-		// it into pass 1 would redo O(d²) per block, see kernels/lthn_tq_kv.metal)
+		// it into pass 1 would redo O(d²) per block, see kernels/quant/lthn_tq_kv.metal)
 		t.qRot = device.NewBufferWithLengthOptions(uint(maxQd*bf16Size), metal.MTLResourceStorageModeShared)
 	}
 	// Resolve every pipeline this carrier can dispatch so a missing kernel

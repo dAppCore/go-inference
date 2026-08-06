@@ -13,7 +13,7 @@ import (
 )
 
 // turboquant_device.go — S2 device kernels for TurboQuant KV-cache quantisation (RFC #41,
-// kernels/lthn_turboquant.metal): pipeline resolvers for the three instantiated bit widths, the
+// kernels/quant/lthn_turboquant.metal): pipeline resolvers for the three instantiated bit widths, the
 // encoder emitters a future S3 block/layer wiring reuses, and host round-trip wrappers the parity
 // tests (turboquant_device_test.go) and any pre-integration benches drive. This slice proves the
 // KERNELS only — it does not touch the decode loop, the session, or the paged-KV machinery (that is
@@ -24,7 +24,7 @@ import (
 // DIFFERENT, pre-existing FWHT+uniform-quantiser KV snapshot format under the same "TurboQuant" name
 // — that file is session/paged-KV machinery and out of scope here.
 
-// tqThreadgroupCap is the fixed threadgroup width kernels/lthn_turboquant.metal's LTHN_TQ_CAP
+// tqThreadgroupCap is the fixed threadgroup width kernels/quant/lthn_turboquant.metal's LTHN_TQ_CAP
 // dispatches, independent of the row's actual dimension d.
 const tqThreadgroupCap = 256
 
@@ -82,7 +82,7 @@ func tqResolvePipeline(name string, pso *metal.MTLComputePipelineState, errOut *
 }
 
 // tqRotateQuantPipeline resolves lthn_tq_rotate_quant_bN for bits ∈ {2,3,4} — the only instantiated
-// widths (kernels/lthn_turboquant.metal).
+// widths (kernels/quant/lthn_turboquant.metal).
 func tqRotateQuantPipeline(bits int) (metal.MTLComputePipelineState, error) {
 	switch bits {
 	case 2:

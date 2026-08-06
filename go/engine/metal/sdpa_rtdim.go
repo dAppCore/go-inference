@@ -11,7 +11,7 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
-// sdpa_rtdim.go is the Go driver for kernels/lthn_sdpa_rtdim.metal — the runtime-head-dim decode
+// sdpa_rtdim.go is the Go driver for kernels/attention/lthn_sdpa_rtdim.metal — the runtime-head-dim decode
 // SDPA fallback (#28). The shipped MLX metallib only instantiates sdpa_vector for a fixed class of
 // head dims (64/96/128/256); head_dim 32 has no pipeline anywhere, and before this file every call
 // site's absent-width behaviour differed (some errored immediately, some fell back to a different
@@ -30,7 +30,7 @@ const (
 	// tuning choice. The runtime-dim fallback therefore only serves head dims that are exact
 	// multiples of it (a constraint the fixed 64/96/128/256 instantiations already satisfy).
 	sdpaRTDimBD = 32
-	// sdpaVectorRTDimMaxHeadDim mirrors kernels/lthn_sdpa_rtdim.metal's LTHN_SDPA_RTDIM_MAX_D —
+	// sdpaVectorRTDimMaxHeadDim mirrors kernels/attention/lthn_sdpa_rtdim.metal's LTHN_SDPA_RTDIM_MAX_D —
 	// the per-thread register-array cap, sized to the largest FIXED sdpa_vector instantiation
 	// (256). A head_dim above it is refused with a named error rather than silently truncated.
 	sdpaVectorRTDimMaxHeadDim = 256
@@ -87,7 +87,7 @@ func sdpaVectorRTDimPipeline() (metal.MTLComputePipelineState, error) {
 }
 
 // sdpaVector2Pass1RTDimPipeline resolves (and caches) the 2-pass pass-1 runtime-dim decode SDPA —
-// see kernels/lthn_sdpa_rtdim.metal for the batch=1 constraint. One pipeline total: blocks is a
+// see kernels/attention/lthn_sdpa_rtdim.metal for the batch=1 constraint. One pipeline total: blocks is a
 // runtime buffer parameter here (not the fixed kernel's function-constant 26), so unlike
 // sdpaVector2Pass1HeadDimCache no (headDim, blocks) product of PSOs is ever built.
 func sdpaVector2Pass1RTDimPipeline() (metal.MTLComputePipelineState, error) {

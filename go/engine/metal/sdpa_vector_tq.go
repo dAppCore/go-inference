@@ -14,7 +14,7 @@ import (
 )
 
 // sdpa_vector_tq.go — the TurboQuant live-KV decode SDPA lane (campaign #41
-// S3, kernels/lthn_tq_kv.metal): pipeline resolvers, the dispatchSink emitters
+// S3, kernels/quant/lthn_tq_kv.metal): pipeline resolvers, the dispatchSink emitters
 // the recorded arch ICB and the host test drivers share, and the Π/centroid
 // residency the whole lane keys on. Structure mirrors sdpa_vector_q8.go — the
 // q8 pair is the structural template; the payload format is kv/turboquant's
@@ -279,7 +279,7 @@ func sdpaVectorTQPipeline(headDim, kBits, vBits int) (metal.MTLComputePipelineSt
 // as function constant 26 (the MLX 2-pass convention) beside the bit widths.
 // Pass 2 (below) is TQ's OWNED fork of MLX's sdpa_vector_2pass_2, folding the
 // output unrotation into its epilogue — see sdpaVector2Pass2TQPipeline and
-// kernels/lthn_tq_kv.metal's header.
+// kernels/quant/lthn_tq_kv.metal's header.
 func sdpaVector2Pass1TQPipeline(headDim, kBits, vBits int, blocks int32) (metal.MTLComputePipelineState, error) {
 	if !tqKVGeometryOK(kBits, vBits, headDim) {
 		return nil, core.NewError("native.sdpaVector2Pass1TQPipeline: unsupported (headDim, kBits, vBits)")
@@ -313,7 +313,7 @@ func sdpaVector2Pass1TQPipeline(headDim, kBits, vBits int, blocks int32) (metal.
 
 // sdpaVector2Pass2TQPipeline resolves (and caches) lthn_sdpa_vector_2pass_2_tq
 // — TQ's OWNED fork of MLX's sdpa_vector_2pass_2 merge kernel, folding the
-// output unrotation into its epilogue (kernels/lthn_tq_kv.metal's header has
+// output unrotation into its epilogue (kernels/quant/lthn_tq_kv.metal's header has
 // the full reasoning). No function constants — blocks arrives as a runtime
 // buffer, matching MLX's own pass 2 — so, unlike pass 1, ONE pipeline per
 // headDim serves every block count.

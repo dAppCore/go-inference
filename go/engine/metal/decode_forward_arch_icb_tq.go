@@ -35,7 +35,7 @@ import (
 // (lthn_sdpa_vector_2pass_2_tq, TQ's owned fork of MLX's sdpa_vector_2pass_2)
 // which now folds the output unrotation into its own epilogue — it dispatches
 // one threadgroup per head, same as the single-pass kernel, so that fold is
-// exactly as cheap there as it is here (see kernels/lthn_tq_kv.metal's
+// exactly as cheap there as it is here (see kernels/quant/lthn_tq_kv.metal's
 // header). 3 recorded ops, not 4 — the trailing lthn_tq_rot_rows unrotate
 // dispatch this file used to emit after pass 2 is gone.
 //
@@ -293,7 +293,7 @@ func sdpaVector2Pass1TQPipelineICB(headDim, kBits, vBits int, blocks int32) (met
 // sdpaVector2Pass2TQPipelineICB is sdpaVector2Pass2TQPipeline's ICB-recordable
 // twin — lthn_sdpa_vector_2pass_2_tq, TQ's owned fork of MLX's
 // sdpa_vector_2pass_2 folding the output unrotation into its epilogue
-// (kernels/lthn_tq_kv.metal's header). No function constants — blocks arrives
+// (kernels/quant/lthn_tq_kv.metal's header). No function constants — blocks arrives
 // as a runtime buffer bind — so, like the plain resolver, one pipeline per
 // headDim serves every block count.
 func sdpaVector2Pass2TQPipelineICB(headDim int) (metal.MTLComputePipelineState, error) {

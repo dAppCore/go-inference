@@ -115,7 +115,7 @@ brought into go-inference:
 - **Engines in-repo.** `engine/metal` is the Apple GPU engine — **no cgo**; it
   drives the Apple GPU API through pure-Go `tmc/apple` bindings and dispatches
   Apple MLX's compiled kernels plus go-inference's own fused `lthn_` kernels
-  (`engine/metal/kernels/*.metal`). `engine/hip` is the AMD engine (linux/amd64,
+  (`engine/metal/kernels/<family>/*.metal`). `engine/hip` is the AMD engine (linux/amd64,
   ROCm) and does carry cgo — no-cgo is a per-engine property, not a repo-wide
   rule. go-mlx's `pkg/metal` (the cgo engine) was **deleted, never ported**;
   `pkg/native` became `engine/metal`.

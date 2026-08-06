@@ -13,11 +13,11 @@ import (
 )
 
 // lthn_kernels.go is the native engine's own custom-kernel mechanism: kernels MLX's static metallib
-// does not have, compiled from kernels/*.metal into a sibling lthn_kernels.metallib that device.go
-// loads beside MLX's (customLibrary). The first such kernel is the fused gelu (kernels/
-// lthn_gelu_gate_mul.metal). This is the foundation for any fused/novel op the native wants — fused
-// activations, the "compute fp32, store bf16" path, future LEK/MTP kernels — independent of whether
-// any one of them is wired into the serve decode.
+// does not have, compiled from kernels/<family>/*.metal into a sibling lthn_kernels.metallib that
+// device.go loads beside MLX's (customLibrary). The first such kernel is the fused gelu
+// (kernels/activations/lthn_gelu_gate_mul.metal). This is the foundation for any fused/novel op the
+// native wants — fused activations, the "compute fp32, store bf16" path, future LEK/MTP kernels —
+// independent of whether any one of them is wired into the serve decode.
 
 // gpuHasGeluKernel reports whether the fused gelu kernel is available (the custom kernels metallib
 // loaded). The composed bf16 chain is the production path; this is the fused capability beside it.

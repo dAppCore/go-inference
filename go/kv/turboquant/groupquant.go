@@ -7,7 +7,7 @@ import "math"
 // GroupSize is the per-group element count the plain group-quant baselines
 // use — mirrors engine/metal's paged KV q8 group size (kvQ8GroupSize, #357:
 // int8 rows + f32 group scales, lthn_kv_q8_store_bf16 in
-// kernels/lthn_sdpa_paged.metal). Reimplemented host-side here rather than
+// kernels/attention/lthn_sdpa_paged.metal). Reimplemented host-side here rather than
 // imported: this package is engine-neutral and must build without the
 // darwin/arm64 Metal engine.
 const GroupSize = 64
