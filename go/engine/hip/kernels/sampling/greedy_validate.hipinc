@@ -1,0 +1,28 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_greedy_args(const rocm_greedy_launch_args &args)
+{
+	return args.version == ROCM_GREEDY_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_GREEDY_LAUNCH_ARGS_BYTES &&
+		args.logits_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.logits_bytes == args.count * sizeof(float) &&
+		args.output_bytes == ROCM_GREEDY_RESULT_BYTES;
+}
+
+__device__ bool rocm_valid_softcap_greedy_args(const rocm_softcap_greedy_launch_args &args)
+{
+	const float softcap = rocm_float_from_bits(args.softcap_bits);
+	return args.version == ROCM_SOFTCAP_GREEDY_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_SOFTCAP_GREEDY_LAUNCH_ARGS_BYTES &&
+		args.logits_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.logits_bytes == args.count * sizeof(float) &&
+		args.output_bytes == ROCM_GREEDY_RESULT_BYTES &&
+		(args.suppress_count == 0 || (args.suppress_pointer != 0 && args.suppress_count < args.count)) &&
+		softcap >= 0.0f &&
+		isfinite(softcap);
+}
+

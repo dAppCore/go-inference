@@ -1,0 +1,637 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ float rocm_block_reduce_sum(float value, float *scratch)
+{
+	const uint32_t lane = threadIdx.x & 31u;
+	const uint32_t wave = threadIdx.x >> 5u;
+	const uint32_t wave_count = (blockDim.x + 31u) >> 5u;
+	for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
+		value += rocm_shfl_down(value, stride, 32);
+	}
+	if (lane == 0u) {
+		scratch[wave] = value;
+	}
+	__syncthreads();
+	float reduced = lane < wave_count ? scratch[lane] : 0.0f;
+	if (wave == 0u) {
+		for (uint32_t stride = 16u; stride > 0u; stride >>= 1u) {
+			reduced += rocm_shfl_down(reduced, stride, 32);
+		}
+		if (lane == 0u) {
+			scratch[0] = reduced;
+		}
+	}
+	__syncthreads();
+	return scratch[0];
+}
+
+extern "C" __global__ void rocm_rms_norm(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_launch_args &args = *reinterpret_cast<const rocm_rms_norm_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_args(args)) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	__shared__ float partial[32];
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float rms = sqrtf(total / static_cast<float>(args.count) + rocm_float_from_bits(args.epsilon_bits));
+	if (rms == 0.0f) {
+		return;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+			output[i] = input[i] / rms;
+		}
+	} else if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		const uint16_t *weight = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+			float w = rocm_bfloat16_to_float(weight[i]);
+			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+				w += 1.0f;
+			}
+			output[i] = input[i] / rms * w;
+		}
+	} else {
+		const float *weight = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+			float w = weight[i];
+			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+				w += 1.0f;
+			}
+			output[i] = input[i] / rms * w;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_residual_add(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_residual_add_launch_args &args = *reinterpret_cast<const rocm_rms_norm_residual_add_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_residual_add_args(args)) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const float *residual = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.residual_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	__shared__ float partial[32];
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float mean_square = total / static_cast<float>(args.count) + rocm_float_from_bits(args.epsilon_bits);
+	if (mean_square == 0.0f) {
+		return;
+	}
+	const float inv_rms = rocm_rsqrtf(mean_square);
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+			output[i] = (residual[i] + input[i] * inv_rms) * output_scale;
+		}
+	} else if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		const uint16_t *weight = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+			float w = rocm_bfloat16_to_float(weight[i]);
+			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+				w += 1.0f;
+			}
+			output[i] = (residual[i] + input[i] * inv_rms * w) * output_scale;
+		}
+	} else {
+		const float *weight = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+			float w = weight[i];
+			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+				w += 1.0f;
+			}
+			output[i] = (residual[i] + input[i] * inv_rms * w) * output_scale;
+		}
+	}
+}
+
+__device__ float rocm_rms_norm_weight_value(uint64_t pointer, uint32_t encoding, uint32_t flags, uint32_t index)
+{
+	float weight_value = 1.0f;
+	if (encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		const uint16_t *weight = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(pointer));
+		weight_value = rocm_bfloat16_to_float(weight[index]);
+	} else if (encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32) {
+		const float *weight = reinterpret_cast<const float *>(static_cast<uintptr_t>(pointer));
+		weight_value = weight[index];
+	}
+	if ((flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+		weight_value += 1.0f;
+	}
+	return weight_value;
+}
+
+extern "C" __global__ void rocm_moe_combine_norms(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_moe_combine_norms_launch_args &args = *reinterpret_cast<const rocm_moe_combine_norms_launch_args *>(packet);
+	if (!rocm_valid_moe_combine_norms_args(args)) {
+		return;
+	}
+	const float *local_input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.local_input_pointer));
+	const float *expert_input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.expert_input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	__shared__ float partial[32];
+	float local_sum_squares = 0.0f;
+	float expert_sum_squares = 0.0f;
+	for (uint32_t index = threadIdx.x; index < args.count; index += blockDim.x) {
+		const float local_value = local_input[index];
+		const float expert_value = expert_input[index];
+		local_sum_squares += local_value * local_value;
+		expert_sum_squares += expert_value * expert_value;
+	}
+	const float local_total = rocm_block_reduce_sum(local_sum_squares, partial);
+	const float expert_total = rocm_block_reduce_sum(expert_sum_squares, partial);
+	const float local_rms = sqrtf(local_total / static_cast<float>(args.count) + rocm_float_from_bits(args.local_epsilon_bits));
+	const float expert_rms = sqrtf(expert_total / static_cast<float>(args.count) + rocm_float_from_bits(args.expert_epsilon_bits));
+	if (local_rms == 0.0f || expert_rms == 0.0f) {
+		return;
+	}
+	for (uint32_t index = threadIdx.x; index < args.count; index += blockDim.x) {
+		const float local_weight = rocm_rms_norm_weight_value(args.local_weight_pointer, args.local_weight_encoding, args.local_flags, index);
+		const float expert_weight = rocm_rms_norm_weight_value(args.expert_weight_pointer, args.expert_weight_encoding, args.expert_flags, index);
+		output[index] = local_input[index] / local_rms * local_weight + expert_input[index] / expert_rms * expert_weight;
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_residual_add_norm(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_residual_add_norm_launch_args &args = *reinterpret_cast<const rocm_rms_norm_residual_add_norm_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_residual_add_norm_args(args)) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const float *residual = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.residual_pointer));
+	float *residual_output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.residual_output_pointer));
+	float *norm_output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.norm_output_pointer));
+	__shared__ float partial[32];
+
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float mean_square = total / static_cast<float>(args.count) + rocm_float_from_bits(args.epsilon_bits);
+	if (mean_square == 0.0f) {
+		return;
+	}
+	const float inv_rms = rocm_rsqrtf(mean_square);
+
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+	float residual_sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+		const float weight = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i);
+		const float value = (residual[i] + input[i] * inv_rms * weight) * output_scale;
+		residual_output[i] = value;
+		residual_sum_squares += value * value;
+	}
+	const float residual_total = rocm_block_reduce_sum(residual_sum_squares, partial);
+	const float norm_mean_square = residual_total / static_cast<float>(args.count) + rocm_float_from_bits(args.norm_epsilon_bits);
+	if (norm_mean_square == 0.0f) {
+		return;
+	}
+	const float norm_inv_rms = rocm_rsqrtf(norm_mean_square);
+	if (args.q8_output_pointer == 0) {
+		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
+			const float weight = rocm_rms_norm_weight_value(args.norm_weight_pointer, args.norm_weight_encoding, args.norm_flags, i);
+			norm_output[i] = residual_output[i] * norm_inv_rms * weight;
+		}
+		return;
+	}
+	rocm_q8_1_block *q8_output = reinterpret_cast<rocm_q8_1_block *>(static_cast<uintptr_t>(args.q8_output_pointer));
+	const uint32_t block_lane = threadIdx.x & (ROCM_Q8_1_BLOCK_SIZE - 1u);
+	const uint32_t workgroup_block = threadIdx.x / ROCM_Q8_1_BLOCK_SIZE;
+	const uint32_t blocks_per_workgroup = blockDim.x / ROCM_Q8_1_BLOCK_SIZE;
+	const uint32_t block_count = args.count / ROCM_Q8_1_BLOCK_SIZE;
+	for (uint32_t block_base = 0; block_base < block_count; block_base += blocks_per_workgroup) {
+		const uint32_t block_index = block_base + workgroup_block;
+		const bool block_valid = block_index < block_count;
+		const uint32_t i = block_index * ROCM_Q8_1_BLOCK_SIZE + block_lane;
+		float value = 0.0f;
+		if (block_valid) {
+			const float weight = rocm_rms_norm_weight_value(args.norm_weight_pointer, args.norm_weight_encoding, args.norm_flags, i);
+			value = residual_output[i] * norm_inv_rms * weight;
+			norm_output[i] = value;
+		}
+		float max_abs = fabsf(value);
+		for (uint32_t stride = ROCM_Q8_1_BLOCK_SIZE / 2u; stride > 0u; stride >>= 1u) {
+			max_abs = fmaxf(max_abs, rocm_shfl_down(max_abs, stride, ROCM_Q8_1_BLOCK_SIZE));
+		}
+		max_abs = rocm_shfl_float(max_abs, 0, ROCM_Q8_1_BLOCK_SIZE);
+		const float scale = max_abs > 0.0f ? max_abs / 127.0f : 0.0f;
+		int32_t quant = scale > 0.0f ? static_cast<int32_t>(nearbyintf(value / scale)) : 0;
+		quant = quant < -127 ? -127 : (quant > 127 ? 127 : quant);
+		float quant_sum = static_cast<float>(quant);
+		for (uint32_t stride = ROCM_Q8_1_BLOCK_SIZE / 2u; stride > 0u; stride >>= 1u) {
+			quant_sum += rocm_shfl_down(quant_sum, stride, ROCM_Q8_1_BLOCK_SIZE);
+		}
+		if (block_valid) {
+			q8_output[block_index].quants[block_lane] = static_cast<signed char>(quant);
+			if (block_lane == 0u) {
+				q8_output[block_index].scale = scale;
+				q8_output[block_index].scaled_sum = scale * quant_sum;
+			}
+		}
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_heads(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_heads_launch_args &args = *reinterpret_cast<const rocm_rms_norm_heads_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_heads_args(args) || blockIdx.x >= args.head_count) {
+		return;
+	}
+	const uint32_t head = blockIdx.x;
+	const uint32_t head_offset = head * args.head_dim;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer)) + head_offset;
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer)) + head_offset;
+	__shared__ float partial[32];
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.head_dim; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float rms = sqrtf(total / static_cast<float>(args.head_dim) + rocm_float_from_bits(args.epsilon_bits));
+	if (rms == 0.0f) {
+		return;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+		for (uint32_t i = threadIdx.x; i < args.head_dim; i += blockDim.x) {
+			output[i] = input[i] / rms;
+		}
+	} else if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		const uint16_t *weight = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t i = threadIdx.x; i < args.head_dim; i += blockDim.x) {
+			float w = rocm_bfloat16_to_float(weight[i]);
+			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+				w += 1.0f;
+			}
+			output[i] = input[i] / rms * w;
+		}
+	} else {
+		const float *weight = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t i = threadIdx.x; i < args.head_dim; i += blockDim.x) {
+			float w = weight[i];
+			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+				w += 1.0f;
+			}
+			output[i] = input[i] / rms * w;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_rope_heads(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_rope_heads_launch_args &args = *reinterpret_cast<const rocm_rms_norm_rope_heads_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_rope_heads_args(args) || blockIdx.x >= args.head_count) {
+		return;
+	}
+	const uint32_t head = blockIdx.x;
+	const uint32_t head_offset = head * args.head_dim;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer)) + head_offset;
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer)) + head_offset;
+	__shared__ float partial[32];
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.head_dim; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float rms = sqrtf(total / static_cast<float>(args.head_dim) + rocm_float_from_bits(args.epsilon_bits));
+	if (rms == 0.0f) {
+		return;
+	}
+	const uint32_t frequency_dim = args.frequency_dim == 0u ? args.head_dim : args.frequency_dim;
+		const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+		const float base = rocm_float_from_bits(args.base_bits);
+		const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+		const float dim = static_cast<float>(frequency_dim);
+		const uint32_t half_head_dim = args.head_dim >> 1u;
+		const bool neox = (args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ROPE_NEOX) != 0u;
+		if (neox) {
+			const uint32_t active_pairs = rotary_count >> 1u;
+			for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+				const uint32_t i = pair;
+				const uint32_t j = pair + half_head_dim;
+				const float weight_x = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i);
+				const float weight_y = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, j);
+				const float x = input[i] / rms * weight_x;
+				const float y = input[j] / rms * weight_y;
+				if (pair < active_pairs) {
+					const float frequency = 1.0f / powf(base, static_cast<float>(pair << 1u) / dim);
+					const float angle = static_cast<float>(args.position) * frequency * frequency_scale;
+					const float cosine = cosf(angle);
+					const float sine = sinf(angle);
+					output[i] = x * cosine - y * sine;
+					output[j] = x * sine + y * cosine;
+				} else {
+					output[i] = x;
+					output[j] = y;
+				}
+			}
+			return;
+		}
+		for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+			const uint32_t i = pair << 1u;
+			const float weight_x = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i);
+			const float weight_y = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i + 1u);
+			const float x = input[i] / rms * weight_x;
+			const float y = input[i + 1u] / rms * weight_y;
+			if (i < rotary_count) {
+				const float frequency = 1.0f / powf(base, static_cast<float>(i) / dim);
+				const float angle = static_cast<float>(args.position) * frequency * frequency_scale;
+				const float cosine = cosf(angle);
+				const float sine = sinf(angle);
+			output[i] = x * cosine - y * sine;
+			output[i + 1u] = x * sine + y * cosine;
+		} else {
+			output[i] = x;
+			output[i + 1u] = y;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_rope_heads_pair(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_rope_heads_pair_launch_args &args = *reinterpret_cast<const rocm_rms_norm_rope_heads_pair_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_rope_heads_pair_args(args) || blockIdx.x >= args.query_head_count + args.key_head_count) {
+		return;
+	}
+	const bool query = blockIdx.x < args.query_head_count;
+	const uint32_t head = query ? blockIdx.x : blockIdx.x - args.query_head_count;
+	const uint32_t head_offset = head * args.head_dim;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(query ? args.query_input_pointer : args.key_input_pointer)) + head_offset;
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(query ? args.query_output_pointer : args.key_output_pointer)) + head_offset;
+	const uint64_t weight_pointer = query ? args.query_weight_pointer : args.key_weight_pointer;
+	const uint32_t weight_encoding = query ? args.query_weight_encoding : args.key_weight_encoding;
+	const uint32_t flags = query ? args.query_flags : args.key_flags;
+	const uint32_t epsilon_bits = query ? args.query_epsilon_bits : args.key_epsilon_bits;
+	__shared__ float partial[32];
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.head_dim; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float rms = sqrtf(total / static_cast<float>(args.head_dim) + rocm_float_from_bits(epsilon_bits));
+	if (rms == 0.0f) {
+		return;
+	}
+	const uint32_t frequency_dim = args.frequency_dim == 0u ? args.head_dim : args.frequency_dim;
+	const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	const float dim = static_cast<float>(frequency_dim);
+	const uint32_t half_head_dim = args.head_dim >> 1u;
+	const bool neox = (flags & ROCM_RMS_NORM_LAUNCH_FLAG_ROPE_NEOX) != 0u;
+	if (neox) {
+		const uint32_t active_pairs = rotary_count >> 1u;
+		for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+			const uint32_t i = pair;
+			const uint32_t j = pair + half_head_dim;
+			const float weight_x = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i);
+			const float weight_y = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, j);
+			const float x = input[i] / rms * weight_x;
+			const float y = input[j] / rms * weight_y;
+			if (pair < active_pairs) {
+				const float frequency = 1.0f / powf(base, static_cast<float>(pair << 1u) / dim);
+				const float angle = static_cast<float>(args.position) * frequency * frequency_scale;
+				const float cosine = cosf(angle);
+				const float sine = sinf(angle);
+				output[i] = x * cosine - y * sine;
+				output[j] = x * sine + y * cosine;
+			} else {
+				output[i] = x;
+				output[j] = y;
+			}
+		}
+		return;
+	}
+	for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+		const uint32_t i = pair << 1u;
+		const float weight_x = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i);
+		const float weight_y = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i + 1u);
+		const float x = input[i] / rms * weight_x;
+		const float y = input[i + 1u] / rms * weight_y;
+		if (i < rotary_count) {
+			const float frequency = 1.0f / powf(base, static_cast<float>(i) / dim);
+			const float angle = static_cast<float>(args.position) * frequency * frequency_scale;
+			const float cosine = cosf(angle);
+			const float sine = sinf(angle);
+			output[i] = x * cosine - y * sine;
+			output[i + 1u] = x * sine + y * cosine;
+		} else {
+			output[i] = x;
+			output[i + 1u] = y;
+		}
+	}
+}
+
+__device__ void rocm_rms_norm_rope_heads_pair_lane_batch_execute(
+	const float *input,
+	float *output,
+	uint64_t weight_pointer,
+	uint32_t weight_encoding,
+	uint32_t flags,
+	uint32_t epsilon_bits,
+	uint32_t head_dim,
+	uint32_t position,
+	float base,
+	uint32_t frequency_dim,
+	uint32_t rotary_count,
+	float frequency_scale,
+	float *partial)
+{
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float rms = sqrtf(total / static_cast<float>(head_dim) + rocm_float_from_bits(epsilon_bits));
+	if (rms == 0.0f) {
+		return;
+	}
+	const uint32_t effective_frequency_dim = frequency_dim == 0u ? head_dim : frequency_dim;
+	const uint32_t effective_rotary_count = rotary_count == 0u ? head_dim : rotary_count;
+	const float dim = static_cast<float>(effective_frequency_dim);
+	const uint32_t half_head_dim = head_dim >> 1u;
+	const bool neox = (flags & ROCM_RMS_NORM_LAUNCH_FLAG_ROPE_NEOX) != 0u;
+	if (neox) {
+		const uint32_t active_pairs = effective_rotary_count >> 1u;
+		for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+			const uint32_t i = pair;
+			const uint32_t j = pair + half_head_dim;
+			const float weight_x = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i);
+			const float weight_y = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, j);
+			const float x = input[i] / rms * weight_x;
+			const float y = input[j] / rms * weight_y;
+			if (pair < active_pairs) {
+				const float frequency = 1.0f / powf(base, static_cast<float>(pair << 1u) / dim);
+				const float angle = static_cast<float>(position) * frequency * frequency_scale;
+				const float cosine = cosf(angle);
+				const float sine = sinf(angle);
+				output[i] = x * cosine - y * sine;
+				output[j] = x * sine + y * cosine;
+			} else {
+				output[i] = x;
+				output[j] = y;
+			}
+		}
+		return;
+	}
+	for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+		const uint32_t i = pair << 1u;
+		const float weight_x = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i);
+		const float weight_y = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i + 1u);
+		const float x = input[i] / rms * weight_x;
+		const float y = input[i + 1u] / rms * weight_y;
+		if (i < effective_rotary_count) {
+			const float frequency = 1.0f / powf(base, static_cast<float>(i) / dim);
+			const float angle = static_cast<float>(position) * frequency * frequency_scale;
+			const float cosine = cosf(angle);
+			const float sine = sinf(angle);
+			output[i] = x * cosine - y * sine;
+			output[i + 1u] = x * sine + y * cosine;
+		} else {
+			output[i] = x;
+			output[i + 1u] = y;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_rope_heads_pair_lane_batch(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_rope_heads_pair_lane_batch_launch_args &args = *reinterpret_cast<const rocm_rms_norm_rope_heads_pair_lane_batch_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_rope_heads_pair_lane_batch_args(args) || blockIdx.y >= args.batch) {
+		return;
+	}
+	const uint32_t head = blockIdx.x;
+	if (head >= args.query_head_count && head >= args.key_head_count) {
+		return;
+	}
+	const uint32_t batch = blockIdx.y;
+	const uint32_t *positions = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.positions_pointer));
+	const uint32_t position = positions[batch];
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	__shared__ float partial[32];
+	if (head < args.query_head_count) {
+		const uint64_t offset = (static_cast<uint64_t>(batch) * args.query_head_count + head) * args.head_dim;
+		const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.query_input_pointer)) + offset;
+		float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.query_output_pointer)) + offset;
+		rocm_rms_norm_rope_heads_pair_lane_batch_execute(input, output, args.query_weight_pointer, args.query_weight_encoding, args.query_flags, args.query_epsilon_bits, args.head_dim, position, base, args.frequency_dim, args.rotary_count, frequency_scale, partial);
+	}
+	__syncthreads();
+	if (head < args.key_head_count) {
+		const uint64_t offset = (static_cast<uint64_t>(batch) * args.key_head_count + head) * args.head_dim;
+		const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.key_input_pointer)) + offset;
+		float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.key_output_pointer)) + offset;
+		rocm_rms_norm_rope_heads_pair_lane_batch_execute(input, output, args.key_weight_pointer, args.key_weight_encoding, args.key_flags, args.key_epsilon_bits, args.head_dim, position, base, args.frequency_dim, args.rotary_count, frequency_scale, partial);
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_rope_heads_batch(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_rope_heads_batch_launch_args &args = *reinterpret_cast<const rocm_rms_norm_rope_heads_batch_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_rope_heads_batch_args(args) || blockIdx.x >= args.head_count || blockIdx.y >= args.batch) {
+		return;
+	}
+	const uint32_t head = blockIdx.x;
+	const uint32_t batch = blockIdx.y;
+	const uint32_t head_offset = (batch * args.head_count + head) * args.head_dim;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer)) + head_offset;
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer)) + head_offset;
+	__shared__ float partial[32];
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < args.head_dim; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float rms = sqrtf(total / static_cast<float>(args.head_dim) + rocm_float_from_bits(args.epsilon_bits));
+	if (rms == 0.0f) {
+		return;
+	}
+	const uint32_t frequency_dim = args.frequency_dim == 0u ? args.head_dim : args.frequency_dim;
+		const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+		const float base = rocm_float_from_bits(args.base_bits);
+		const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+		const float dim = static_cast<float>(frequency_dim);
+		const uint32_t position = args.start_position + batch;
+		const uint32_t half_head_dim = args.head_dim >> 1u;
+		const bool neox = (args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ROPE_NEOX) != 0u;
+		if (neox) {
+			const uint32_t active_pairs = rotary_count >> 1u;
+			for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+				const uint32_t i = pair;
+				const uint32_t j = pair + half_head_dim;
+				const float weight_x = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i);
+				const float weight_y = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, j);
+				const float x = input[i] / rms * weight_x;
+				const float y = input[j] / rms * weight_y;
+				if (pair < active_pairs) {
+					const float frequency = 1.0f / powf(base, static_cast<float>(pair << 1u) / dim);
+					const float angle = static_cast<float>(position) * frequency * frequency_scale;
+					const float cosine = cosf(angle);
+					const float sine = sinf(angle);
+					output[i] = x * cosine - y * sine;
+					output[j] = x * sine + y * cosine;
+				} else {
+					output[i] = x;
+					output[j] = y;
+				}
+			}
+			return;
+		}
+		for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+			const uint32_t i = pair << 1u;
+			const float weight_x = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i);
+			const float weight_y = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i + 1u);
+			const float x = input[i] / rms * weight_x;
+			const float y = input[i + 1u] / rms * weight_y;
+			if (i < rotary_count) {
+				const float frequency = 1.0f / powf(base, static_cast<float>(i) / dim);
+				const float angle = static_cast<float>(position) * frequency * frequency_scale;
+				const float cosine = cosf(angle);
+				const float sine = sinf(angle);
+			output[i] = x * cosine - y * sine;
+			output[i + 1u] = x * sine + y * cosine;
+		} else {
+			output[i] = x;
+			output[i + 1u] = y;
+		}
+	}
+}
+

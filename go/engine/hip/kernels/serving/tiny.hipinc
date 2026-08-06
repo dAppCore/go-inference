@@ -1,0 +1,170 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_tiny_prefill(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_tiny_prefill_launch_args &args = *reinterpret_cast<const rocm_tiny_prefill_launch_args *>(packet);
+	if (!rocm_valid_tiny_prefill_args(args)) {
+		return;
+	}
+	const int32_t *tokens = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(args.token_pointer));
+	const float *embedding = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.embedding_pointer));
+	float *logits = reinterpret_cast<float *>(static_cast<uintptr_t>(args.logit_pointer));
+	float *attention = reinterpret_cast<float *>(static_cast<uintptr_t>(args.attention_pointer));
+	float *state_keys = reinterpret_cast<float *>(static_cast<uintptr_t>(args.key_pointer));
+	float *state_values = reinterpret_cast<float *>(static_cast<uintptr_t>(args.value_pointer));
+	const float q8_scale = rocm_float_from_bits(args.q8_scale_bits);
+
+	const int32_t query_token = tokens[args.token_count - 1];
+	if (query_token < 0 || static_cast<uint32_t>(query_token) >= args.vocab_size) {
+		return;
+	}
+	const uint32_t query_base = static_cast<uint32_t>(query_token) * args.hidden_size;
+	const float scale = 1.0f / sqrtf(static_cast<float>(args.hidden_size));
+	float max_score = -3.4028234663852886e38f;
+	for (uint32_t token = 0; token < args.token_count; ++token) {
+		const int32_t token_id = tokens[token];
+		if (token_id < 0 || static_cast<uint32_t>(token_id) >= args.vocab_size) {
+			return;
+		}
+		const uint32_t key_base = static_cast<uint32_t>(token_id) * args.hidden_size;
+		const uint32_t state_base = token * args.hidden_size;
+		float score = 0.0f;
+		for (uint32_t dim = 0; dim < args.hidden_size; ++dim) {
+			const float value = embedding[key_base + dim];
+			state_keys[state_base + dim] = value;
+			state_values[state_base + dim] = value;
+			score += embedding[query_base + dim] * value;
+		}
+		score *= scale;
+		attention[token] = score;
+		if (score > max_score) {
+			max_score = score;
+		}
+	}
+
+	float attention_sum = 0.0f;
+	for (uint32_t token = 0; token < args.token_count; ++token) {
+		const float value = expf(attention[token] - max_score);
+		attention[token] = value;
+		attention_sum += value;
+	}
+	if (attention_sum == 0.0f) {
+		return;
+	}
+	for (uint32_t token = 0; token < args.token_count; ++token) {
+		attention[token] = attention[token] / attention_sum;
+	}
+
+	int32_t best_index = 0;
+	float best_score = 0.0f;
+	for (uint32_t vocab = 0; vocab < args.vocab_size; ++vocab) {
+		float logit = 0.0f;
+		const uint32_t weight_base = vocab * args.hidden_size;
+		for (uint32_t dim = 0; dim < args.hidden_size; ++dim) {
+			float context_value = 0.0f;
+			for (uint32_t token = 0; token < args.token_count; ++token) {
+				const uint32_t value_base = static_cast<uint32_t>(tokens[token]) * args.hidden_size;
+				context_value += attention[token] * embedding[value_base + dim];
+			}
+			logit += context_value * rocm_tiny_output_weight_value(args.output_weight_pointer, args.output_weight_encoding, weight_base + dim, q8_scale);
+		}
+		logits[vocab] = logit;
+		if (vocab == 0 || logit > best_score) {
+			best_index = static_cast<int32_t>(vocab);
+			best_score = logit;
+		}
+	}
+
+	const uintptr_t result_pointer = static_cast<uintptr_t>(args.result_pointer);
+	int32_t *result_index = reinterpret_cast<int32_t *>(result_pointer);
+	float *result_score = reinterpret_cast<float *>(result_pointer + sizeof(int32_t));
+	*result_index = best_index;
+	*result_score = best_score;
+}
+
+extern "C" __global__ void rocm_tiny_decode(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_tiny_decode_launch_args &args = *reinterpret_cast<const rocm_tiny_decode_launch_args *>(packet);
+	if (!rocm_valid_tiny_decode_args(args)) {
+		return;
+	}
+	const float *prior_keys = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.prior_key_pointer));
+	const float *prior_values = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.prior_value_pointer));
+	const float *embedding = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.embedding_pointer));
+	float *logits = reinterpret_cast<float *>(static_cast<uintptr_t>(args.logit_pointer));
+	float *attention = reinterpret_cast<float *>(static_cast<uintptr_t>(args.attention_pointer));
+	float *updated_keys = reinterpret_cast<float *>(static_cast<uintptr_t>(args.updated_key_pointer));
+	float *updated_values = reinterpret_cast<float *>(static_cast<uintptr_t>(args.updated_value_pointer));
+	const float q8_scale = rocm_float_from_bits(args.q8_scale_bits);
+
+	const uint32_t token_base = args.token_id * args.hidden_size;
+	for (uint32_t index = 0; index < args.prior_token_count * args.hidden_size; ++index) {
+		updated_keys[index] = prior_keys[index];
+		updated_values[index] = prior_values[index];
+	}
+	const uint32_t updated_base = args.prior_token_count * args.hidden_size;
+	for (uint32_t dim = 0; dim < args.hidden_size; ++dim) {
+		updated_keys[updated_base + dim] = embedding[token_base + dim];
+		updated_values[updated_base + dim] = embedding[token_base + dim];
+	}
+
+	const float scale = 1.0f / sqrtf(static_cast<float>(args.hidden_size));
+	float max_score = -3.4028234663852886e38f;
+	const uint32_t total_tokens = args.prior_token_count + 1u;
+	for (uint32_t token = 0; token < total_tokens; ++token) {
+		const uint32_t key_base = token * args.hidden_size;
+		float score = 0.0f;
+		for (uint32_t dim = 0; dim < args.hidden_size; ++dim) {
+			score += embedding[token_base + dim] * updated_keys[key_base + dim];
+		}
+		score *= scale;
+		attention[token] = score;
+		if (score > max_score) {
+			max_score = score;
+		}
+	}
+
+	float attention_sum = 0.0f;
+	for (uint32_t token = 0; token < total_tokens; ++token) {
+		const float value = expf(attention[token] - max_score);
+		attention[token] = value;
+		attention_sum += value;
+	}
+	if (attention_sum == 0.0f) {
+		return;
+	}
+	for (uint32_t token = 0; token < total_tokens; ++token) {
+		attention[token] = attention[token] / attention_sum;
+	}
+
+	int32_t best_index = 0;
+	float best_score = 0.0f;
+	for (uint32_t vocab = 0; vocab < args.vocab_size; ++vocab) {
+		float logit = 0.0f;
+		const uint32_t weight_base = vocab * args.hidden_size;
+		for (uint32_t dim = 0; dim < args.hidden_size; ++dim) {
+			float context_value = 0.0f;
+			for (uint32_t token = 0; token < total_tokens; ++token) {
+				context_value += attention[token] * updated_values[token * args.hidden_size + dim];
+			}
+			logit += context_value * rocm_tiny_output_weight_value(args.output_weight_pointer, args.output_weight_encoding, weight_base + dim, q8_scale);
+		}
+		logits[vocab] = logit;
+		if (vocab == 0 || logit > best_score) {
+			best_index = static_cast<int32_t>(vocab);
+			best_score = logit;
+		}
+	}
+
+	const uintptr_t result_pointer = static_cast<uintptr_t>(args.result_pointer);
+	int32_t *result_index = reinterpret_cast<int32_t *>(result_pointer);
+	float *result_score = reinterpret_cast<float *>(result_pointer + sizeof(int32_t));
+	*result_index = best_index;
+	*result_score = best_score;
+}

@@ -1,0 +1,34 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_rms_norm_weight_config(uint64_t weight_pointer, uint32_t weight_bytes, uint32_t count, uint32_t weight_encoding, uint32_t flags);
+
+__device__ bool rocm_valid_rms_norm_residual_add_gelu_tanh_proj_args(const rocm_rms_norm_residual_add_gelu_tanh_proj_launch_args &args)
+{
+	const float epsilon = rocm_float_from_bits(args.epsilon_bits);
+	const float output_scale = rocm_float_from_bits(args.output_scale_bits);
+	if (args.version != ROCM_RMS_NORM_RESIDUAL_ADD_GELU_TANH_PROJ_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_RMS_NORM_RESIDUAL_ADD_GELU_TANH_PROJ_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.residual_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.multiplier_pointer == 0 ||
+		args.residual_output_pointer == 0 ||
+		args.activation_output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.residual_bytes != args.cols * sizeof(float) ||
+		args.residual_output_bytes != args.cols * sizeof(float) ||
+		args.multiplier_bytes != args.rows * sizeof(float) ||
+		args.activation_output_bytes != args.rows * sizeof(float) ||
+		!(epsilon >= 0.0f) ||
+		!isfinite(output_scale)) {
+		return false;
+	}
+	return rocm_valid_rms_norm_weight_config(args.rms_weight_pointer, args.rms_weight_bytes, args.cols, args.rms_weight_encoding, args.rms_flags) &&
+		rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+

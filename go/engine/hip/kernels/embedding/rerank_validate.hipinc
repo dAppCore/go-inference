@@ -1,0 +1,16 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_rerank_cosine_args(const rocm_rerank_cosine_launch_args &args)
+{
+	return args.version == ROCM_RERANK_COSINE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_RERANK_COSINE_LAUNCH_ARGS_BYTES &&
+		args.query_pointer != 0 &&
+		args.document_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.document_count > 0 &&
+		args.dim > 0 &&
+		args.query_bytes == args.dim * sizeof(float) &&
+		args.document_bytes == args.document_count * args.dim * sizeof(float) &&
+		args.output_bytes == args.document_count * sizeof(float);
+}
+

@@ -1,0 +1,463 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_kv_descriptor_append_args(const rocm_kv_descriptor_append_launch_args &args)
+{
+	return args.version == ROCM_KV_DESCRIPTOR_APPEND_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_KV_DESCRIPTOR_APPEND_LAUNCH_ARGS_BYTES &&
+		(args.reserved0 == ROCM_KV_DESCRIPTOR_APPEND_MODE_BUILD_SINGLE_PAGE || args.previous_descriptor_pointer != 0) &&
+		args.output_descriptor_pointer != 0 &&
+		args.new_key_pointer != 0 &&
+		args.new_value_pointer != 0 &&
+		(args.reserved0 == ROCM_KV_DESCRIPTOR_APPEND_MODE_BUILD_SINGLE_PAGE || args.previous_descriptor_bytes >= ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) &&
+		args.output_page_count > 0 &&
+		args.output_token_count > 0 &&
+		args.output_descriptor_bytes == static_cast<uint64_t>(ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) + static_cast<uint64_t>(args.output_page_count) * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES &&
+		rocm_supported_kv_mode(args.mode_code) &&
+		args.block_size > 0 &&
+		args.key_width > 0 &&
+		args.value_width > 0 &&
+		rocm_valid_kv_tensor_encoding(args.new_key_encoding) &&
+		rocm_valid_kv_tensor_encoding(args.new_value_encoding) &&
+		args.new_key_bytes > 0 &&
+		args.new_value_bytes > 0;
+}
+
+__device__ bool rocm_kv_descriptor_encoding_is_row_interleaved(uint32_t encoding)
+{
+	return encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED ||
+		encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED;
+}
+
+__device__ uint64_t rocm_kv_descriptor_interleaved_row_stride(uint32_t encoding, uint32_t width)
+{
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED) {
+		return sizeof(uint32_t) + width;
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED) {
+		return sizeof(uint32_t) + ((static_cast<uint64_t>(width) + 1u) / 2u);
+	}
+	return 0u;
+}
+
+__device__ bool rocm_kv_descriptor_trim_page(const rocm_device_kv_page_descriptor *page, uint64_t trim_start, rocm_device_kv_page_descriptor *out_page)
+{
+	if (page == nullptr || out_page == nullptr) {
+		return false;
+	}
+	const uint64_t page_end = page->token_start + page->token_count;
+	if (page_end <= trim_start) {
+		return false;
+	}
+	*out_page = *page;
+	if (page->token_start >= trim_start) {
+		out_page->token_start = page->token_start - trim_start;
+		return true;
+	}
+	if (!rocm_kv_descriptor_encoding_is_row_interleaved(page->key_encoding) ||
+		!rocm_kv_descriptor_encoding_is_row_interleaved(page->value_encoding)) {
+		return false;
+	}
+	const uint64_t skip_tokens = trim_start - page->token_start;
+	const uint64_t key_stride = rocm_kv_descriptor_interleaved_row_stride(page->key_encoding, page->key_width);
+	const uint64_t value_stride = rocm_kv_descriptor_interleaved_row_stride(page->value_encoding, page->value_width);
+	if (key_stride == 0u ||
+		value_stride == 0u ||
+		page->key_bytes != key_stride * page->token_count ||
+		page->value_bytes != value_stride * page->token_count ||
+		skip_tokens >= page->token_count) {
+		return false;
+	}
+	out_page->token_start = 0u;
+	out_page->token_count = page_end - trim_start;
+	out_page->key_pointer = page->key_pointer + key_stride * skip_tokens;
+	out_page->value_pointer = page->value_pointer + value_stride * skip_tokens;
+	out_page->key_bytes = key_stride * out_page->token_count;
+	out_page->value_bytes = value_stride * out_page->token_count;
+	return true;
+}
+
+__device__ void rocm_kv_descriptor_append_execute(const rocm_kv_descriptor_append_launch_args &args)
+{
+	unsigned char *output_base = reinterpret_cast<unsigned char *>(static_cast<uintptr_t>(args.output_descriptor_pointer));
+	if (args.reserved0 == ROCM_KV_DESCRIPTOR_APPEND_MODE_BUILD_SINGLE_PAGE) {
+		if (threadIdx.x != 0 ||
+			args.output_page_count != 1u ||
+			args.trim_start != 0u) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES);
+		page->token_start = 0u;
+		page->token_count = args.output_token_count;
+		page->key_width = args.key_width;
+		page->value_width = args.value_width;
+		page->key_encoding = args.new_key_encoding;
+		page->value_encoding = args.new_value_encoding;
+		page->key_pointer = args.new_key_pointer;
+		page->value_pointer = args.new_value_pointer;
+		page->key_bytes = args.new_key_bytes;
+		page->value_bytes = args.new_value_bytes;
+
+		rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+		header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+		header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+		header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+		header->mode_code = args.mode_code;
+		header->page_count = args.output_page_count;
+		header->block_size = args.block_size;
+		header->token_count = args.output_token_count;
+		return;
+	}
+	const rocm_device_kv_descriptor_header *previous = reinterpret_cast<const rocm_device_kv_descriptor_header *>(static_cast<uintptr_t>(args.previous_descriptor_pointer));
+	const uint64_t append_count = args.trim_start + static_cast<uint64_t>(args.output_token_count) - previous->token_count;
+	if (previous->version != ROCM_DEVICE_KV_DESCRIPTOR_VERSION ||
+		previous->header_bytes != ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES ||
+		previous->page_bytes != ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES ||
+		previous->mode_code != args.mode_code ||
+		previous->block_size != args.block_size ||
+		previous->page_count == 0 ||
+		previous->token_count == 0 ||
+			args.previous_descriptor_bytes != static_cast<uint64_t>(ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) + static_cast<uint64_t>(previous->page_count) * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES ||
+			args.trim_start + static_cast<uint64_t>(args.output_token_count) <= previous->token_count ||
+			append_count == 0u ||
+			append_count > args.block_size) {
+		return;
+	}
+
+	const unsigned char *previous_base = reinterpret_cast<const unsigned char *>(previous);
+	if (args.reserved0 == ROCM_KV_DESCRIPTOR_APPEND_MODE_GROW_LAST_PAGE &&
+		args.trim_start == 0u &&
+		args.output_page_count == previous->page_count &&
+		args.output_token_count == previous->token_count + append_count) {
+		const uint32_t last_index = previous->page_count - 1u;
+		if (args.previous_descriptor_pointer != args.output_descriptor_pointer) {
+			for (uint32_t page_index = threadIdx.x; page_index < previous->page_count; page_index += blockDim.x) {
+				const rocm_device_kv_page_descriptor *page = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + page_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+				rocm_device_kv_page_descriptor *out_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + page_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+				*out_page = *page;
+			}
+			__syncthreads();
+		}
+		if (threadIdx.x != 0) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *last_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + last_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		const rocm_device_kv_page_descriptor *previous_last = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + last_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		if (previous_last->token_start + previous_last->token_count != previous->token_count ||
+			previous_last->key_pointer != args.new_key_pointer ||
+			previous_last->value_pointer != args.new_value_pointer ||
+			previous_last->key_width != args.key_width ||
+			previous_last->value_width != args.value_width ||
+			previous_last->key_encoding != args.new_key_encoding ||
+			previous_last->value_encoding != args.new_value_encoding ||
+			args.new_key_bytes <= previous_last->key_bytes ||
+			args.new_value_bytes <= previous_last->value_bytes) {
+			return;
+		}
+		last_page->token_count = previous_last->token_count + append_count;
+		last_page->key_bytes = args.new_key_bytes;
+		last_page->value_bytes = args.new_value_bytes;
+		rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+		header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+		header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+		header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+		header->mode_code = args.mode_code;
+		header->page_count = args.output_page_count;
+		header->block_size = args.block_size;
+		header->token_count = args.output_token_count;
+		return;
+	}
+	if (args.reserved0 == ROCM_KV_DESCRIPTOR_APPEND_MODE_GROW_LAST_PAGE &&
+		args.trim_start > 0u &&
+		args.output_page_count <= previous->page_count) {
+		if (threadIdx.x != 0) {
+			return;
+		}
+		const uint32_t last_index = previous->page_count - 1u;
+		const uint32_t output_last_index = args.output_page_count - 1u;
+		uint32_t output_index = 0u;
+		for (uint32_t page_index = 0u; page_index < last_index; ++page_index) {
+			const rocm_device_kv_page_descriptor *page = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + page_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+			rocm_device_kv_page_descriptor local_page {};
+			if (!rocm_kv_descriptor_trim_page(page, args.trim_start, &local_page)) {
+				continue;
+			}
+			if (output_index >= output_last_index) {
+				return;
+			}
+			rocm_device_kv_page_descriptor *out_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + output_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+			*out_page = local_page;
+			++output_index;
+		}
+		if (output_index != output_last_index) {
+			return;
+		}
+		const rocm_device_kv_page_descriptor *previous_last = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + last_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		rocm_device_kv_page_descriptor retained_last {};
+		if (!rocm_kv_descriptor_trim_page(previous_last, args.trim_start, &retained_last) ||
+			previous_last->token_start + previous_last->token_count != previous->token_count ||
+			retained_last.key_pointer != args.new_key_pointer ||
+			retained_last.value_pointer != args.new_value_pointer ||
+			retained_last.key_width != args.key_width ||
+			retained_last.value_width != args.value_width ||
+			retained_last.key_encoding != args.new_key_encoding ||
+			retained_last.value_encoding != args.new_value_encoding ||
+			args.new_key_bytes <= retained_last.key_bytes ||
+			args.new_value_bytes <= retained_last.value_bytes) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *last_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + output_last_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		*last_page = retained_last;
+		last_page->token_count = retained_last.token_count + append_count;
+		last_page->key_bytes = args.new_key_bytes;
+		last_page->value_bytes = args.new_value_bytes;
+
+		rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+		header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+		header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+		header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+		header->mode_code = args.mode_code;
+		header->page_count = args.output_page_count;
+		header->block_size = args.block_size;
+		header->token_count = args.output_token_count;
+		return;
+	}
+	if (args.trim_start == 0u &&
+		args.previous_descriptor_pointer == args.output_descriptor_pointer &&
+		args.output_page_count == previous->page_count + 1u) {
+		if (threadIdx.x != 0) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *new_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + previous->page_count * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		new_page->token_start = static_cast<uint64_t>(args.output_token_count) - append_count;
+		new_page->token_count = append_count;
+		new_page->key_width = args.key_width;
+		new_page->value_width = args.value_width;
+		new_page->key_encoding = args.new_key_encoding;
+		new_page->value_encoding = args.new_value_encoding;
+		new_page->key_pointer = args.new_key_pointer;
+		new_page->value_pointer = args.new_value_pointer;
+		new_page->key_bytes = args.new_key_bytes;
+		new_page->value_bytes = args.new_value_bytes;
+
+		rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+		header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+		header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+		header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+		header->mode_code = args.mode_code;
+		header->page_count = args.output_page_count;
+		header->block_size = args.block_size;
+		header->token_count = args.output_token_count;
+		return;
+	}
+	if (args.trim_start == 0u && args.output_page_count == previous->page_count + 1u) {
+		for (uint32_t page_index = threadIdx.x; page_index < previous->page_count; page_index += blockDim.x) {
+			const rocm_device_kv_page_descriptor *page = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + page_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+			rocm_device_kv_page_descriptor *out_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + page_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+			*out_page = *page;
+		}
+		__syncthreads();
+		if (threadIdx.x != 0) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *new_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + previous->page_count * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		new_page->token_start = static_cast<uint64_t>(args.output_token_count) - append_count;
+		new_page->token_count = append_count;
+		new_page->key_width = args.key_width;
+		new_page->value_width = args.value_width;
+		new_page->key_encoding = args.new_key_encoding;
+		new_page->value_encoding = args.new_value_encoding;
+		new_page->key_pointer = args.new_key_pointer;
+		new_page->value_pointer = args.new_value_pointer;
+		new_page->key_bytes = args.new_key_bytes;
+		new_page->value_bytes = args.new_value_bytes;
+
+		rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+		header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+		header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+		header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+		header->mode_code = args.mode_code;
+		header->page_count = args.output_page_count;
+		header->block_size = args.block_size;
+		header->token_count = args.output_token_count;
+		return;
+	}
+	if (args.trim_start > 0u &&
+		args.previous_descriptor_pointer == args.output_descriptor_pointer &&
+		previous->page_count == previous->token_count &&
+		args.output_page_count == args.output_token_count &&
+		args.output_page_count + args.trim_start == previous->page_count + 1u) {
+		const uint32_t copied_pages = args.output_page_count - 1u;
+		for (uint32_t tile_start = 0u; tile_start < copied_pages; tile_start += blockDim.x) {
+			const uint32_t output_index = tile_start + threadIdx.x;
+			rocm_device_kv_page_descriptor local_page {};
+			const bool active = output_index < copied_pages;
+			if (active) {
+				const uint64_t source_index = static_cast<uint64_t>(output_index) + args.trim_start;
+				const rocm_device_kv_page_descriptor *page = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + source_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+				local_page = *page;
+				local_page.token_start = output_index;
+			}
+			__syncthreads();
+			if (active) {
+				rocm_device_kv_page_descriptor *out_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + output_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+				*out_page = local_page;
+			}
+			__syncthreads();
+		}
+		if (threadIdx.x != 0) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *new_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + copied_pages * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		new_page->token_start = static_cast<uint64_t>(args.output_token_count - 1u);
+		new_page->token_count = 1;
+		new_page->key_width = args.key_width;
+		new_page->value_width = args.value_width;
+		new_page->key_encoding = args.new_key_encoding;
+		new_page->value_encoding = args.new_value_encoding;
+		new_page->key_pointer = args.new_key_pointer;
+		new_page->value_pointer = args.new_value_pointer;
+		new_page->key_bytes = args.new_key_bytes;
+		new_page->value_bytes = args.new_value_bytes;
+
+		rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+		header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+		header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+		header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+		header->mode_code = args.mode_code;
+		header->page_count = args.output_page_count;
+		header->block_size = args.block_size;
+		header->token_count = args.output_token_count;
+		return;
+	}
+	if (args.trim_start > 0u &&
+		args.previous_descriptor_pointer != args.output_descriptor_pointer &&
+		previous->page_count == previous->token_count &&
+		args.output_page_count == args.output_token_count &&
+		args.output_page_count + args.trim_start == previous->page_count + 1u) {
+		const uint32_t copied_pages = args.output_page_count - 1u;
+		for (uint32_t output_index = threadIdx.x; output_index < copied_pages; output_index += blockDim.x) {
+			const uint64_t source_index = static_cast<uint64_t>(output_index) + args.trim_start;
+			const rocm_device_kv_page_descriptor *page = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + source_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+			rocm_device_kv_page_descriptor *out_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + output_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+			*out_page = *page;
+			out_page->token_start = output_index;
+		}
+		__syncthreads();
+		if (threadIdx.x != 0) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *new_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + copied_pages * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		new_page->token_start = static_cast<uint64_t>(args.output_token_count - 1u);
+		new_page->token_count = 1;
+		new_page->key_width = args.key_width;
+		new_page->value_width = args.value_width;
+		new_page->key_encoding = args.new_key_encoding;
+		new_page->value_encoding = args.new_value_encoding;
+		new_page->key_pointer = args.new_key_pointer;
+		new_page->value_pointer = args.new_value_pointer;
+		new_page->key_bytes = args.new_key_bytes;
+		new_page->value_bytes = args.new_value_bytes;
+
+		rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+		header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+		header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+		header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+		header->mode_code = args.mode_code;
+		header->page_count = args.output_page_count;
+		header->block_size = args.block_size;
+		header->token_count = args.output_token_count;
+		return;
+	}
+	if (threadIdx.x != 0) {
+		return;
+	}
+	uint32_t output_index = 0;
+	for (uint32_t page_index = 0; page_index < previous->page_count; ++page_index) {
+		const rocm_device_kv_page_descriptor *page = reinterpret_cast<const rocm_device_kv_page_descriptor *>(previous_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + page_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		const uint64_t page_end = page->token_start + page->token_count;
+		if (page_end <= args.trim_start) {
+			continue;
+		}
+		if (output_index + 1u >= args.output_page_count) {
+			return;
+		}
+		rocm_device_kv_page_descriptor local_page {};
+		if (!rocm_kv_descriptor_trim_page(page, args.trim_start, &local_page)) {
+			return;
+		}
+		rocm_device_kv_page_descriptor *out_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + output_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		*out_page = local_page;
+		++output_index;
+	}
+	if (output_index + 1u != args.output_page_count) {
+		return;
+	}
+	rocm_device_kv_page_descriptor *new_page = reinterpret_cast<rocm_device_kv_page_descriptor *>(output_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + output_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+	new_page->token_start = static_cast<uint64_t>(args.output_token_count) - append_count;
+	new_page->token_count = append_count;
+	new_page->key_width = args.key_width;
+	new_page->value_width = args.value_width;
+	new_page->key_encoding = args.new_key_encoding;
+	new_page->value_encoding = args.new_value_encoding;
+	new_page->key_pointer = args.new_key_pointer;
+	new_page->value_pointer = args.new_value_pointer;
+	new_page->key_bytes = args.new_key_bytes;
+	new_page->value_bytes = args.new_value_bytes;
+
+	rocm_device_kv_descriptor_header *header = reinterpret_cast<rocm_device_kv_descriptor_header *>(output_base);
+	header->version = ROCM_DEVICE_KV_DESCRIPTOR_VERSION;
+	header->header_bytes = ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES;
+	header->page_bytes = ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+	header->mode_code = args.mode_code;
+	header->page_count = args.output_page_count;
+	header->block_size = args.block_size;
+	header->token_count = args.output_token_count;
+}
+
+extern "C" __global__ void rocm_kv_descriptor_append(const unsigned char *packet)
+{
+	if (packet == nullptr || blockIdx.x != 0) {
+		return;
+	}
+	const rocm_kv_descriptor_append_launch_args &args = *reinterpret_cast<const rocm_kv_descriptor_append_launch_args *>(packet);
+	if (!rocm_valid_kv_descriptor_append_args(args)) {
+		return;
+	}
+	rocm_kv_descriptor_append_execute(args);
+}
+
+extern "C" __global__ void rocm_kv_encode_token_value_norm_descriptor_append(const unsigned char *packet)
+{
+	if (packet == nullptr || blockIdx.x > 2u || blockDim.x == 0 || blockDim.x > ROCM_KV_ENCODE_TOKEN_BLOCK_SIZE) {
+		return;
+	}
+	const rocm_kv_encode_token_value_norm_descriptor_append_launch_args &args = *reinterpret_cast<const rocm_kv_encode_token_value_norm_descriptor_append_launch_args *>(packet);
+	if (args.version != ROCM_KV_ENCODE_TOKEN_VALUE_NORM_DESCRIPTOR_APPEND_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_KV_ENCODE_TOKEN_VALUE_NORM_DESCRIPTOR_APPEND_LAUNCH_ARGS_BYTES) {
+		return;
+	}
+	if (blockIdx.x < 2u) {
+		if (!rocm_valid_kv_encode_token_value_norm_args(args.encode)) {
+			return;
+		}
+		const bool encode_key = blockIdx.x == 0;
+		const uint32_t row_count = args.encode.reserved2 == 0u ? 1u : static_cast<uint32_t>(args.encode.reserved2);
+		if (encode_key) {
+			const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.encode.key_input_pointer));
+			unsigned char *output = reinterpret_cast<unsigned char *>(static_cast<uintptr_t>(args.encode.key_output_pointer));
+			const uint32_t row_width = args.encode.reserved0 == 0u ? args.encode.key_count : static_cast<uint32_t>(args.encode.reserved0);
+			rocm_encode_kv_token_tensor(input, output, args.encode.key_count, args.encode.key_encoding, row_width, row_count);
+			return;
+		}
+		const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.encode.value_input_pointer));
+		unsigned char *output = reinterpret_cast<unsigned char *>(static_cast<uintptr_t>(args.encode.value_output_pointer));
+		const uint32_t row_width = args.encode.reserved1 == 0u ? args.encode.value_count : static_cast<uint32_t>(args.encode.reserved1);
+		rocm_encode_kv_token_tensor_value_norm(input, output, args.encode.value_count, args.encode.value_encoding, row_width, row_count, args.encode.value_head_dim, args.encode.value_head_count, rocm_float_from_bits(args.encode.value_epsilon_bits));
+		return;
+	}
+	if (!rocm_valid_kv_descriptor_append_args(args.descriptor)) {
+		return;
+	}
+	rocm_kv_descriptor_append_execute(args.descriptor);
+}
+

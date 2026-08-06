@@ -2,7 +2,70 @@
 
 # go-rocm HIP Kernels
 
-`rocm_kernels.hip` contains the first native kernel source for the launch ABI used by `go/hip_launch.go`.
+`rocm_kernels.hip` is the **amalgamation translation unit** for the launch ABI used by
+`go/hip_launch.go`. It holds no kernel code of its own: a preamble, the anonymous
+namespace, and an ordered `#include` manifest of the family fragments below. One
+`hipcc` invocation still compiles one TU — for AMD (`--genco`), for NVIDIA (`-x cu`)
+and for HIP-CPU (`-x c++`) — from exactly this file.
+
+## Layout
+
+The tree follows the QuixiCore family taxonomy: **semantic family first, file per
+operation**. A fragment is a `.hipinc` — a source *fragment*, never a standalone TU.
+
+```text
+kernels/
+  rocm_kernels.hip                    the amalgamation TU + ordered manifest
+  contract/launch_abi.hipinc          every launch-args constant, struct and static_assert
+  common/                             numeric + math primitives shared by every family
+  activations/                        SwiGLU, GELU-tanh multiply, vector add/scale, transpose
+  attention/                          SDPA, multi-head, chunked/batched, device-KV readers, rotary
+  embedding/                          table lookup, mean pooling, rerank cosine
+  lora/                               LoRA projection
+  matmul/                             dense fp16/q8/f32/BF16 row projection
+  moe/                                routing, gather/scatter/reduce, affine expert routes
+  norms/                              RMSNorm family, residual-add, QK-norm+RoPE, MoE combine
+  quant/                              MLX affine + GGUF quantised projection, AutoRound, JANGTQ, codebook
+  sampling/                           greedy, softcap greedy, packed top-k, diffusion sampling
+  serving/                            prefill/decode packets, KV cache encode/append, tiny fixtures
+  training/                           cross-entropy, distillation KL, GRPO advantage
+```
+
+Within a family, `<operation>.hipinc` holds the kernels and their local device
+helpers; `<operation>_validate.hipinc` holds the `rocm_valid_*_args` validators,
+which live inside the anonymous namespace and so are emitted in an earlier phase
+of the manifest.
+
+**Why no `variants/` tree.** QuixiCore splits each operation into
+`variants/rocm_<target>/` because it ships several CDNA generations side by side.
+This engine compiles *one* source for AMD, NVIDIA and CPU alike, so the variant
+axis is empty and the directory would be ceremony. The axis that *is* real here is
+the quantisation scheme and tile shape, and it is carried in the kernel symbol name
+(`..._q8_g64_row16_tokens16_shared`). If genuinely architecture-specific kernels
+ever arrive, they go in `kernels/<family>/variants/<target>/` and the manifest
+selects one — do not reach for `#ifdef`.
+
+## Adding a kernel
+
+1. Put the launch-args struct, its constants and its `static_assert` in
+   `contract/launch_abi.hipinc`. That file is the ABI the Go launcher mirrors
+   byte-for-byte; keeping it in one place is what makes ABI drift reviewable.
+2. Put the `rocm_valid_<name>_args` validator in the family's
+   `<operation>_validate.hipinc`.
+3. Put the kernel body, and any device helper only it uses, in the family's
+   `<operation>.hipinc`. Add a new fragment instead if the operation is new.
+4. **Add the fragment to the manifest in `rocm_kernels.hip`, in the right phase.**
+   The manifest is explicit and ordered on purpose — there is no glob. Validators
+   and device helpers must be included *before* the kernels that call them, and
+   everything in the first phase sits inside the anonymous namespace.
+   `TestHIPKernelSource_FragmentManifestCoversEveryFile_Good` fails on any
+   fragment that is on disk but unwired, or wired twice.
+5. Add the exported symbol to the launcher-name list further down this file and to
+   `TestHIPKernelSource_ExportsLaunchABI_Good`.
+
+Ordering is load-bearing: this is one translation unit, and C++ needs a definition
+before its first use. Fragments are contiguous slices of that one unit, so moving a
+fragment in the manifest is a real change, not a cosmetic one.
 
 Build a gfx1100 HSACO on a ROCm machine:
 

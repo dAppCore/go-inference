@@ -1,0 +1,311 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_rms_norm_args(const rocm_rms_norm_launch_args &args)
+{
+	const float epsilon = rocm_float_from_bits(args.epsilon_bits);
+	if (args.version != ROCM_RMS_NORM_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_RMS_NORM_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.count == 0 ||
+		args.input_bytes != args.count * sizeof(float) ||
+		args.output_bytes != args.count * sizeof(float) ||
+		!(epsilon >= 0.0f) ||
+		(args.flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+		return false;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+		return args.weight_pointer == 0 && args.weight_bytes == 0 && args.flags == 0;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32) {
+		return args.weight_pointer != 0 && args.weight_bytes == args.count * sizeof(float);
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		return args.weight_pointer != 0 && args.weight_bytes == args.count * sizeof(uint16_t);
+	}
+	return false;
+}
+
+__device__ bool rocm_valid_moe_combine_norms_args(const rocm_moe_combine_norms_launch_args &args)
+{
+	const float local_epsilon = rocm_float_from_bits(args.local_epsilon_bits);
+	const float expert_epsilon = rocm_float_from_bits(args.expert_epsilon_bits);
+	if (args.version != ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_BYTES ||
+		args.local_input_pointer == 0 ||
+		args.expert_input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.count == 0 ||
+		args.local_input_bytes != args.count * sizeof(float) ||
+		args.expert_input_bytes != args.count * sizeof(float) ||
+		args.output_bytes != args.count * sizeof(float) ||
+		!(local_epsilon >= 0.0f) ||
+		!(expert_epsilon >= 0.0f) ||
+		(args.local_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0 ||
+		(args.expert_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+		return false;
+	}
+	const bool local_weight_ok =
+		(args.local_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE && args.local_weight_pointer == 0 && args.local_weight_bytes == 0 && args.local_flags == 0) ||
+		(args.local_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32 && args.local_weight_pointer != 0 && args.local_weight_bytes == args.count * sizeof(float)) ||
+		(args.local_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16 && args.local_weight_pointer != 0 && args.local_weight_bytes == args.count * sizeof(uint16_t));
+	const bool expert_weight_ok =
+		(args.expert_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE && args.expert_weight_pointer == 0 && args.expert_weight_bytes == 0 && args.expert_flags == 0) ||
+		(args.expert_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32 && args.expert_weight_pointer != 0 && args.expert_weight_bytes == args.count * sizeof(float)) ||
+		(args.expert_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16 && args.expert_weight_pointer != 0 && args.expert_weight_bytes == args.count * sizeof(uint16_t));
+	return local_weight_ok && expert_weight_ok;
+}
+
+__device__ bool rocm_valid_rms_norm_weight_config(uint64_t weight_pointer, uint32_t weight_bytes, uint32_t count, uint32_t weight_encoding, uint32_t flags)
+{
+	if ((flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) != 0) {
+		return false;
+	}
+	if (weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+		return weight_pointer == 0 && weight_bytes == 0 && (flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) == 0;
+	}
+	if (weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32) {
+		return weight_pointer != 0 && weight_bytes == count * sizeof(float);
+	}
+	if (weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		return weight_pointer != 0 && weight_bytes == count * sizeof(uint16_t);
+	}
+	return false;
+}
+
+__device__ bool rocm_valid_rms_norm_residual_add_args(const rocm_rms_norm_residual_add_launch_args &args)
+{
+	const float epsilon = rocm_float_from_bits(args.epsilon_bits);
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+	if (args.version != ROCM_RMS_NORM_RESIDUAL_ADD_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_RMS_NORM_RESIDUAL_ADD_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.residual_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.count == 0 ||
+		args.input_bytes != args.count * sizeof(float) ||
+		args.residual_bytes != args.count * sizeof(float) ||
+		args.output_bytes != args.count * sizeof(float) ||
+		!(epsilon >= 0.0f) ||
+		!isfinite(output_scale) ||
+		(args.flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+		return false;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+		return args.weight_pointer == 0 && args.weight_bytes == 0 && args.flags == 0;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32) {
+		return args.weight_pointer != 0 && args.weight_bytes == args.count * sizeof(float);
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		return args.weight_pointer != 0 && args.weight_bytes == args.count * sizeof(uint16_t);
+	}
+	return false;
+}
+
+__device__ bool rocm_valid_rms_norm_residual_add_norm_args(const rocm_rms_norm_residual_add_norm_launch_args &args)
+{
+	const float epsilon = rocm_float_from_bits(args.epsilon_bits);
+	const float norm_epsilon = rocm_float_from_bits(args.norm_epsilon_bits);
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+	const bool q8_output_disabled = args.q8_output_pointer == 0 && args.q8_output_bytes == 0;
+	const bool q8_output_enabled = args.q8_output_pointer != 0 &&
+		(args.count % ROCM_Q8_1_BLOCK_SIZE) == 0 &&
+		static_cast<uint64_t>(args.q8_output_bytes) ==
+			static_cast<uint64_t>(args.count / ROCM_Q8_1_BLOCK_SIZE) * ROCM_Q8_1_BLOCK_BYTES;
+	return args.version == ROCM_RMS_NORM_RESIDUAL_ADD_NORM_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_RMS_NORM_RESIDUAL_ADD_NORM_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.residual_pointer != 0 &&
+		args.residual_output_pointer != 0 &&
+		args.norm_output_pointer != 0 &&
+		args.count > 0 &&
+		args.input_bytes == args.count * sizeof(float) &&
+		args.residual_bytes == args.count * sizeof(float) &&
+		args.residual_output_bytes == args.count * sizeof(float) &&
+		args.norm_output_bytes == args.count * sizeof(float) &&
+		(epsilon >= 0.0f) &&
+		isfinite(epsilon) &&
+		(norm_epsilon >= 0.0f) &&
+		isfinite(norm_epsilon) &&
+		isfinite(output_scale) &&
+		(q8_output_disabled || q8_output_enabled) &&
+		rocm_valid_rms_norm_weight_config(args.weight_pointer, args.weight_bytes, args.count, args.weight_encoding, args.flags) &&
+		rocm_valid_rms_norm_weight_config(args.norm_weight_pointer, args.norm_weight_bytes, args.count, args.norm_weight_encoding, args.norm_flags);
+}
+
+__device__ bool rocm_valid_rms_norm_heads_args(const rocm_rms_norm_heads_launch_args &args)
+{
+	const float epsilon = rocm_float_from_bits(args.epsilon_bits);
+	if (args.version != ROCM_RMS_NORM_HEADS_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_RMS_NORM_HEADS_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.head_dim == 0 ||
+		args.head_count == 0 ||
+		args.input_bytes != args.head_dim * args.head_count * sizeof(float) ||
+		args.output_bytes != args.head_dim * args.head_count * sizeof(float) ||
+		!(epsilon >= 0.0f) ||
+		(args.flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+		return false;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+		return args.weight_pointer == 0 && args.weight_bytes == 0 && args.flags == 0;
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32) {
+		return args.weight_pointer != 0 && args.weight_bytes == args.head_dim * sizeof(float);
+	}
+	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+		return args.weight_pointer != 0 && args.weight_bytes == args.head_dim * sizeof(uint16_t);
+	}
+	return false;
+}
+
+__device__ bool rocm_valid_rms_norm_rope_heads_args(const rocm_rms_norm_rope_heads_launch_args &args)
+{
+	const float epsilon = rocm_float_from_bits(args.epsilon_bits);
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+	return args.version == ROCM_RMS_NORM_ROPE_HEADS_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_RMS_NORM_ROPE_HEADS_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.head_dim > 0 &&
+		(args.head_dim % 2u) == 0u &&
+		args.head_count > 0 &&
+		args.input_bytes == args.head_dim * args.head_count * sizeof(float) &&
+		args.output_bytes == args.head_dim * args.head_count * sizeof(float) &&
+		(epsilon >= 0.0f) &&
+		isfinite(epsilon) &&
+		base > 0.0f &&
+		isfinite(base) &&
+		frequency_scale > 0.0f &&
+		isfinite(frequency_scale) &&
+		(args.flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.frequency_dim == 0u || args.frequency_dim >= args.head_dim) &&
+		(rotary_count % 2u) == 0u &&
+		rotary_count <= args.head_dim &&
+		rocm_valid_rms_norm_weight_config(args.weight_pointer, args.weight_bytes, args.head_dim, args.weight_encoding, args.flags);
+}
+
+__device__ bool rocm_valid_rms_norm_rope_heads_pair_args(const rocm_rms_norm_rope_heads_pair_launch_args &args)
+{
+	const float query_epsilon = rocm_float_from_bits(args.query_epsilon_bits);
+	const float key_epsilon = rocm_float_from_bits(args.key_epsilon_bits);
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+	const uint64_t query_count = static_cast<uint64_t>(args.head_dim) * static_cast<uint64_t>(args.query_head_count);
+	const uint64_t key_count = static_cast<uint64_t>(args.head_dim) * static_cast<uint64_t>(args.key_head_count);
+	return args.version == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_BYTES &&
+		args.query_input_pointer != 0 &&
+		args.query_output_pointer != 0 &&
+		args.key_input_pointer != 0 &&
+		args.key_output_pointer != 0 &&
+		args.head_dim > 0 &&
+		(args.head_dim % 2u) == 0u &&
+		args.query_head_count > 0 &&
+		args.key_head_count > 0 &&
+		query_count <= 0xffffffffu &&
+		key_count <= 0xffffffffu &&
+		args.query_input_bytes == query_count * sizeof(float) &&
+		args.query_output_bytes == query_count * sizeof(float) &&
+		args.key_input_bytes == key_count * sizeof(float) &&
+		args.key_output_bytes == key_count * sizeof(float) &&
+		(query_epsilon >= 0.0f) &&
+		isfinite(query_epsilon) &&
+		(key_epsilon >= 0.0f) &&
+		isfinite(key_epsilon) &&
+		base > 0.0f &&
+		isfinite(base) &&
+		frequency_scale > 0.0f &&
+		isfinite(frequency_scale) &&
+		(args.query_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.key_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.frequency_dim == 0u || args.frequency_dim >= args.head_dim) &&
+		(rotary_count % 2u) == 0u &&
+		rotary_count <= args.head_dim &&
+		rocm_valid_rms_norm_weight_config(args.query_weight_pointer, args.query_weight_bytes, args.head_dim, args.query_weight_encoding, args.query_flags) &&
+		rocm_valid_rms_norm_weight_config(args.key_weight_pointer, args.key_weight_bytes, args.head_dim, args.key_weight_encoding, args.key_flags);
+}
+
+__device__ bool rocm_valid_rms_norm_rope_heads_batch_args(const rocm_rms_norm_rope_heads_batch_launch_args &args)
+{
+	const float epsilon = rocm_float_from_bits(args.epsilon_bits);
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+	const uint64_t total_count = static_cast<uint64_t>(args.head_dim) * static_cast<uint64_t>(args.head_count) * static_cast<uint64_t>(args.batch);
+	const uint64_t last_position = static_cast<uint64_t>(args.start_position) + static_cast<uint64_t>(args.batch == 0u ? 0u : args.batch - 1u);
+	return args.version == ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.head_dim > 0 &&
+		(args.head_dim % 2u) == 0u &&
+		args.head_count > 0 &&
+		args.batch > 0 &&
+		total_count <= 0xffffffffu &&
+		args.input_bytes == total_count * sizeof(float) &&
+		args.output_bytes == total_count * sizeof(float) &&
+		(epsilon >= 0.0f) &&
+		isfinite(epsilon) &&
+		base > 0.0f &&
+		isfinite(base) &&
+		frequency_scale > 0.0f &&
+		isfinite(frequency_scale) &&
+		last_position <= 0xffffffffu &&
+		(args.flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.frequency_dim == 0u || args.frequency_dim >= args.head_dim) &&
+		(rotary_count % 2u) == 0u &&
+		rotary_count <= args.head_dim &&
+		rocm_valid_rms_norm_weight_config(args.weight_pointer, args.weight_bytes, args.head_dim, args.weight_encoding, args.flags);
+}
+
+__device__ bool rocm_valid_rms_norm_rope_heads_pair_lane_batch_args(const rocm_rms_norm_rope_heads_pair_lane_batch_launch_args &args)
+{
+	const float query_epsilon = rocm_float_from_bits(args.query_epsilon_bits);
+	const float key_epsilon = rocm_float_from_bits(args.key_epsilon_bits);
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+	const uint64_t query_count = static_cast<uint64_t>(args.head_dim) * static_cast<uint64_t>(args.query_head_count) * static_cast<uint64_t>(args.batch);
+	const uint64_t key_count = static_cast<uint64_t>(args.head_dim) * static_cast<uint64_t>(args.key_head_count) * static_cast<uint64_t>(args.batch);
+	return args.version == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_BYTES &&
+		args.query_input_pointer != 0 &&
+		args.query_output_pointer != 0 &&
+		args.key_input_pointer != 0 &&
+		args.key_output_pointer != 0 &&
+		args.positions_pointer != 0 &&
+		args.head_dim > 0 &&
+		(args.head_dim % 2u) == 0u &&
+		args.query_head_count > 0 &&
+		args.key_head_count > 0 &&
+		args.batch > 0 &&
+		query_count <= 0xffffffffu &&
+		key_count <= 0xffffffffu &&
+		args.query_input_bytes == query_count * sizeof(float) &&
+		args.query_output_bytes == query_count * sizeof(float) &&
+		args.key_input_bytes == key_count * sizeof(float) &&
+		args.key_output_bytes == key_count * sizeof(float) &&
+		args.positions_bytes == args.batch * sizeof(uint32_t) &&
+		(query_epsilon >= 0.0f) &&
+		isfinite(query_epsilon) &&
+		(key_epsilon >= 0.0f) &&
+		isfinite(key_epsilon) &&
+		base > 0.0f &&
+		isfinite(base) &&
+		frequency_scale > 0.0f &&
+		isfinite(frequency_scale) &&
+		(args.query_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.key_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.frequency_dim == 0u || args.frequency_dim >= args.head_dim) &&
+		(rotary_count % 2u) == 0u &&
+		rotary_count <= args.head_dim &&
+		rocm_valid_rms_norm_weight_config(args.query_weight_pointer, args.query_weight_bytes, args.head_dim, args.query_weight_encoding, args.query_flags) &&
+		rocm_valid_rms_norm_weight_config(args.key_weight_pointer, args.key_weight_bytes, args.head_dim, args.key_weight_encoding, args.key_flags);
+}
+

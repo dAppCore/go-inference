@@ -1,0 +1,16 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ float rocm_tiny_output_weight_value(uint64_t pointer, uint32_t encoding, uint32_t index, float q8_scale)
+{
+	if (encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_FP32) {
+		const float *weights = reinterpret_cast<const float *>(static_cast<uintptr_t>(pointer));
+		return weights[index];
+	}
+	if (encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_FP16) {
+		const uint16_t *weights = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(pointer));
+		return rocm_half_to_float(weights[index]);
+	}
+	const int8_t *weights = reinterpret_cast<const int8_t *>(static_cast<uintptr_t>(pointer));
+	return static_cast<float>(weights[index]) * q8_scale;
+}
+

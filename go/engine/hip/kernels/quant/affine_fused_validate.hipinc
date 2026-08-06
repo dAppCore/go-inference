@@ -1,0 +1,183 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_mlx_q4_token_suppressed(uint32_t row, const int32_t *suppress_tokens, uint32_t suppress_count)
+{
+	if (suppress_tokens == nullptr || suppress_count == 0) {
+		return false;
+	}
+	const int32_t token = static_cast<int32_t>(row);
+	for (uint32_t index = 0; index < suppress_count; ++index) {
+		if (suppress_tokens[index] == token) {
+			return true;
+		}
+	}
+	return false;
+}
+
+__device__ bool rocm_valid_mlx_q4_triple_projection_part(uint32_t rows, uint32_t cols, uint32_t group_size, uint32_t bits, uint32_t weight_bytes, uint32_t scale_bytes, uint32_t bias_bytes)
+{
+	if (rows == 0) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(rows, cols, group_size, bits, weight_bytes, scale_bytes, bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_triple_projection_args(const rocm_mlx_q4_triple_projection_launch_args &args)
+{
+	const uint64_t total_rows = static_cast<uint64_t>(args.first_rows) + args.second_rows + args.third_rows;
+	if (args.version != ROCM_MLX_Q4_TRIPLE_PROJECTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_TRIPLE_PROJECTION_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.first_weight_pointer == 0 ||
+		args.first_scale_pointer == 0 ||
+		args.first_bias_pointer == 0 ||
+		args.second_weight_pointer == 0 ||
+		args.second_scale_pointer == 0 ||
+		args.second_bias_pointer == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		static_cast<uint64_t>(args.output_bytes) != total_rows * sizeof(float)) {
+		return false;
+	}
+	if (args.third_rows > 0 &&
+		(args.third_weight_pointer == 0 ||
+			args.third_scale_pointer == 0 ||
+			args.third_bias_pointer == 0)) {
+		return false;
+	}
+	if (args.third_rows == 0 &&
+		(args.third_weight_bytes != 0 ||
+			args.third_scale_bytes != 0 ||
+			args.third_bias_bytes != 0)) {
+		return false;
+	}
+	return rocm_valid_mlx_q4_triple_projection_part(args.first_rows, args.cols, args.group_size, args.bits, args.first_weight_bytes, args.first_scale_bytes, args.first_bias_bytes) &&
+		rocm_valid_mlx_q4_triple_projection_part(args.second_rows, args.cols, args.group_size, args.bits, args.second_weight_bytes, args.second_scale_bytes, args.second_bias_bytes) &&
+		(args.third_rows == 0 || rocm_valid_mlx_q4_triple_projection_part(args.third_rows, args.cols, args.group_size, args.bits, args.third_weight_bytes, args.third_scale_bytes, args.third_bias_bytes));
+}
+
+__device__ bool rocm_valid_mlx_q4_gelu_tanh_mul_args(const rocm_mlx_q4_gelu_tanh_mul_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_GELU_TANH_MUL_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_GELU_TANH_MUL_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.gate_weight_pointer == 0 ||
+		args.gate_scale_pointer == 0 ||
+		args.gate_bias_pointer == 0 ||
+		args.up_weight_pointer == 0 ||
+		args.up_scale_pointer == 0 ||
+		args.up_bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.output_bytes != args.rows * sizeof(float)) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.gate_weight_bytes, args.gate_scale_bytes, args.gate_bias_bytes) &&
+		rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.up_weight_bytes, args.up_scale_bytes, args.up_bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_gelu_tanh_mul_batch_args(const rocm_mlx_q4_gelu_tanh_mul_batch_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_GELU_TANH_MUL_BATCH_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_GELU_TANH_MUL_BATCH_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.gate_weight_pointer == 0 ||
+		args.gate_scale_pointer == 0 ||
+		args.gate_bias_pointer == 0 ||
+		args.up_weight_pointer == 0 ||
+		args.up_scale_pointer == 0 ||
+		args.up_bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.batch == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.batch * args.cols * sizeof(float) ||
+		args.output_bytes != args.batch * args.rows * sizeof(float)) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.gate_weight_bytes, args.gate_scale_bytes, args.gate_bias_bytes) &&
+		rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.up_weight_bytes, args.up_scale_bytes, args.up_bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_gelu_tanh_mlp_persistent_args(const rocm_mlx_q4_gelu_tanh_mlp_persistent_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_GELU_TANH_MLP_PERSISTENT_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_GELU_TANH_MLP_PERSISTENT_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.gate_weight_pointer == 0 ||
+		args.gate_scale_pointer == 0 ||
+		args.gate_bias_pointer == 0 ||
+		args.up_weight_pointer == 0 ||
+		args.up_scale_pointer == 0 ||
+		args.up_bias_pointer == 0 ||
+		args.down_weight_pointer == 0 ||
+		args.down_scale_pointer == 0 ||
+		args.down_bias_pointer == 0 ||
+		args.activation_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.barrier_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols != 1536u ||
+		args.down_rows != 1536u ||
+		args.group_size != 32u ||
+		args.bits != 4u ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.activation_bytes != args.rows * sizeof(float) ||
+		args.output_bytes != args.down_rows * sizeof(float) ||
+		args.barrier_bytes != 8u) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.gate_weight_bytes, args.gate_scale_bytes, args.gate_bias_bytes) &&
+		rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.up_weight_bytes, args.up_scale_bytes, args.up_bias_bytes) &&
+		rocm_mlx_affine_shape_valid(args.down_rows, args.rows, args.group_size, args.bits, args.down_weight_bytes, args.down_scale_bytes, args.down_bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_gelu_tanh_proj_args(const rocm_mlx_q4_gelu_tanh_proj_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_GELU_TANH_PROJ_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_GELU_TANH_PROJ_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.multiplier_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.multiplier_bytes != args.rows * sizeof(float) ||
+		args.output_bytes != args.rows * sizeof(float)) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_gelu_tanh_proj_batch_args(const rocm_mlx_q4_gelu_tanh_proj_batch_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_GELU_TANH_PROJ_BATCH_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_GELU_TANH_PROJ_BATCH_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.multiplier_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.batch == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.batch * args.cols * sizeof(float) ||
+		args.multiplier_bytes != args.batch * args.rows * sizeof(float) ||
+		args.output_bytes != args.batch * args.rows * sizeof(float)) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+

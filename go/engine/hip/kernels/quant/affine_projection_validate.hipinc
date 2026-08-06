@@ -1,0 +1,140 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_mlx_affine_bits_supported(uint32_t bits);
+__device__ uint64_t rocm_mlx_affine_packed_per_row(uint32_t cols, uint32_t bits);
+__device__ bool rocm_mlx_affine_shape_valid(
+	uint32_t rows,
+	uint32_t cols,
+	uint32_t group_size,
+	uint32_t bits,
+	uint64_t weight_bytes,
+	uint64_t scale_bytes,
+	uint64_t bias_bytes);
+
+__device__ bool rocm_valid_mlx_q4_projection_args(const rocm_mlx_q4_projection_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.output_bytes != args.rows * sizeof(float)) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_projection_batch_args(const rocm_mlx_q4_projection_batch_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_PROJECTION_BATCH_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_PROJECTION_BATCH_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.batch == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.batch * args.cols * sizeof(float) ||
+		args.output_bytes != args.batch * args.rows * sizeof(float)) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_projection_greedy_args(const rocm_mlx_q4_projection_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.output_bytes != ROCM_MLX_Q4_PROJECTION_BEST_BYTES) {
+		return false;
+	}
+	if (args.suppress_count != 0 && args.suppress_pointer == 0) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_projection_greedy_batch_args(const rocm_mlx_q4_projection_greedy_batch_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_PROJECTION_GREEDY_BATCH_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_PROJECTION_GREEDY_BATCH_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.batch == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.batch * args.cols * sizeof(float) ||
+		args.output_bytes != args.batch * ROCM_MLX_Q4_PROJECTION_BEST_BYTES) {
+		return false;
+	}
+	if (args.suppress_count != 0 && args.suppress_pointer == 0) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_projection_scores_args(const rocm_mlx_q4_projection_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.output_bytes != args.rows * ROCM_MLX_Q4_PROJECTION_BEST_BYTES) {
+		return false;
+	}
+	if (args.suppress_count != 0 && args.suppress_pointer == 0) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+
+__device__ bool rocm_valid_mlx_q4_projection_selected_greedy_args(const rocm_mlx_q4_projection_launch_args &args)
+{
+	if (args.version != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MLX_Q4_PROJECTION_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.scale_pointer == 0 ||
+		args.bias_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.suppress_pointer == 0 ||
+		args.suppress_count == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.group_size == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.output_bytes != ROCM_MLX_Q4_PROJECTION_BEST_BYTES) {
+		return false;
+	}
+	return rocm_mlx_affine_shape_valid(args.rows, args.cols, args.group_size, args.bits, args.weight_bytes, args.scale_bytes, args.bias_bytes);
+}
+

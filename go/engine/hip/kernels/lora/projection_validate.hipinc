@@ -1,0 +1,29 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_lora_args(const rocm_lora_launch_args &args)
+{
+	const bool has_bias = (args.flags & ROCM_LORA_LAUNCH_FLAG_BIAS) != 0;
+	bool valid_bias = args.bias_pointer == 0 && args.bias_bytes == 0;
+	if (has_bias) {
+		valid_bias = args.bias_pointer != 0 && args.bias_bytes == args.rows * sizeof(float);
+	}
+	return args.version == ROCM_LORA_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_LORA_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.base_weight_pointer != 0 &&
+		args.lora_a_pointer != 0 &&
+		args.lora_b_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.rows > 0 &&
+		args.cols > 0 &&
+		args.rank > 0 &&
+		args.input_count == args.cols &&
+		args.input_bytes == args.cols * sizeof(float) &&
+		args.base_weight_bytes == args.rows * args.cols * sizeof(float) &&
+		args.lora_a_bytes == args.rank * args.cols * sizeof(float) &&
+		args.lora_b_bytes == args.rows * args.rank * sizeof(float) &&
+		args.output_bytes == args.rows * sizeof(float) &&
+		rocm_positive_finite(rocm_float_from_bits(args.alpha_bits)) &&
+		valid_bias;
+}
+

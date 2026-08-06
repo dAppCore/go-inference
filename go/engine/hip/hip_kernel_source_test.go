@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -17,9 +18,90 @@ import (
 
 const hipKernelSourcePathForTest = "kernels/rocm_kernels.hip"
 const hipKernelMakefilePathForTest = "../../../Makefile"
+const hipKernelFragmentSuffixForTest = ".hipinc"
+
+// hipKernelSourceFragmentIncludeForTest matches one manifest line of the
+// amalgamation translation unit: a quoted include of a family fragment,
+// resolved relative to the including file's own directory.
+var hipKernelSourceFragmentIncludeForTest = regexp.MustCompile(`(?m)^#include "([^"]+\.hipinc)"$`)
+
+// hipReadKernelSource reads the HIP kernel translation unit and resolves its
+// ordered fragment manifest, returning the same single source string the
+// compiler sees. It is a drop-in for os.ReadFile on the kernel source: the
+// kernels moved into kernels/<family>/*.hipinc, but the assembled text — and
+// therefore every source assertion below — is unchanged.
+func hipReadKernelSource(path string) ([]byte, error) {
+	source, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(path)
+	var failure error
+	resolved := hipKernelSourceFragmentIncludeForTest.ReplaceAllStringFunc(string(source), func(line string) string {
+		name := hipKernelSourceFragmentIncludeForTest.FindStringSubmatch(line)[1]
+		fragment, readErr := os.ReadFile(filepath.Join(dir, name))
+		if readErr != nil {
+			failure = readErr
+			return line
+		}
+		return strings.TrimSuffix(string(fragment), "\n")
+	})
+	if failure != nil {
+		return nil, failure
+	}
+	return []byte(resolved), nil
+}
+
+// TestHIPKernelSource_FragmentManifestCoversEveryFile_Good guards the ordered
+// manifest: the amalgamation lists its fragments explicitly, never by glob, so
+// a new kernels/<family>/*.hipinc that nobody wired would otherwise compile to
+// nothing at all. Every fragment on disk must be included exactly once, every
+// include must resolve, and every fragment must carry the licence header.
+func TestHIPKernelSource_FragmentManifestCoversEveryFile_Good(t *testing.T) {
+	manifest, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+
+	root := filepath.Dir(hipKernelSourcePathForTest)
+	included := map[string]int{}
+	for _, match := range hipKernelSourceFragmentIncludeForTest.FindAllStringSubmatch(string(manifest), -1) {
+		included[match[1]]++
+	}
+
+	var onDisk []string
+	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() || !strings.HasSuffix(path, hipKernelFragmentSuffixForTest) {
+			return nil
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		onDisk = append(onDisk, filepath.ToSlash(relative))
+		return nil
+	})
+	core.RequireNoError(t, err)
+	core.AssertTrue(t, len(onDisk) > 0, "the kernel tree must hold fragments")
+
+	for _, fragment := range onDisk {
+		core.AssertTrue(t, included[fragment] == 1,
+			"fragment "+fragment+" must appear exactly once in the manifest")
+		body, readErr := os.ReadFile(filepath.Join(root, fragment))
+		core.RequireNoError(t, readErr)
+		core.AssertTrue(t, strings.HasPrefix(string(body), "// SPDX-Licence-Identifier: EUPL-1.2"),
+			"fragment "+fragment+" must carry the EUPL-1.2 licence header")
+	}
+
+	for fragment := range included {
+		core.AssertTrue(t, len(onDisk) > 0 && strings.Contains(strings.Join(onDisk, "\n"), fragment),
+			"manifest includes "+fragment+" but no such fragment exists")
+	}
+}
 
 func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -377,7 +459,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingAffineG64Rows16_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16`)
 
@@ -390,7 +472,7 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingAffineG64Rows16_Good(t *testi
 }
 
 func TestHIPKernelSource_MLXAffineQ8G64GELUTanhRow8_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q8_g64_row8`)
 
@@ -404,7 +486,7 @@ func TestHIPKernelSource_MLXAffineQ8G64GELUTanhRow8_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_MLXAffineQ8G64ProjectionRow8_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_mlx_q4_projection_q8_g64_row8`)
 
@@ -416,7 +498,7 @@ func TestHIPKernelSource_MLXAffineQ8G64ProjectionRow8_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Dims4Rows4_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_dims4_rows4`)
 
@@ -428,7 +510,7 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Dims4Rows4_Good(t *testi
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64`)
 
@@ -440,7 +522,7 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64_Good(t *t
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4`)
 
@@ -455,7 +537,7 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64Probabilit
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Tile32x64_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_tile32x64`)
 
@@ -467,7 +549,7 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Tile32x64_Good(t *testin
 }
 
 func TestHIPKernelSource_DiffusionSampleProbabilitiesKeepsLogitsOnDevice_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_sample_probabilities`)
 
@@ -478,7 +560,7 @@ func TestHIPKernelSource_DiffusionSampleProbabilitiesKeepsLogitsOnDevice_Good(t 
 }
 
 func TestHIPKernelSource_DiffusionSampleProbabilitiesWide_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_sample_probabilities_wide`)
 
@@ -498,7 +580,7 @@ func TestHIPKernelSource_AMDBuildDefaultsO3_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_MoECombineNormsFusesIndependentRMSNorms_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -511,7 +593,7 @@ func TestHIPKernelSource_MoECombineNormsFusesIndependentRMSNorms_Good(t *testing
 }
 
 func TestHIPKernelSource_RMSNormResidualAddNormUsesInverseRMS_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_rms_norm_residual_add_norm`)
 
@@ -523,7 +605,7 @@ func TestHIPKernelSource_RMSNormResidualAddNormUsesInverseRMS_Good(t *testing.T)
 }
 
 func TestHIPKernelSource_RMSNormResidualAddNormEmitsQ8_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_rms_norm_residual_add_norm`)
 
@@ -533,7 +615,7 @@ func TestHIPKernelSource_RMSNormResidualAddNormEmitsQ8_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_RMSNormResidualAddUsesInverseRMS_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_rms_norm_residual_add`)
 
@@ -543,7 +625,7 @@ func TestHIPKernelSource_RMSNormResidualAddUsesInverseRMS_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -804,7 +886,7 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 }
 
 func TestHIPKernelSource_MoEMLXAffineRoutesABIAndSemantics_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -840,7 +922,7 @@ func TestHIPKernelSource_MoEMLXAffineRoutesABIAndSemantics_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_MLXQ8Group32UsesPackedDot_Good(t *testing.T) {
-	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	source, err := hipReadKernelSource("kernels/rocm_kernels.hip")
 	core.RequireNoError(t, err)
 	text := string(source)
 	core.AssertContains(t, text, "rocm_mlx_affine_q8_32_dot")
@@ -848,7 +930,7 @@ func TestHIPKernelSource_MLXQ8Group32UsesPackedDot_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_MLXQ8Group32FusedGELUUsesPackedPairDot_Good(t *testing.T) {
-	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	source, err := hipReadKernelSource("kernels/rocm_kernels.hip")
 	core.RequireNoError(t, err)
 	text := string(source)
 	core.AssertContains(t, text, "rocm_mlx_affine_q8_32_pair_dot")
@@ -857,7 +939,7 @@ func TestHIPKernelSource_MLXQ8Group32FusedGELUUsesPackedPairDot_Good(t *testing.
 }
 
 func TestHIPKernelSource_MLXQ8Group64UsesPackedDot_Good(t *testing.T) {
-	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	source, err := hipReadKernelSource("kernels/rocm_kernels.hip")
 	core.RequireNoError(t, err)
 	text := string(source)
 	projection := hipKernelSourceFunctionBodyForTest(t, text, `__device__ float rocm_mlx_q4_projection_row_sum(`)
@@ -866,7 +948,7 @@ func TestHIPKernelSource_MLXQ8Group64UsesPackedDot_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_MLXQ8Group64FusedGELUUsesPackedPairDot_Good(t *testing.T) {
-	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	source, err := hipReadKernelSource("kernels/rocm_kernels.hip")
 	core.RequireNoError(t, err)
 	text := string(source)
 	gelu := hipKernelSourceFunctionBodyForTest(t, text, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply`)
@@ -875,7 +957,7 @@ func TestHIPKernelSource_MLXQ8Group64FusedGELUUsesPackedPairDot_Good(t *testing.
 }
 
 func TestHIPKernelSource_MLXQ4Group64Rows3840Cols15360UsesRow16_Good(t *testing.T) {
-	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	source, err := hipReadKernelSource("kernels/rocm_kernels.hip")
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(source), `extern "C" __global__ void rocm_mlx_q4_projection_q4_g64_rows3840_cols15360_row16`)
 	core.AssertContains(t, kernel, "args.rows != 3840u")
@@ -886,7 +968,7 @@ func TestHIPKernelSource_MLXQ4Group64Rows3840Cols15360UsesRow16_Good(t *testing.
 }
 
 func TestHIPKernelSource_MLXQ4Group64Rows15360Cols3840FusedGELUUsesRow8_Good(t *testing.T) {
-	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	source, err := hipReadKernelSource("kernels/rocm_kernels.hip")
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(source), `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g64_rows15360_cols3840_row8`)
 	core.AssertContains(t, kernel, "args.rows != 15360u")
@@ -898,7 +980,7 @@ func TestHIPKernelSource_MLXQ4Group64Rows15360Cols3840FusedGELUUsesRow8_Good(t *
 }
 
 func TestHIPKernelSource_MLXQ4Group64E4BFusedGELUUsesRow16_Good(t *testing.T) {
-	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	source, err := hipReadKernelSource("kernels/rocm_kernels.hip")
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(source), `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g64_e4b_row16`)
 	core.AssertContains(t, kernel, "args.rows != 10240u")
@@ -911,7 +993,7 @@ func TestHIPKernelSource_MLXQ4Group64E4BFusedGELUUsesRow16_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_ProjectionUsesCoalescedBlockPerRow_Good(t *testing.T) {
-	source, err := os.ReadFile(hipKernelSourcePathForTest)
+	source, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	kernel := hipKernelSourceFunctionBodyForTest(t, string(source), `extern "C" __global__ void rocm_projection`)
 	core.AssertContains(t, kernel, "const uint32_t row = blockIdx.x")
@@ -920,7 +1002,7 @@ func TestHIPKernelSource_ProjectionUsesCoalescedBlockPerRow_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_AutoRoundQuantizeGroupPacking_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -933,7 +1015,7 @@ func TestHIPKernelSource_AutoRoundQuantizeGroupPacking_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_EmbeddingGreedyTokenReadsPackedBest_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -946,7 +1028,7 @@ func TestHIPKernelSource_EmbeddingGreedyTokenReadsPackedBest_Good(t *testing.T) 
 }
 
 func TestHIPKernelSource_MoERouterRanksExpertsInParallel_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	router := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_moe_router`)
 	core.AssertTrue(t, strings.Contains(router, "const uint32_t expert = threadIdx.x;"))
@@ -956,7 +1038,7 @@ func TestHIPKernelSource_MoERouterRanksExpertsInParallel_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_MoEBatchRoutesPreserveRouterRankOrder_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 	scatter := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_moe_batch_scatter_routes`)
@@ -997,7 +1079,7 @@ func TestHIPDriverCGOSource_HotOutputPointersUseResultWrappers_Good(t *testing.T
 }
 
 func TestHIPKernelSource_KVDescriptorAppendInPlaceSkipsSelfCopy_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -1010,7 +1092,7 @@ func TestHIPKernelSource_KVDescriptorAppendInPlaceSkipsSelfCopy_Good(t *testing.
 }
 
 func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -1089,7 +1171,7 @@ func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testin
 }
 
 func TestHIPKernelSource_RMSNormRoPEHeadsPairLaneBatchUsesDevicePositions_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 	body := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_rms_norm_rope_heads_pair_lane_batch`)
@@ -1102,7 +1184,7 @@ func TestHIPKernelSource_RMSNormRoPEHeadsPairLaneBatchUsesDevicePositions_Good(t
 }
 
 func TestHIPKernelSource_HIPCPUFusedAttentionRouting_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -1133,7 +1215,7 @@ func TestHIPKernelSource_HIPCPUFusedAttentionRouting_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_AttentionLaneBatchUsesIndependentDescriptors_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 	body := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_lane_batch`)
@@ -1153,7 +1235,7 @@ func TestHIPKernelSource_AttentionLaneBatchUsesIndependentDescriptors_Good(t *te
 }
 
 func TestHIPKernelSource_AttentionReductionBlockSizeGuards_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	sourceBytes, err := hipReadKernelSource(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 

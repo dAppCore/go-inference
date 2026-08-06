@@ -1,0 +1,96 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ float rocm_gelu_tanh_value(float value)
+{
+	const float value2 = value * value;
+	const float value3 = value2 * value;
+	const float tanh_arg = 0.7978845608028654f * (value + 0.044715f * value3);
+	return 0.5f * value * (1.0f + tanhf(tanh_arg));
+}
+
+__device__ float rocm_fast_expf(float value)
+{
+#if defined(__HIP_CPU_RT__)
+	return expf(value);
+#else
+	return __expf(value);
+#endif
+}
+
+__device__ float rocm_rsqrtf(float value)
+{
+#if defined(__HIP_CPU_RT__)
+	return 1.0f / sqrtf(value);
+#else
+	return rsqrtf(value);
+#endif
+}
+
+__device__ float rocm_shfl_down(float value, uint32_t delta, int width)
+{
+#if defined(__HIP_PLATFORM_NVIDIA__) || defined(__HIP_PLATFORM_NVCC__) || defined(__CUDACC__)
+	return __shfl_down_sync(0xffffffffu, value, delta, width);
+#else
+	return __shfl_down(value, delta, width);
+#endif
+}
+
+__device__ uint32_t rocm_shfl_u32(uint32_t value, int source_lane, int width)
+{
+#if defined(__HIP_PLATFORM_NVIDIA__) || defined(__HIP_PLATFORM_NVCC__) || defined(__CUDACC__)
+	return __shfl_sync(0xffffffffu, value, source_lane, width);
+#else
+	return __shfl(value, source_lane, width);
+#endif
+}
+
+__device__ float rocm_shfl_float(float value, int source_lane, int width)
+{
+#if defined(__HIP_PLATFORM_NVIDIA__) || defined(__HIP_PLATFORM_NVCC__) || defined(__CUDACC__)
+	return __shfl_sync(0xffffffffu, value, source_lane, width);
+#else
+	return __shfl(value, source_lane, width);
+#endif
+}
+
+__device__ uint64_t rocm_shfl_u64(uint64_t value, int source_lane, int width)
+{
+	const uint32_t lo = rocm_shfl_u32(static_cast<uint32_t>(value), source_lane, width);
+	const uint32_t hi = rocm_shfl_u32(static_cast<uint32_t>(value >> 32u), source_lane, width);
+	return (static_cast<uint64_t>(hi) << 32u) | static_cast<uint64_t>(lo);
+}
+
+union rocm_packed_char4 {
+	uint32_t word;
+	char4 lanes;
+};
+
+__device__ int32_t rocm_sdot4(uint32_t left, uint32_t right)
+{
+#if defined(__HIP_CPU_RT__)
+	int32_t sum = 0;
+#pragma unroll
+	for (uint32_t lane = 0; lane < 4u; ++lane) {
+		sum += static_cast<int32_t>(static_cast<int8_t>(left >> (lane * 8u))) *
+			static_cast<int32_t>(static_cast<int8_t>(right >> (lane * 8u)));
+	}
+	return sum;
+#elif defined(__HIP_PLATFORM_NVIDIA__) || defined(__HIP_PLATFORM_NVCC__) || defined(__CUDACC__)
+	return __dp4a(static_cast<int32_t>(left), static_cast<int32_t>(right), 0);
+#elif defined(__HIP_PLATFORM_AMD__)
+	rocm_packed_char4 left_pack;
+	rocm_packed_char4 right_pack;
+	left_pack.word = left;
+	right_pack.word = right;
+	return amd_mixed_dot(left_pack.lanes, right_pack.lanes, 0, false);
+#else
+	int32_t sum = 0;
+#pragma unroll
+	for (uint32_t lane = 0; lane < 4u; ++lane) {
+		sum += static_cast<int32_t>(static_cast<int8_t>(left >> (lane * 8u))) *
+			static_cast<int32_t>(static_cast<int8_t>(right >> (lane * 8u)));
+	}
+	return sum;
+#endif
+}
+

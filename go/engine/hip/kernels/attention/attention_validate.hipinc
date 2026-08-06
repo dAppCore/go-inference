@@ -1,0 +1,380 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_attention_args(const rocm_attention_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	if (args.version != ROCM_ATTENTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_ATTENTION_LAUNCH_ARGS_BYTES ||
+		args.query_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.dim == 0 ||
+		args.token_count == 0 ||
+		args.query_bytes != args.dim * sizeof(float) ||
+		args.output_bytes != args.dim * sizeof(float) ||
+		args.weight_bytes != args.token_count * sizeof(float) ||
+		!(scale >= 0.0f) ||
+		!isfinite(scale)) {
+		return false;
+	}
+	if (args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
+		return args.key_pointer != 0 &&
+			args.value_pointer != 0 &&
+			args.key_bytes == args.dim * args.token_count * sizeof(float) &&
+			args.value_bytes == args.dim * args.token_count * sizeof(float) &&
+			args.descriptor_pointer == 0 &&
+			args.descriptor_bytes == 0;
+	}
+	return rocm_valid_device_kv_attention_descriptor(args);
+}
+
+__device__ bool rocm_valid_attention_heads_args(const rocm_attention_heads_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	const uint32_t kv_head_count = rocm_attention_kv_head_count(args.reserved0, args.head_count);
+	const bool global_weights = args.weight_pointer != 0 &&
+		args.weight_bytes == args.head_count * args.token_count * sizeof(float);
+	const bool shared_weights = args.weight_pointer == 0 &&
+		args.weight_bytes == 0 &&
+		args.token_count <= ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS;
+	if (args.version != ROCM_ATTENTION_HEADS_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_ATTENTION_HEADS_LAUNCH_ARGS_BYTES ||
+		args.query_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.dim == 0 ||
+		args.token_count == 0 ||
+		args.head_count == 0 ||
+		args.query_bytes != args.head_count * args.dim * sizeof(float) ||
+		args.output_bytes != args.head_count * args.dim * sizeof(float) ||
+		(!global_weights && !shared_weights) ||
+		!(scale >= 0.0f) ||
+		!isfinite(scale)) {
+		return false;
+	}
+	if (args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
+		return args.key_pointer != 0 &&
+			args.value_pointer != 0 &&
+			kv_head_count > 0 &&
+			args.head_count % kv_head_count == 0 &&
+			args.key_bytes == args.dim * args.token_count * kv_head_count * sizeof(float) &&
+			args.value_bytes == args.dim * args.token_count * kv_head_count * sizeof(float) &&
+			args.descriptor_pointer == 0 &&
+			args.descriptor_bytes == 0;
+	}
+	if (args.kv_source != ROCM_ATTENTION_KV_SOURCE_DEVICE ||
+		args.key_pointer != 0 ||
+		args.value_pointer != 0 ||
+		args.key_bytes != 0 ||
+		args.value_bytes != 0 ||
+		args.descriptor_pointer == 0 ||
+		args.descriptor_bytes < ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) {
+		return false;
+	}
+	rocm_attention_launch_args single = {};
+	single.version = ROCM_ATTENTION_LAUNCH_ARGS_VERSION;
+	single.total_bytes = ROCM_ATTENTION_LAUNCH_ARGS_BYTES;
+	single.query_pointer = args.query_pointer;
+	single.output_pointer = args.output_pointer;
+	single.weight_pointer = args.weight_pointer;
+	single.dim = args.dim;
+	single.token_count = args.token_count;
+	single.query_bytes = args.dim * sizeof(float);
+	single.output_bytes = args.dim * sizeof(float);
+	single.weight_bytes = args.token_count * sizeof(float);
+	single.kv_source = args.kv_source;
+	single.scale_bits = args.scale_bits;
+	single.descriptor_pointer = args.descriptor_pointer;
+	single.descriptor_bytes = args.descriptor_bytes;
+	return rocm_valid_device_kv_attention_descriptor_header(single);
+}
+
+__device__ bool rocm_valid_attention_heads_batch_causal_args(const rocm_attention_heads_batch_causal_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	const uint32_t kv_head_count = rocm_attention_kv_head_count(args.reserved0, args.head_count);
+	const uint64_t query_elements = static_cast<uint64_t>(args.query_count) * args.head_count * args.dim;
+	const bool causal_window_ok = static_cast<uint64_t>(args.query_start_token) + args.query_count <= args.token_count;
+	const bool global_weights = args.weight_pointer != 0 &&
+		static_cast<uint64_t>(args.weight_bytes) == static_cast<uint64_t>(args.query_count) * args.head_count * args.token_count * sizeof(float);
+	const bool shared_weights = args.weight_pointer == 0 &&
+		args.weight_bytes == 0 &&
+		args.token_count <= ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS;
+	if (args.version != ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_BYTES ||
+		args.query_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.dim == 0 ||
+		args.token_count == 0 ||
+		args.head_count == 0 ||
+		args.query_count == 0 ||
+		!causal_window_ok ||
+		static_cast<uint64_t>(args.query_bytes) != query_elements * sizeof(float) ||
+		static_cast<uint64_t>(args.output_bytes) != query_elements * sizeof(float) ||
+		(!global_weights && !shared_weights) ||
+		!(scale >= 0.0f) ||
+		!isfinite(scale)) {
+		return false;
+	}
+	if (args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
+		return args.key_pointer != 0 &&
+			args.value_pointer != 0 &&
+			kv_head_count > 0 &&
+			args.head_count % kv_head_count == 0 &&
+			static_cast<uint64_t>(args.key_bytes) == static_cast<uint64_t>(args.dim) * args.token_count * kv_head_count * sizeof(float) &&
+			static_cast<uint64_t>(args.value_bytes) == static_cast<uint64_t>(args.dim) * args.token_count * kv_head_count * sizeof(float) &&
+			args.descriptor_pointer == 0 &&
+			args.descriptor_bytes == 0;
+	}
+	if (args.kv_source != ROCM_ATTENTION_KV_SOURCE_DEVICE ||
+		args.key_pointer != 0 ||
+		args.value_pointer != 0 ||
+		args.key_bytes != 0 ||
+		args.value_bytes != 0 ||
+		args.descriptor_pointer == 0 ||
+		args.descriptor_bytes < ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) {
+		return false;
+	}
+	rocm_attention_launch_args single = {};
+	single.version = ROCM_ATTENTION_LAUNCH_ARGS_VERSION;
+	single.total_bytes = ROCM_ATTENTION_LAUNCH_ARGS_BYTES;
+	single.query_pointer = args.query_pointer;
+	single.output_pointer = args.output_pointer;
+	single.weight_pointer = args.weight_pointer;
+	single.dim = args.dim;
+	single.token_count = args.token_count;
+	single.query_bytes = args.dim * sizeof(float);
+	single.output_bytes = args.dim * sizeof(float);
+	single.weight_bytes = args.token_count * sizeof(float);
+	single.kv_source = args.kv_source;
+	single.scale_bits = args.scale_bits;
+	single.descriptor_pointer = args.descriptor_pointer;
+	single.descriptor_bytes = args.descriptor_bytes;
+	return rocm_valid_device_kv_attention_descriptor_header(single);
+}
+
+__device__ bool rocm_valid_attention_heads_batch_capped_args(const rocm_attention_heads_batch_causal_launch_args &args)
+{
+	return rocm_valid_attention_heads_batch_causal_args(args) &&
+		args.reserved1 != 0 &&
+		args.reserved2 == static_cast<uint64_t>(args.query_count) * sizeof(uint32_t);
+}
+
+__device__ bool rocm_valid_attention_heads_lane_batch_args(const rocm_attention_heads_lane_batch_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	const uint64_t query_elements = static_cast<uint64_t>(args.lane_count) * args.head_count * args.dim;
+	const bool global_weights = args.weight_pointer != 0 &&
+		static_cast<uint64_t>(args.weight_bytes) == static_cast<uint64_t>(args.lane_count) * args.head_count * args.max_token_count * sizeof(float);
+	const bool shared_weights = args.weight_pointer == 0 &&
+		args.weight_bytes == 0 &&
+		args.max_token_count <= ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS;
+	return args.version == ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_BYTES &&
+		args.query_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.lane_pointer != 0 &&
+		args.dim > 0 &&
+		args.lane_count > 0 &&
+		args.head_count > 0 &&
+		args.key_heads > 0 &&
+		args.key_heads <= args.head_count &&
+		args.head_count % args.key_heads == 0 &&
+		args.max_token_count > 0 &&
+		static_cast<uint64_t>(args.query_bytes) == query_elements * sizeof(float) &&
+		static_cast<uint64_t>(args.output_bytes) == query_elements * sizeof(float) &&
+		static_cast<uint64_t>(args.lane_bytes) == static_cast<uint64_t>(args.lane_count) * ROCM_ATTENTION_HEADS_LANE_DESCRIPTOR_BYTES &&
+		(global_weights || shared_weights) &&
+		(scale >= 0.0f) &&
+		isfinite(scale);
+}
+
+__device__ bool rocm_valid_attention_heads_batch_causal_query_rms_rope_args(const rocm_attention_heads_batch_causal_query_rms_rope_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	const float query_epsilon = rocm_float_from_bits(args.query_epsilon_bits);
+	const float rope_base = rocm_float_from_bits(args.rope_base_bits);
+	const float rope_frequency_scale = rocm_float_from_bits(args.rope_frequency_scale_bits);
+	const uint32_t kv_head_count = args.key_heads == 0u ? 1u : args.key_heads;
+	const uint64_t query_elements = static_cast<uint64_t>(args.query_count) * args.head_count * args.dim;
+	const bool causal_window_ok = static_cast<uint64_t>(args.query_start_token) + args.query_count <= args.token_count;
+	const bool global_weights = args.attention_weight_pointer != 0 &&
+		static_cast<uint64_t>(args.attention_weight_bytes) == static_cast<uint64_t>(args.query_count) * args.head_count * args.token_count * sizeof(float);
+	const bool shared_weights = args.attention_weight_pointer == 0 &&
+		args.attention_weight_bytes == 0 &&
+		args.token_count <= ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS;
+	bool query_weight_ok = false;
+	if ((args.query_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u) {
+		if (args.query_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
+			query_weight_ok = args.query_weight_pointer == 0 &&
+				args.query_weight_bytes == 0 &&
+				(args.query_flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) == 0u;
+		} else if (args.query_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32) {
+			query_weight_ok = args.query_weight_pointer != 0 &&
+				static_cast<uint64_t>(args.query_weight_bytes) == static_cast<uint64_t>(args.dim) * sizeof(float);
+		} else if (args.query_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
+			query_weight_ok = args.query_weight_pointer != 0 &&
+				static_cast<uint64_t>(args.query_weight_bytes) == static_cast<uint64_t>(args.dim) * sizeof(uint16_t);
+		}
+	}
+	if (args.version != ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_BYTES ||
+		args.query_input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.dim == 0 ||
+		(args.dim & 1u) != 0u ||
+		args.token_count == 0 ||
+		args.head_count == 0 ||
+		args.query_count == 0 ||
+		kv_head_count == 0 ||
+		args.head_count % kv_head_count != 0 ||
+		!causal_window_ok ||
+		static_cast<uint64_t>(args.query_input_bytes) != query_elements * sizeof(float) ||
+		static_cast<uint64_t>(args.output_bytes) != query_elements * sizeof(float) ||
+		(!global_weights && !shared_weights) ||
+		!query_weight_ok ||
+		!(scale >= 0.0f) ||
+		!isfinite(scale) ||
+		!(query_epsilon >= 0.0f) ||
+		!isfinite(query_epsilon) ||
+		!(rope_base > 0.0f) ||
+		!isfinite(rope_base) ||
+		!(rope_frequency_scale > 0.0f) ||
+		!isfinite(rope_frequency_scale) ||
+		(args.rope_frequency_dim != 0u && args.rope_frequency_dim < args.dim) ||
+		args.rope_rotary_count > args.dim ||
+		(args.rope_rotary_count & 1u) != 0u) {
+		return false;
+	}
+	if (args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
+		return args.key_pointer != 0 &&
+			args.value_pointer != 0 &&
+			static_cast<uint64_t>(args.key_bytes) == static_cast<uint64_t>(args.dim) * args.token_count * kv_head_count * sizeof(float) &&
+			static_cast<uint64_t>(args.value_bytes) == static_cast<uint64_t>(args.dim) * args.token_count * kv_head_count * sizeof(float) &&
+			args.descriptor_pointer == 0 &&
+			args.descriptor_bytes == 0;
+	}
+	if (args.kv_source != ROCM_ATTENTION_KV_SOURCE_DEVICE ||
+		args.key_pointer != 0 ||
+		args.value_pointer != 0 ||
+		args.key_bytes != 0 ||
+		args.value_bytes != 0 ||
+		args.descriptor_pointer == 0 ||
+		args.descriptor_bytes < ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) {
+		return false;
+	}
+	rocm_attention_launch_args single = {};
+	single.version = ROCM_ATTENTION_LAUNCH_ARGS_VERSION;
+	single.total_bytes = ROCM_ATTENTION_LAUNCH_ARGS_BYTES;
+	single.query_pointer = args.query_input_pointer;
+	single.output_pointer = args.output_pointer;
+	single.weight_pointer = args.attention_weight_pointer == 0 ? 0 : args.attention_weight_pointer;
+	single.dim = args.dim;
+	single.token_count = args.token_count;
+	single.query_bytes = args.dim * sizeof(float);
+	single.output_bytes = args.dim * sizeof(float);
+	single.weight_bytes = args.token_count * sizeof(float);
+	single.kv_source = args.kv_source;
+	single.scale_bits = args.scale_bits;
+	single.descriptor_pointer = args.descriptor_pointer;
+	single.descriptor_bytes = args.descriptor_bytes;
+	return rocm_valid_device_kv_attention_descriptor_header(single);
+}
+
+__device__ bool rocm_valid_attention_heads_chunked_args(const rocm_attention_heads_chunked_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	if (args.version != ROCM_ATTENTION_HEADS_CHUNKED_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_ATTENTION_HEADS_CHUNKED_LAUNCH_ARGS_BYTES ||
+		args.query_pointer == 0 ||
+		args.descriptor_pointer == 0 ||
+		args.partial_pointer == 0 ||
+		args.stats_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.dim == 0 ||
+		args.dim > ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE ||
+		args.token_count == 0 ||
+		args.head_count == 0 ||
+		args.key_heads == 0 ||
+		args.key_heads > args.head_count ||
+		args.head_count % args.key_heads != 0 ||
+		args.dim > (~0u) / args.key_heads ||
+		(args.key_heads > 1u && (args.dim & 1u) != 0u) ||
+		args.chunk_size == 0 ||
+		args.chunk_count == 0 ||
+		args.chunk_count != (args.token_count + args.chunk_size - 1u) / args.chunk_size ||
+		static_cast<uint64_t>(args.query_bytes) != static_cast<uint64_t>(args.head_count) * args.dim * sizeof(float) ||
+		static_cast<uint64_t>(args.partial_bytes) != static_cast<uint64_t>(args.head_count) * args.chunk_count * args.dim * sizeof(float) ||
+		static_cast<uint64_t>(args.stats_bytes) != static_cast<uint64_t>(args.head_count) * args.chunk_count * 2u * sizeof(float) ||
+		static_cast<uint64_t>(args.output_bytes) != static_cast<uint64_t>(args.head_count) * args.dim * sizeof(float) ||
+		!(scale >= 0.0f) ||
+		!isfinite(scale)) {
+		return false;
+	}
+	if (args.descriptor_bytes < ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) {
+		return false;
+	}
+	const rocm_device_kv_descriptor_header *header = reinterpret_cast<const rocm_device_kv_descriptor_header *>(static_cast<uintptr_t>(args.descriptor_pointer));
+	return header->version == ROCM_DEVICE_KV_DESCRIPTOR_VERSION &&
+		header->header_bytes == ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES &&
+		header->page_bytes == ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES &&
+		header->mode_code == ROCM_DEVICE_KV_DESCRIPTOR_MODE_KQ8VQ4 &&
+		header->page_count > 0 &&
+		header->token_count == args.token_count &&
+		args.descriptor_bytes == static_cast<uint64_t>(ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) + static_cast<uint64_t>(header->page_count) * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+}
+
+__device__ bool rocm_valid_attention_heads_batch_chunked_args(const rocm_attention_heads_batch_chunked_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	const uint64_t query_elements = static_cast<uint64_t>(args.query_count) * args.head_count * args.dim;
+	const bool causal_window_ok = static_cast<uint64_t>(args.query_start_token) + args.query_count <= args.token_count;
+	const bool visible_caps_ok = (args.visible_cap_pointer == 0u && args.visible_cap_bytes == 0u) ||
+		(args.visible_cap_pointer != 0u && static_cast<uint64_t>(args.visible_cap_bytes) == static_cast<uint64_t>(args.query_count) * sizeof(uint32_t));
+	const uint32_t active_end = args.visible_cap_pointer == 0u ? args.query_start_token + args.query_count : args.token_count;
+	const uint32_t expected_chunk_count = args.chunk_size != 0u && active_end > args.chunk_start_token
+		? (active_end - args.chunk_start_token + args.chunk_size - 1u) / args.chunk_size
+		: 0u;
+	if (args.version != ROCM_ATTENTION_HEADS_BATCH_CHUNKED_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_ATTENTION_HEADS_BATCH_CHUNKED_LAUNCH_ARGS_BYTES ||
+		args.query_pointer == 0 ||
+		args.descriptor_pointer == 0 ||
+		args.partial_pointer == 0 ||
+		args.stats_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.dim == 0 ||
+		args.dim > ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE ||
+		args.token_count == 0 ||
+		args.head_count == 0 ||
+		args.key_heads == 0 ||
+		args.key_heads > args.head_count ||
+		args.head_count % args.key_heads != 0 ||
+		args.dim > (~0u) / args.key_heads ||
+		(args.key_heads > 1u && (args.dim & 1u) != 0u) ||
+		args.query_count == 0 ||
+		!causal_window_ok ||
+		!visible_caps_ok ||
+		args.chunk_size == 0 ||
+		args.chunk_count == 0 ||
+		args.chunk_start_token > active_end ||
+		args.chunk_count != expected_chunk_count ||
+		static_cast<uint64_t>(args.query_bytes) != query_elements * sizeof(float) ||
+		static_cast<uint64_t>(args.partial_bytes) != query_elements * args.chunk_count * sizeof(float) ||
+		static_cast<uint64_t>(args.stats_bytes) != static_cast<uint64_t>(args.query_count) * args.head_count * args.chunk_count * 2u * sizeof(float) ||
+		static_cast<uint64_t>(args.output_bytes) != query_elements * sizeof(float) ||
+		!(scale >= 0.0f) ||
+		!isfinite(scale)) {
+		return false;
+	}
+	if (args.descriptor_bytes < ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) {
+		return false;
+	}
+	const rocm_device_kv_descriptor_header *header = reinterpret_cast<const rocm_device_kv_descriptor_header *>(static_cast<uintptr_t>(args.descriptor_pointer));
+	return header->version == ROCM_DEVICE_KV_DESCRIPTOR_VERSION &&
+		header->header_bytes == ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES &&
+		header->page_bytes == ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES &&
+		header->mode_code == ROCM_DEVICE_KV_DESCRIPTOR_MODE_KQ8VQ4 &&
+		header->page_count > 0 &&
+		header->token_count == args.token_count &&
+		args.descriptor_bytes == static_cast<uint64_t>(ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) + static_cast<uint64_t>(header->page_count) * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES;
+}
+
