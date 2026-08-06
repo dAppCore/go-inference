@@ -9,7 +9,7 @@ version: '3'
 #   build/dist/lib/mlx.metallib          — MLX's own compiled kernels (steel_gemm, affine_qmv,
 #                                    vv_*, rms, rope) the engine dispatches. Built by CMake.
 #   build/dist/lib/lthn_kernels.metallib — go-inference's OWN fused kernels (engine/metal/kernels/
-#                                    *.metal), loaded beside mlx.metallib.
+#                                    <family>/*.metal), loaded beside mlx.metallib.
 vars:
   GO_BUILD_CACHE: '{{default "/private/tmp/lem-dev/gocache" .GOCACHE}}'
   # BIN_NAME names every produced binary and VERSION stamps main.version —
@@ -54,21 +54,31 @@ tasks:
         echo "  mlx.metallib: $(du -h build/dist/lib/mlx.metallib | cut -f1) (Apple MLX $(git -C external/mlx describe --tags) + $(ls patches/mlx/*.patch | wc -l | tr -d ' ') lthn patches)"
 
   metallib:kernels:
-    desc: "Compile go-inference's OWN Metal kernels (engine/metal/kernels/*.metal) into build/dist/lib/lthn_kernels.metallib (needs external/mlx headers)."
+    desc: "Compile go-inference's OWN Metal kernels (engine/metal/kernels/<family>/*.metal) into build/dist/lib/lthn_kernels.metallib (needs external/mlx headers)."
     cmds:
       - mkdir -p build/dist/lib
       - |-
         set -e
         airdir="$(mktemp -d)"
+        # Sources are collected RECURSIVELY over the kernels/<family>/ tree (the QuixiCore
+        # family taxonomy engine/hip's kernels/ uses too — see kernels/README.md). Each .metal
+        # is an independent compilation unit linked into one library, so the tree carries no
+        # ordering meaning and a new family directory needs no change here. experimental/ is
+        # prototype ground and is deliberately NOT shipped in the library.
+        srcs="$(find go/engine/metal/kernels -name experimental -prune -o -name '*.metal' -print | sort)"
+        # The .air files are named by BASENAME, so two families holding the same filename would
+        # silently overwrite one another's object and drop a kernel from the library.
+        dupes="$(echo "$srcs" | xargs -n1 basename | sort | uniq -d)"
+        [ -z "$dupes" ] || { echo "duplicate kernel basenames across families: $dupes"; exit 1; }
         # -fno-fast-math matches MLX's own kernel build (external/mlx .../kernels/CMakeLists.txt):
         # the byte-identity twins (lthn_qmv_rows et al) must not let the compiler reassociate
         # fp chains the oracle kernels keep in source order (M=4 drift receipt, 2026-07-13).
-        for m in go/engine/metal/kernels/*.metal; do
+        for m in $srcs; do
           xcrun -sdk macosx metal -std=metal4.0 -fno-fast-math -I external/mlx -c "$m" -o "$airdir/$(basename "${m%.metal}").air"
         done
         xcrun -sdk macosx metallib "$airdir"/*.air -o build/dist/lib/lthn_kernels.metallib
         rm -rf "$airdir"
-        echo "  lthn_kernels.metallib: $(ls -1 go/engine/metal/kernels/*.metal | wc -l | tr -d ' ') kernel(s) -> build/dist/lib/lthn_kernels.metallib"
+        echo "  lthn_kernels.metallib: $(echo "$srcs" | wc -l | tr -d ' ') kernel(s) -> build/dist/lib/lthn_kernels.metallib"
 
   build:
     desc: "Build the sovereign lem binary (engine/metal, -tags metal_runtime) to bin/lem."
