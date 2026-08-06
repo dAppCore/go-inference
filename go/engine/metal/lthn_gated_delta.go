@@ -91,7 +91,7 @@ func gatedDeltaStepUsable(dk, dv, hk, hv int) bool {
 
 // encGatedDeltaStepF32 encodes the recurrence over q/k/v [T,Hk|Hv,Dk|Dv], g/beta [T,Hv] and the
 // in-place state [kSlots,Hv,Dv,Dk] (slot 0 live), writing y [T,Hv,Dv] — one dispatch, the whole
-// T-loop inside the kernel (docs in kernels/lthn_gated_delta.metal). This is the S2-reusable core:
+// T-loop inside the kernel (docs in kernels/attention/lthn_gated_delta.metal). This is the S2-reusable core:
 // the caller owns buffer residency and the surrounding command buffer.
 func encGatedDeltaStepF32(
 	enc metal.MTLComputeCommandEncoder,

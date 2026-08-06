@@ -32,7 +32,7 @@ import (
 //
 // Post-#48 LONG-CONTEXT slice (lthn_sdpa_vector_2pass_2_tq folds the output
 // unrotation into pass 2's own epilogue — TQ's owned fork of MLX's
-// sdpa_vector_2pass_2, kernels/lthn_tq_kv.metal's header has the full
+// sdpa_vector_2pass_2, kernels/quant/lthn_tq_kv.metal's header has the full
 // reasoning) the 2-pass band TIGHTENED to ≤ 0.0006 across all 12 deep cases
 // (was ≤ 0.0008 when pass 2 was MLX's stock kernel writing a rotated-space
 // bf16 intermediate for a separate lthn_tq_unrot_rows_bf16 dispatch to read
