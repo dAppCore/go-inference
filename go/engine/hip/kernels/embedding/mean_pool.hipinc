@@ -1,0 +1,34 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_embedding_mean_pool(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_embedding_mean_pool_launch_args &args = *reinterpret_cast<const rocm_embedding_mean_pool_launch_args *>(packet);
+	if (!rocm_valid_embedding_mean_pool_args(args)) {
+		return;
+	}
+	const float *tokens = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.token_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	for (uint32_t dim = 0; dim < args.dim; ++dim) {
+		float sum = 0.0f;
+		for (uint32_t token = 0; token < args.token_count; ++token) {
+			sum += tokens[token * args.dim + dim];
+		}
+		output[dim] = sum / static_cast<float>(args.token_count);
+	}
+	if ((args.flags & ROCM_EMBEDDING_MEAN_POOL_LAUNCH_FLAG_NORMALIZE) != 0) {
+		float norm = 0.0f;
+		for (uint32_t dim = 0; dim < args.dim; ++dim) {
+			norm += output[dim] * output[dim];
+		}
+		if (norm > 0.0f) {
+			const float scale = rocm_rsqrtf(norm);
+			for (uint32_t dim = 0; dim < args.dim; ++dim) {
+				output[dim] *= scale;
+			}
+		}
+	}
+}
+

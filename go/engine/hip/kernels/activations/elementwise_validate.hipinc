@@ -1,0 +1,83 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_vector_add_args(const rocm_vector_add_launch_args &args)
+{
+	return args.version == ROCM_VECTOR_ADD_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_VECTOR_ADD_LAUNCH_ARGS_BYTES &&
+		args.left_pointer != 0 &&
+		args.right_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.left_bytes == args.count * sizeof(float) &&
+		args.right_bytes == args.count * sizeof(float) &&
+		args.output_bytes == args.count * sizeof(float);
+}
+
+__device__ bool rocm_valid_vector_add_scaled_args(const rocm_vector_add_scaled_launch_args &args)
+{
+	return args.version == ROCM_VECTOR_ADD_SCALED_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_VECTOR_ADD_SCALED_LAUNCH_ARGS_BYTES &&
+		args.left_pointer != 0 &&
+		args.right_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.left_bytes == args.count * sizeof(float) &&
+		args.right_bytes == args.count * sizeof(float) &&
+		args.output_bytes == args.count * sizeof(float) &&
+		isfinite(rocm_float_from_bits(args.scale_bits));
+}
+
+__device__ bool rocm_valid_vector_scale_args(const rocm_vector_scale_launch_args &args)
+{
+	return args.version == ROCM_VECTOR_SCALE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_VECTOR_SCALE_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.input_bytes == args.count * sizeof(float) &&
+		args.output_bytes == args.count * sizeof(float) &&
+		isfinite(rocm_float_from_bits(args.scale_bits));
+}
+
+__device__ bool rocm_valid_per_layer_input_transpose_args(const rocm_per_layer_input_transpose_launch_args &args)
+{
+	if (args.version != ROCM_PER_LAYER_INPUT_TRANSPOSE_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_PER_LAYER_INPUT_TRANSPOSE_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.batch == 0 ||
+		args.layer_count == 0 ||
+		args.input_size == 0) {
+		return false;
+	}
+	const uint64_t count = static_cast<uint64_t>(args.batch) * args.layer_count * args.input_size;
+	return args.input_bytes == count * sizeof(float) &&
+		args.output_bytes == count * sizeof(float);
+}
+
+__device__ bool rocm_valid_swiglu_args(const rocm_swiglu_launch_args &args)
+{
+	return args.version == ROCM_SWIGLU_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_SWIGLU_LAUNCH_ARGS_BYTES &&
+		args.gate_pointer != 0 &&
+		args.up_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.gate_bytes == args.count * sizeof(float) &&
+		args.up_bytes == args.count * sizeof(float) &&
+		args.output_bytes == args.count * sizeof(float);
+}
+
+__device__ bool rocm_valid_gelu_tanh_mul_args(const rocm_gelu_tanh_mul_launch_args &args)
+{
+	return args.version == ROCM_GELU_TANH_MUL_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_GELU_TANH_MUL_LAUNCH_ARGS_BYTES &&
+		args.gate_pointer != 0 &&
+		args.up_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.gate_bytes == args.count * sizeof(float) &&
+		args.up_bytes == args.count * sizeof(float) &&
+		args.output_bytes == args.count * sizeof(float);
+}
+

@@ -1,0 +1,77 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_tiny_prefill_args(const rocm_tiny_prefill_launch_args &args)
+{
+	const uint32_t table_count = args.vocab_size * args.hidden_size;
+	bool valid_output_weights = false;
+	if (args.output_weight_encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_FP32) {
+		valid_output_weights = args.output_weight_bytes == table_count * sizeof(float);
+	} else if (args.output_weight_encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_FP16) {
+		valid_output_weights = args.output_weight_bytes == table_count * sizeof(uint16_t);
+	} else if (args.output_weight_encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_Q8) {
+		const float scale = rocm_float_from_bits(args.q8_scale_bits);
+		valid_output_weights = args.output_weight_bytes == table_count &&
+			rocm_positive_finite(scale);
+	}
+	return args.version == ROCM_TINY_PREFILL_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_TINY_PREFILL_LAUNCH_ARGS_BYTES &&
+		args.token_pointer != 0 &&
+		args.embedding_pointer != 0 &&
+		args.output_weight_pointer != 0 &&
+		args.logit_pointer != 0 &&
+		args.attention_pointer != 0 &&
+		args.result_pointer != 0 &&
+		args.key_pointer != 0 &&
+		args.value_pointer != 0 &&
+		args.token_count > 0 &&
+		args.vocab_size > 0 &&
+		args.hidden_size > 0 &&
+		args.token_bytes == args.token_count * sizeof(int32_t) &&
+		args.embedding_bytes == args.vocab_size * args.hidden_size * sizeof(float) &&
+		valid_output_weights &&
+		args.logit_bytes == args.vocab_size * sizeof(float) &&
+		args.attention_bytes == args.token_count * sizeof(float) &&
+		args.result_bytes == ROCM_GREEDY_RESULT_BYTES &&
+		args.key_bytes == args.token_count * args.hidden_size * sizeof(float) &&
+		args.value_bytes == args.token_count * args.hidden_size * sizeof(float);
+}
+
+__device__ bool rocm_valid_tiny_decode_args(const rocm_tiny_decode_launch_args &args)
+{
+	const uint32_t table_count = args.vocab_size * args.hidden_size;
+	bool valid_output_weights = false;
+	if (args.output_weight_encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_FP32) {
+		valid_output_weights = args.output_weight_bytes == table_count * sizeof(float);
+	} else if (args.output_weight_encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_FP16) {
+		valid_output_weights = args.output_weight_bytes == table_count * sizeof(uint16_t);
+	} else if (args.output_weight_encoding == ROCM_TINY_OUTPUT_WEIGHT_ENCODING_Q8) {
+		const float scale = rocm_float_from_bits(args.q8_scale_bits);
+		valid_output_weights = args.output_weight_bytes == table_count &&
+			rocm_positive_finite(scale);
+	}
+	return args.version == ROCM_TINY_DECODE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_TINY_DECODE_LAUNCH_ARGS_BYTES &&
+		args.prior_key_pointer != 0 &&
+		args.prior_value_pointer != 0 &&
+		args.embedding_pointer != 0 &&
+		args.output_weight_pointer != 0 &&
+		args.logit_pointer != 0 &&
+		args.attention_pointer != 0 &&
+		args.updated_key_pointer != 0 &&
+		args.updated_value_pointer != 0 &&
+		args.result_pointer != 0 &&
+		args.prior_token_count > 0 &&
+		args.vocab_size > 0 &&
+		args.hidden_size > 0 &&
+		args.token_id < args.vocab_size &&
+		args.prior_key_bytes == args.prior_token_count * args.hidden_size * sizeof(float) &&
+		args.prior_value_bytes == args.prior_token_count * args.hidden_size * sizeof(float) &&
+		args.embedding_bytes == args.vocab_size * args.hidden_size * sizeof(float) &&
+		valid_output_weights &&
+		args.logit_bytes == args.vocab_size * sizeof(float) &&
+		args.attention_bytes == (args.prior_token_count + 1u) * sizeof(float) &&
+		args.updated_key_bytes == (args.prior_token_count + 1u) * args.hidden_size * sizeof(float) &&
+		args.updated_value_bytes == (args.prior_token_count + 1u) * args.hidden_size * sizeof(float) &&
+		args.result_bytes == ROCM_GREEDY_RESULT_BYTES;
+}
+

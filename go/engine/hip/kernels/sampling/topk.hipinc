@@ -1,0 +1,191 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_ordered_embedding_candidates(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_ordered_embedding_candidates_launch_args &args = *reinterpret_cast<const rocm_ordered_embedding_candidates_launch_args *>(packet);
+	if (!rocm_valid_ordered_embedding_candidates_args(args) || blockDim.x != ROCM_ORDERED_EMBEDDING_CANDIDATES_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= args.output_count) {
+		return;
+	}
+	const uint32_t centroid_rank = index / args.tokens_per_centroid;
+	const uint32_t token_offset = index - centroid_rank * args.tokens_per_centroid;
+	const unsigned long long *topk = reinterpret_cast<const unsigned long long *>(static_cast<uintptr_t>(args.topk_pointer));
+	const int32_t *suppress_tokens = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(args.suppress_pointer));
+	int32_t *output = reinterpret_cast<int32_t *>(static_cast<uintptr_t>(args.output_pointer));
+
+	int32_t selected_token = -1;
+	const unsigned long long packed_centroid = topk[centroid_rank];
+	if (packed_centroid != 0) {
+		const uint32_t centroid = ~static_cast<uint32_t>(packed_centroid);
+		if (centroid < args.num_centroids) {
+			const uint32_t ordering_index = centroid * args.tokens_per_centroid + token_offset;
+			int64_t ordered = -1;
+			if (args.token_ordering_element_bytes == sizeof(int32_t)) {
+				const int32_t *ordering = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(args.token_ordering_pointer));
+				ordered = ordering[ordering_index];
+			} else {
+				const int64_t *ordering = reinterpret_cast<const int64_t *>(static_cast<uintptr_t>(args.token_ordering_pointer));
+				ordered = ordering[ordering_index];
+			}
+			if (ordered >= 0 && ordered <= INT32_MAX && !rocm_mlx_q4_token_suppressed(static_cast<uint32_t>(ordered), suppress_tokens, args.suppress_count)) {
+				selected_token = static_cast<int32_t>(ordered);
+			}
+		}
+	}
+	output[index] = selected_token;
+}
+
+extern "C" __global__ void rocm_packed_topk(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_packed_topk_launch_args &args = *reinterpret_cast<const rocm_packed_topk_launch_args *>(packet);
+	if (!rocm_valid_packed_topk_args(args) || blockDim.x != ROCM_PACKED_TOPK_BLOCK_SIZE) {
+		return;
+	}
+	__shared__ unsigned long long scratch[ROCM_PACKED_TOPK_CHUNK_SIZE];
+	const uint32_t chunk_begin = blockIdx.x * args.chunk_size;
+	const unsigned long long *input = reinterpret_cast<const unsigned long long *>(static_cast<uintptr_t>(args.input_pointer));
+	unsigned long long *output = reinterpret_cast<unsigned long long *>(static_cast<uintptr_t>(args.output_pointer));
+	for (uint32_t local = threadIdx.x; local < ROCM_PACKED_TOPK_CHUNK_SIZE; local += blockDim.x) {
+		const uint32_t index = chunk_begin + local;
+		scratch[local] = index < args.input_count ? input[index] : 0;
+	}
+	__syncthreads();
+
+	for (uint32_t width = 2u; width <= ROCM_PACKED_TOPK_CHUNK_SIZE; width <<= 1u) {
+		for (uint32_t stride = width >> 1u; stride > 0u; stride >>= 1u) {
+			for (uint32_t local = threadIdx.x; local < ROCM_PACKED_TOPK_CHUNK_SIZE; local += blockDim.x) {
+				const uint32_t other = local ^ stride;
+				if (other > local) {
+					const bool descending = (local & width) == 0u;
+					const unsigned long long left = scratch[local];
+					const unsigned long long right = scratch[other];
+					if ((descending && left < right) || (!descending && left > right)) {
+						scratch[local] = right;
+						scratch[other] = left;
+					}
+				}
+			}
+			__syncthreads();
+		}
+	}
+	if (threadIdx.x < args.top_k) {
+		output[blockIdx.x * args.top_k + threadIdx.x] = scratch[threadIdx.x];
+	}
+}
+
+extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
+{
+	if (packet == nullptr || blockIdx.x != 0 || threadIdx.x != 0) {
+		return;
+	}
+	const rocm_packed_topk_sample_launch_args &args = *reinterpret_cast<const rocm_packed_topk_sample_launch_args *>(packet);
+	if (!rocm_valid_packed_topk_sample_args(args)) {
+		return;
+	}
+	const unsigned long long *input = reinterpret_cast<const unsigned long long *>(static_cast<uintptr_t>(args.input_pointer));
+	unsigned long long *output = reinterpret_cast<unsigned long long *>(static_cast<uintptr_t>(args.output_pointer));
+	output[0] = 0ull;
+
+	uint32_t first_valid = args.top_k;
+	for (uint32_t index = 0; index < args.top_k; ++index) {
+		if (input[index] != 0ull) {
+			first_valid = index;
+			break;
+		}
+	}
+	if (first_valid >= args.top_k) {
+		return;
+	}
+	const float raw_temperature = rocm_float_from_bits(args.temperature_bits);
+	const float raw_top_p = rocm_float_from_bits(args.top_p_bits);
+	if (raw_temperature <= 0.0f && raw_top_p <= 0.0f) {
+		output[0] = input[first_valid];
+		return;
+	}
+	const double temperature = raw_temperature == 0.0f ? 1.0 : static_cast<double>(raw_temperature);
+	const double top_p = raw_top_p == 0.0f ? 1.0 : static_cast<double>(raw_top_p);
+	if (!(temperature > 0.0) || !(top_p > 0.0 && top_p <= 1.0)) {
+		return;
+	}
+	const double softcap = static_cast<double>(rocm_float_from_bits(args.softcap_bits));
+	const double max_value = rocm_packed_topk_sample_score(input[first_valid], softcap) / temperature;
+	double total = 0.0;
+	for (uint32_t index = first_valid; index < args.top_k; ++index) {
+		const unsigned long long packed = input[index];
+		if (packed == 0ull) {
+			continue;
+		}
+		const double score = rocm_packed_topk_sample_score(packed, softcap);
+		const double weight = exp(score / temperature - max_value);
+		if (!isfinite(weight)) {
+			return;
+		}
+		total += weight;
+	}
+	if (!(total > 0.0) || !isfinite(total)) {
+		return;
+	}
+	uint32_t limit = args.top_k;
+	if (top_p < 1.0) {
+		double cumulative = 0.0;
+		for (uint32_t index = first_valid; index < args.top_k; ++index) {
+			const unsigned long long packed = input[index];
+			if (packed == 0ull) {
+				continue;
+			}
+			const double score = rocm_packed_topk_sample_score(packed, softcap);
+			cumulative += exp(score / temperature - max_value);
+			if (cumulative / total >= top_p) {
+				limit = index + 1u;
+				break;
+			}
+		}
+	}
+	double selected_total = 0.0;
+	unsigned long long fallback = input[first_valid];
+	for (uint32_t index = first_valid; index < limit; ++index) {
+		const unsigned long long packed = input[index];
+		if (packed == 0ull) {
+			continue;
+		}
+		fallback = packed;
+		const double score = rocm_packed_topk_sample_score(packed, softcap);
+		selected_total += exp(score / temperature - max_value);
+	}
+	if (!(selected_total > 0.0) || !isfinite(selected_total)) {
+		return;
+	}
+	double draw = rocm_double_from_bits(args.draw_bits);
+	if (draw < 0.0) {
+		draw = 0.0;
+	}
+	if (draw >= 1.0) {
+		draw = nextafter(1.0, 0.0);
+	}
+	const double target = draw * selected_total;
+	double cumulative = 0.0;
+	for (uint32_t index = first_valid; index < limit; ++index) {
+		const unsigned long long packed = input[index];
+		if (packed == 0ull) {
+			continue;
+		}
+		const double score = rocm_packed_topk_sample_score(packed, softcap);
+		cumulative += exp(score / temperature - max_value);
+		if (target <= cumulative) {
+			output[0] = packed;
+			return;
+		}
+	}
+	output[0] = fallback;
+}
+

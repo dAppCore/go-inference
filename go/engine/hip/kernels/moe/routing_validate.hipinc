@@ -1,0 +1,84 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_moe_router_args(const rocm_moe_router_launch_args &args)
+{
+	return args.version == ROCM_MOE_ROUTER_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_MOE_ROUTER_LAUNCH_ARGS_BYTES &&
+		args.logit_pointer != 0 &&
+		args.id_pointer != 0 &&
+		args.prob_pointer != 0 &&
+		args.expert_count > 0 &&
+		args.top_k > 0 &&
+		args.top_k <= args.expert_count &&
+		args.logit_bytes == args.expert_count * sizeof(float) &&
+		args.id_bytes == args.top_k * sizeof(int32_t) &&
+		args.prob_bytes == args.top_k * sizeof(float);
+}
+
+__device__ bool rocm_valid_moe_lazy_args(const rocm_moe_lazy_launch_args &args)
+{
+	return args.version == ROCM_MOE_LAZY_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES &&
+		args.id_pointer != 0 &&
+		args.resident_pointer != 0 &&
+		args.selected_count > 0 &&
+		args.expert_count > 0 &&
+		args.id_bytes == args.selected_count * sizeof(int32_t) &&
+		args.resident_bytes == args.expert_count * sizeof(uint8_t);
+}
+
+__device__ bool rocm_valid_moe_batch_route_rows_args(const rocm_moe_batch_route_rows_launch_args &args)
+{
+	return args.version == ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_MOE_BATCH_ROUTE_ROWS_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.metadata_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.route_count > 0 &&
+		args.row_width > 0 &&
+		args.input_rows > 0 &&
+		args.output_rows > 0 &&
+		args.input_bytes == static_cast<uint64_t>(args.input_rows) * args.row_width * sizeof(float) &&
+		args.metadata_bytes == static_cast<uint64_t>(args.route_count) * ROCM_MOE_BATCH_ROUTE_METADATA_BYTES &&
+		args.output_bytes == static_cast<uint64_t>(args.output_rows) * args.row_width * sizeof(float);
+}
+
+__device__ bool rocm_valid_moe_batch_reduce_args(const rocm_moe_batch_reduce_launch_args &args)
+{
+	return args.version == ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_MOE_BATCH_REDUCE_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.rows > 0 &&
+		args.top_k > 0 &&
+		args.row_width > 0 &&
+		args.input_bytes == static_cast<uint64_t>(args.rows) * args.top_k * args.row_width * sizeof(float) &&
+		args.output_bytes == static_cast<uint64_t>(args.rows) * args.row_width * sizeof(float);
+}
+
+__device__ bool rocm_valid_moe_mlx_affine_routes_args(const rocm_moe_mlx_affine_routes_launch_args &args)
+{
+	if (args.version != ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MOE_MLX_AFFINE_ROUTES_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.chunk_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.input_rows == 0 ||
+		args.pair_count == 0 ||
+		args.chunk_count == 0 ||
+		args.group_size == 0 ||
+		(args.flags & ~ROCM_MOE_MLX_AFFINE_ROUTES_FLAG_GATE_UP) != 0 ||
+		!rocm_mlx_affine_bits_supported(args.bits)) {
+		return false;
+	}
+	const uint64_t total_bits = static_cast<uint64_t>(args.cols) * args.bits;
+	if ((total_bits % 32u) != 0u || (args.cols % args.group_size) != 0u) {
+		return false;
+	}
+	return args.input_bytes == static_cast<uint64_t>(args.input_rows) * args.cols * sizeof(float) &&
+		args.chunk_bytes == static_cast<uint64_t>(args.chunk_count) * ROCM_MOE_MLX_AFFINE_ROUTES_CHUNK_BYTES &&
+		args.output_bytes == static_cast<uint64_t>(args.pair_count) * args.rows * sizeof(float);
+}
+

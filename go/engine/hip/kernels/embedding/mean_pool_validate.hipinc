@@ -1,0 +1,14 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_embedding_mean_pool_args(const rocm_embedding_mean_pool_launch_args &args)
+{
+	return args.version == ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_BYTES &&
+		args.token_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.token_count > 0 &&
+		args.dim > 0 &&
+		args.token_bytes == args.token_count * args.dim * sizeof(float) &&
+		args.output_bytes == args.dim * sizeof(float);
+}
+

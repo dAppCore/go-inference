@@ -1,0 +1,44 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_cross_entropy_loss_args(const rocm_cross_entropy_loss_launch_args &args)
+{
+	return args.version == ROCM_CROSS_ENTROPY_LOSS_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_CROSS_ENTROPY_LOSS_LAUNCH_ARGS_BYTES &&
+		args.logit_pointer != 0 &&
+		args.target_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.batch > 0 &&
+		args.vocab > 0 &&
+		args.logit_bytes == args.batch * args.vocab * sizeof(float) &&
+		args.target_bytes == args.batch * sizeof(int32_t) &&
+		args.output_bytes == ROCM_CROSS_ENTROPY_LOSS_OUTPUT_BYTES;
+}
+
+__device__ bool rocm_valid_distillation_kl_loss_args(const rocm_distillation_kl_loss_launch_args &args)
+{
+	const double temperature = rocm_double_from_bits(args.temperature_bits);
+	return args.version == ROCM_DISTILLATION_KL_LOSS_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_DISTILLATION_KL_LOSS_LAUNCH_ARGS_BYTES &&
+		args.student_pointer != 0 &&
+		args.teacher_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.batch > 0 &&
+		args.vocab > 0 &&
+		args.student_bytes == args.batch * args.vocab * sizeof(float) &&
+		args.teacher_bytes == args.batch * args.vocab * sizeof(float) &&
+		args.output_bytes == ROCM_DISTILLATION_KL_LOSS_OUTPUT_BYTES &&
+		temperature > 0.0 &&
+		isfinite(temperature);
+}
+
+__device__ bool rocm_valid_grpo_advantage_args(const rocm_grpo_advantage_launch_args &args)
+{
+	return args.version == ROCM_GRPO_ADVANTAGE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_GRPO_ADVANTAGE_LAUNCH_ARGS_BYTES &&
+		args.reward_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		args.reward_bytes == args.count * sizeof(double) &&
+		args.output_bytes == args.count * sizeof(double);
+}
+

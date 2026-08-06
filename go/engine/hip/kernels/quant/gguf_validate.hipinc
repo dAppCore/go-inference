@@ -1,0 +1,103 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_q8_1_quantize_args(const rocm_q8_1_quantize_launch_args &args)
+{
+	return args.version == ROCM_Q8_1_QUANTIZE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_Q8_1_QUANTIZE_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.rows > 0 &&
+		args.cols > 0 &&
+		(args.cols % ROCM_Q8_1_BLOCK_SIZE) == 0 &&
+		args.input_bytes == static_cast<uint64_t>(args.rows) * args.cols * sizeof(float) &&
+		args.output_bytes == static_cast<uint64_t>(args.rows) * (args.cols / ROCM_Q8_1_BLOCK_SIZE) * ROCM_Q8_1_BLOCK_BYTES;
+}
+
+__device__ bool rocm_valid_gguf_q4_k_q8_1_gate_up_args(const rocm_gguf_q4_k_q8_1_gate_up_launch_args &args, uint32_t block_bytes)
+{
+	if (args.version != ROCM_GGUF_Q4_K_Q8_1_GATE_UP_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_GGUF_Q4_K_Q8_1_GATE_UP_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.gate_pointer == 0 ||
+		args.up_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		(args.cols & 255u) != 0u) {
+		return false;
+	}
+	if (args.batch == 0u || args.reserved0 != 0u) {
+		return false;
+	}
+	const uint64_t weight_bytes = static_cast<uint64_t>(args.rows) * (args.cols >> 8u) * block_bytes;
+	return args.input_bytes == static_cast<uint64_t>(args.batch) * (args.cols / ROCM_Q8_1_BLOCK_SIZE) * ROCM_Q8_1_BLOCK_BYTES &&
+		args.gate_bytes == weight_bytes &&
+		args.up_bytes == weight_bytes &&
+		args.output_bytes == static_cast<uint64_t>(args.batch) * args.rows * sizeof(float);
+}
+
+__device__ bool rocm_valid_gguf_q4_0_projection_args(const rocm_gguf_q4_0_projection_launch_args &args, bool fused_gate_up)
+{
+	if (args.version != ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		(args.cols & 31u) != 0u ||
+		args.weight_rows == 0 ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.output_bytes != args.rows * sizeof(float) ||
+		args.weight_bytes != static_cast<uint64_t>(args.weight_rows) * (args.cols >> 5u) * 18u) {
+		return false;
+	}
+	const uint64_t required_rows = static_cast<uint64_t>(args.row_offset) + (fused_gate_up ? 2u : 1u) * args.rows;
+	return required_rows <= args.weight_rows;
+}
+
+__device__ bool rocm_valid_gguf_q4_k_expand_args(const rocm_gguf_q4_k_expand_launch_args &args)
+{
+	return args.version == ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_BYTES &&
+		args.raw_pointer != 0 &&
+		args.expanded_pointer != 0 &&
+		args.block_count > 0 &&
+		args.raw_bytes == static_cast<uint64_t>(args.block_count) * 144u &&
+		args.expanded_bytes == static_cast<uint64_t>(args.block_count) * ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES;
+}
+
+__device__ bool rocm_valid_gguf_q4_0_selected_experts_args(const rocm_gguf_q4_0_selected_experts_launch_args &args)
+{
+	const bool q4_0_pair = args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0 && args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0;
+	const bool q4_k_gate = args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K || args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K_EXPANDED;
+	const bool mixed_pair = q4_k_gate &&
+		(args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q5_1 || args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q8_0);
+	const bool gate_bytes_valid =
+		(args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0 && (args.hidden_size & 31u) == 0u && args.gate_up_bytes == args.gate_up_rows * (args.hidden_size >> 5u) * 18u) ||
+		(args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K && (args.hidden_size & 255u) == 0u && args.gate_up_bytes == args.gate_up_rows * (args.hidden_size >> 8u) * 144u) ||
+		(args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K_EXPANDED && (args.hidden_size & 255u) == 0u && args.gate_up_bytes == args.gate_up_rows * (args.hidden_size >> 8u) * ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES);
+	const bool down_bytes_valid =
+		(args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0 && (args.expert_ff & 31u) == 0u && args.down_bytes == args.down_rows * (args.expert_ff >> 5u) * 18u) ||
+		(args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q5_1 && (args.expert_ff & 31u) == 0u && args.down_bytes == args.down_rows * (args.expert_ff >> 5u) * 24u) ||
+		(args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q8_0 && (args.expert_ff & 31u) == 0u && args.down_bytes == args.down_rows * (args.expert_ff >> 5u) * 34u);
+	if (args.version != ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 || args.activation_pointer == 0 || args.output_pointer == 0 ||
+		args.top_k == 0 || args.top_k > ROCM_GGUF_Q4_0_SELECTED_EXPERTS_MAX_TOP_K ||
+		args.hidden_size == 0 || args.expert_ff == 0 ||
+		(!q4_0_pair && !mixed_pair) || !gate_bytes_valid || !down_bytes_valid ||
+		args.gate_up_rows != 2u * args.expert_ff || args.down_rows != args.hidden_size ||
+		args.input_bytes != args.hidden_size * sizeof(float) ||
+		args.activation_bytes != args.top_k * args.expert_ff * sizeof(float) ||
+		args.output_bytes != args.hidden_size * sizeof(float)) {
+		return false;
+	}
+	for (uint32_t expert = 0; expert < args.top_k; ++expert) {
+		if (args.gate_up_pointers[expert] == 0 || args.down_pointers[expert] == 0 || !isfinite(args.route_weights[expert])) {
+			return false;
+		}
+	}
+	return true;
+}
+

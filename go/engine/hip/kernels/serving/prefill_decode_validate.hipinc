@@ -1,0 +1,33 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_prefill_args(const rocm_prefill_launch_args &args)
+{
+	return args.version == ROCM_PREFILL_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_PREFILL_LAUNCH_ARGS_BYTES &&
+		args.token_pointer != 0 &&
+		args.token_count > 0 &&
+		args.token_bytes == args.token_count * sizeof(int32_t) &&
+		rocm_supported_kv_mode(args.mode_code) &&
+		args.block_size > 0 &&
+		args.key_width > 0 &&
+		args.value_width > 0;
+}
+
+__device__ bool rocm_valid_decode_args(const rocm_decode_launch_args &args)
+{
+	return args.version == ROCM_DECODE_LAUNCH_ARGS_VERSION &&
+		args.header_bytes == ROCM_DECODE_LAUNCH_ARGS_HEADER_BYTES &&
+		args.total_bytes == ROCM_DECODE_LAUNCH_ARGS_BYTES &&
+		args.kv_descriptor_bytes == ROCM_DEVICE_KV_LAUNCH_DESCRIPTOR_BYTES &&
+		args.kv.descriptor_pointer != 0 &&
+		args.kv.descriptor_bytes >= 32 &&
+		args.kv.descriptor_version == ROCM_DEVICE_KV_DESCRIPTOR_VERSION &&
+		rocm_supported_kv_mode(args.kv.mode_code) &&
+		args.kv.block_size > 0 &&
+		args.kv.page_count > 0 &&
+		args.kv.token_count > 0 &&
+		args.position == args.kv.token_count &&
+		args.kv.key_width > 0 &&
+		args.kv.value_width > 0;
+}
+

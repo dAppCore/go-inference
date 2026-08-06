@@ -1,0 +1,74 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_rope(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rope_launch_args &args = *reinterpret_cast<const rocm_rope_launch_args *>(packet);
+	if (!rocm_valid_rope_args(args)) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const float base = rocm_float_from_bits(args.base_bits);
+	const uint32_t frequency_dim = args.frequency_dim == 0 ? args.count : args.frequency_dim;
+	const uint32_t rotary_count = args.reserved2 == 0 ? args.count : static_cast<uint32_t>(args.reserved2);
+	const float dim = static_cast<float>(frequency_dim);
+	const uint32_t pair_count = args.count >> 1;
+	for (uint32_t pair = blockIdx.x * blockDim.x + threadIdx.x; pair < pair_count; pair += blockDim.x * gridDim.x) {
+		const uint32_t i = pair << 1;
+		const float x = input[i];
+		const float y = input[i + 1];
+		if (i < rotary_count) {
+			const float frequency = 1.0f / powf(base, static_cast<float>(i) / dim);
+			const float angle = static_cast<float>(args.position) * frequency;
+			const float cosine = cosf(angle);
+			const float sine = sinf(angle);
+			output[i] = x * cosine - y * sine;
+			output[i + 1] = x * sine + y * cosine;
+		} else {
+			output[i] = x;
+			output[i + 1] = y;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_rope_heads(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rope_heads_launch_args &args = *reinterpret_cast<const rocm_rope_heads_launch_args *>(packet);
+	if (!rocm_valid_rope_heads_args(args)) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const float base = rocm_float_from_bits(args.base_bits);
+	const uint32_t frequency_dim = args.frequency_dim == 0 ? args.head_dim : args.frequency_dim;
+	const uint32_t rotary_count = args.rotary_count == 0 ? args.head_dim : args.rotary_count;
+	const float dim = static_cast<float>(frequency_dim);
+	const uint32_t pairs_per_head = args.head_dim >> 1;
+	const uint32_t total_pairs = args.head_count * pairs_per_head;
+	for (uint32_t global_pair = blockIdx.x * blockDim.x + threadIdx.x; global_pair < total_pairs; global_pair += blockDim.x * gridDim.x) {
+		const uint32_t head = global_pair / pairs_per_head;
+		const uint32_t pair = global_pair - head * pairs_per_head;
+		const uint32_t local_i = pair << 1;
+		const uint32_t i = head * args.head_dim + local_i;
+		const float x = input[i];
+		const float y = input[i + 1];
+		if (local_i < rotary_count) {
+			const float frequency = 1.0f / powf(base, static_cast<float>(local_i) / dim);
+			const float angle = static_cast<float>(args.position) * frequency;
+			const float cosine = cosf(angle);
+			const float sine = sinf(angle);
+			output[i] = x * cosine - y * sine;
+			output[i + 1] = x * sine + y * cosine;
+		} else {
+			output[i] = x;
+			output[i + 1] = y;
+		}
+	}
+}
+

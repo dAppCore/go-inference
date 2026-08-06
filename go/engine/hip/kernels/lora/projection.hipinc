@@ -1,0 +1,43 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_lora_projection(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_lora_launch_args &args = *reinterpret_cast<const rocm_lora_launch_args *>(packet);
+	if (!rocm_valid_lora_args(args)) {
+		return;
+	}
+
+	const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+	if (row >= args.rows) {
+		return;
+	}
+
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const float *base = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.base_weight_pointer));
+	const float *lora_a = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.lora_a_pointer));
+	const float *lora_b = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.lora_b_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+
+	float sum = 0.0f;
+	for (uint32_t col = 0; col < args.cols; ++col) {
+		sum += input[col] * base[row * args.cols + col];
+	}
+	if ((args.flags & ROCM_LORA_LAUNCH_FLAG_BIAS) != 0 && args.bias_pointer != 0) {
+		const float *bias = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.bias_pointer));
+		sum += bias[row];
+	}
+	float delta = 0.0f;
+	for (uint32_t r = 0; r < args.rank; ++r) {
+		float down = 0.0f;
+		for (uint32_t col = 0; col < args.cols; ++col) {
+			down += lora_a[r * args.cols + col] * input[col];
+		}
+		delta += lora_b[row * args.rank + r] * down;
+	}
+	const float scale = rocm_float_from_bits(args.alpha_bits) / static_cast<float>(args.rank);
+	output[row] = sum + scale * delta;
+}
+

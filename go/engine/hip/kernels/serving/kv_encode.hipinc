@@ -1,0 +1,501 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_kv_encode_token_args(const rocm_kv_encode_token_launch_args &args)
+{
+	const uint64_t row_count = args.reserved2 == 0u ? 1u : args.reserved2;
+	const uint64_t key_width = args.reserved0 == 0u ? args.key_count : args.reserved0;
+	const uint64_t value_width = args.reserved1 == 0u ? args.value_count : args.reserved1;
+	return args.version == ROCM_KV_ENCODE_TOKEN_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_KV_ENCODE_TOKEN_LAUNCH_ARGS_BYTES &&
+		args.key_input_pointer != 0 &&
+		args.value_input_pointer != 0 &&
+		args.key_output_pointer != 0 &&
+		args.value_output_pointer != 0 &&
+		args.key_count > 0 &&
+		args.value_count > 0 &&
+		args.key_input_bytes == args.key_count * sizeof(float) &&
+		args.value_input_bytes == args.value_count * sizeof(float) &&
+		rocm_valid_kv_tensor_encoding(args.key_encoding) &&
+		rocm_valid_kv_tensor_encoding(args.value_encoding) &&
+		row_count > 0u &&
+		key_width > 0u &&
+		value_width > 0u &&
+		static_cast<uint64_t>(args.key_count) == key_width * row_count &&
+		static_cast<uint64_t>(args.value_count) == value_width * row_count &&
+		(args.key_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS || (key_width & 1u) == 0u) &&
+		(args.value_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS || (value_width & 1u) == 0u) &&
+		(args.key_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED || (key_width & 1u) == 0u) &&
+		(args.value_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED || (value_width & 1u) == 0u) &&
+		args.key_output_bytes == rocm_device_kv_tensor_bytes_rows(args.key_encoding, args.key_count, row_count) &&
+		args.value_output_bytes == rocm_device_kv_tensor_bytes_rows(args.value_encoding, args.value_count, row_count);
+}
+
+__device__ bool rocm_valid_kv_encode_token_value_norm_args(const rocm_kv_encode_token_value_norm_launch_args &args)
+{
+	const uint64_t row_count = args.reserved2 == 0u ? 1u : args.reserved2;
+	const uint64_t key_width = args.reserved0 == 0u ? args.key_count : args.reserved0;
+	const uint64_t value_width = args.reserved1 == 0u ? args.value_count : args.reserved1;
+	const float epsilon = rocm_float_from_bits(args.value_epsilon_bits);
+	return args.version == ROCM_KV_ENCODE_TOKEN_VALUE_NORM_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_KV_ENCODE_TOKEN_VALUE_NORM_LAUNCH_ARGS_BYTES &&
+		args.key_input_pointer != 0 &&
+		args.value_input_pointer != 0 &&
+		args.key_output_pointer != 0 &&
+		args.value_output_pointer != 0 &&
+		args.key_count > 0 &&
+		args.value_count > 0 &&
+		args.key_input_bytes == args.key_count * sizeof(float) &&
+		args.value_input_bytes == args.value_count * sizeof(float) &&
+		rocm_valid_kv_tensor_encoding(args.key_encoding) &&
+		rocm_valid_kv_tensor_encoding(args.value_encoding) &&
+		row_count > 0u &&
+		key_width > 0u &&
+		value_width > 0u &&
+		args.value_head_dim > 0u &&
+		args.value_head_count > 0u &&
+		args.value_head_count <= ROCM_KV_ENCODE_TOKEN_VALUE_NORM_MAX_HEADS &&
+		value_width == static_cast<uint64_t>(args.value_head_dim) * args.value_head_count &&
+		static_cast<uint64_t>(args.key_count) == key_width * row_count &&
+		static_cast<uint64_t>(args.value_count) == value_width * row_count &&
+		(args.key_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS || (key_width & 1u) == 0u) &&
+		(args.value_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS || (value_width & 1u) == 0u) &&
+		(args.key_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED || (key_width & 1u) == 0u) &&
+		(args.value_encoding != ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED || (value_width & 1u) == 0u) &&
+		isfinite(epsilon) &&
+		epsilon >= 0.0f &&
+		args.key_output_bytes == rocm_device_kv_tensor_bytes_rows(args.key_encoding, args.key_count, row_count) &&
+		args.value_output_bytes == rocm_device_kv_tensor_bytes_rows(args.value_encoding, args.value_count, row_count);
+}
+
+__device__ uint8_t rocm_pack_signed_q4(int value)
+{
+	if (value < 0) {
+		value += 16;
+	}
+	return static_cast<uint8_t>(value) & 0x0fu;
+}
+
+__device__ int rocm_clamp_int(int value, int low, int high)
+{
+	if (value < low) {
+		return low;
+	}
+	if (value > high) {
+		return high;
+	}
+	return value;
+}
+
+__device__ int rocm_quantize_kv_value(float value, float scale, uint32_t encoding)
+{
+	const int quantized = static_cast<int>(roundf(value / scale));
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8 || encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS || encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED) {
+		return rocm_clamp_int(quantized, -127, 127);
+	}
+	return rocm_clamp_int(quantized, -8, 7);
+}
+
+__device__ void rocm_encode_kv_token_tensor(const float *input, unsigned char *output, uint32_t count, uint32_t encoding, uint32_t row_width, uint32_t row_count)
+{
+	const uint32_t tid = threadIdx.x;
+	const uint32_t threads = blockDim.x;
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_FP16) {
+		uint16_t *halves = reinterpret_cast<uint16_t *>(output);
+		for (uint32_t index = tid; index < count; index += threads) {
+			halves[index] = rocm_float_to_half(input[index]);
+		}
+		return;
+	}
+
+	__shared__ float scratch[ROCM_KV_ENCODE_TOKEN_BLOCK_SIZE];
+	const bool row_interleaved = encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED || encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED;
+	if (row_interleaved) {
+		const uint32_t row_payload = encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED
+			? row_width
+			: ((row_width + 1u) >> 1u);
+		const uint32_t row_stride = sizeof(uint32_t) + row_payload;
+		for (uint32_t row = 0; row < row_count; ++row) {
+			const uint32_t row_start = row * row_width;
+			unsigned char *row_output = output + static_cast<uint64_t>(row) * row_stride;
+			float max_abs = 0.0f;
+			for (uint32_t dim = tid; dim < row_width; dim += threads) {
+				const float magnitude = fabsf(input[row_start + dim]);
+				if (magnitude > max_abs) {
+					max_abs = magnitude;
+				}
+			}
+			scratch[tid] = max_abs;
+			__syncthreads();
+			for (uint32_t stride = threads >> 1; stride > 0; stride >>= 1) {
+				if (tid < stride && scratch[tid + stride] > scratch[tid]) {
+					scratch[tid] = scratch[tid + stride];
+				}
+				__syncthreads();
+			}
+			const float scale = scratch[0] == 0.0f ? 1.0f : scratch[0] / (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED ? 127.0f : 7.0f);
+			if (tid == 0) {
+				*reinterpret_cast<uint32_t *>(row_output) = rocm_float_bits(scale);
+			}
+			__syncthreads();
+			unsigned char *payload = row_output + sizeof(uint32_t);
+			if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED) {
+				int8_t *quantized = reinterpret_cast<int8_t *>(payload);
+				for (uint32_t dim = tid; dim < row_width; dim += threads) {
+					quantized[dim] = static_cast<int8_t>(rocm_quantize_kv_value(input[row_start + dim], scale, encoding));
+				}
+			} else {
+				const uint32_t packed_count = row_width >> 1u;
+				for (uint32_t packed = tid; packed < packed_count; packed += threads) {
+					const uint32_t first = row_start + packed * 2u;
+					const int low = rocm_quantize_kv_value(input[first], scale, encoding);
+					const int high = rocm_quantize_kv_value(input[first + 1u], scale, encoding);
+					payload[packed] = static_cast<unsigned char>(rocm_pack_signed_q4(low) | (rocm_pack_signed_q4(high) << 4));
+				}
+			}
+			__syncthreads();
+		}
+		return;
+	}
+	const bool row_scaled = encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS || encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS;
+	if (row_scaled) {
+		unsigned char *payload = output + row_count * sizeof(uint32_t);
+		for (uint32_t row = 0; row < row_count; ++row) {
+			const uint32_t row_start = row * row_width;
+			float max_abs = 0.0f;
+			for (uint32_t dim = tid; dim < row_width; dim += threads) {
+				const float magnitude = fabsf(input[row_start + dim]);
+				if (magnitude > max_abs) {
+					max_abs = magnitude;
+				}
+			}
+			scratch[tid] = max_abs;
+			__syncthreads();
+			for (uint32_t stride = threads >> 1; stride > 0; stride >>= 1) {
+				if (tid < stride && scratch[tid + stride] > scratch[tid]) {
+					scratch[tid] = scratch[tid + stride];
+				}
+				__syncthreads();
+			}
+			const float scale = scratch[0] == 0.0f ? 1.0f : scratch[0] / (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS ? 127.0f : 7.0f);
+			if (tid == 0) {
+				reinterpret_cast<uint32_t *>(output)[row] = rocm_float_bits(scale);
+			}
+			__syncthreads();
+			if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS) {
+				int8_t *quantized = reinterpret_cast<int8_t *>(payload);
+				for (uint32_t dim = tid; dim < row_width; dim += threads) {
+					const uint32_t index = row_start + dim;
+					quantized[index] = static_cast<int8_t>(rocm_quantize_kv_value(input[index], scale, encoding));
+				}
+			} else {
+				const uint32_t packed_start = row_start >> 1u;
+				const uint32_t packed_count = row_width >> 1u;
+				for (uint32_t packed = tid; packed < packed_count; packed += threads) {
+					const uint32_t first = row_start + packed * 2u;
+					const int low = rocm_quantize_kv_value(input[first], scale, encoding);
+					const int high = rocm_quantize_kv_value(input[first + 1u], scale, encoding);
+					payload[packed_start + packed] = static_cast<unsigned char>(rocm_pack_signed_q4(low) | (rocm_pack_signed_q4(high) << 4));
+				}
+			}
+			__syncthreads();
+		}
+		return;
+	}
+
+	float max_abs = 0.0f;
+	for (uint32_t index = tid; index < count; index += threads) {
+		const float magnitude = fabsf(input[index]);
+		if (magnitude > max_abs) {
+			max_abs = magnitude;
+		}
+	}
+	scratch[tid] = max_abs;
+	__syncthreads();
+	for (uint32_t stride = threads >> 1; stride > 0; stride >>= 1) {
+		if (tid < stride && scratch[tid + stride] > scratch[tid]) {
+			scratch[tid] = scratch[tid + stride];
+		}
+		__syncthreads();
+	}
+	const float scale = scratch[0] == 0.0f ? 1.0f : scratch[0] / (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8 ? 127.0f : 7.0f);
+	if (tid == 0) {
+		*reinterpret_cast<uint32_t *>(output) = rocm_float_bits(scale);
+	}
+	__syncthreads();
+
+	unsigned char *payload = output + sizeof(uint32_t);
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8) {
+		int8_t *quantized = reinterpret_cast<int8_t *>(payload);
+		for (uint32_t index = tid; index < count; index += threads) {
+			quantized[index] = static_cast<int8_t>(rocm_quantize_kv_value(input[index], scale, encoding));
+		}
+		return;
+	}
+
+	const uint32_t packed_count = (count + 1u) / 2u;
+	for (uint32_t packed_index = tid; packed_index < packed_count; packed_index += threads) {
+		const uint32_t first = packed_index * 2u;
+		const int low = rocm_quantize_kv_value(input[first], scale, encoding);
+		int high = 0;
+		if (first + 1u < count) {
+			high = rocm_quantize_kv_value(input[first + 1u], scale, encoding);
+		}
+		payload[packed_index] = static_cast<unsigned char>(rocm_pack_signed_q4(low) | (rocm_pack_signed_q4(high) << 4));
+	}
+}
+
+__device__ float rocm_kv_encode_block_reduce_sum(float value, float *scratch)
+{
+	const uint32_t tid = threadIdx.x;
+	const uint32_t threads = blockDim.x;
+	scratch[tid] = value;
+	__syncthreads();
+	for (uint32_t stride = threads >> 1; stride > 0; stride >>= 1) {
+		if (tid < stride) {
+			scratch[tid] += scratch[tid + stride];
+		}
+		__syncthreads();
+	}
+	return scratch[0];
+}
+
+__device__ float rocm_kv_encode_block_reduce_max(float value, float *scratch)
+{
+	const uint32_t tid = threadIdx.x;
+	const uint32_t threads = blockDim.x;
+	scratch[tid] = value;
+	__syncthreads();
+	for (uint32_t stride = threads >> 1; stride > 0; stride >>= 1) {
+		if (tid < stride && scratch[tid + stride] > scratch[tid]) {
+			scratch[tid] = scratch[tid + stride];
+		}
+		__syncthreads();
+	}
+	return scratch[0];
+}
+
+__device__ void rocm_kv_encode_value_norm_prepare_row(const float *input, uint32_t row_start, uint32_t head_dim, uint32_t head_count, float epsilon, float *scratch, float *head_rms)
+{
+	const uint32_t tid = threadIdx.x;
+	for (uint32_t head = 0; head < head_count; ++head) {
+		const uint32_t head_start = row_start + head * head_dim;
+		float sum_squares = 0.0f;
+		for (uint32_t dim = tid; dim < head_dim; dim += blockDim.x) {
+			const float value = input[head_start + dim];
+			sum_squares += value * value;
+		}
+		const float total = rocm_kv_encode_block_reduce_sum(sum_squares, scratch);
+		if (tid == 0) {
+			const float rms = sqrtf(total / static_cast<float>(head_dim) + epsilon);
+			head_rms[head] = rms == 0.0f ? 1.0f : rms;
+		}
+		__syncthreads();
+	}
+}
+
+__device__ float rocm_kv_encode_value_norm_value(const float *input, uint32_t row_start, uint32_t dim, uint32_t head_dim, const float *head_rms)
+{
+	const uint32_t head = dim / head_dim;
+	return input[row_start + dim] / head_rms[head];
+}
+
+__device__ void rocm_encode_kv_token_tensor_value_norm(const float *input, unsigned char *output, uint32_t count, uint32_t encoding, uint32_t row_width, uint32_t row_count, uint32_t head_dim, uint32_t head_count, float epsilon)
+{
+	const uint32_t tid = threadIdx.x;
+	const uint32_t threads = blockDim.x;
+	__shared__ float scratch[ROCM_KV_ENCODE_TOKEN_BLOCK_SIZE];
+	__shared__ float head_rms[ROCM_KV_ENCODE_TOKEN_VALUE_NORM_MAX_HEADS];
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_FP16) {
+		uint16_t *halves = reinterpret_cast<uint16_t *>(output);
+		for (uint32_t row = 0; row < row_count; ++row) {
+			const uint32_t row_start = row * row_width;
+			rocm_kv_encode_value_norm_prepare_row(input, row_start, head_dim, head_count, epsilon, scratch, head_rms);
+			for (uint32_t dim = tid; dim < row_width; dim += threads) {
+				halves[row_start + dim] = rocm_float_to_half(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms));
+			}
+			__syncthreads();
+		}
+		return;
+	}
+
+	const bool row_interleaved = encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED || encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED;
+	if (row_interleaved) {
+		const uint32_t row_payload = encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED
+			? row_width
+			: ((row_width + 1u) >> 1u);
+		const uint32_t row_stride = sizeof(uint32_t) + row_payload;
+		for (uint32_t row = 0; row < row_count; ++row) {
+			const uint32_t row_start = row * row_width;
+			unsigned char *row_output = output + static_cast<uint64_t>(row) * row_stride;
+			rocm_kv_encode_value_norm_prepare_row(input, row_start, head_dim, head_count, epsilon, scratch, head_rms);
+			float max_abs = 0.0f;
+			for (uint32_t dim = tid; dim < row_width; dim += threads) {
+				const float magnitude = fabsf(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms));
+				if (magnitude > max_abs) {
+					max_abs = magnitude;
+				}
+			}
+			const float row_max = rocm_kv_encode_block_reduce_max(max_abs, scratch);
+			const float scale = row_max == 0.0f ? 1.0f : row_max / (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED ? 127.0f : 7.0f);
+			if (tid == 0) {
+				*reinterpret_cast<uint32_t *>(row_output) = rocm_float_bits(scale);
+			}
+			__syncthreads();
+			unsigned char *payload = row_output + sizeof(uint32_t);
+			if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED) {
+				int8_t *quantized = reinterpret_cast<int8_t *>(payload);
+				for (uint32_t dim = tid; dim < row_width; dim += threads) {
+					quantized[dim] = static_cast<int8_t>(rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms), scale, encoding));
+				}
+			} else {
+				const uint32_t packed_count = row_width >> 1u;
+				for (uint32_t packed = tid; packed < packed_count; packed += threads) {
+					const uint32_t dim = packed * 2u;
+					const int low = rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms), scale, encoding);
+					const int high = rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim + 1u, head_dim, head_rms), scale, encoding);
+					payload[packed] = static_cast<unsigned char>(rocm_pack_signed_q4(low) | (rocm_pack_signed_q4(high) << 4));
+				}
+			}
+			__syncthreads();
+		}
+		return;
+	}
+
+	const bool row_scaled = encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS || encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS;
+	if (row_scaled) {
+		unsigned char *payload = output + row_count * sizeof(uint32_t);
+		for (uint32_t row = 0; row < row_count; ++row) {
+			const uint32_t row_start = row * row_width;
+			rocm_kv_encode_value_norm_prepare_row(input, row_start, head_dim, head_count, epsilon, scratch, head_rms);
+			float max_abs = 0.0f;
+			for (uint32_t dim = tid; dim < row_width; dim += threads) {
+				const float magnitude = fabsf(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms));
+				if (magnitude > max_abs) {
+					max_abs = magnitude;
+				}
+			}
+			const float row_max = rocm_kv_encode_block_reduce_max(max_abs, scratch);
+			const float scale = row_max == 0.0f ? 1.0f : row_max / (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS ? 127.0f : 7.0f);
+			if (tid == 0) {
+				reinterpret_cast<uint32_t *>(output)[row] = rocm_float_bits(scale);
+			}
+			__syncthreads();
+			if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS) {
+				int8_t *quantized = reinterpret_cast<int8_t *>(payload);
+				for (uint32_t dim = tid; dim < row_width; dim += threads) {
+					quantized[row_start + dim] = static_cast<int8_t>(rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms), scale, encoding));
+				}
+			} else {
+				const uint32_t packed_start = row_start >> 1u;
+				const uint32_t packed_count = row_width >> 1u;
+				for (uint32_t packed = tid; packed < packed_count; packed += threads) {
+					const uint32_t dim = packed * 2u;
+					const int low = rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms), scale, encoding);
+					const int high = rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim + 1u, head_dim, head_rms), scale, encoding);
+					payload[packed_start + packed] = static_cast<unsigned char>(rocm_pack_signed_q4(low) | (rocm_pack_signed_q4(high) << 4));
+				}
+			}
+			__syncthreads();
+		}
+		return;
+	}
+
+	float max_abs = 0.0f;
+	for (uint32_t row = 0; row < row_count; ++row) {
+		const uint32_t row_start = row * row_width;
+		rocm_kv_encode_value_norm_prepare_row(input, row_start, head_dim, head_count, epsilon, scratch, head_rms);
+		for (uint32_t dim = tid; dim < row_width; dim += threads) {
+			const float magnitude = fabsf(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms));
+			if (magnitude > max_abs) {
+				max_abs = magnitude;
+			}
+		}
+		__syncthreads();
+	}
+	const float global_max = rocm_kv_encode_block_reduce_max(max_abs, scratch);
+	const float scale = global_max == 0.0f ? 1.0f : global_max / (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8 ? 127.0f : 7.0f);
+	if (tid == 0) {
+		*reinterpret_cast<uint32_t *>(output) = rocm_float_bits(scale);
+	}
+	__syncthreads();
+
+	unsigned char *payload = output + sizeof(uint32_t);
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8) {
+		int8_t *quantized = reinterpret_cast<int8_t *>(payload);
+		for (uint32_t row = 0; row < row_count; ++row) {
+			const uint32_t row_start = row * row_width;
+			rocm_kv_encode_value_norm_prepare_row(input, row_start, head_dim, head_count, epsilon, scratch, head_rms);
+			for (uint32_t dim = tid; dim < row_width; dim += threads) {
+				quantized[row_start + dim] = static_cast<int8_t>(rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms), scale, encoding));
+			}
+			__syncthreads();
+		}
+		return;
+	}
+
+	const uint32_t packed_count = (count + 1u) / 2u;
+	for (uint32_t row = 0; row < row_count; ++row) {
+		const uint32_t row_start = row * row_width;
+		rocm_kv_encode_value_norm_prepare_row(input, row_start, head_dim, head_count, epsilon, scratch, head_rms);
+		for (uint32_t packed_index = tid; packed_index < packed_count; packed_index += threads) {
+			const uint32_t first = packed_index * 2u;
+			if (first < row_start || first >= row_start + row_width) {
+				continue;
+			}
+			const uint32_t dim = first - row_start;
+			const int low = rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim, head_dim, head_rms), scale, encoding);
+			int high = 0;
+			if (dim + 1u < row_width) {
+				high = rocm_quantize_kv_value(rocm_kv_encode_value_norm_value(input, row_start, dim + 1u, head_dim, head_rms), scale, encoding);
+			}
+			payload[packed_index] = static_cast<unsigned char>(rocm_pack_signed_q4(low) | (rocm_pack_signed_q4(high) << 4));
+		}
+		__syncthreads();
+	}
+}
+
+extern "C" __global__ void rocm_kv_encode_token(const unsigned char *packet)
+{
+	if (packet == nullptr || blockIdx.x > 1u || blockDim.x == 0 || blockDim.x > ROCM_KV_ENCODE_TOKEN_BLOCK_SIZE) {
+		return;
+	}
+	const rocm_kv_encode_token_launch_args &args = *reinterpret_cast<const rocm_kv_encode_token_launch_args *>(packet);
+	if (!rocm_valid_kv_encode_token_args(args)) {
+		return;
+	}
+	const bool encode_key = blockIdx.x == 0;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(encode_key ? args.key_input_pointer : args.value_input_pointer));
+	unsigned char *output = reinterpret_cast<unsigned char *>(static_cast<uintptr_t>(encode_key ? args.key_output_pointer : args.value_output_pointer));
+	const uint32_t count = encode_key ? args.key_count : args.value_count;
+	const uint32_t encoding = encode_key ? args.key_encoding : args.value_encoding;
+	const uint32_t row_count = args.reserved2 == 0u ? 1u : static_cast<uint32_t>(args.reserved2);
+	const uint32_t row_width = encode_key
+		? (args.reserved0 == 0u ? args.key_count : static_cast<uint32_t>(args.reserved0))
+		: (args.reserved1 == 0u ? args.value_count : static_cast<uint32_t>(args.reserved1));
+	rocm_encode_kv_token_tensor(input, output, count, encoding, row_width, row_count);
+}
+
+extern "C" __global__ void rocm_kv_encode_token_value_norm(const unsigned char *packet)
+{
+	if (packet == nullptr || blockIdx.x > 1u || blockDim.x == 0 || blockDim.x > ROCM_KV_ENCODE_TOKEN_BLOCK_SIZE) {
+		return;
+	}
+	const rocm_kv_encode_token_value_norm_launch_args &args = *reinterpret_cast<const rocm_kv_encode_token_value_norm_launch_args *>(packet);
+	if (!rocm_valid_kv_encode_token_value_norm_args(args)) {
+		return;
+	}
+	const bool encode_key = blockIdx.x == 0;
+	const uint32_t row_count = args.reserved2 == 0u ? 1u : static_cast<uint32_t>(args.reserved2);
+	if (encode_key) {
+		const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.key_input_pointer));
+		unsigned char *output = reinterpret_cast<unsigned char *>(static_cast<uintptr_t>(args.key_output_pointer));
+		const uint32_t row_width = args.reserved0 == 0u ? args.key_count : static_cast<uint32_t>(args.reserved0);
+		rocm_encode_kv_token_tensor(input, output, args.key_count, args.key_encoding, row_width, row_count);
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.value_input_pointer));
+	unsigned char *output = reinterpret_cast<unsigned char *>(static_cast<uintptr_t>(args.value_output_pointer));
+	const uint32_t row_width = args.reserved1 == 0u ? args.value_count : static_cast<uint32_t>(args.reserved1);
+	rocm_encode_kv_token_tensor_value_norm(input, output, args.value_count, args.value_encoding, row_width, row_count, args.value_head_dim, args.value_head_count, rocm_float_from_bits(args.value_epsilon_bits));
+}
+

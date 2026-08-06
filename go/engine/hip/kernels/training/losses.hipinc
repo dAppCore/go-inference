@@ -1,0 +1,115 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_cross_entropy_loss(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_cross_entropy_loss_launch_args &args = *reinterpret_cast<const rocm_cross_entropy_loss_launch_args *>(packet);
+	if (!rocm_valid_cross_entropy_loss_args(args)) {
+		return;
+	}
+	const float *logits = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.logit_pointer));
+	const int32_t *targets = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(args.target_pointer));
+	double total = 0.0;
+	for (uint32_t batch = 0; batch < args.batch; ++batch) {
+		const float *row = logits + batch * args.vocab;
+		const int32_t target = targets[batch];
+		if (target < 0 || static_cast<uint32_t>(target) >= args.vocab) {
+			return;
+		}
+		float max_value = row[0];
+		for (uint32_t col = 1; col < args.vocab; ++col) {
+			max_value = fmaxf(max_value, row[col]);
+		}
+		double sum = 0.0;
+		for (uint32_t col = 0; col < args.vocab; ++col) {
+			sum += exp(static_cast<double>(row[col] - max_value));
+		}
+		total += static_cast<double>(max_value) + log(sum) - static_cast<double>(row[target]);
+	}
+	const double loss = total / static_cast<double>(args.batch);
+	double *output = reinterpret_cast<double *>(static_cast<uintptr_t>(args.output_pointer));
+	output[0] = loss;
+	output[1] = exp(loss);
+}
+
+extern "C" __global__ void rocm_distillation_kl_loss(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_distillation_kl_loss_launch_args &args = *reinterpret_cast<const rocm_distillation_kl_loss_launch_args *>(packet);
+	if (!rocm_valid_distillation_kl_loss_args(args)) {
+		return;
+	}
+	const float *student = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.student_pointer));
+	const float *teacher = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.teacher_pointer));
+	const double temperature = rocm_double_from_bits(args.temperature_bits);
+	double total = 0.0;
+	for (uint32_t batch = 0; batch < args.batch; ++batch) {
+		const float *student_row = student + batch * args.vocab;
+		const float *teacher_row = teacher + batch * args.vocab;
+		double student_max = static_cast<double>(student_row[0]) / temperature;
+		double teacher_max = static_cast<double>(teacher_row[0]) / temperature;
+		for (uint32_t col = 1; col < args.vocab; ++col) {
+			student_max = fmax(student_max, static_cast<double>(student_row[col]) / temperature);
+			teacher_max = fmax(teacher_max, static_cast<double>(teacher_row[col]) / temperature);
+		}
+		double student_sum = 0.0;
+		double teacher_sum = 0.0;
+		for (uint32_t col = 0; col < args.vocab; ++col) {
+			student_sum += exp(static_cast<double>(student_row[col]) / temperature - student_max);
+			teacher_sum += exp(static_cast<double>(teacher_row[col]) / temperature - teacher_max);
+		}
+		const double student_norm = student_max + log(student_sum);
+		const double teacher_norm = teacher_max + log(teacher_sum);
+		for (uint32_t col = 0; col < args.vocab; ++col) {
+			const double student_log_prob = static_cast<double>(student_row[col]) / temperature - student_norm;
+			const double teacher_log_prob = static_cast<double>(teacher_row[col]) / temperature - teacher_norm;
+			const double teacher_prob = exp(teacher_log_prob);
+			total += teacher_prob * (teacher_log_prob - student_log_prob);
+		}
+	}
+	double *output = reinterpret_cast<double *>(static_cast<uintptr_t>(args.output_pointer));
+	output[0] = total * temperature * temperature / static_cast<double>(args.batch);
+}
+
+extern "C" __global__ void rocm_grpo_advantage(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_grpo_advantage_launch_args &args = *reinterpret_cast<const rocm_grpo_advantage_launch_args *>(packet);
+	if (!rocm_valid_grpo_advantage_args(args)) {
+		return;
+	}
+	const double *rewards = reinterpret_cast<const double *>(static_cast<uintptr_t>(args.reward_pointer));
+	double *output = reinterpret_cast<double *>(static_cast<uintptr_t>(args.output_pointer));
+	double mean = 0.0;
+	for (uint32_t index = 0; index < args.count; ++index) {
+		const double reward = rewards[index];
+		if (!isfinite(reward)) {
+			return;
+		}
+		mean += reward;
+	}
+	mean /= static_cast<double>(args.count);
+	double variance = 0.0;
+	for (uint32_t index = 0; index < args.count; ++index) {
+		const double diff = rewards[index] - mean;
+		variance += diff * diff;
+	}
+	variance /= static_cast<double>(args.count);
+	if (variance == 0.0) {
+		for (uint32_t index = 0; index < args.count; ++index) {
+			output[index] = 0.0;
+		}
+		return;
+	}
+	const double stddev = sqrt(variance);
+	for (uint32_t index = 0; index < args.count; ++index) {
+		output[index] = (rewards[index] - mean) / stddev;
+	}
+}
+

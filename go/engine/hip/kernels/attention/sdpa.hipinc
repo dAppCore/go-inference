@@ -1,0 +1,14 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_attention(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_attention_launch_args &args = *reinterpret_cast<const rocm_attention_launch_args *>(packet);
+	if (!rocm_valid_attention_args(args)) {
+		return;
+	}
+	rocm_run_single_head_attention(args);
+}
+

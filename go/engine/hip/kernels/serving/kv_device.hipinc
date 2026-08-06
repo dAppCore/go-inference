@@ -1,0 +1,139 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ uint64_t rocm_device_kv_tensor_bytes(uint32_t encoding, uint64_t length);
+__device__ uint64_t rocm_device_kv_tensor_bytes_rows(uint32_t encoding, uint64_t length, uint64_t rows);
+
+__device__ uint32_t rocm_attention_kv_head_count(uint32_t encoded, uint32_t query_heads)
+{
+	if (encoded == 0u) {
+		return 1u;
+	}
+	return encoded > query_heads ? query_heads : encoded;
+}
+
+__device__ uint32_t rocm_attention_kv_head_for_query(uint32_t query_head, uint32_t query_heads, uint32_t kv_heads)
+{
+	if (kv_heads <= 1u || query_heads <= kv_heads) {
+		return kv_heads <= 1u ? 0u : query_head;
+	}
+	const uint32_t group = query_heads / kv_heads;
+	if (group == 0u) {
+		return 0u;
+	}
+	const uint32_t kv_head = query_head / group;
+	return kv_head >= kv_heads ? kv_heads - 1u : kv_head;
+}
+
+__device__ bool rocm_valid_device_kv_attention_descriptor_header(const rocm_attention_launch_args &args)
+{
+	if (args.kv_source != ROCM_ATTENTION_KV_SOURCE_DEVICE ||
+		args.descriptor_pointer == 0 ||
+		args.descriptor_bytes < ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES ||
+		args.key_pointer != 0 ||
+		args.value_pointer != 0 ||
+		args.key_bytes != 0 ||
+		args.value_bytes != 0) {
+		return false;
+	}
+	const rocm_device_kv_descriptor_header *header = reinterpret_cast<const rocm_device_kv_descriptor_header *>(static_cast<uintptr_t>(args.descriptor_pointer));
+	if (header->version != ROCM_DEVICE_KV_DESCRIPTOR_VERSION ||
+		header->header_bytes != ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES ||
+		header->page_bytes != ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES ||
+		header->page_count == 0 ||
+		header->token_count != args.token_count ||
+		args.descriptor_bytes != static_cast<uint64_t>(ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES) + static_cast<uint64_t>(header->page_count) * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES) {
+		return false;
+	}
+	return true;
+}
+
+__device__ bool rocm_valid_device_kv_attention_descriptor(const rocm_attention_launch_args &args)
+{
+	if (!rocm_valid_device_kv_attention_descriptor_header(args)) {
+		return false;
+	}
+	const rocm_device_kv_descriptor_header *header = reinterpret_cast<const rocm_device_kv_descriptor_header *>(static_cast<uintptr_t>(args.descriptor_pointer));
+	const unsigned char *base = reinterpret_cast<const unsigned char *>(header);
+	for (uint32_t page_index = 0; page_index < header->page_count; ++page_index) {
+		const rocm_device_kv_page_descriptor *page = reinterpret_cast<const rocm_device_kv_page_descriptor *>(base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + page_index * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES);
+		if (page->token_count == 0 ||
+			page->token_start + page->token_count > args.token_count ||
+			page->key_width != args.dim ||
+			page->value_width != args.dim ||
+			page->key_pointer == 0 ||
+			page->value_pointer == 0 ||
+			rocm_device_kv_tensor_bytes_rows(page->key_encoding, static_cast<uint64_t>(page->token_count) * page->key_width, page->token_count) == 0 ||
+			rocm_device_kv_tensor_bytes_rows(page->value_encoding, static_cast<uint64_t>(page->token_count) * page->value_width, page->token_count) == 0 ||
+			page->key_bytes != rocm_device_kv_tensor_bytes_rows(page->key_encoding, static_cast<uint64_t>(page->token_count) * page->key_width, page->token_count) ||
+			page->value_bytes != rocm_device_kv_tensor_bytes_rows(page->value_encoding, static_cast<uint64_t>(page->token_count) * page->value_width, page->token_count)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+__device__ uint64_t rocm_device_kv_tensor_bytes(uint32_t encoding, uint64_t length)
+{
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_FP16) {
+		return length * sizeof(uint16_t);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8) {
+		return sizeof(uint32_t) + length * sizeof(int8_t);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4) {
+		return sizeof(uint32_t) + ((length + 1u) / 2u);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS) {
+		return sizeof(uint32_t) + length * sizeof(int8_t);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS) {
+		return sizeof(uint32_t) + ((length + 1u) / 2u);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED) {
+		return sizeof(uint32_t) + length;
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED) {
+		return sizeof(uint32_t) + ((length + 1u) / 2u);
+	}
+	return 0;
+}
+
+__device__ uint64_t rocm_device_kv_tensor_bytes_rows(uint32_t encoding, uint64_t length, uint64_t rows)
+{
+	if (rows == 0u) {
+		return 0;
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS) {
+		return rows * sizeof(uint32_t) + length * sizeof(int8_t);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS) {
+		return rows * sizeof(uint32_t) + ((length + 1u) / 2u);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED) {
+		if ((length % rows) != 0u) {
+			return 0u;
+		}
+		const uint64_t row_width = length / rows;
+		return rows * (sizeof(uint32_t) + row_width);
+	}
+	if (encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED) {
+		if ((length % rows) != 0u) {
+			return 0u;
+		}
+		const uint64_t row_width = length / rows;
+		return rows * (sizeof(uint32_t) + ((row_width + 1u) / 2u));
+	}
+	return rocm_device_kv_tensor_bytes(encoding, length);
+}
+
+__device__ bool rocm_valid_kv_tensor_encoding(uint32_t encoding)
+{
+	return encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_FP16 ||
+		encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8 ||
+		encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4 ||
+		encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS ||
+		encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS ||
+		encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q8_ROWS_INTERLEAVED ||
+		encoding == ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED;
+}
+

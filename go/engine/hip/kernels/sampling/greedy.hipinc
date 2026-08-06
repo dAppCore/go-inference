@@ -1,0 +1,89 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_greedy_sample(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || threadIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_greedy_launch_args &args = *reinterpret_cast<const rocm_greedy_launch_args *>(packet);
+	if (!rocm_valid_greedy_args(args)) {
+		return;
+	}
+	const float *logits = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.logits_pointer));
+	int32_t best_index = 0;
+	float best_score = logits[0];
+	for (uint32_t i = 1; i < args.count; ++i) {
+		if (logits[i] > best_score) {
+			best_index = static_cast<int32_t>(i);
+			best_score = logits[i];
+		}
+	}
+	const uintptr_t output_pointer = static_cast<uintptr_t>(args.output_pointer);
+	int32_t *output_index = reinterpret_cast<int32_t *>(output_pointer);
+	float *output_score = reinterpret_cast<float *>(output_pointer + sizeof(int32_t));
+	*output_index = best_index;
+	*output_score = best_score;
+}
+
+extern "C" __global__ void rocm_softcap_greedy_sample(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_softcap_greedy_launch_args &args = *reinterpret_cast<const rocm_softcap_greedy_launch_args *>(packet);
+	if (!rocm_valid_softcap_greedy_args(args)) {
+		return;
+	}
+	const uint32_t tid = threadIdx.x;
+	const uint32_t threads = blockDim.x;
+	if (threads == 0 || threads > 256) {
+		return;
+	}
+	__shared__ float scores[256];
+	__shared__ int32_t indices[256];
+	float *logits = reinterpret_cast<float *>(static_cast<uintptr_t>(args.logits_pointer));
+	const int32_t *suppress_tokens = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(args.suppress_pointer));
+	for (uint32_t suppress_index = tid; suppress_index < args.suppress_count; suppress_index += threads) {
+		const int32_t token = suppress_tokens[suppress_index];
+		if (token >= 0 && static_cast<uint32_t>(token) < args.count) {
+			logits[token] = -FLT_MAX;
+		}
+	}
+	__syncthreads();
+	float best_score = -FLT_MAX;
+	int32_t best_index = -1;
+	for (uint32_t index = tid; index < args.count; index += threads) {
+		const float score = logits[index];
+		if (best_index < 0 || score > best_score || (score == best_score && static_cast<int32_t>(index) < best_index)) {
+			best_score = score;
+			best_index = static_cast<int32_t>(index);
+		}
+	}
+	scores[tid] = best_score;
+	indices[tid] = best_index;
+	__syncthreads();
+	for (uint32_t stride = threads >> 1; stride > 0; stride >>= 1) {
+		if (tid < stride) {
+			const float other_score = scores[tid + stride];
+			const int32_t other_index = indices[tid + stride];
+			if (other_index >= 0 && (indices[tid] < 0 || other_score > scores[tid] || (other_score == scores[tid] && other_index < indices[tid]))) {
+				scores[tid] = other_score;
+				indices[tid] = other_index;
+			}
+		}
+		__syncthreads();
+	}
+	if (tid == 0) {
+		float score = scores[0];
+		const float softcap = rocm_float_from_bits(args.softcap_bits);
+		if (softcap > 0.0f) {
+			score = tanhf(score / softcap) * softcap;
+		}
+		const uintptr_t output_pointer = static_cast<uintptr_t>(args.output_pointer);
+		int32_t *output_index = reinterpret_cast<int32_t *>(output_pointer);
+		float *output_score = reinterpret_cast<float *>(output_pointer + sizeof(int32_t));
+		*output_index = indices[0];
+		*output_score = score;
+	}
+}
+

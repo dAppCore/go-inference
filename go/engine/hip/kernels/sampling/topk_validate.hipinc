@@ -1,0 +1,78 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_packed_topk_args(const rocm_packed_topk_launch_args &args)
+{
+	if (args.version != ROCM_PACKED_TOPK_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_PACKED_TOPK_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.input_count == 0 ||
+		args.output_count == 0 ||
+		args.top_k == 0 ||
+		args.top_k > ROCM_PACKED_TOPK_MAX_K ||
+		args.chunk_size != ROCM_PACKED_TOPK_CHUNK_SIZE ||
+		args.input_bytes != args.input_count * ROCM_MLX_Q4_PROJECTION_BEST_BYTES ||
+		args.output_bytes != args.output_count * ROCM_MLX_Q4_PROJECTION_BEST_BYTES) {
+		return false;
+	}
+	const uint32_t chunk_count = (args.input_count + args.chunk_size - 1u) / args.chunk_size;
+	return args.output_count == chunk_count * args.top_k;
+}
+
+__device__ bool rocm_valid_ordered_embedding_candidates_args(const rocm_ordered_embedding_candidates_launch_args &args)
+{
+	if (args.version != ROCM_ORDERED_EMBEDDING_CANDIDATES_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_ORDERED_EMBEDDING_CANDIDATES_LAUNCH_ARGS_BYTES ||
+		args.topk_pointer == 0 ||
+		args.token_ordering_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.topk_count == 0 ||
+		args.topk_count > ROCM_PACKED_TOPK_MAX_K ||
+		args.num_centroids == 0 ||
+		args.tokens_per_centroid == 0 ||
+		args.token_ordering_count == 0 ||
+		args.output_count == 0 ||
+		args.output_count != args.topk_count * args.tokens_per_centroid ||
+		args.token_ordering_count != args.num_centroids * args.tokens_per_centroid ||
+		args.topk_bytes != args.topk_count * ROCM_MLX_Q4_PROJECTION_BEST_BYTES ||
+		args.output_bytes != args.output_count * sizeof(int32_t)) {
+		return false;
+	}
+	if (args.token_ordering_element_bytes != sizeof(int32_t) && args.token_ordering_element_bytes != sizeof(int64_t)) {
+		return false;
+	}
+	if (args.token_ordering_bytes != args.token_ordering_count * args.token_ordering_element_bytes) {
+		return false;
+	}
+	if (args.suppress_count != 0 && args.suppress_pointer == 0) {
+		return false;
+	}
+	return true;
+}
+
+__device__ bool rocm_valid_packed_topk_sample_args(const rocm_packed_topk_sample_launch_args &args)
+{
+	const float temperature = rocm_float_from_bits(args.temperature_bits);
+	const float top_p = rocm_float_from_bits(args.top_p_bits);
+	const double draw = rocm_double_from_bits(args.draw_bits);
+	const float softcap = rocm_float_from_bits(args.softcap_bits);
+	return args.version == ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.input_count > 0 &&
+		args.top_k > 0 &&
+		args.top_k <= args.input_count &&
+		args.top_k <= ROCM_PACKED_TOPK_MAX_K &&
+		args.input_bytes == args.input_count * ROCM_MLX_Q4_PROJECTION_BEST_BYTES &&
+		args.output_bytes == ROCM_MLX_Q4_PROJECTION_BEST_BYTES &&
+		temperature >= 0.0f &&
+		isfinite(temperature) &&
+		top_p >= 0.0f &&
+		top_p <= 1.0f &&
+		isfinite(top_p) &&
+		softcap >= 0.0f &&
+		isfinite(softcap) &&
+		isfinite(draw);
+}
+

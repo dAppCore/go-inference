@@ -1,0 +1,52 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_autoround_quantize(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_autoround_quantize_launch_args &args = *reinterpret_cast<const rocm_autoround_quantize_launch_args *>(packet);
+	if (!rocm_valid_autoround_quantize_args(args)) {
+		return;
+	}
+	const uint32_t group_index = blockIdx.x * blockDim.x + threadIdx.x;
+	const uint32_t group_count = args.rows * args.groups_per_row;
+	if (group_index >= group_count) {
+		return;
+	}
+	const uint32_t row = group_index / args.groups_per_row;
+	const uint32_t group = group_index % args.groups_per_row;
+	const uint32_t value_start = row * args.cols + group * args.group_size;
+	const uint32_t packed_start_bit = value_start * args.bits;
+	const uint32_t packed_start_byte = packed_start_bit >> 3;
+	const uint32_t packed_group_bytes = (args.group_size * args.bits + 7u) / 8u;
+	const float *weights = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
+	uint8_t *packed = reinterpret_cast<uint8_t *>(static_cast<uintptr_t>(args.packed_pointer));
+	float *scales = reinterpret_cast<float *>(static_cast<uintptr_t>(args.scale_pointer));
+	float max_abs = 0.0f;
+	for (uint32_t offset = 0; offset < args.group_size; ++offset) {
+		const float value = weights[value_start + offset];
+		if (!isfinite(value)) {
+			return;
+		}
+		max_abs = fmaxf(max_abs, fabsf(value));
+	}
+	const int32_t qmin = -(1 << (args.bits - 1u));
+	const int32_t qmax = (1 << (args.bits - 1u)) - 1;
+	const float scale = max_abs == 0.0f ? 1.0f : max_abs / static_cast<float>(qmax);
+	scales[group_index] = scale;
+	for (uint32_t byte = 0; byte < packed_group_bytes; ++byte) {
+		packed[packed_start_byte + byte] = 0;
+	}
+	for (uint32_t offset = 0; offset < args.group_size; ++offset) {
+		int32_t quantized = static_cast<int32_t>(roundf(weights[value_start + offset] / scale));
+		if (quantized < qmin) {
+			quantized = qmin;
+		}
+		if (quantized > qmax) {
+			quantized = qmax;
+		}
+		rocm_autoround_pack_signed(packed, args.bits, value_start + offset, quantized);
+	}
+}
+

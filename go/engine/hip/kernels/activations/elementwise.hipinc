@@ -1,0 +1,128 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_vector_add(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_vector_add_launch_args &args = *reinterpret_cast<const rocm_vector_add_launch_args *>(packet);
+	if (!rocm_valid_vector_add_args(args)) {
+		return;
+	}
+	const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= args.count) {
+		return;
+	}
+	const float *left = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.left_pointer));
+	const float *right = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.right_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	output[index] = left[index] + right[index];
+}
+
+extern "C" __global__ void rocm_vector_add_scaled(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_vector_add_scaled_launch_args &args = *reinterpret_cast<const rocm_vector_add_scaled_launch_args *>(packet);
+	if (!rocm_valid_vector_add_scaled_args(args)) {
+		return;
+	}
+	const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= args.count) {
+		return;
+	}
+	const float *left = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.left_pointer));
+	const float *right = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.right_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	output[index] = (left[index] + right[index]) * rocm_float_from_bits(args.scale_bits);
+}
+
+extern "C" __global__ void rocm_vector_scale(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_vector_scale_launch_args &args = *reinterpret_cast<const rocm_vector_scale_launch_args *>(packet);
+	if (!rocm_valid_vector_scale_args(args)) {
+		return;
+	}
+	const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= args.count) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	output[index] = input[index] * rocm_float_from_bits(args.scale_bits);
+}
+
+extern "C" __global__ void rocm_per_layer_input_transpose(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_per_layer_input_transpose_launch_args &args = *reinterpret_cast<const rocm_per_layer_input_transpose_launch_args *>(packet);
+	if (!rocm_valid_per_layer_input_transpose_args(args)) {
+		return;
+	}
+	const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+	const uint64_t input_size = args.input_size;
+	const uint64_t layer_count = args.layer_count;
+	const uint64_t batch = args.batch;
+	const uint64_t total = batch * layer_count * input_size;
+	if (index >= total) {
+		return;
+	}
+	const uint64_t input_value = index % input_size;
+	const uint64_t layer = (index / input_size) % layer_count;
+	const uint64_t token = index / (input_size * layer_count);
+	const uint64_t output_index = (layer * batch + token) * input_size + input_value;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	output[output_index] = input[index];
+}
+
+extern "C" __global__ void rocm_swiglu(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_swiglu_launch_args &args = *reinterpret_cast<const rocm_swiglu_launch_args *>(packet);
+	if (!rocm_valid_swiglu_args(args)) {
+		return;
+	}
+	const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= args.count) {
+		return;
+	}
+	const float *gate = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.gate_pointer));
+	const float *up = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.up_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const float value = gate[index];
+	output[index] = value / (1.0f + expf(-value)) * up[index];
+}
+
+extern "C" __global__ void rocm_gelu_tanh_multiply(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gelu_tanh_mul_launch_args &args = *reinterpret_cast<const rocm_gelu_tanh_mul_launch_args *>(packet);
+	if (!rocm_valid_gelu_tanh_mul_args(args)) {
+		return;
+	}
+	const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= args.count) {
+		return;
+	}
+	const float *gate = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.gate_pointer));
+	const float *up = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.up_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const float value = gate[index];
+	const float value2 = value * value;
+	const float value3 = value2 * value;
+	const float tanh_arg = 0.7978845608028654f * (value + 0.044715f * value3);
+	const float gelu = 0.5f * value * (1.0f + tanhf(tanh_arg));
+	output[index] = gelu * up[index];
+}
+

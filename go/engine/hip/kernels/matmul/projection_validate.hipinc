@@ -1,0 +1,68 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_projection_args(const rocm_projection_launch_args &args)
+{
+	if (args.version != ROCM_PROJECTION_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_PROJECTION_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.input_count != args.cols ||
+		args.input_bytes != args.cols * sizeof(float) ||
+		args.output_bytes != args.rows * sizeof(float)) {
+		return false;
+	}
+	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_FP16 ||
+		args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_BF16) {
+		return args.weight_bytes == static_cast<uint64_t>(args.rows) * args.cols * sizeof(uint16_t);
+	}
+	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_Q8) {
+		const float scale = rocm_float_from_bits(args.q8_scale_bits);
+		return args.weight_bytes == static_cast<uint64_t>(args.rows) * args.cols &&
+			rocm_positive_finite(scale);
+	}
+	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_F32) {
+		return args.weight_bytes == static_cast<uint64_t>(args.rows) * args.cols * sizeof(float);
+	}
+	return false;
+}
+
+__device__ bool rocm_valid_projection_batch_args(const rocm_projection_batch_launch_args &args)
+{
+	if (args.version != ROCM_PROJECTION_BATCH_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_PROJECTION_BATCH_LAUNCH_ARGS_BYTES ||
+		args.input_pointer == 0 ||
+		args.weight_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.cols == 0 ||
+		args.batch == 0 ||
+		args.input_bytes != static_cast<uint64_t>(args.batch) * args.cols * sizeof(float) ||
+		args.output_bytes != static_cast<uint64_t>(args.batch) * args.rows * sizeof(float)) {
+		return false;
+	}
+	if ((args.flags & ROCM_PROJECTION_LAUNCH_FLAG_BIAS) != 0 &&
+		(args.bias_pointer == 0 || args.bias_bytes != args.rows * sizeof(float))) {
+		return false;
+	}
+	if ((args.flags & ROCM_PROJECTION_LAUNCH_FLAG_BIAS) == 0 &&
+		(args.bias_pointer != 0 || args.bias_bytes != 0)) {
+		return false;
+	}
+	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_FP16 ||
+		args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_BF16) {
+		return args.weight_bytes == static_cast<uint64_t>(args.rows) * args.cols * sizeof(uint16_t);
+	}
+	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_Q8) {
+		const float scale = rocm_float_from_bits(args.q8_scale_bits);
+		return args.weight_bytes == static_cast<uint64_t>(args.rows) * args.cols &&
+			rocm_positive_finite(scale);
+	}
+	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_F32) {
+		return args.weight_bytes == static_cast<uint64_t>(args.rows) * args.cols * sizeof(float);
+	}
+	return false;
+}
+

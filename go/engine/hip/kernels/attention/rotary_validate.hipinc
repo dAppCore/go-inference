@@ -1,0 +1,41 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_rope_args(const rocm_rope_launch_args &args)
+{
+	const bool rotary_override = args.reserved2 != 0;
+	const bool rotary_fits = !rotary_override || args.reserved2 <= static_cast<uint64_t>(args.count);
+	const uint32_t rotary_count = rotary_override ? static_cast<uint32_t>(args.reserved2) : args.count;
+	return args.version == ROCM_ROPE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_ROPE_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.count > 0 &&
+		rotary_fits &&
+		(args.count % 2) == 0 &&
+		(rotary_count % 2) == 0 &&
+		rotary_count <= args.count &&
+		args.input_bytes == args.count * sizeof(float) &&
+		args.output_bytes == args.count * sizeof(float) &&
+		rocm_float_from_bits(args.base_bits) > 0.0f &&
+		(args.frequency_dim == 0 || args.frequency_dim >= args.count);
+}
+
+__device__ bool rocm_valid_rope_heads_args(const rocm_rope_heads_launch_args &args)
+{
+	const bool rotary_override = args.rotary_count != 0;
+	const uint32_t rotary_count = rotary_override ? args.rotary_count : args.head_dim;
+	return args.version == ROCM_ROPE_HEADS_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_ROPE_HEADS_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.head_dim > 0 &&
+		args.head_count > 0 &&
+		(args.head_dim % 2) == 0 &&
+		(rotary_count % 2) == 0 &&
+		rotary_count <= args.head_dim &&
+		args.input_bytes == args.head_dim * args.head_count * sizeof(float) &&
+		args.output_bytes == args.head_dim * args.head_count * sizeof(float) &&
+		rocm_float_from_bits(args.base_bits) > 0.0f &&
+		(args.frequency_dim == 0 || args.frequency_dim >= args.head_dim);
+}
+

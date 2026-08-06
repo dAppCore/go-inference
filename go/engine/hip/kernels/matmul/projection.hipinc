@@ -1,0 +1,147 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ float rocm_block_reduce_sum(float value, float *scratch);
+
+extern "C" __global__ void rocm_projection(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_projection_launch_args &args = *reinterpret_cast<const rocm_projection_launch_args *>(packet);
+	if (!rocm_valid_projection_args(args)) {
+		return;
+	}
+
+	if (blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t row = blockIdx.x;
+	if (row >= args.rows) {
+		return;
+	}
+
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float sum = 0.0f;
+	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_FP16) {
+		const uint16_t *weights = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
+			sum += input[col] * rocm_half_to_float(weights[row * args.cols + col]);
+		}
+	} else if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_BF16) {
+		const uint16_t *weights = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
+			sum += input[col] * rocm_bfloat16_to_float(weights[row * args.cols + col]);
+		}
+	} else if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_Q8) {
+		const int8_t *weights = reinterpret_cast<const int8_t *>(static_cast<uintptr_t>(args.weight_pointer));
+		const float scale = rocm_float_from_bits(args.q8_scale_bits);
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
+			sum += input[col] * static_cast<float>(weights[row * args.cols + col]) * scale;
+		}
+	} else {
+		const float *weights = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
+			sum += input[col] * weights[row * args.cols + col];
+		}
+	}
+	__shared__ float scratch[ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / 32u];
+	sum = rocm_block_reduce_sum(sum, scratch);
+	if (threadIdx.x == 0u && (args.flags & ROCM_PROJECTION_LAUNCH_FLAG_BIAS) != 0 && args.bias_pointer != 0) {
+		const float *bias = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.bias_pointer));
+		sum += bias[row];
+	}
+	if (threadIdx.x == 0u) {
+		output[row] = sum;
+	}
+}
+
+__device__ float rocm_mlx_q4_row_reduce(float value);
+
+extern "C" __global__ void rocm_projection_batch(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_projection_batch_launch_args &args = *reinterpret_cast<const rocm_projection_batch_launch_args *>(packet);
+	if (!rocm_valid_projection_batch_args(args) || blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	const uint32_t batch_base = blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK;
+	if (batch_base >= args.batch) {
+		return;
+	}
+
+	const float *input_base = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *output_base = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float sums[ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK] = {};
+	if (row < args.rows) {
+		if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_FP16) {
+			const uint16_t *weights = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
+			for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+				const float weight = rocm_half_to_float(weights[row * args.cols + col]);
+#pragma unroll
+				for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK; ++token_lane) {
+					const uint32_t batch = batch_base + token_lane;
+					if (batch < args.batch) {
+						sums[token_lane] += input_base[static_cast<uint64_t>(batch) * args.cols + col] * weight;
+					}
+				}
+			}
+		} else if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_BF16) {
+			const uint16_t *weights = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
+			for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+				const float weight = rocm_bfloat16_to_float(weights[row * args.cols + col]);
+#pragma unroll
+				for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK; ++token_lane) {
+					const uint32_t batch = batch_base + token_lane;
+					if (batch < args.batch) {
+						sums[token_lane] += input_base[static_cast<uint64_t>(batch) * args.cols + col] * weight;
+					}
+				}
+			}
+		} else if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_Q8) {
+			const int8_t *weights = reinterpret_cast<const int8_t *>(static_cast<uintptr_t>(args.weight_pointer));
+			const float scale = rocm_float_from_bits(args.q8_scale_bits);
+			for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+				const float weight = static_cast<float>(weights[row * args.cols + col]) * scale;
+#pragma unroll
+				for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK; ++token_lane) {
+					const uint32_t batch = batch_base + token_lane;
+					if (batch < args.batch) {
+						sums[token_lane] += input_base[static_cast<uint64_t>(batch) * args.cols + col] * weight;
+					}
+				}
+			}
+		} else {
+			const float *weights = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
+			for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+				const float weight = weights[row * args.cols + col];
+#pragma unroll
+				for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK; ++token_lane) {
+					const uint32_t batch = batch_base + token_lane;
+					if (batch < args.batch) {
+						sums[token_lane] += input_base[static_cast<uint64_t>(batch) * args.cols + col] * weight;
+					}
+				}
+			}
+		}
+	}
+	const float *bias = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.bias_pointer));
+#pragma unroll
+	for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK; ++token_lane) {
+		const uint32_t batch = batch_base + token_lane;
+		float sum = rocm_mlx_q4_row_reduce(sums[token_lane]);
+		if ((args.flags & ROCM_PROJECTION_LAUNCH_FLAG_BIAS) != 0 && args.bias_pointer != 0 && row < args.rows) {
+			sum += bias[row];
+		}
+		if (col_lane == 0 && row < args.rows && batch < args.batch) {
+			output_base[static_cast<uint64_t>(batch) * args.rows + row] = sum;
+		}
+	}
+}
+

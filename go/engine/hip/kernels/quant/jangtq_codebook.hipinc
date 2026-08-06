@@ -1,0 +1,58 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_jangtq_projection(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_jangtq_launch_args &args = *reinterpret_cast<const rocm_jangtq_launch_args *>(packet);
+	if (!rocm_valid_jangtq_args(args)) {
+		return;
+	}
+	const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+	if (row >= args.rows) {
+		return;
+	}
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint8_t *packed = reinterpret_cast<const uint8_t *>(static_cast<uintptr_t>(args.packed_pointer));
+	const float *bias = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	float sum = 0.0f;
+	if ((args.flags & ROCM_JANGTQ_LAUNCH_FLAG_BIAS) != 0) {
+		sum = bias[row];
+	}
+	for (uint32_t col = 0; col < args.cols; ++col) {
+		const uint32_t index = row * args.cols + col;
+		const int8_t quantized = rocm_unpack_signed_bits(packed, args.bits, index);
+		sum += input[col] * static_cast<float>(quantized) * scale;
+	}
+	output[row] = sum;
+}
+
+extern "C" __global__ void rocm_codebook_lookup(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_codebook_launch_args &args = *reinterpret_cast<const rocm_codebook_launch_args *>(packet);
+	if (!rocm_valid_codebook_args(args)) {
+		return;
+	}
+	const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+	const uint32_t output_count = args.code_count * args.code_dim;
+	if (index >= output_count) {
+		return;
+	}
+	const uint8_t *codes = reinterpret_cast<const uint8_t *>(static_cast<uintptr_t>(args.code_pointer));
+	const float *codebook = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.codebook_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint32_t code_index = index / args.code_dim;
+	const uint32_t dim = index % args.code_dim;
+	const uint32_t code = static_cast<uint32_t>(codes[code_index]);
+	if (code >= args.codebook_count) {
+		return;
+	}
+	output[index] = codebook[code * args.code_dim + dim];
+}
+

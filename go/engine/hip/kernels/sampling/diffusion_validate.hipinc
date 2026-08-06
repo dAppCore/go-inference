@@ -1,0 +1,53 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_diffusion_expected_embedding_args(const rocm_diffusion_expected_embedding_launch_args &args)
+{
+	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+	if (args.version != ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES ||
+		args.probability_pointer == 0 ||
+		args.embedding_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.rows == 0 ||
+		args.vocab_size == 0 ||
+		args.hidden_size == 0 ||
+		args.probability_bytes != static_cast<uint64_t>(args.rows) * args.vocab_size * sizeof(float) ||
+		args.output_bytes != static_cast<uint64_t>(args.rows) * args.hidden_size * sizeof(float) ||
+		!isfinite(output_scale)) {
+		return false;
+	}
+	if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_F32) {
+		return args.embedding_bytes == static_cast<uint64_t>(args.vocab_size) * args.hidden_size * sizeof(float);
+	}
+	if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_BF16) {
+		return args.embedding_bytes == static_cast<uint64_t>(args.vocab_size) * args.hidden_size * sizeof(uint16_t);
+	}
+	if (args.table_encoding == ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4) {
+		const uint32_t bits = args.bits == 0u ? ROCM_MLX_Q4_PROJECTION_BITS : args.bits;
+		return args.scale_pointer != 0 &&
+			args.bias_pointer != 0 &&
+			rocm_mlx_affine_shape_valid(args.vocab_size, args.hidden_size, args.group_size, bits, args.embedding_bytes, args.scale_bytes, args.bias_bytes);
+	}
+	return false;
+}
+
+__device__ bool rocm_valid_diffusion_sample_args(const rocm_diffusion_sample_launch_args &args)
+{
+	const float temperature = rocm_float_from_bits(args.temperature_bits);
+	const float softcap = rocm_float_from_bits(args.softcap_bits);
+	return args.version == ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_BYTES &&
+		args.logits_pointer != 0 &&
+		args.draws_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.rows > 0 &&
+		args.vocab_size > 0 &&
+		args.logits_bytes == static_cast<uint64_t>(args.rows) * args.vocab_size * sizeof(float) &&
+		args.draws_bytes == static_cast<uint64_t>(args.rows) * sizeof(float) &&
+		args.output_bytes == static_cast<uint64_t>(args.rows) * ROCM_DIFFUSION_SAMPLE_RESULT_BYTES &&
+		temperature > 0.0f &&
+		isfinite(temperature) &&
+		softcap >= 0.0f &&
+		isfinite(softcap);
+}
+

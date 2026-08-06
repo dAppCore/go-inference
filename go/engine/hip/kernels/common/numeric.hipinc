@@ -1,0 +1,121 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ float rocm_float_from_bits(uint32_t bits)
+{
+	union {
+		uint32_t u;
+		float f;
+	} value;
+	value.u = bits;
+	return value.f;
+}
+
+__device__ uint32_t rocm_float_bits(float value)
+{
+	union {
+		float f;
+		uint32_t u;
+	} bits;
+	bits.f = value;
+	return bits.u;
+}
+
+__device__ double rocm_double_from_bits(uint64_t bits)
+{
+	union {
+		uint64_t u;
+		double f;
+	} value;
+	value.u = bits;
+	return value.f;
+}
+
+__device__ float rocm_half_to_float(uint16_t half)
+{
+	const uint32_t sign = (static_cast<uint32_t>(half & 0x8000u)) << 16;
+	uint32_t exponent = (half >> 10) & 0x1fu;
+	uint32_t mantissa = half & 0x03ffu;
+
+	if (exponent == 0) {
+		if (mantissa == 0) {
+			return rocm_float_from_bits(sign);
+		}
+		while ((mantissa & 0x0400u) == 0) {
+			mantissa <<= 1;
+			--exponent;
+		}
+		++exponent;
+		mantissa &= 0x03ffu;
+	} else if (exponent == 31) {
+		return rocm_float_from_bits(sign | 0x7f800000u | (mantissa << 13));
+	}
+
+	exponent = exponent + (127u - 15u);
+	return rocm_float_from_bits(sign | (exponent << 23) | (mantissa << 13));
+}
+
+__device__ uint16_t rocm_float_to_half(float value)
+{
+	const uint32_t bits = rocm_float_bits(value);
+	const uint16_t sign = static_cast<uint16_t>((bits >> 16) & 0x8000u);
+	const int exponent = static_cast<int>((bits >> 23) & 0xffu) - 127 + 15;
+	const uint32_t mantissa = bits & 0x7fffffu;
+	if (exponent <= 0) {
+		return sign;
+	}
+	if (exponent >= 0x1f) {
+		return static_cast<uint16_t>(sign | 0x7c00u);
+	}
+	return static_cast<uint16_t>(sign | static_cast<uint16_t>(exponent << 10) | static_cast<uint16_t>(mantissa >> 13));
+}
+
+__device__ float rocm_bfloat16_to_float(uint16_t value)
+{
+	return rocm_float_from_bits(static_cast<uint32_t>(value) << 16);
+}
+
+__device__ uint16_t rocm_float_to_bfloat16(float value)
+{
+	uint32_t bits = rocm_float_bits(value);
+	bits += 0x7fffu + ((bits >> 16u) & 1u);
+	return static_cast<uint16_t>(bits >> 16u);
+}
+
+__device__ uint32_t rocm_ordered_float_key(float value)
+{
+	const uint32_t bits = rocm_float_bits(value);
+	if ((bits & 0x80000000u) != 0u) {
+		return ~bits;
+	}
+	return bits ^ 0x80000000u;
+}
+
+__device__ uint64_t rocm_pack_score_index(float score, uint32_t index)
+{
+	return (static_cast<uint64_t>(rocm_ordered_float_key(score)) << 32) | static_cast<uint64_t>(~index);
+}
+
+__device__ float rocm_score_from_ordered_key(uint32_t key)
+{
+	if ((key & 0x80000000u) != 0u) {
+		return rocm_float_from_bits(key ^ 0x80000000u);
+	}
+	return rocm_float_from_bits(~key);
+}
+
+__device__ double rocm_packed_topk_sample_score(unsigned long long packed, double softcap)
+{
+	const double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
+	return softcap > 0.0 ? tanh(score / softcap) * softcap : score;
+}
+
+__device__ bool rocm_supported_kv_mode(uint32_t mode_code)
+{
+	return mode_code >= 1 && mode_code <= 3;
+}
+
+__device__ bool rocm_positive_finite(float value)
+{
+	return value > 0.0f && isfinite(value);
+}
+

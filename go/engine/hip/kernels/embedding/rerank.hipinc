@@ -1,0 +1,36 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+extern "C" __global__ void rocm_rerank_cosine(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rerank_cosine_launch_args &args = *reinterpret_cast<const rocm_rerank_cosine_launch_args *>(packet);
+	if (!rocm_valid_rerank_cosine_args(args)) {
+		return;
+	}
+	const uint32_t doc = blockIdx.x * blockDim.x + threadIdx.x;
+	if (doc >= args.document_count) {
+		return;
+	}
+	const float *query = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.query_pointer));
+	const float *documents = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.document_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float dot = 0.0f;
+	float query_norm = 0.0f;
+	float doc_norm = 0.0f;
+	const float *document = documents + doc * args.dim;
+	for (uint32_t dim = 0; dim < args.dim; ++dim) {
+		const float q = query[dim];
+		const float d = document[dim];
+		dot += q * d;
+		query_norm += q * q;
+		doc_norm += d * d;
+	}
+	if (query_norm == 0.0f || doc_norm == 0.0f) {
+		output[doc] = 0.0f;
+		return;
+	}
+	output[doc] = dot * rocm_rsqrtf(query_norm) * rocm_rsqrtf(doc_norm);
+}
+

@@ -1,0 +1,63 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+__device__ bool rocm_valid_jangtq_args(const rocm_jangtq_launch_args &args)
+{
+	bool valid_bits = args.bits == 2 || args.bits == 4 || args.bits == 8;
+	const uint64_t required_packed = (static_cast<uint64_t>(args.bits) * args.rows * args.cols + 7u) / 8u;
+	const bool has_bias = (args.flags & ROCM_JANGTQ_LAUNCH_FLAG_BIAS) != 0;
+	bool valid_bias = args.bias_pointer == 0 && args.bias_bytes == 0;
+	if (has_bias) {
+		valid_bias = args.bias_pointer != 0 && args.bias_bytes == args.rows * sizeof(float);
+	}
+	return args.version == ROCM_JANGTQ_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_JANGTQ_LAUNCH_ARGS_BYTES &&
+		args.input_pointer != 0 &&
+		args.packed_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.input_count == args.cols &&
+		args.rows > 0 &&
+		args.cols > 0 &&
+		valid_bits &&
+		args.group_size > 0 &&
+		(args.group_size & (args.group_size - 1u)) == 0 &&
+		args.input_bytes == args.cols * sizeof(float) &&
+		args.packed_bytes >= required_packed &&
+		args.output_bytes == args.rows * sizeof(float) &&
+		rocm_positive_finite(rocm_float_from_bits(args.scale_bits)) &&
+		valid_bias;
+}
+
+__device__ int8_t rocm_unpack_signed_bits(const uint8_t *packed, uint32_t bits, uint32_t index)
+{
+	const uint32_t bit_offset = index * bits;
+	const uint32_t byte_index = bit_offset / 8u;
+	const uint32_t shift = bit_offset % 8u;
+	uint32_t raw = static_cast<uint32_t>(packed[byte_index] >> shift);
+	if (shift + bits > 8u) {
+		raw |= static_cast<uint32_t>(packed[byte_index + 1u]) << (8u - shift);
+	}
+	const uint32_t mask = (1u << bits) - 1u;
+	const uint32_t sign_bit = 1u << (bits - 1u);
+	raw &= mask;
+	int32_t value = static_cast<int32_t>(raw);
+	if ((raw & sign_bit) != 0) {
+		value -= static_cast<int32_t>(1u << bits);
+	}
+	return static_cast<int8_t>(value);
+}
+
+__device__ bool rocm_valid_codebook_args(const rocm_codebook_launch_args &args)
+{
+	return args.version == ROCM_CODEBOOK_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_CODEBOOK_LAUNCH_ARGS_BYTES &&
+		args.code_pointer != 0 &&
+		args.codebook_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.code_count > 0 &&
+		args.codebook_count > 0 &&
+		args.code_dim > 0 &&
+		args.code_bytes == args.code_count * sizeof(uint8_t) &&
+		args.codebook_bytes == args.codebook_count * args.code_dim * sizeof(float) &&
+		args.output_bytes == args.code_count * args.code_dim * sizeof(float);
+}
+
