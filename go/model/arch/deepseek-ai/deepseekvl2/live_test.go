@@ -17,6 +17,36 @@ import (
 // that proves the real ~6.7GB checkpoint — real tensor names, real tokenizer, real trained
 // weights — resolves and runs OCR correctly end to end.
 
+// requireDeepSeekOCRE2E gates the two tests that run a FULL decode through the
+// real checkpoint. Both are host-f32 SAM+CLIP+MoE forwards; on an M3 Ultra a
+// single one overruns `go test`'s 10-minute default -timeout, so a wholesale
+// `go test ./...` on any machine that happens to hold the checkpoint does not
+// just run slow — it panics the package:
+//
+//	panic: test timed out after 10m0s
+//	FAIL dappco.re/go/inference/model/arch/deepseek-ai/deepseekvl2  608.495s
+//
+// CI never saw it because a hosted runner has no ~/.cache/huggingface, so the
+// resolver skips first. Same shape, same fix as the sibling OCR arch —
+// rednote-hilab/dotsocr's DOTS_OCR_E2E gate (#58).
+//
+// Nothing is weakened: these still need the 6.7GB checkpoint they always
+// needed, and they still assert the exact reference transcript. They are now
+// opted INTO rather than fired by accident:
+//
+//	DEEPSEEK_OCR_E2E=1 go test -timeout 60m ./model/arch/deepseek-ai/deepseekvl2
+//
+// TestLive_RealCheckpoint_Load stays ungated — it loads and inspects geometry,
+// it does not decode.
+func requireDeepSeekOCRE2E(t *testing.T) {
+	t.Helper()
+	if os.Getenv("DEEPSEEK_OCR_E2E") == "" {
+		t.Skip("full real-checkpoint decode overruns go test's default -timeout inside " +
+			"wholesale ./model/... gates — set DEEPSEEK_OCR_E2E=1 (with -timeout raised) " +
+			"to run it deliberately")
+	}
+}
+
 func resolveDeepSeekOCRDir(t *testing.T) string {
 	t.Helper()
 	if dir := os.Getenv("DEEPSEEK_OCR_DIR"); dir != "" {
@@ -91,6 +121,7 @@ func TestLive_RealCheckpoint_Load(t *testing.T) {
 // decode is deterministic, so exact string equality is the right assertion (not a similarity/
 // edit-distance heuristic) — matching whisper's TestLive_RealCheckpoint_Transcribe precedent.
 func TestLive_RealCheckpoint_OCR(t *testing.T) {
+	requireDeepSeekOCRE2E(t)
 	dir := resolveDeepSeekOCRDir(t)
 	m, err := Load(dir)
 	if err != nil {
@@ -112,6 +143,7 @@ func TestLive_RealCheckpoint_OCR(t *testing.T) {
 // capability-discovery surface) reproduces OCR's own exact-golden result through its (text, error)
 // reshape — mirrors whisper's TestLive_RealCheckpoint_TranscribeAudio_Good.
 func TestLive_RealCheckpoint_OCRImage_Good(t *testing.T) {
+	requireDeepSeekOCRE2E(t)
 	dir := resolveDeepSeekOCRDir(t)
 	m, err := Load(dir)
 	if err != nil {
