@@ -30,12 +30,20 @@ func createModelDir(t *testing.T, dir string, config map[string]any, numSafetens
 
 // --- Discover ---
 
+// The length check before an index is checkLen, not core.AssertLen:
+// core's Assert* family marks the test failed and CARRIES ON, so a
+// short slice turned "want 1, got 0" into an index-out-of-range panic
+// that took the whole package binary down with it and hid every test
+// after this one (the windows runner, run 31101973970). checkLen is
+// the file's own t.Fatalf helper — same assertion, bails at the point
+// of failure. Every sibling below already used it.
+
 func TestDiscover_Discover_Good(t *testing.T) {
 	base := t.TempDir()
 	createModelDir(t, core.JoinPath(base, "gemma3-1b"), map[string]any{"model_type": "gemma3"}, 2)
 
 	models := slices.Collect(Discover(base))
-	core.AssertLen(t, models, 1)
+	checkLen(t, models, 1)
 	core.AssertEqual(t, "gemma3", models[0].ModelType)
 	core.AssertEqual(t, 2, models[0].NumFiles)
 }
@@ -54,7 +62,7 @@ func TestDiscover_Discover_Ugly(t *testing.T) {
 	createModelDir(t, core.JoinPath(base, "no-type"), map[string]any{"vocab_size": 32000}, 1)
 
 	models := slices.Collect(Discover(base))
-	core.AssertLen(t, models, 1)
+	checkLen(t, models, 1)
 	core.AssertEqual(t, "", models[0].ModelType)
 	core.AssertEqual(t, 0, models[0].QuantBits)
 }
@@ -399,7 +407,8 @@ func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
 // Baselines (Apple M3 Ultra, -benchmem, 10 junk dirs):
 //
 //	alpha.95 (per-call core.New): 254 allocs / 26616 B
-//	sync.Once cached Core:        208 allocs / 24064 B  ← current
+//	sync.Once cached Core:        208 allocs / 24064 B
+//	no Core, core.ReadDir/ReadFile: 164 allocs / 20192 B  ← current
 //
 // The ceiling is set with deliberate headroom — small drift from
 // stdlib internals across Go releases is acceptable; a fix that
@@ -426,11 +435,13 @@ func TestDiscover_AllocBudget_NoModels_TenJunkDirs(t *testing.T) {
 		}
 	})
 
-	// Ceiling: 215 — current measured (208) plus ~3% headroom for
-	// stdlib drift. Was 254→260 pre-sync.Once-Core. Ratchet DOWN
+	// Ceiling: 170 — current measured (164) plus ~3% headroom for
+	// stdlib drift. Was 260 (per-call core.New) → 215 (sync.Once
+	// Core) → 170 now the *core.Fs handle is gone entirely and the
+	// walk calls core.ReadDir/core.ReadFile directly. Ratchet DOWN
 	// when optimisations land; never up without a documented
 	// reason in the commit that bumps this.
-	const budget = 215.0
+	const budget = 170.0
 	if avg > budget {
 		t.Fatalf("Discover alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
 			"This usually means a recent change added a per-call allocation "+

@@ -1,10 +1,15 @@
 # PR gate + push CI for go-inference — the model-free test surface on all three
-# desktop OSes. The suite is testable without a model loaded (engine/metal skips
-# cleanly without MLX_METALLIB_PATH; engine/hip's contract tests are host-side),
-# so this lane is the go/no-go for PRs into dev: linux + macos are REQUIRED
-# checks; windows is EXPERIMENTAL (continue-on-error) until the cgo-on windows
-# graph is proven — its logs name the real portability offenders either way.
-# The full artifact build (and the metal lane) lives in build.yml.
+# desktop OSes. Everything here runs with DEFAULT build tags, so what it proves
+# is precise: engine/hip's contract tests are host-side and do run; the whole
+# engine/metal test surface sits behind -tags metal_runtime and is therefore not
+# compiled here at all (its MLX_METALLIB_PATH self-skips only fire under
+# `task test:metal`, an owner-machine lane — hosted runners are pre-macOS 26 and
+# cannot build the Metal 4 metallibs). Live-checkpoint tests across the tree
+# resolve their weights from the host cache and skip, by name, when it is absent.
+# This lane is the go/no-go for PRs into dev: linux + macos are REQUIRED checks;
+# windows is EXPERIMENTAL (continue-on-error) until the cgo-on windows graph is
+# proven — its logs name the real portability offenders either way.
+# The full artifact build (and the metal build lane) lives in build.yml.
 name: CI
 
 on:
@@ -45,7 +50,7 @@ jobs:
 
       # The module suite resolves from go.mod tags (GOWORK=off) — proves the
       # published dependency surface, not the workspace.
-      - name: Module suite (default tags — engine/metal skips without a metallib)
+      - name: Module suite (default tags — the model-free, GPU-free surface)
         working-directory: go
         env:
           GOWORK: "off"
