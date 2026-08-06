@@ -90,6 +90,22 @@ func openAppFilesAt(root string) core.Result {
 		return core.Fail(core.E("tui.openAppFilesAt", "invalid path result", nil))
 	}
 
+	// The root must EXIST before the sandbox can be anchored to it:
+	// go/io's local Medium is an os.Root handle (io@v0.15.4), and
+	// os.OpenRoot opens a directory — it does not create one. Every
+	// caller here is a first-run path (~/.lem on a fresh machine, a
+	// t.TempDir() in the suite), so creating the root IS the job.
+	//
+	// 0o700 because ~/.lem holds the DuckDB stores, the serve admin
+	// token and the workspace state — owner-only, like ~/.ssh.
+	//
+	// Fails closed on a non-directory: MkdirAll over a regular file
+	// returns ENOTDIR and leaves the file untouched, which is the
+	// contract TestAppFiles_Ugly pins.
+	if created := core.MkdirAll(paths.Root, 0o700); !created.OK {
+		return core.Fail(core.E("tui.openAppFilesAt", core.Concat("create application root: ", paths.Root), resultError(created)))
+	}
+
 	medium, err := coreio.NewSandboxed(paths.Root)
 	if err != nil {
 		return core.Fail(core.E("tui.openAppFilesAt", core.Concat("open application root: ", paths.Root), err))
