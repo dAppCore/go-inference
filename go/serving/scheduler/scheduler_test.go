@@ -562,10 +562,27 @@ func waitGoroutineCount(t *testing.T, want func(int) bool) int {
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("goroutine count never satisfied predicate, last = %d", n)
+			t.Fatalf("goroutine count never satisfied predicate, last = %d\n\n%s", n, goroutineDump())
 		case <-time.After(2 * time.Millisecond):
 		}
 	}
+}
+
+// goroutineDump renders every live goroutine's stack.
+//
+// runtime.NumGoroutine is process-global, so on its own a failure here reports
+// a number and nothing else — and that number cannot distinguish the two
+// causes. Either a worker under test has not exited, or something unrelated
+// started meanwhile and raised the floor permanently, in which case `n <=
+// before` can never be satisfied however long the deadline. The stacks say
+// which, and this helper exists because guessing between them from an integer
+// is how the flake stayed unfalsifiable across two platforms.
+func goroutineDump() string {
+	// One megabyte holds the whole set for these suites; runtime.Stack
+	// truncates rather than failing if a future one outgrows it, and a
+	// truncated dump still names the goroutines at the top.
+	buf := make([]byte, 1<<20)
+	return string(buf[:runtime.Stack(buf, true)])
 }
 
 // TestModel_CloseEngine_Serial_DrainsWorkers_Good is the goroutine-leak guard
