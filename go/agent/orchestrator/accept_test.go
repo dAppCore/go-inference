@@ -182,7 +182,7 @@ func TestAcceptOrchestratorReviewChangesGuardsDurableCleanupBeforeWorkspaceMutat
 			core.AssertEqual(t, test.wantOK, result.OK)
 			if !test.wantOK {
 				core.AssertContains(t, result.Error(), test.wantError)
-				core.AssertContains(t, result.Error(), jsonEmbedded(receipt.Worktree))
+				assertNamesWorktree(t, result.Error(), receipt.Worktree)
 				fixture.ids.mu.Lock()
 				idCountAfter := fixture.ids.number
 				fixture.ids.mu.Unlock()
@@ -1176,20 +1176,58 @@ func TestAccept_Orchestrator_Reject_Ugly(t *testing.T) {
 	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), "run").OK)
 }
 
+// assertNamesWorktree checks that err identifies the retained worktree,
+// accepting either spelling the guard can legitimately produce.
+//
+// The blocked-review path formats a JSON receipt, so a Windows path reaches it
+// with every separator doubled ("C:\\Users\\..."). The invalid-recovery
+// path formats the worktree directly, so the same path arrives bare. Both are
+// correct messages; which one you get depends on which guard fired, and the
+// test's claim is only that the error NAMES the worktree.
+//
+// On POSIX the two forms are byte-identical — a path with no backslashes has
+// nothing to escape — which is why a single raw comparison passed on every
+// required lane while being wrong for half the cases.
+func assertNamesWorktree(t *testing.T, err, worktree string) {
+	t.Helper()
+	if core.Contains(err, worktree) || core.Contains(err, jsonEmbedded(worktree)) {
+		return
+	}
+	t.Fatalf("error does not name the retained worktree in either form.\n error:    %s\n raw:      %s\n encoded:  %s",
+		err, worktree, jsonEmbedded(worktree))
+}
+
 // jsonEmbedded renders value as it appears INSIDE a JSON document — the
 // encoded form with its surrounding quotes removed.
-//
-// The blocked-review error carries the retained receipt as JSON, so a Windows
-// worktree path reaches it with every separator doubled
-// ("C:\\Users\\RUNNER~1\\..."). Searching that message for the RAW path finds
-// nothing, while on POSIX the two forms are identical because there are no
-// backslashes to escape — which is why the assertion only ever failed on one
-// platform. Encoding the needle the same way the haystack was encoded keeps
-// the test asserting what it means: that the error names the retained
-// worktree.
 func jsonEmbedded(value string) string {
 	encoded := core.JSONMarshalString(value)
 	return core.TrimSuffix(core.TrimPrefix(encoded, `"`), `"`)
+}
+
+// TestAcceptOrchestrator_assertNamesWorktree_Ugly pins BOTH message shapes the
+// guard produces, on any runner, so the Windows behaviour is provable from a
+// POSIX one.
+//
+// This exists because a first attempt fixed the JSON-encoded shape and broke
+// the bare one: the group key is a receipt blob for the blocked-review guard
+// and the worktree path itself for the invalid-recovery guard, so no single
+// encoding is right for both.
+func TestAcceptOrchestrator_assertNamesWorktree_Ugly(t *testing.T) {
+	const worktree = `C:\Users\RUNNER~1\Temp\retained review worktree`
+
+	// Shape 1 — the path formatted bare into the message.
+	assertNamesWorktree(t, "cleanup recovery is invalid for "+worktree+": bad JSON", worktree)
+
+	// Shape 2 — the path inside a JSON receipt, separators doubled.
+	assertNamesWorktree(t, `blocked by retained review cleanup recovery {"Worktree":"`+
+		jsonEmbedded(worktree)+`"}`, worktree)
+
+	// And a message naming a DIFFERENT worktree must not satisfy either form,
+	// or the assertion would pass on anything.
+	other := `C:\Users\RUNNER~1\Temp\some other worktree`
+	if core.Contains(other, worktree) || core.Contains(jsonEmbedded(other), jsonEmbedded(worktree)) {
+		t.Fatal("fixture paths overlap; the negative case below proves nothing")
+	}
 }
 
 // TestAcceptOrchestrator_jsonEmbedded_Ugly pins both halves of the escaping,
