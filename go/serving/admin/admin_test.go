@@ -15,6 +15,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/internal/testenv"
 )
 
 // jsonString renders s as a JSON string literal. Test bodies interpolate
@@ -56,7 +57,7 @@ func (f *fakeReloader) ReloadModel(newPath string, opts []inference.LoadOption) 
 func seedModel(t *testing.T, name string) string {
 	t.Helper()
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	dir := core.PathJoin(home, "Lethean", "lem", "models", name)
 	if r := core.MkdirAll(dir, 0o755); !r.OK {
 		t.Fatalf("mkdir model dir: %v", r.Value)
@@ -273,7 +274,7 @@ func TestReloadHandler_WrongConfirm_Bad(t *testing.T) {
 // is refused even with a valid confirmation (integrity gate).
 func TestReloadHandler_NoManifest_Ugly(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	dir := core.PathJoin(home, "Lethean", "lem", "models", "nomanifest")
 	if r := core.MkdirAll(dir, 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)
@@ -377,7 +378,7 @@ func TestReloadHandler_ModelPath_Good(t *testing.T) {
 // TestReloadHandler_ModelPathEscapesDir_Bad proves a model_path outside
 // standardModelDir() is refused even with a valid confirmation.
 func TestReloadHandler_ModelPathEscapesDir_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	outside := t.TempDir()
 	if r := core.WriteFile(core.PathJoin(outside, shaManifestFilename), []byte("x"), 0o600); !r.OK {
 		t.Fatalf("seed sha sidecar: %v", r.Value)
@@ -448,7 +449,7 @@ func TestBindModelPathToStandardDir_Empty_Bad(t *testing.T) {
 // TestBindModelPathToStandardDir_NotFound_Bad proves a path that doesn't
 // exist on disk is refused rather than silently bound.
 func TestBindModelPathToStandardDir_NotFound_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	if _, err := bindModelPathToStandardDir("/does/not/exist"); err == nil {
 		t.Fatal("bindModelPathToStandardDir(missing) should error")
 	}
@@ -458,7 +459,7 @@ func TestBindModelPathToStandardDir_NotFound_Bad(t *testing.T) {
 // dir missing the .sha256 sidecar is refused — the same integrity gate
 // resolveModelNameToPath enforces for the legacy basename route.
 func TestBindModelPathToStandardDir_NoManifest_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	dir := core.PathJoin(standardModelDir(), "nomanifest")
 	if r := core.MkdirAll(dir, 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)
@@ -479,7 +480,7 @@ func TestResolveModelNameToPath_Empty_Bad(t *testing.T) {
 // TestResolveModelNameToPath_DirNotFound_Bad proves a syntactically valid
 // basename that doesn't exist under standardModelDir() is refused.
 func TestResolveModelNameToPath_DirNotFound_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	if _, err := resolveModelNameToPath("ghost"); err == nil {
 		t.Fatal("resolveModelNameToPath(missing dir) should error")
 	}
@@ -489,7 +490,7 @@ func TestResolveModelNameToPath_DirNotFound_Bad(t *testing.T) {
 // resolves (via a symlink) to a target outside standardModelDir() is refused
 // — a literal-string basename check alone would miss this.
 func TestResolveModelNameToPath_SymlinkEscape_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	outside := t.TempDir()
 	if r := core.WriteFile(core.PathJoin(outside, shaManifestFilename), []byte("x"), 0o600); !r.OK {
 		t.Fatalf("seed sha sidecar outside: %v", r.Value)
@@ -541,7 +542,7 @@ func TestListKnownModels_Good(t *testing.T) {
 // TestListKnownModels_NoDir_Bad proves a missing models root (nothing
 // downloaded yet) reports an empty list, not an error or a panic.
 func TestListKnownModels_NoDir_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	if got := ListKnownModels(); len(got) != 0 {
 		t.Fatalf("ListKnownModels() on an absent root = %v, want empty", got)
 	}

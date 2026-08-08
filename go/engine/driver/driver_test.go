@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 	coreprocess "dappco.re/go/process"
 )
 
@@ -396,7 +397,7 @@ func TestDriver_Service_Status_Ugly(t *testing.T) {
 
 func TestDriver_Service_Models_Good(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	modelsDir := core.PathJoin(home, "Lethean", "lem", "models")
 	profilesDir := core.PathJoin(home, "Lethean", "conf", "models")
 	if r := core.MkdirAll(modelsDir, 0o755); !r.OK {
@@ -430,7 +431,7 @@ func TestDriver_Service_Models_Good(t *testing.T) {
 }
 
 func TestDriver_Service_Models_Bad(t *testing.T) {
-	t.Setenv("HOME", "")
+	testenv.SetHome(t, "")
 	svc := &Service{}
 	r := svc.Models()
 	if r.OK {
@@ -442,7 +443,7 @@ func TestDriver_Service_Models_Bad(t *testing.T) {
 // models nor the profiles directory present — an empty catalogue is a valid
 // answer, never an error (listNames treats a missing dir as "nothing here").
 func TestDriver_Service_Models_Ugly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	svc := &Service{}
 	r := svc.Models()
 	if !r.OK {
@@ -803,7 +804,7 @@ func TestDriver_ListNames_Ugly(t *testing.T) {
 
 func TestDriver_ServePersistPath_Good(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	want := core.PathJoin(home, "Lethean", "lem", "lthn-ai-serve.json")
 	if got := servePersistPath(); got != want {
 		t.Fatalf("servePersistPath = %q, want %q", got, want)
@@ -811,7 +812,7 @@ func TestDriver_ServePersistPath_Good(t *testing.T) {
 }
 
 func TestDriver_ServePersistPath_Bad(t *testing.T) {
-	t.Setenv("HOME", "")
+	testenv.SetHome(t, "")
 	if got := servePersistPath(); got != "" {
 		t.Fatalf("servePersistPath = %q, want empty when the home dir can't resolve", got)
 	}
@@ -821,7 +822,7 @@ func TestDriver_ServePersistPath_Bad(t *testing.T) {
 
 func TestDriver_PersistServe_Good(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	persistServe(persistedServe{Runtime: RuntimeMLX, Model: "org/model", Profile: "balanced"})
 
 	data := core.ReadFile(servePersistPath())
@@ -839,7 +840,7 @@ func TestDriver_PersistServe_Good(t *testing.T) {
 
 func TestDriver_PersistServe_Bad(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	persistServe(persistedServe{Runtime: RuntimeMLX, Model: ""}) // model-less: nothing to restore
 
 	if core.Stat(servePersistPath()).OK {
@@ -851,7 +852,7 @@ func TestDriver_PersistServe_Bad(t *testing.T) {
 
 func TestDriver_Service_LastServed_Good(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	persistServe(persistedServe{Runtime: RuntimeCUDA, Model: "org/model", Profile: "p1"})
 
 	svc := &Service{}
@@ -865,7 +866,7 @@ func TestDriver_Service_LastServed_Good(t *testing.T) {
 }
 
 func TestDriver_Service_LastServed_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // resolves fine, but nothing was ever persisted
+	testenv.SetHome(t, t.TempDir()) // resolves fine, but nothing was ever persisted
 	svc := &Service{}
 	if _, ok := svc.LastServed(); ok {
 		t.Fatal("LastServed() ok=true with nothing persisted")
@@ -874,7 +875,7 @@ func TestDriver_Service_LastServed_Bad(t *testing.T) {
 
 func TestDriver_Service_LastServed_Ugly(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	path := servePersistPath()
 	if r := core.MkdirAll(core.PathDir(path), 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)

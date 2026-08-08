@@ -9,13 +9,14 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 )
 
 // TestAdminTokenPath_Good pins the canonical token location under $HOME — the
 // same path lthn-mlx used, so cmd/lem and any launchd job reading the token
 // file agree on where it lives.
 func TestAdminTokenPath_Good(t *testing.T) {
-	t.Setenv("HOME", "/home/tester")
+	testenv.SetHome(t, "/home/tester")
 	if got, want := AdminTokenPath(), core.PathJoin("/home/tester", "Lethean", "lem", "admin.token"); got != want {
 		t.Fatalf("AdminTokenPath = %q, want %q", got, want)
 	}
@@ -261,7 +262,7 @@ func TestRequireBearerOnAdmin_CorrectBearer_Good(t *testing.T) {
 // TestServeAuth_AdminTokenPath_Good proves the canonical path under a normal
 // $HOME — the same path lthn-mlx used.
 func TestServeAuth_AdminTokenPath_Good(t *testing.T) {
-	t.Setenv("HOME", "/home/tester")
+	testenv.SetHome(t, "/home/tester")
 	got := AdminTokenPath()
 	want := core.PathJoin("/home/tester", "Lethean", "lem", "admin.token")
 	if got != want {
@@ -273,7 +274,7 @@ func TestServeAuth_AdminTokenPath_Good(t *testing.T) {
 // relative path rather than panicking — AdminTokenPath has no error return,
 // so this is the honest behaviour to pin down.
 func TestServeAuth_AdminTokenPath_Bad(t *testing.T) {
-	t.Setenv("HOME", "")
+	testenv.SetHome(t, "")
 	got := AdminTokenPath()
 	want := core.PathJoin("", "Lethean", "lem", "admin.token")
 	if got != want {
@@ -284,7 +285,7 @@ func TestServeAuth_AdminTokenPath_Bad(t *testing.T) {
 // TestServeAuth_AdminTokenPath_Ugly proves a $HOME with a trailing separator
 // is normalised — PathJoin cleans the join rather than doubling the slash.
 func TestServeAuth_AdminTokenPath_Ugly(t *testing.T) {
-	t.Setenv("HOME", "/home/tester/")
+	testenv.SetHome(t, "/home/tester/")
 	got := AdminTokenPath()
 	want := core.PathJoin("/home/tester/", "Lethean", "lem", "admin.token")
 	if got != want {

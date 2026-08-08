@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"dappco.re/go/inference/internal/testenv"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ func withTempHome(t *testing.T) {
 
 	t.Setenv("CORE_HOME", "")
 	t.Setenv("DIR_HOME", "")
-	t.Setenv("HOME", tempHome)
+	testenv.SetHome(t, tempHome)
 }
 
 func TestRecordAndReadEvents_Good(t *testing.T) {
@@ -74,7 +75,7 @@ func TestRecord_Good_UsesCurrentDayForDailyFile(t *testing.T) {
 
 func TestMetricsDir_Good_HonoursEnvPrecedence(t *testing.T) {
 	t.Setenv("CORE_HOME", "/core-home")
-	t.Setenv("HOME", "/home")
+	testenv.SetHome(t, "/home")
 	t.Setenv("USERPROFILE", "/userprofile")
 	t.Setenv("DIR_HOME", "/dir-home")
 
@@ -89,7 +90,7 @@ func TestMetricsDir_Good_HonoursEnvPrecedence(t *testing.T) {
 		t.Fatalf("metricsDir() with HOME = %q, want %q", got, want)
 	}
 
-	t.Setenv("HOME", "")
+	testenv.SetHome(t, "")
 	got = requireMetricsDir(t, metricsDir())
 	if want := core.JoinPath("/userprofile", "Lethean", "lem", "ai", "metrics"); got != want {
 		t.Fatalf("metricsDir() with USERPROFILE = %q, want %q", got, want)

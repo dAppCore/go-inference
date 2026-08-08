@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 )
 
 // TestReload_ListKnownModels_Good proves a models root with several verified
@@ -37,7 +38,7 @@ func TestReload_ListKnownModels_Good(t *testing.T) {
 // panicking — a different failure shape than a missing root entirely.
 func TestReload_ListKnownModels_Bad(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	root := standardModelDir()
 	if r := core.MkdirAll(core.PathDir(root), 0o755); !r.OK {
 		t.Fatalf("mkdir models parent: %v", r.Value)
@@ -56,7 +57,7 @@ func TestReload_ListKnownModels_Bad(t *testing.T) {
 // empty, non-nil slice rather than nil — callers range over it directly.
 func TestReload_ListKnownModels_Ugly(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	if r := core.MkdirAll(standardModelDir(), 0o755); !r.OK {
 		t.Fatalf("mkdir empty models root: %v", r.Value)
 	}

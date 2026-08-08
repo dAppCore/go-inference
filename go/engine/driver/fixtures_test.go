@@ -14,6 +14,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 	"github.com/gin-gonic/gin"
 )
 
@@ -168,7 +169,7 @@ func isolateDriverLookup(t *testing.T) string {
 	t.Helper()
 	driverDir := t.TempDir()
 	t.Setenv("CORE_AI_DRIVER_DIR", driverDir)
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	return driverDir
 }
