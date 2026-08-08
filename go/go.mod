@@ -13,7 +13,7 @@ require (
 	dappco.re/go/io v0.15.4
 	dappco.re/go/log v0.13.1
 	dappco.re/go/mcp v0.19.1
-	dappco.re/go/process v0.16.1
+	dappco.re/go/process v0.16.2
 	dappco.re/go/rag v0.15.1
 	dappco.re/go/ratelimit v0.12.1
 	dappco.re/go/store v0.14.1
