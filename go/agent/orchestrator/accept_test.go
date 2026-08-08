@@ -182,7 +182,7 @@ func TestAcceptOrchestratorReviewChangesGuardsDurableCleanupBeforeWorkspaceMutat
 			core.AssertEqual(t, test.wantOK, result.OK)
 			if !test.wantOK {
 				core.AssertContains(t, result.Error(), test.wantError)
-				core.AssertContains(t, result.Error(), receipt.Worktree)
+				core.AssertContains(t, result.Error(), jsonEmbedded(receipt.Worktree))
 				fixture.ids.mu.Lock()
 				idCountAfter := fixture.ids.number
 				fixture.ids.mu.Unlock()
@@ -1174,4 +1174,45 @@ func TestAccept_Orchestrator_Reject_Ugly(t *testing.T) {
 	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), " ").OK)
 	core.AssertTrue(t, fixture.orchestrator.Close().OK)
 	core.AssertFalse(t, fixture.orchestrator.Reject(context.Background(), "run").OK)
+}
+
+// jsonEmbedded renders value as it appears INSIDE a JSON document — the
+// encoded form with its surrounding quotes removed.
+//
+// The blocked-review error carries the retained receipt as JSON, so a Windows
+// worktree path reaches it with every separator doubled
+// ("C:\\Users\\RUNNER~1\\..."). Searching that message for the RAW path finds
+// nothing, while on POSIX the two forms are identical because there are no
+// backslashes to escape — which is why the assertion only ever failed on one
+// platform. Encoding the needle the same way the haystack was encoded keeps
+// the test asserting what it means: that the error names the retained
+// worktree.
+func jsonEmbedded(value string) string {
+	encoded := core.JSONMarshalString(value)
+	return core.TrimSuffix(core.TrimPrefix(encoded, `"`), `"`)
+}
+
+// TestAcceptOrchestrator_jsonEmbedded_Ugly pins both halves of the escaping,
+// on any platform, so the Windows case is provable from a POSIX runner.
+func TestAcceptOrchestrator_jsonEmbedded_Ugly(t *testing.T) {
+	// The case the helper exists for: JSON doubles every separator, so a
+	// needle searched for inside an encoded receipt has to be doubled too.
+	windows := `C:\Users\RUNNER~1\Temp\retained review worktree`
+	if got, want := jsonEmbedded(windows), `C:\\Users\\RUNNER~1\\Temp\\retained review worktree`; got != want {
+		t.Fatalf("jsonEmbedded(windows path) = %q, want %q", got, want)
+	}
+
+	// And the reason this only ever failed on one platform: a POSIX path has
+	// nothing to escape, so the raw and encoded forms are identical and the
+	// old assertion passed for free.
+	posix := "/tmp/retained review worktree"
+	if got := jsonEmbedded(posix); got != posix {
+		t.Fatalf("jsonEmbedded(posix path) = %q, want it unchanged", got)
+	}
+
+	// A quote inside the value is escaped rather than terminating the string,
+	// and the surrounding quotes are stripped either way.
+	if got, want := jsonEmbedded(`a"b`), `a\"b`; got != want {
+		t.Fatalf("jsonEmbedded(quoted) = %q, want %q", got, want)
+	}
 }
