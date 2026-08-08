@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"dappco.re/go/inference/internal/testenv"
 	"time"
 
 	. "dappco.re/go"
@@ -8,7 +9,6 @@ import (
 
 func withMetricsExampleHome(fn func()) {
 	previousCoreHome := Getenv("CORE_HOME")
-	previousHome := Getenv("HOME")
 	previousDirHome := Getenv("DIR_HOME")
 	tempHomeResult := MkdirTemp("", "ai-metrics-example-*")
 	if !tempHomeResult.OK {
@@ -18,12 +18,11 @@ func withMetricsExampleHome(fn func()) {
 	tempHome := tempHomeResult.Value.(string)
 	defer RemoveAll(tempHome)
 	defer Setenv("DIR_HOME", previousDirHome)
-	defer Setenv("HOME", previousHome)
 	defer Setenv("CORE_HOME", previousCoreHome)
 
 	Setenv("CORE_HOME", "")
 	Setenv("DIR_HOME", "")
-	Setenv("HOME", tempHome)
+	defer testenv.SetHomeDir(tempHome)()
 	fn()
 }
 
