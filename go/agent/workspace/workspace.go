@@ -1334,7 +1334,14 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 	}
 	if _, statErr := manager.files.Stat(worktreeRelative); statErr == nil {
 		verified = false
-		failures = append(failures, "filesystem verify: retained worktree directory")
+		// Report what Git believes alongside the directory that survived.
+		// When these disagree the cause is a path the listing spells
+		// differently from the one we looked for — separator, casing, a
+		// short 8.3 name — and without both sides the failure is
+		// indistinguishable from the OS refusing to unlink a file in use.
+		failures = append(failures, core.Concat(
+			"filesystem verify: retained worktree directory; git lists: ",
+			worktreeListingPaths(worktrees.String())))
 	} else if !core.Is(statErr, core.ErrNotExist) {
 		verified = false
 		failures = append(failures, core.Concat("filesystem verify: ", statErr.Error()))
@@ -1353,8 +1360,22 @@ func (manager *Manager) cleanupFailedWorktree(ctx context.Context, clonePath, wo
 	return core.Ok(nil)
 }
 
+// worktreeBranchAtPath reports the branch checked out in the worktree at path,
+// reading `git worktree list --porcelain` output, and whether that worktree is
+// listed at all.
+//
+// Paths are compared in slash form. Git prints worktree paths with forward
+// slashes on EVERY platform, so the byte comparison this used to do never
+// matched a filepath-built Windows path ("C:\...\worktree"). The consequences
+// ran the whole way through cleanupFailedWorktree: it read the answer as "not
+// a worktree", skipped `worktree remove` entirely, and left the directory on
+// disk with its branch still checked out — which is in turn why
+// `branch --delete --force` exited 1. The verify step calls this same helper,
+// so it agreed the metadata was gone, and the only symptom that reached the
+// surface was a retained directory that looked for all the world like a
+// Windows file lock.
 func worktreeBranchAtPath(output, path string) (string, bool) {
-	currentPath := ""
+	want := comparableWorktreePath(path)
 	found := false
 	for _, line := range core.Split(output, "\n") {
 		line = core.Trim(line)
@@ -1365,8 +1386,7 @@ func worktreeBranchAtPath(output, path string) (string, bool) {
 			if found {
 				return "", true
 			}
-			currentPath = core.TrimPrefix(line, "worktree ")
-			found = currentPath == path
+			found = comparableWorktreePath(core.TrimPrefix(line, "worktree ")) == want
 			continue
 		}
 		if found && core.HasPrefix(line, "branch refs/heads/") {
@@ -1374,6 +1394,35 @@ func worktreeBranchAtPath(output, path string) (string, bool) {
 		}
 	}
 	return "", found
+}
+
+// worktreeListingPaths extracts just the "worktree <path>" entries from a
+// porcelain listing, joined for a one-line diagnostic. The rest of the
+// porcelain output (HEAD revisions, branch refs) says nothing about why a
+// path failed to match.
+func worktreeListingPaths(output string) string {
+	paths := make([]string, 0, 4)
+	for _, line := range core.Split(output, "\n") {
+		if line = core.Trim(line); core.HasPrefix(line, "worktree ") {
+			paths = append(paths, core.TrimPrefix(line, "worktree "))
+		}
+	}
+	if len(paths) == 0 {
+		return "(no worktrees listed)"
+	}
+	return core.Join(", ", paths...)
+}
+
+// comparableWorktreePath renders a path in the form worktree listings are
+// matched on: forward slashes throughout, lower-cased only where the
+// platform's own filenames are case-insensitive. Folding on POSIX would
+// wrongly equate two directories that genuinely differ.
+func comparableWorktreePath(path string) string {
+	slashed := core.PathToSlash(path)
+	if string(core.PathSeparator) == `\` {
+		return core.Lower(slashed)
+	}
+	return slashed
 }
 
 func (manager *Manager) runWorkspaceOwnerID(projectID, worktreePath string) string {

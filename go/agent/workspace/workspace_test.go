@@ -4,6 +4,7 @@ package workspace
 
 import (
 	"context"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -2264,4 +2265,106 @@ func TestWorkspaceGitOutputShape(t *testing.T) {
 		return nil, false
 	})
 	core.AssertFalse(t, fixture.manager.gitOutput(context.Background(), fixture.root, nil, "shape").OK)
+}
+
+// TestWorkspace_worktreeBranchAtPath_Good matches a worktree listing against
+// the path we hold for it. Git prints porcelain paths with forward slashes on
+// every platform, so the listing is spelled that way here even though the
+// lookup path is built with the platform's own separator — which is the whole
+// case this helper exists to get right.
+func TestWorkspace_worktreeBranchAtPath_Good(t *testing.T) {
+	root := core.PathJoin("tmp", "LEM workspaces", "project", "reviews", "worktree")
+	listing := core.Concat(
+		"worktree ", core.PathToSlash(root), "\n",
+		"HEAD 1111111111111111111111111111111111111111\n",
+		"branch refs/heads/lem/integration/accept-run/review-id\n",
+	)
+
+	branch, found := worktreeBranchAtPath(listing, root)
+	if !found {
+		t.Fatal("worktree spelled with forward slashes was not matched against a native path")
+	}
+	if branch != "lem/integration/accept-run/review-id" {
+		t.Fatalf("branch = %q, want the checked-out integration branch", branch)
+	}
+}
+
+// TestWorkspace_worktreeBranchAtPath_Bad covers the genuine misses: a listing
+// that names a different worktree, and one that names nothing at all.
+func TestWorkspace_worktreeBranchAtPath_Bad(t *testing.T) {
+	root := core.PathJoin("tmp", "project", "worktree")
+	other := core.Concat("worktree ", core.PathToSlash(core.PathJoin("tmp", "project", "elsewhere")), "\n")
+
+	if _, found := worktreeBranchAtPath(other, root); found {
+		t.Fatal("a listing naming a different worktree must not match")
+	}
+	if _, found := worktreeBranchAtPath("", root); found {
+		t.Fatal("an empty listing must not match")
+	}
+}
+
+// TestWorkspace_worktreeBranchAtPath_Ugly covers a detached worktree — listed,
+// so removal must still run, but carrying no branch line — and a bare worktree
+// entry terminated by a blank line rather than a branch.
+func TestWorkspace_worktreeBranchAtPath_Ugly(t *testing.T) {
+	root := core.PathJoin("tmp", "project", "worktree")
+	slashed := core.PathToSlash(root)
+
+	detached := core.Concat("worktree ", slashed, "\nHEAD 2222222222222222222222222222222222222222\ndetached\n")
+	branch, found := worktreeBranchAtPath(detached, root)
+	if !found {
+		t.Fatal("a detached worktree is still a worktree and must be found")
+	}
+	if branch != "" {
+		t.Fatalf("branch = %q, want empty for a detached worktree", branch)
+	}
+
+	// The entry before ours must not be mistaken for it.
+	preceded := core.Concat(
+		"worktree ", core.PathToSlash(core.PathJoin("tmp", "project", "first")), "\n",
+		"branch refs/heads/other\n\n",
+		"worktree ", slashed, "\n",
+		"branch refs/heads/wanted\n",
+	)
+	branch, found = worktreeBranchAtPath(preceded, root)
+	if !found || branch != "wanted" {
+		t.Fatalf("second entry: branch=%q found=%v, want \"wanted\"/true", branch, found)
+	}
+}
+
+// TestWorkspace_worktreeBranchAtPath_Ugly_SeparatorConventions is the
+// assertion that actually separates the fixed helper from the broken one. The
+// tests above pass either way on POSIX, where PathToSlash is the identity and
+// there is nothing to convert; only a listing and a lookup path spelled with
+// DIFFERENT separators tells them apart.
+//
+// The expectation is platform-truthful rather than uniform: on Windows the two
+// spellings name one directory and must match, while on POSIX a backslash is
+// an ordinary filename character and they are genuinely different paths that
+// must not.
+func TestWorkspace_worktreeBranchAtPath_Ugly_SeparatorConventions(t *testing.T) {
+	const listing = "worktree C:/Users/RUNNER~1/AppData/Local/Temp/project/worktree\n" +
+		"branch refs/heads/lem/integration/accept-run/review-id\n"
+	const nativeWindows = `C:\Users\RUNNER~1\AppData\Local\Temp\project\worktree`
+
+	branch, found := worktreeBranchAtPath(listing, nativeWindows)
+	if runtime.GOOS == "windows" {
+		if !found {
+			t.Fatal("git's forward-slash listing must match the filepath-built path it names")
+		}
+		if branch != "lem/integration/accept-run/review-id" {
+			t.Fatalf("branch = %q, want the checked-out integration branch", branch)
+		}
+
+		// Windows filenames are case-insensitive, so a listing that differs
+		// only in casing still names the same worktree.
+		if _, folded := worktreeBranchAtPath(core.Lower(listing), nativeWindows); !folded {
+			t.Fatal("a case-differing listing must still match on Windows")
+		}
+		return
+	}
+	if found {
+		t.Fatalf("on %s a backslash is a filename character, so %q names a different path than the listing",
+			runtime.GOOS, nativeWindows)
+	}
 }
