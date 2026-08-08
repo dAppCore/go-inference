@@ -9,6 +9,7 @@ import (
 	"dappco.re/go/inference/agent/gitserver"
 	"dappco.re/go/inference/agent/queue"
 	"dappco.re/go/inference/agent/work"
+	"dappco.re/go/inference/internal/pathx"
 	commandexec "dappco.re/go/process/exec"
 )
 
@@ -418,11 +419,22 @@ func (manager *Manager) verifyChangeReview(ctx context.Context, project work.Pro
 	if !commonResult.OK {
 		return core.Fail(core.E("workspace.Manager.Apply", "failed to resolve integration repository", commonResult.Err()))
 	}
-	clonePath := core.Trim(commonResult.String())
-	cloneResult := manager.internalAbsolute(clonePath)
-	if !cloneResult.OK || cloneResult.String() != project.ClonePath || clonePath != project.ClonePath || core.PathBase(clonePath) != "repo.git" {
+	// Compare the NORMALISED path, not git's raw output. Git prints paths with
+	// forward slashes on every platform, so on Windows "C:/.../repo.git" never
+	// equals a filepath-built ClonePath of "C:\...\repo.git" even when both
+	// name the same directory — and core.PathBase, which matches only the
+	// platform separator, reads that raw output as having no separator at all
+	// and hands back the whole path instead of "repo.git". Between them those
+	// two refused every valid clone on Windows.
+	//
+	// The guarantee the raw comparison reached for survives: internalAbsolute
+	// has already refused anything escaping the internal root, and PathAbs
+	// cleans away any ".." trickery before the equality test.
+	cloneResult := manager.internalAbsolute(core.Trim(commonResult.String()))
+	if !cloneResult.OK || cloneResult.String() != project.ClonePath || pathx.Base(cloneResult.String()) != "repo.git" {
 		return core.Fail(core.NewError("agent workspace acceptance cached clone is outside the internal root"))
 	}
+	clonePath := cloneResult.String()
 	branchResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "symbolic-ref", "--short", "HEAD")
 	headResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "rev-parse", "HEAD")
 	statusResult := manager.gitOutput(ctx, review.IntegrationPath, nil, "status", "--porcelain=v1", "--untracked-files=all")
