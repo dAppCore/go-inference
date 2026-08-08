@@ -7,6 +7,7 @@ import (
 	"math"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/pathx"
 	basegguf "dappco.re/go/inference/model/gguf"
 )
 
@@ -112,8 +113,12 @@ func quantizeGemma3ModelPack(source basegguf.Source, configJSON []byte, tensors 
 // gemma3ModelName derives a general.name from the checkpoint directory basename,
 // dropping the -bf16/-f32 dense-precision suffix. An empty result simply omits
 // general.name.
+//
+// pathx.Base, not core.PathBase: the checkpoint root reaches here from a CLI
+// flag or a config file, so it may well be '/'-separated on Windows — where
+// core.PathBase would find no separator and return the whole path as the name.
 func gemma3ModelName(root string) string {
-	base := core.PathBase(core.TrimSuffix(root, "/"))
+	base := pathx.Base(root)
 	base = core.TrimSuffix(base, "-bf16")
 	base = core.TrimSuffix(base, "-f32")
 	return base
