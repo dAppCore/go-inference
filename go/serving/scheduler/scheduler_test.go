@@ -5,7 +5,6 @@ package scheduler
 import (
 	"context"
 	"iter"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -546,45 +545,6 @@ func TestModel_Stats_Serial_Good(t *testing.T) {
 	}
 }
 
-// waitGoroutineCount polls runtime.NumGoroutine until want is satisfied or the
-// deadline passes. A worker goroutine's own exit (the runtime's counter
-// decrement) trails the workerWG.Done() call that unblocks a joining Wait() by
-// a scheduling instant, so an immediate read right after a synchronous
-// CloseEngine call can occasionally observe a stale, still-draining count —
-// the same reason waitStats polls Stats rather than reading it once.
-func waitGoroutineCount(t *testing.T, want func(int) bool) int {
-	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for {
-		n := runtime.NumGoroutine()
-		if want(n) {
-			return n
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("goroutine count never satisfied predicate, last = %d\n\n%s", n, goroutineDump())
-		case <-time.After(2 * time.Millisecond):
-		}
-	}
-}
-
-// goroutineDump renders every live goroutine's stack.
-//
-// runtime.NumGoroutine is process-global, so on its own a failure here reports
-// a number and nothing else — and that number cannot distinguish the two
-// causes. Either a worker under test has not exited, or something unrelated
-// started meanwhile and raised the floor permanently, in which case `n <=
-// before` can never be satisfied however long the deadline. The stacks say
-// which, and this helper exists because guessing between them from an integer
-// is how the flake stayed unfalsifiable across two platforms.
-func goroutineDump() string {
-	// One megabyte holds the whole set for these suites; runtime.Stack
-	// truncates rather than failing if a future one outgrows it, and a
-	// truncated dump still names the goroutines at the top.
-	buf := make([]byte, 1<<20)
-	return string(buf[:runtime.Stack(buf, true)])
-}
-
 // TestModel_CloseEngine_Serial_DrainsWorkers_Good is the goroutine-leak guard
 // a per-resident-model scheduler depends on: serving.multiModelResolver
 // builds a fresh scheduler.Model on every model load and tears it down on
@@ -593,18 +553,31 @@ func goroutineDump() string {
 // DEFAULT scheduler mode (serial is Config.Mode's zero value). Before this
 // fix, CloseEngine's switch had no serial case at all — worker ranged over
 // m.queue, which nothing ever closed.
+// It asserts on Stats().LiveWorkers, which the scheduler owns, rather than on
+// runtime.NumGoroutine. The process-global count could not answer this
+// question: ANY goroutine started elsewhere in the test binary raises the floor
+// permanently, so "back to the starting count" is unsatisfiable however long
+// you wait — which red-lit this suite on windows and its serving twin on the
+// required linux lane before anything was actually leaking.
+//
+// The replacement needs no polling at all. Workers decrement LiveWorkers before
+// calling workerWG.Done, and closeSerialEngine waits on that group, so zero
+// after CloseEngine returns is a guarantee rather than a sample.
 func TestModel_CloseEngine_Serial_DrainsWorkers_Good(t *testing.T) {
-	before := runtime.NumGoroutine()
 	base := &immediateModel{tokens: []inference.Token{{Text: "x"}}}
 	m, err := New(base, Config{MaxConcurrent: 4, MaxQueue: 4, StreamBuffer: 4})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	waitGoroutineCount(t, func(n int) bool { return n >= before+4 })
+	if live := m.Stats().LiveWorkers; live != 4 {
+		t.Fatalf("LiveWorkers after New = %d, want 4 — the pool must be up before close means anything", live)
+	}
 
 	m.CloseEngine()
 
-	waitGoroutineCount(t, func(n int) bool { return n <= before })
+	if live := m.Stats().LiveWorkers; live != 0 {
+		t.Fatalf("LiveWorkers after CloseEngine = %d, want 0 — the worker pool leaked", live)
+	}
 }
 
 // TestModel_CloseEngine_Serial_ActiveAndQueued_NoHang_Good proves CloseEngine
