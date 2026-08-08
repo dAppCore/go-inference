@@ -75,11 +75,14 @@ type cbReq struct {
 // durations rung).
 func (r *cbReq) stampMetrics() {
 	r.metrics.PrefillDuration = r.prefillDur
+	// measuredSpan, not a bare time.Since: a span the platform clock cannot
+	// resolve still elapsed, and a zero here would suppress the throughput
+	// rates below, whose divides are guarded on a positive duration.
 	if !r.start.IsZero() {
-		r.metrics.TotalDuration = time.Since(r.start)
+		r.metrics.TotalDuration = measuredSpan(r.start)
 	}
 	if !r.decodeStart.IsZero() {
-		r.metrics.DecodeDuration = time.Since(r.decodeStart)
+		r.metrics.DecodeDuration = measuredSpan(r.decodeStart)
 	}
 	if r.prefillDur > 0 && r.metrics.PromptTokens > 0 {
 		r.metrics.PrefillTokensPerSec = float64(r.metrics.PromptTokens) / r.prefillDur.Seconds()
@@ -250,10 +253,10 @@ type cbPrepared struct {
 }
 
 // measuredSpan reports the time elapsed since start, floored at one
-// nanosecond. A prefill that finished faster than the platform's monotonic
-// tick can resolve — Windows' clock returns exactly 0 for a sub-microsecond
-// span — still happened, and reporting 0 would both blank PrefillDuration and
-// suppress PrefillTokensPerSec, whose divide is guarded on a positive span.
+// nanosecond. Work that finished faster than the platform's monotonic tick can
+// resolve — Windows' clock returns exactly 0 for a sub-microsecond span — still
+// happened, and reporting 0 would both blank the duration and suppress the
+// throughput rate derived from it, whose divide is guarded on a positive span.
 func measuredSpan(start time.Time) time.Duration {
 	if elapsed := time.Since(start); elapsed > 0 {
 		return elapsed
