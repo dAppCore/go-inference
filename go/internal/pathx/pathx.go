@@ -15,7 +15,32 @@
 // it with core.PathJoin.
 package pathx
 
-import core "dappco.re/go"
+import (
+	"sync"
+
+	core "dappco.re/go"
+)
+
+var (
+	separatorOnce  sync.Once
+	separatorCache string
+)
+
+// nativeSeparator resolves the directory separator once per process and caches
+// it, mirroring discover.go's pathSeparator. core.Env walks a map and falls
+// back to os.Getenv when the key is unset, and these helpers sit on hot paths
+// (lora's Inspect resolves an adapter sidecar per call). The override is set
+// once at process start, typically by tests, and never mutates.
+func nativeSeparator() string {
+	separatorOnce.Do(func() {
+		if separator := core.Env("DS"); separator != "" {
+			separatorCache = separator
+			return
+		}
+		separatorCache = "/"
+	})
+	return separatorCache
+}
 
 // Base returns the last element of p, treating both '/' and the platform
 // separator as boundaries. Trailing separators are ignored. An empty path, or
@@ -87,17 +112,14 @@ func separatorOf(p string) string {
 	if i := lastSeparator(p); i >= 0 {
 		return p[i : i+1]
 	}
-	if separator := core.Env("DS"); separator != "" {
-		return separator
-	}
-	return "/"
+	return nativeSeparator()
 }
 
 // lastSeparator reports the index of the final '/' or platform separator in p,
 // or -1 when p carries neither.
 func lastSeparator(p string) int {
 	best := core.LastIndex(p, "/")
-	if separator := core.Env("DS"); separator != "" && separator != "/" {
+	if separator := nativeSeparator(); separator != "/" {
 		if i := core.LastIndex(p, separator); i > best {
 			best = i
 		}
@@ -108,10 +130,10 @@ func lastSeparator(p string) int {
 // trimTrailingSeparators drops any run of trailing separators, so that a path
 // written with a trailing slash names the same element as one without.
 func trimTrailingSeparators(p string) string {
-	separator := core.Env("DS")
+	separator := nativeSeparator()
 	for len(p) > 1 {
 		tail := p[len(p)-1:]
-		if tail != "/" && (separator == "" || tail != separator) {
+		if tail != "/" && tail != separator {
 			break
 		}
 		p = p[:len(p)-1]
