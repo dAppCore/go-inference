@@ -70,11 +70,172 @@ func TestExport_CopyTo_Ugly_DestIsDirectory(t *testing.T) {
 	core.AssertTrue(t, err != nil)
 }
 
-// TestExport_CopyTo_Ugly_SourceRemoved — the source file is removed from
-// disk after Open (the driver keeps its own fd, so CHECKPOINT still
-// succeeds), so the fresh-by-path open of the source for copying fails —
-// the "open source" branch, distinct from the checkpoint-error branch
-// covered by ClosedDB_Ugly.
+// TestExport_CopyTo_Ugly_StaleDestReplaced — exporting twice to the same path
+// replaces the file rather than merging into it. ATTACH opens an existing
+// database instead of truncating it, so without the clear step the second
+// export would hit the first one's rows and fail the primary key, or silently
+// accumulate. The second archive here holds a different conversation, so a
+// merge would show up as two.
+func TestExport_CopyTo_Ugly_StaleDestReplaced(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "export.duckdb")
+
+	first, err := Open("snider", filepath.Join(dir, "first.duckdb"))
+	if err != nil {
+		t.Fatalf("Open(first): %v", err)
+	}
+	if _, err := first.StartConversation(NewConversation{ModelID: "a"}); err != nil {
+		t.Fatalf("StartConversation(first): %v", err)
+	}
+	if err := first.CopyTo(dest); err != nil {
+		t.Fatalf("CopyTo(first): %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first): %v", err)
+	}
+
+	second, err := Open("snider", filepath.Join(dir, "second.duckdb"))
+	if err != nil {
+		t.Fatalf("Open(second): %v", err)
+	}
+	defer second.Close()
+	wantID, err := second.StartConversation(NewConversation{ModelID: "b"})
+	if err != nil {
+		t.Fatalf("StartConversation(second): %v", err)
+	}
+	if err := second.CopyTo(dest); err != nil {
+		t.Fatalf("CopyTo(second) over a stale export: %v", err)
+	}
+
+	exported, err := Open("snider", dest)
+	if err != nil {
+		t.Fatalf("Open(export): %v", err)
+	}
+	defer exported.Close()
+	conversations, err := exported.RecentConversations(10)
+	if err != nil {
+		t.Fatalf("RecentConversations(export): %v", err)
+	}
+	if len(conversations) != 1 || conversations[0].ID != wantID {
+		t.Fatalf("re-export holds %d conversations (%+v), want only the second archive's (%s)",
+			len(conversations), conversations, wantID)
+	}
+}
+
+// TestExport_CopyTo_Bad_ClosedHistory — a History whose database has been
+// closed cannot export. The connection cannot be acquired, so the failure is
+// reported before anything touches the destination path.
+func TestExport_CopyTo_Bad_ClosedHistory(t *testing.T) {
+	dir := t.TempDir()
+	h, err := Open("snider", filepath.Join(dir, "chats.duckdb"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	dest := filepath.Join(dir, "export.duckdb")
+	if err := h.CopyTo(dest); err == nil {
+		t.Fatal("CopyTo on a closed history = nil, want an error")
+	}
+	if stat := core.Stat(dest); stat.OK {
+		t.Fatal("CopyTo on a closed history created the destination; it must fail before touching it")
+	}
+}
+
+// TestExport_CopyTo_Ugly_ForeignKeyChain is the direct receipt for the copy
+// ORDER. The schema chains conversations <- turns <- embeddings, and DuckDB's
+// own COPY FROM DATABASE does not topologically sort: pointed at this schema
+// it aborts partway with "Violates foreign key constraint because key ... does
+// not exist in the referenced table". CopyTo therefore writes the tables out
+// itself, parents first.
+//
+// embeddings has no public writer — it is a sidecar reserved for a future
+// embedding model — so the row is seeded directly. Without that the last link
+// in the chain is copied only ever empty, and an ordering regression there
+// would pass unnoticed.
+func TestExport_CopyTo_Ugly_ForeignKeyChain(t *testing.T) {
+	dir := t.TempDir()
+	h, err := Open("snider", filepath.Join(dir, "chats.duckdb"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer h.Close()
+
+	conversationID, err := h.StartConversation(NewConversation{ModelID: "gemma"})
+	if err != nil {
+		t.Fatalf("StartConversation: %v", err)
+	}
+	turnID, err := h.WriteTurn(conversationID, NewTurn{Role: "user", Content: "hello"})
+	if err != nil {
+		t.Fatalf("WriteTurn: %v", err)
+	}
+	if _, err := h.db.Exec(
+		`INSERT INTO embeddings (turn_id, embedding_model, vector) VALUES (?, ?, NULL)`,
+		turnID, "test-embed"); err != nil {
+		t.Fatalf("seed embeddings: %v", err)
+	}
+
+	dest := filepath.Join(dir, "export.duckdb")
+	if err := h.CopyTo(dest); err != nil {
+		t.Fatalf("CopyTo: %v", err)
+	}
+
+	exported, err := Open("snider", dest)
+	if err != nil {
+		t.Fatalf("Open(export): %v", err)
+	}
+	defer exported.Close()
+
+	// Every link in the chain must have survived, and the child rows must
+	// still point at parents that exist — which is what the FK would have
+	// refused had the order been wrong.
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{`SELECT count(*) FROM conversations`, 1},
+		{`SELECT count(*) FROM turns`, 1},
+		{`SELECT count(*) FROM embeddings`, 1},
+		{`SELECT count(*) FROM turns t JOIN conversations c ON t.conversation_id = c.id`, 1},
+		{`SELECT count(*) FROM embeddings e JOIN turns t ON e.turn_id = t.id`, 1},
+	} {
+		var got int
+		if err := exported.db.QueryRow(tc.query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", tc.query, err)
+		}
+		if got != tc.want {
+			t.Errorf("%s = %d, want %d", tc.query, got, tc.want)
+		}
+	}
+
+	// The export must be schema-identical to a live archive, not a
+	// constraint-free CREATE TABLE AS SELECT: the foreign key has to still be
+	// there, or a tool opening the file gets a weaker database than the one
+	// it was exported from.
+	var constraints int
+	if err := exported.db.QueryRow(
+		`SELECT count(*) FROM duckdb_constraints()
+		  WHERE table_name = 'turns' AND constraint_type = 'FOREIGN KEY'`).Scan(&constraints); err != nil {
+		t.Fatalf("duckdb_constraints: %v", err)
+	}
+	if constraints != 1 {
+		t.Errorf("exported turns carries %d foreign keys, want 1", constraints)
+	}
+}
+
+// TestExport_CopyTo_Ugly_SourceRemoved — the source file is unlinked after
+// Open. The driver keeps its own descriptor, so the archive is still fully
+// readable, and the export therefore SUCCEEDS with the data intact.
+//
+// This assertion is the inverse of the one it replaces. The old CopyTo
+// re-opened the source by path to byte-copy it, so an unlinked file made the
+// export fail — the previous test pinned that "open source" branch by name.
+// Re-opening by path is exactly what does not work on Windows, where DuckDB
+// holds its file without FILE_SHARE_READ; the engine now copies from its own
+// open database, so a path that has gone away no longer costs the user their
+// export. Failing here would now be the bug.
 func TestExport_CopyTo_Ugly_SourceRemoved(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chats.duckdb")
@@ -83,14 +244,34 @@ func TestExport_CopyTo_Ugly_SourceRemoved(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer h.Close()
-	if _, err := h.StartConversation(NewConversation{ModelID: "x"}); err != nil {
+	conversationID, err := h.StartConversation(NewConversation{ModelID: "x"})
+	if err != nil {
 		t.Fatalf("StartConversation: %v", err)
 	}
 	if r := core.Remove(path); !r.OK {
 		t.Fatalf("remove source: %v", r.Value)
 	}
-	err = h.CopyTo(filepath.Join(dir, "copy.duckdb"))
-	core.AssertTrue(t, err != nil)
+
+	dest := filepath.Join(dir, "copy.duckdb")
+	if err := h.CopyTo(dest); err != nil {
+		t.Fatalf("CopyTo after source unlink: %v", err)
+	}
+
+	// The export is not merely present — it carries the row written before
+	// the unlink, which is the claim that matters.
+	copied, err := Open("snider", dest)
+	if err != nil {
+		t.Fatalf("Open(export): %v", err)
+	}
+	defer copied.Close()
+	conversations, err := copied.RecentConversations(10)
+	if err != nil {
+		t.Fatalf("RecentConversations(export): %v", err)
+	}
+	if len(conversations) != 1 || conversations[0].ID != conversationID {
+		t.Fatalf("export carried %d conversations (%+v), want the one written before the unlink (%s)",
+			len(conversations), conversations, conversationID)
+	}
 }
 
 // TestExport_ExportJSONL_Bad_EmptyDest — an empty destination is rejected.

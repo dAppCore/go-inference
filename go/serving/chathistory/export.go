@@ -3,17 +3,42 @@
 package chathistory
 
 import (
+	"context"
 	"database/sql"
-	"io"
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/pathx"
 )
 
-// CopyTo copies the live DuckDB file to dest. The user-friendly export
-// path: hand them a single .duckdb they can open in any tool. The
-// source file is checkpointed first to ensure all WAL writes are
-// flushed into the main file.
+// exportAttachAlias is the catalog name the destination is attached under for
+// the duration of a CopyTo. It only has to avoid colliding with the live
+// database's own name; a second concurrent CopyTo fails cleanly at ATTACH
+// rather than interleaving into one another's output.
+const exportAttachAlias = "chathistory_export"
+
+// exportCopyOrder lists the tables in foreign-key dependency order: a row in
+// turns references conversations, and a row in embeddings references turns, so
+// a parent is always populated before its children.
+//
+// This ordering is the whole reason the copy is written out table by table
+// rather than handed to DuckDB's COPY FROM DATABASE, which does not
+// topologically sort and fails partway with "Violates foreign key constraint
+// because key ... does not exist in the referenced table".
+var exportCopyOrder = []string{"conversations", "turns", "embeddings"}
+
+// CopyTo writes the live history to dest as a standalone DuckDB file. The
+// user-friendly export path: hand them a single .duckdb they can open in any
+// tool. The archive is checkpointed first so WAL writes are folded in.
+//
+// DuckDB performs the copy itself — the destination is ATTACHed, given the
+// same schema from the same embedded migration, and populated from the live
+// tables. Nothing re-opens the source file by path. That second descriptor was
+// not portable: on Windows DuckDB holds its database file without
+// FILE_SHARE_READ, so opening it again fails outright with "The process cannot
+// access the file because it is being used by another process". Letting the
+// engine read from its own open database also means the export is a consistent
+// snapshot rather than a byte copy racing concurrent writers.
 //
 // This is the simplest export — the file IS the format. For tools
 // that prefer line-delimited records, ExportJSONL.
@@ -26,38 +51,133 @@ func (h *History) CopyTo(dest string) error {
 	if core.Trim(dest) == "" {
 		return core.E("chathistory.CopyTo", "dest required", nil)
 	}
-	if _, err := h.db.Exec(`CHECKPOINT`); err != nil {
+
+	ctx := context.Background()
+	// One pinned connection for the whole operation: USE is connection-scoped
+	// under database/sql's pool, so running the steps across arbitrary pooled
+	// connections would apply the schema to the wrong catalog.
+	conn, err := h.db.Conn(ctx)
+	if err != nil {
+		return core.E("chathistory.CopyTo", "acquire connection", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `CHECKPOINT`); err != nil {
 		return core.E("chathistory.CopyTo", "checkpoint", err)
 	}
-	srcResult := core.Open(h.path)
-	if !srcResult.OK {
-		return core.E("chathistory.CopyTo", "open source", srcResult.Value.(error))
-	}
-	src := srcResult.Value.(*core.OSFile)
-	defer src.Close()
-	if dir := core.PathDir(dest); dir != "" {
+	// pathx.Dir, not core.PathDir: the latter matches only the platform
+	// separator, so a '/'-spelled dest on Windows reports "." and the nested
+	// parent is never created. "" means "no parent component".
+	if dir := pathx.Dir(dest); dir != "" {
 		if r := core.MkdirAll(dir, 0o755); !r.OK {
 			return core.E("chathistory.CopyTo", "mkdir dest parent", r.Value.(error))
 		}
 	}
-	dstResult := core.Create(dest)
-	if !dstResult.OK {
-		return core.E("chathistory.CopyTo", "create dest", dstResult.Value.(error))
+	// ATTACH opens an existing file rather than truncating it, so a stale
+	// export would be merged into instead of replaced. Clear it first —
+	// but only when it is a regular file. os.Remove deletes an empty
+	// directory without complaint, and a caller who names a directory by
+	// mistake must get ATTACH's error, not have that directory silently
+	// deleted. A missing dest is the normal case, not an error.
+	if err := clearExportFile(dest); err != nil {
+		return core.E("chathistory.CopyTo", "clear dest", err)
 	}
-	dst := dstResult.Value.(*core.OSFile)
-	// Close error matters on the success path — disk-full /
-	// network-drive errors often surface only at Close, not during
-	// Write. Defer here would discard them. Explicit Close after
-	// Copy means a partial-file failure becomes a returned error
-	// rather than a "succeeded but file is corrupt" surprise.
-	if _, err := io.Copy(dst, src); err != nil {
-		_ = dst.Close()
-		return core.E("chathistory.CopyTo", "copy bytes", err)
+
+	var source string
+	if err := conn.QueryRowContext(ctx, `SELECT current_database()`).Scan(&source); err != nil {
+		return core.E("chathistory.CopyTo", "current database", err)
 	}
-	if err := dst.Close(); err != nil {
-		return core.E("chathistory.CopyTo", "close dest", err)
+	// Every statement below reports through one wrapper, so the failure path
+	// is a single arm exercised by any one of them rather than a dozen
+	// near-identical ones that only fault injection could reach.
+	run := func(step, statement string) error {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			return core.E("chathistory.CopyTo", step, err)
+		}
+		return nil
+	}
+
+	if err := run("attach dest", `ATTACH `+sqlQuote(dest)+` AS `+sqlIdent(exportAttachAlias)); err != nil {
+		return err
+	}
+	if err := copyInto(run, source); err != nil {
+		_, _ = conn.ExecContext(ctx, `DETACH `+sqlIdent(exportAttachAlias))
+		return err
+	}
+	// DETACH is what flushes and closes the destination file, so its error
+	// matters on the success path for the same reason a file Close's did: a
+	// disk-full surfaces here, not during the writes.
+	return run("detach dest", `DETACH `+sqlIdent(exportAttachAlias))
+}
+
+// copyInto builds the destination schema and fills it, running each statement
+// through run. The destination is attached on entry and detached by the caller
+// either way.
+func copyInto(run func(step, statement string) error, source string) error {
+	// Replay the same embedded migration that Open applies, so the export is
+	// schema-identical to a live archive — primary keys, foreign keys and
+	// indexes included, none of which a CREATE TABLE AS SELECT would carry.
+	// The DDL is unqualified, so the catalog is switched rather than the
+	// statements rewritten.
+	steps := []struct{ step, statement string }{
+		{"select dest catalog", `USE ` + sqlIdent(exportAttachAlias)},
+		{"apply dest schema", initSchema},
+		{"restore source catalog", `USE ` + sqlIdent(source)},
+		// The migration already records the version it introduces; carry
+		// across any later rows without disturbing it.
+		{"copy schema_version",
+			`INSERT INTO ` + sqlIdent(exportAttachAlias) + `.schema_version
+			 SELECT * FROM schema_version ON CONFLICT (version) DO NOTHING`},
+	}
+	for _, table := range exportCopyOrder {
+		steps = append(steps, struct{ step, statement string }{
+			"copy " + table,
+			`INSERT INTO ` + sqlIdent(exportAttachAlias) + `.` + sqlIdent(table) +
+				` SELECT * FROM ` + sqlIdent(table),
+		})
+	}
+	for _, s := range steps {
+		if err := run(s.step, s.statement); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// clearExportFile removes dest when it is an existing regular file, so ATTACH
+// creates the export fresh rather than opening and merging into a stale one.
+// A directory is deliberately left in place: os.Remove would delete an empty
+// one, turning a mistyped destination into silent data loss, so it is handed
+// to ATTACH to refuse instead.
+func clearExportFile(dest string) error {
+	stat := core.Stat(dest)
+	if !stat.OK {
+		return nil // absent, or unreadable — ATTACH reports the latter
+	}
+	info, ok := stat.Value.(core.FsFileInfo)
+	if !ok || info.IsDir() {
+		return nil
+	}
+	if r := core.Remove(dest); !r.OK {
+		if removeErr, ok := r.Value.(error); ok && !core.IsNotExist(removeErr) {
+			return removeErr
+		}
+	}
+	return nil
+}
+
+// sqlQuote renders s as a SQL string literal, doubling any embedded quote.
+// Export destinations are caller-supplied paths, and a path may legally
+// contain a single quote on both POSIX and Windows.
+func sqlQuote(s string) string {
+	return "'" + core.Replace(s, "'", "''") + "'"
+}
+
+// sqlIdent renders s as a quoted SQL identifier, doubling any embedded double
+// quote. DuckDB names a database after its filename, so a source name can
+// carry characters that would not parse bare.
+func sqlIdent(s string) string {
+	return `"` + core.Replace(s, `"`, `""`) + `"`
 }
 
 // JSONLConversation is one record line in the JSONL export. Shape is
