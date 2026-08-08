@@ -208,10 +208,7 @@ func TestAdmin_AdminAddr_Good(t *testing.T) {
 // exited — adminAddr must refuse rather than hand back a dead address.
 func TestAdmin_AdminAddr_Bad(t *testing.T) {
 	dir := t.TempDir()
-	quick := core.PathJoin(dir, "quick")
-	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
-		t.Fatalf("write quick-exit script: %v", r.Value)
-	}
+	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
 	if !sr.OK {
