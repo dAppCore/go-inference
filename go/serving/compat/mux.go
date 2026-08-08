@@ -26,6 +26,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/parser"
+	"dappco.re/go/inference/internal/pathx"
 	anthropiccompat "dappco.re/go/inference/serving/provider/anthropic"
 	ollamacompat "dappco.re/go/inference/serving/provider/ollama"
 	openaicompat "dappco.re/go/inference/serving/provider/openai"
@@ -1241,7 +1242,10 @@ func resolverModelNames(resolver openaicompat.Resolver) []string {
 		return lister.ModelNames()
 	}
 	if backend, ok := resolver.(*openaicompat.BackendResolver); ok && backend != nil && backend.ModelPath != "" {
-		return []string{core.PathBase(backend.ModelPath)}
+		// pathx.Base: the advertised model id must be the file's own name even
+		// when ModelPath arrived '/'-separated on Windows, where core.PathBase
+		// would publish the entire path as the id.
+		return []string{pathx.Base(backend.ModelPath)}
 	}
 	return nil
 }

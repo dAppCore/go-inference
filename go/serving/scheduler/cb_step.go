@@ -75,11 +75,14 @@ type cbReq struct {
 // durations rung).
 func (r *cbReq) stampMetrics() {
 	r.metrics.PrefillDuration = r.prefillDur
+	// measuredSpan, not a bare time.Since: a span the platform clock cannot
+	// resolve still elapsed, and a zero here would suppress the throughput
+	// rates below, whose divides are guarded on a positive duration.
 	if !r.start.IsZero() {
-		r.metrics.TotalDuration = time.Since(r.start)
+		r.metrics.TotalDuration = measuredSpan(r.start)
 	}
 	if !r.decodeStart.IsZero() {
-		r.metrics.DecodeDuration = time.Since(r.decodeStart)
+		r.metrics.DecodeDuration = measuredSpan(r.decodeStart)
 	}
 	if r.prefillDur > 0 && r.metrics.PromptTokens > 0 {
 		r.metrics.PrefillTokensPerSec = float64(r.metrics.PromptTokens) / r.prefillDur.Seconds()
@@ -249,6 +252,18 @@ type cbPrepared struct {
 	prepDur time.Duration // the BeginPrepare span — the request's honest PrefillDuration
 }
 
+// measuredSpan reports the time elapsed since start, floored at one
+// nanosecond. Work that finished faster than the platform's monotonic tick can
+// resolve — Windows' clock returns exactly 0 for a sub-microsecond span — still
+// happened, and reporting 0 would both blank the duration and suppress the
+// throughput rate derived from it, whose divide is guarded on a positive span.
+func measuredSpan(start time.Time) time.Duration {
+	if elapsed := time.Since(start); elapsed > 0 {
+		return elapsed
+	}
+	return time.Nanosecond
+}
+
 // run is the single drive-loop goroutine: it owns the lane set, the pending
 // queue, and the lane→request map outright (single-writer, no lock).
 //
@@ -299,7 +314,7 @@ func (e *cbStepEngine) run() {
 			e.cancelled.Add(1)
 			return
 		}
-		req.prefillDur = time.Since(prepStart)
+		req.prefillDur = measuredSpan(prepStart)
 		req.decodeStart = time.Now()
 		byLane[h.ID] = req
 		e.admitted.Add(1)
@@ -324,7 +339,7 @@ func (e *cbStepEngine) run() {
 			go func(req *cbReq) {
 				prepStart := time.Now()
 				p, err := overlap.BeginPrepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops, Sampler: req.sampler})
-				prepCh <- cbPrepared{req: req, p: p, err: err, prepDur: time.Since(prepStart)}
+				prepCh <- cbPrepared{req: req, p: p, err: err, prepDur: measuredSpan(prepStart)}
 			}(req)
 		}
 		e.queued.Store(int64(len(pending)))

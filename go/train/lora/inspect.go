@@ -12,6 +12,7 @@ import (
 	"slices"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/pathx"
 	"dappco.re/go/inference/model/state"
 )
 
@@ -101,7 +102,7 @@ func Inspect(path string, identityPath string) (AdapterInfo, error) {
 		return AdapterInfo{}, core.E("lora.Inspect", "parse adapter_config.json", err)
 	}
 	info := AdapterInfo{
-		Name:       core.PathBase(identityPath),
+		Name:       pathx.Base(identityPath),
 		Path:       identityPath,
 		Rank:       cfg.Rank,
 		Alpha:      cfg.Alpha,
@@ -116,10 +117,9 @@ func adapterConfigPath(path string) string {
 	return adapterConfigPathPrecomputed(path, core.HasSuffix(path, ".safetensors"))
 }
 
-// adapterConfigSuffix carries the leading separator inline so the
-// concat-path can drop it cheaply when the input already ends in '/'
-// (matching filepath.Join's separator-collapse semantics).
-const adapterConfigSuffix = "/adapter_config.json"
+// adapterConfigFilename is the sidecar an adapter directory carries; pathx.Join
+// supplies whichever separator the directory is already written with.
+const adapterConfigFilename = "adapter_config.json"
 
 // joinDirChildPattern concatenates a directory path with a relative
 // child segment, collapsing the duplicate separator when dir already
@@ -143,26 +143,27 @@ func joinDirChildPattern(dir, child string) string {
 // adapterConfigPath; the Inspect hot path computes the .safetensors
 // suffix check once and threads the result through this helper.
 //
-// Builds the joined path with a direct concat instead of routing through
+// Builds the joined path with pathx.Join instead of routing through
 // core.PathJoin (filepath.Join → filepath.Clean): filepath.Clean always
 // allocates an internal lazybuf even when the inputs are already canonical,
 // roughly doubling the cost of producing the result string. Both Inspect
 // callers feed an already-cleaned adapter path, so the only normalisation
-// we need is the "collapse a duplicate '/'" rule that filepath.Join uses
-// when joining a path that already ends in '/'.
+// we need is the trailing-separator collapse, which pathx.Join does.
+//
+// pathx rather than core for the split as well: core.PathDir matches only the
+// platform separator, so on Windows it reports "." for the whole of a
+// '/'-spelled adapter path and the sidecar is looked for in the wrong place.
 func adapterConfigPathPrecomputed(path string, isSafetensors bool) string {
 	base := path
 	if isSafetensors {
-		// PathDir returns a substring of path (no alloc); strip the
+		// pathx.Dir returns a substring of path (no alloc); strip the
 		// trailing weight-file segment so the join targets the parent dir.
-		base = core.PathDir(path)
+		// A bare filename has no parent — its sidecar sits beside it.
+		if base = pathx.Dir(path); base == "" {
+			base = "."
+		}
 	}
-	// Trailing-slash collapse: when base ends in '/', skip the leading
-	// '/' from adapterConfigSuffix to avoid producing "//adapter_config".
-	if len(base) > 0 && base[len(base)-1] == '/' {
-		return base + adapterConfigSuffix[1:]
-	}
-	return base + adapterConfigSuffix
+	return pathx.Join(base, adapterConfigFilename)
 }
 
 func hashAdapter(path string, config []byte) string {

@@ -4,12 +4,25 @@ package blockcache
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	state "dappco.re/go/inference/model/state"
 )
+
+// requirePOSIXDirPermissions skips a test whose fault injection is a
+// chmod'd read-only directory. On Windows os.Chmod only toggles
+// FILE_ATTRIBUTE_READONLY, which does not deny creating or unlinking
+// entries inside a directory, so the failure arm under test never fires
+// and the assertion would report a false negative.
+func requirePOSIXDirPermissions(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod cannot deny directory writes on Windows (FILE_ATTRIBUTE_READONLY only)")
+	}
+}
 
 // recordingStateWriter is a test stub that returns a fixed ChunkRef and records
 // the last payload it received. It lets the State cold-store success path be
@@ -215,6 +228,7 @@ func TestBlockcache_Service_DiskRecordUnreadableQuarantined(t *testing.T) {
 // WriteFile-failure branch: a read-only DiskPath directory already exists (so the
 // inner MkdirAll no-ops), but the block record cannot be written into it.
 func TestBlockcache_Service_WarmCacheWriteFailure(t *testing.T) {
+	requirePOSIXDirPermissions(t)
 	diskPath := core.PathJoin(t.TempDir(), "blocks")
 	if result := core.MkdirAll(diskPath, 0o700); !result.OK {
 		t.Fatalf("MkdirAll(diskPath) error = %s", result.Error())
@@ -256,6 +270,7 @@ func TestBlockcache_Service_ClearCacheRunsRuntimeHook(t *testing.T) {
 // DiskPath's parent directory is made read-only, so the post-load RemoveAll
 // inside clearDiskLocked cannot unlink the block directory.
 func TestBlockcache_Service_ClearCacheDiskFailure(t *testing.T) {
+	requirePOSIXDirPermissions(t)
 	parent := core.PathJoin(t.TempDir(), "parent")
 	diskPath := core.PathJoin(parent, "blocks")
 	if result := core.MkdirAll(diskPath, 0o700); !result.OK {
@@ -313,6 +328,7 @@ func TestBlockcache_Service_DiskBytesStatFallback(t *testing.T) {
 // labelled block is persisted, the DiskPath directory is made read-only, so
 // unlinking the matched block's record file fails and the error is surfaced.
 func TestBlockcache_Service_ClearCacheRemoveBlockFailure(t *testing.T) {
+	requirePOSIXDirPermissions(t)
 	diskPath := core.PathJoin(t.TempDir(), "blocks")
 	if result := core.MkdirAll(diskPath, 0o700); !result.OK {
 		t.Fatalf("MkdirAll(diskPath) error = %s", result.Error())

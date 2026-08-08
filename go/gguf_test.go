@@ -35,7 +35,9 @@ func TestGGUF_ReadGGUFInfo_Bad(t *testing.T) {
 
 func TestGGUF_DiscoverModels_Ugly(t *testing.T) {
 	dir := t.TempDir()
-	path := writeMinimalGGUFAt(t, core.JoinPath(dir, "model.gguf"), map[string]any{
+	// PathJoin (filepath.Join), not JoinPath (always '/'): the expectation is
+	// compared against a path DiscoverModels built with native separators.
+	path := writeMinimalGGUFAt(t, core.PathJoin(dir, "model.gguf"), map[string]any{
 		"general.architecture": "gemma4_text",
 		"general.file_type":    uint32(7),
 	})

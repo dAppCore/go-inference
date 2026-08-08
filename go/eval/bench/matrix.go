@@ -8,6 +8,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/pathx"
 )
 
 // matrix.go is the multi-model layer over the single-model harness: a bench MATRIX is a list of
@@ -94,7 +95,10 @@ func LoadMatrixConfig(data []byte) (MatrixConfig, error) {
 			return cfg, core.NewError(core.Sprintf("bench.LoadMatrixConfig: run %d has no model", i))
 		}
 		if run.Name == "" {
-			run.Name = core.PathBase(core.Trim(run.Model))
+			// pathx.Base: run.Model is a hub ref as often as a path
+			// ("org/model-a"), and those are '/'-separated everywhere —
+			// core.PathBase would name the whole ref on Windows.
+			run.Name = pathx.Base(core.Trim(run.Model))
 		}
 		if len(run.Lanes) == 0 {
 			run.Lanes = []string{MatrixLanePlain}
@@ -229,7 +233,7 @@ func RunMatrix(ctx context.Context, cfg MatrixConfig, load MatrixLoad, out io.Wr
 			}
 			name := run.Name
 			if name == "" {
-				name = core.PathBase(core.Trim(run.Model)) // positional runs bypass LoadMatrixConfig's defaulting
+				name = pathx.Base(core.Trim(run.Model)) // positional runs bypass LoadMatrixConfig's defaulting
 			}
 			row := MatrixRow{Name: name, Lane: lane, Model: run.Model, Draft: run.Draft}
 			row = runMatrixLane(ctx, row, run, lane, tokens, cfg, load)

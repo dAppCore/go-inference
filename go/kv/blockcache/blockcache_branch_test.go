@@ -66,6 +66,7 @@ func TestBlockcache_Service_WriteDiskBlockMkdirFailure(t *testing.T) {
 // passes; the subsequent MkdirAll that recreates the cache directory then
 // fails on the read-only parent, surfacing the recreate error.
 func TestBlockcache_Service_ClearDiskRecreateFailure(t *testing.T) {
+	requirePOSIXDirPermissions(t)
 	parent := core.PathJoin(t.TempDir(), "parent")
 	if result := core.MkdirAll(parent, 0o700); !result.OK {
 		t.Fatalf("MkdirAll(parent) error = %s", result.Error())

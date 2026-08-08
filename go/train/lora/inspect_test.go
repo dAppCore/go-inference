@@ -353,7 +353,11 @@ func TestInspect_Inspect_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Inspect() error = %v", err)
 	}
-	if info.Path != identityPath || info.Name != core.PathBase(identityPath) {
+	// The expected name is spelled out rather than recomputed with a path
+	// helper: core.PathBase matches only the platform separator and would
+	// hand back the whole identityPath on Windows, so asserting against it
+	// would pin the bug pathx.Base exists to fix.
+	if info.Path != identityPath || info.Name != "support-tone" {
 		t.Fatalf("adapter identity = %+v, want name/path derived from identityPath %q", info, identityPath)
 	}
 	if info.Rank != 8 || info.Alpha != 16 || info.Hash == "" {
