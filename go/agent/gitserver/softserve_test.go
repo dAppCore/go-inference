@@ -4,6 +4,7 @@ package gitserver
 
 import (
 	"context"
+	"runtime"
 	"testing"
 	"time"
 
@@ -47,8 +48,18 @@ func gitserverTestService(t *testing.T) (*softServe, Repository) {
 	return service, repositoryResult.Value.(Repository)
 }
 
+// gitserverRunGit runs one git command in directory and returns its trimmed
+// combined output.
+//
+// core.autocrlf is pinned off for every invocation. Git for Windows turns it
+// on by default, which rewrites LF to CRLF on checkout — the round-trip
+// fixture pushed as "private fixture\n" came back as "private fixture\r\n".
+// These tests assert that softserve moves bytes through intact; they are not
+// a statement about any platform's line-ending policy, and normalising the
+// comparison instead would hide a real corruption behind the same green.
 func gitserverRunGit(t *testing.T, directory string, environment []string, args ...string) string {
 	t.Helper()
+	args = append([]string{"-c", "core.autocrlf=false"}, args...)
 	result := command.Command(context.Background(), "git", args...).
 		WithDir(directory).
 		WithEnv(environment).
@@ -241,6 +252,17 @@ func TestSoftserveGitRoundTrip(t *testing.T) {
 func TestSoftservePermissions(t *testing.T) {
 	service, repository := gitserverTestService(t)
 	core.AssertTrue(t, service.Health(context.Background()).Value.(Health).Running)
+
+	// The confidentiality this pins — a private data dir and an SSH identity
+	// no one else can read — is a POSIX mode question, and Windows has no
+	// such bits: os.Stat synthesises 0777 for a directory and 0666 for a
+	// writable file, so these read 0o777/0o666 there however the real access
+	// control is set. Windows governs it by ACL, which core.FileMode cannot
+	// express, let alone assert. Startup above is still exercised on Windows;
+	// only the unassertable part is skipped.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not represented on Windows; ACLs govern and FileMode cannot assert them")
+	}
 
 	dataInfo := core.Stat(service.options.DataPath)
 	core.AssertTrue(t, dataInfo.OK, dataInfo.Error())
