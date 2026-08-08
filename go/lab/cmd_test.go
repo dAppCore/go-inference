@@ -167,7 +167,10 @@ func TestCmd_RunServe_Bad_ListenAddrInUse(t *core.T) {
 	got := r.Error()
 
 	core.AssertFalse(t, r.OK)
-	core.AssertContains(t, got, "in use")
+	// Assert on the syscall stage, not the errno text: POSIX says "address
+	// already in use", Windows says "Only one usage of each socket address
+	// ... is normally permitted". Both are reported as a bind failure.
+	core.AssertContains(t, got, "bind:")
 }
 
 func TestCmd_newServeMux_Good(t *core.T) {

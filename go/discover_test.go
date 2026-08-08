@@ -314,14 +314,21 @@ func TestDiscover_Good_AbsolutePath(t *testing.T) {
 }
 
 func TestDiscover_Good_RelativeBaseDir(t *testing.T) {
-	base := t.TempDir()
-	createModelDir(t, core.JoinPath(base, "relative-model"), map[string]any{
-		"model_type": "gemma3",
-	}, 1)
-
 	cwdResult := core.Getwd()
 	checkResultOK(t, cwdResult)
 	cwd := cwdResult.Value.(string)
+
+	// The base must sit under the working directory, not in t.TempDir():
+	// PathRel cannot express a path that crosses volumes, and on Windows CI
+	// the checkout ("D:\a\...") and TEMP ("C:\Users\...") are different drives.
+	baseResult := core.MkdirTemp(cwd, "discover-relative")
+	checkResultOK(t, baseResult)
+	base := baseResult.Value.(string)
+	t.Cleanup(func() { core.RemoveAll(base) })
+
+	createModelDir(t, core.PathJoin(base, "relative-model"), map[string]any{
+		"model_type": "gemma3",
+	}, 1)
 
 	relBaseResult := core.PathRel(cwd, base)
 	checkResultOK(t, relBaseResult)

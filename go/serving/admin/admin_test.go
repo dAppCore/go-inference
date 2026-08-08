@@ -5,6 +5,7 @@ package admin
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -15,6 +16,18 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
+
+// jsonString renders s as a JSON string literal. Test bodies interpolate
+// filesystem paths, and a Windows path ("C:\Users\...") pasted raw into a
+// quoted JSON literal is a decode error — "\U" is not a valid escape.
+func jsonString(t *testing.T, s string) string {
+	t.Helper()
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal %q: %v", s, err)
+	}
+	return string(encoded)
+}
 
 // fakeReloader records the path (and load options) it was asked to swap in.
 // err, when set, makes ReloadModel fail without mutating current/gotPath —
@@ -341,7 +354,7 @@ func TestReloadHandler_ModelPath_Good(t *testing.T) {
 	rl := &fakeReloader{current: "/models/old"}
 	mux := NewMux(Config{Reloader: rl})
 
-	body := `{"model_path":"` + dir + `","confirm_machine":"` + MachineHash() +
+	body := `{"model_path":` + jsonString(t, dir) + `,"confirm_machine":"` + MachineHash() +
 		`","context_length":4096,"adapter_path":"/adapters/lora"}`
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathReload, strings.NewReader(body)))
@@ -372,7 +385,7 @@ func TestReloadHandler_ModelPathEscapesDir_Bad(t *testing.T) {
 	rl := &fakeReloader{current: "/models/old"}
 	mux := NewMux(Config{Reloader: rl})
 
-	body := `{"model_path":"` + outside + `","confirm_machine":"` + MachineHash() + `"}`
+	body := `{"model_path":` + jsonString(t, outside) + `,"confirm_machine":"` + MachineHash() + `"}`
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, PathReload, strings.NewReader(body)))
 

@@ -150,6 +150,10 @@ func reloadFail(w http.ResponseWriter, log io.Writer, from, target, reason strin
 // PathRel containment test (not a raw string prefix — a case-insensitive
 // filesystem can hand back a different casing that a byte-prefix check would
 // falsely reject).
+//
+// The escape arm tests the native separator as well as '/': PathRel returns an
+// OS-native relative path, so on Windows an escaping result reads "..\evil",
+// which a '/'-only prefix check would wave through as contained.
 func pathWithinDir(rootResolved, resolved string) bool {
 	if resolved == rootResolved {
 		return true
@@ -162,10 +166,20 @@ func pathWithinDir(rootResolved, resolved string) bool {
 	if r == "" || r == "." {
 		return true
 	}
-	if r == ".." || core.HasPrefix(r, "../") || core.PathIsAbs(r) {
+	if r == ".." || hasParentPrefix(r) || core.PathIsAbs(r) {
 		return false
 	}
 	return true
+}
+
+// hasParentPrefix reports whether a relative path opens with a parent-dir
+// segment under either separator convention.
+func hasParentPrefix(rel string) bool {
+	if core.HasPrefix(rel, "../") {
+		return true
+	}
+	separator := core.Env("DS")
+	return separator != "" && separator != "/" && core.HasPrefix(rel, ".."+separator)
 }
 
 // bindModelPathToStandardDir accepts an absolute model path and verifies it

@@ -4,6 +4,7 @@ package bundle
 
 import (
 	"math"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -260,7 +261,14 @@ func TestBundle_FileHash_OpenErrorMissing(t *testing.T) {
 // ReadFull-failure branch: opening a directory succeeds and its reported size
 // is below the streaming threshold, so FileHash takes the buffer path, but
 // reading bytes from a directory descriptor fails (EISDIR).
+//
+// POSIX-only: Windows reports a directory's Stat size as 0, so ReadFull is
+// handed a zero-length buffer and returns nil without ever touching the
+// descriptor — the read-failure arm is unreachable there.
 func TestBundle_FileHash_ReadErrorOnDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory Stat reports size 0 on Windows, so the ReadFull arm cannot fail")
+	}
 	dir := t.TempDir()
 	if _, err := FileHash(dir); err == nil {
 		t.Fatal("FileHash(directory) error = nil, want read error")
