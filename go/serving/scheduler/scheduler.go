@@ -82,6 +82,19 @@ type Stats struct {
 	Active     int64 // requests currently running
 	Queued     int64 // requests currently waiting for a slot
 	MaxRunning int64 // largest running-set ever co-resident (batch witness)
+
+	// LiveWorkers is the number of serial-mode worker goroutines still
+	// running: MaxConcurrent from New until CloseEngine joins them, then 0.
+	// Because closeSerialEngine waits on workerWG and each worker decrements
+	// this BEFORE calling Done, a zero here after CloseEngine returns is a
+	// guarantee rather than a sample — which is what makes it usable as a
+	// teardown assertion where runtime.NumGoroutine is not.
+	//
+	// Serial mode only. Batch and interleave report 0: their engines own
+	// their own goroutines and join them in their own close(), and interleave
+	// spawns one per in-flight request rather than holding a fixed pool, so
+	// there is no comparable constant to report.
+	LiveWorkers int64
 }
 
 // Model wraps an inference.TextModel and schedules requests through the mode
@@ -138,6 +151,12 @@ type Model struct {
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	workerWG  sync.WaitGroup
+
+	// liveWorkers counts the serial workers still running, so teardown is
+	// observable from the scheduler itself. Set at New alongside workerWG.Add
+	// and decremented in each worker's defer BEFORE Done, which makes it
+	// exactly 0 by the time closeSerialEngine's Wait returns.
+	liveWorkers atomic.Int64
 
 	// --- non-serial engines (exactly one is non-nil off serial) ---
 	batch *batchEngine
@@ -319,6 +338,7 @@ func New(model inference.TextModel, cfg Config) (*Model, error) {
 		m.queue = make(chan *job, max(cfg.MaxQueue, 0))
 		m.closeCh = make(chan struct{})
 		m.workerWG.Add(m.maxConcurrent)
+		m.liveWorkers.Store(int64(m.maxConcurrent))
 		for worker := range m.maxConcurrent {
 			go m.worker(worker)
 		}
@@ -486,10 +506,11 @@ func (m *Model) Stats() Stats {
 		queued = int64(len(m.queue))
 	}
 	return Stats{
-		Submitted: m.submitted.Load(),
-		Completed: m.completed.Load(),
-		Cancelled: m.cancelled.Load(),
-		Queued:    queued,
+		Submitted:   m.submitted.Load(),
+		Completed:   m.completed.Load(),
+		Cancelled:   m.cancelled.Load(),
+		Queued:      queued,
+		LiveWorkers: m.liveWorkers.Load(),
 	}
 }
 
@@ -739,7 +760,13 @@ func (m *Model) SetProbeSink(sink inference.ProbeSink) {
 }
 
 func (m *Model) worker(_ int) {
-	defer m.workerWG.Done()
+	// Decrement BEFORE Done: closeSerialEngine's Wait unblocks on the last
+	// Done, so ordering it after would let Wait return while a counter read
+	// still saw a live worker — reintroducing the sampling race this replaced.
+	defer func() {
+		m.liveWorkers.Add(-1)
+		m.workerWG.Done()
+	}()
 	for {
 		select {
 		case j := <-m.queue:

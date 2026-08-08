@@ -5,7 +5,6 @@ package serving
 import (
 	"context"
 	"iter"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -129,44 +128,6 @@ func drainScheduledTokens(t *testing.T, ch <-chan inference.ScheduledToken) []in
 			t.Fatalf("drainScheduledTokens: timed out, got %d so far", len(got))
 		}
 	}
-}
-
-// waitGoroutineCount polls runtime.NumGoroutine until want is satisfied or the
-// deadline passes — mirrors serving/scheduler's identically-named test helper
-// (a goroutine's own exit trails the WaitGroup/doneCh signal that unblocks a
-// synchronous Close/CloseEngine call by a scheduling instant, so an immediate
-// read can occasionally observe a stale, still-draining count).
-func waitGoroutineCount(t *testing.T, want func(int) bool) int {
-	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for {
-		n := runtime.NumGoroutine()
-		if want(n) {
-			return n
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("goroutine count never satisfied predicate, last = %d\n\n%s", n, goroutineDump())
-		case <-time.After(2 * time.Millisecond):
-		}
-	}
-}
-
-// goroutineDump renders every live goroutine's stack.
-//
-// runtime.NumGoroutine is process-global, so on its own a failure here reports
-// a number and nothing else — and that number cannot distinguish the two
-// causes. Either a worker under test has not exited, or something unrelated
-// started meanwhile and raised the floor permanently, in which case `n <=
-// before` can never be satisfied however long the deadline. The stacks say
-// which, and this helper exists because guessing between them from an integer
-// is how the flake stayed unfalsifiable across two platforms.
-func goroutineDump() string {
-	// One megabyte holds the whole set for these suites; runtime.Stack
-	// truncates rather than failing if a future one outgrows it, and a
-	// truncated dump still names the goroutines at the top.
-	buf := make([]byte, 1<<20)
-	return string(buf[:runtime.Stack(buf, true)])
 }
 
 // TestMultiModelResolver_New_NoModels_Bad proves construction refuses an empty
@@ -745,7 +706,6 @@ func TestMultiModelResolver_Scheduler_ProfileRouting_Good(t *testing.T) {
 // non-resident with no lingering scheduler reference, and (e) a later resolve
 // rebuilds a FRESH scheduler rather than reusing the torn-down one.
 func TestMultiModelResolver_Scheduler_LoadEvictLifecycle_Good(t *testing.T) {
-	before := runtime.NumGoroutine()
 	base := newBlockingModel("a")
 	r := mustResolver(t, []ModelSpec{{ID: "a", Path: "/m/a"}}, MultiModelOptions{})
 	r.setLoader(func(string, ...inference.LoadOption) (inference.TextModel, error) { return base, nil })
@@ -756,7 +716,15 @@ func TestMultiModelResolver_Scheduler_LoadEvictLifecycle_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve a: %v", err)
 	}
-	waitGoroutineCount(t, func(n int) bool { return n >= before+3 })
+	// Hold the scheduler itself: eviction clears the registry entry, so after
+	// it runs there is nothing left to ask through r.
+	resident := r.entries["a"].sched
+	if resident == nil {
+		t.Fatal("resolved model has no scheduler")
+	}
+	if live := resident.Stats().LiveWorkers; live != 3 {
+		t.Fatalf("LiveWorkers after resolve = %d, want 3", live)
+	}
 
 	sched, ok := model.(inference.SchedulerModel)
 	if !ok {
@@ -802,7 +770,9 @@ func TestMultiModelResolver_Scheduler_LoadEvictLifecycle_Good(t *testing.T) {
 	}
 
 	// The scheduler's goroutines are fully reclaimed.
-	waitGoroutineCount(t, func(n int) bool { return n <= before })
+	if live := resident.Stats().LiveWorkers; live != 0 {
+		t.Fatalf("LiveWorkers after eviction = %d, want 0 — the evicted model's pool leaked", live)
+	}
 
 	// The registry entry is left clean.
 	entry := r.entries["a"]
@@ -926,7 +896,6 @@ func TestMultiModelResolver_List_SchedulerStats_Unconfigured_Good(t *testing.T) 
 // single-model schedulerResolver.close(), which RunServe defers at multi-model
 // serve shutdown so a scheduler-mode serve leaves no goroutines behind.
 func TestMultiModelResolver_CloseSchedulers_Good(t *testing.T) {
-	before := runtime.NumGoroutine()
 	loader, _, _ := countingLoader()
 	r := mustResolver(t, []ModelSpec{
 		{ID: "a", Path: "/m/a"},
@@ -942,11 +911,26 @@ func TestMultiModelResolver_CloseSchedulers_Good(t *testing.T) {
 	if _, err := r.ResolveModel(context.Background(), "b"); err != nil {
 		t.Fatalf("resolve b: %v", err)
 	}
-	waitGoroutineCount(t, func(n int) bool { return n >= before+4 }) // 2 models * 2 workers
+
+	// Hold the schedulers themselves: closeSchedulers clears the registry
+	// entries, so after it runs there is nothing left to ask through r.
+	schedulers := map[string]*scheduler.Model{"a": r.entries["a"].sched, "b": r.entries["b"].sched}
+	for id, sched := range schedulers {
+		if sched == nil {
+			t.Fatalf("model %q resolved without a scheduler", id)
+		}
+		if live := sched.Stats().LiveWorkers; live != 2 {
+			t.Fatalf("model %q LiveWorkers before close = %d, want 2", id, live)
+		}
+	}
 
 	r.closeSchedulers()
 
-	waitGoroutineCount(t, func(n int) bool { return n <= before })
+	for id, sched := range schedulers {
+		if live := sched.Stats().LiveWorkers; live != 0 {
+			t.Fatalf("model %q LiveWorkers after closeSchedulers = %d, want 0 — that model's pool leaked", id, live)
+		}
+	}
 }
 
 // TestMultiModelResolver_CloseSchedulers_Unconfigured_NoOp_Good proves
