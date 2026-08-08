@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 )
 
 // hubSnapshot builds a fake Hugging Face hub entry
@@ -30,7 +31,7 @@ func hubSnapshot(t *testing.T, home, dirName, hash string) string {
 func TestHFModelPath(t *testing.T) {
 	t.Run("exact match", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		testenv.SetHome(t, home)
 		want := hubSnapshot(t, home, "models--mlx-community--gemma-4-e2b-it-6bit", "deadbeef")
 
 		got := HFModelPath(t, "mlx-community/gemma-4-e2b-it-6bit")
@@ -41,7 +42,7 @@ func TestHFModelPath(t *testing.T) {
 
 	t.Run("prefix match", func(t *testing.T) {
 		home := t.TempDir()
-		t.Setenv("HOME", home)
+		testenv.SetHome(t, home)
 		want := hubSnapshot(t, home, "models--mlx-community--Qwen3-Next-80B-A3B", "cafef00d")
 
 		got := HFModelPath(t, "mlx-community/Qwen3-Next*")

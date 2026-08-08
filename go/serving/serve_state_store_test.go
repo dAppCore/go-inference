@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 	"dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/filestore"
 	"dappco.re/go/inference/model/state/ramspill"
@@ -86,7 +87,7 @@ func TestOpenContinuityStore_DurableFile_Ugly(t *testing.T) {
 // scratch spill file exists on disk (created fresh, ready to receive
 // whatever the budget eventually evicts).
 func TestOpenContinuityStore_RAMBudget_Good(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	store, cleanup, where, err := openContinuityStore(context.Background(), "", 64<<10, nil)
 	if err != nil {
 		t.Fatalf("openContinuityStore(ram-budget): %v", err)

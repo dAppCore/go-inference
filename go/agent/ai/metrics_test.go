@@ -6,6 +6,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 	coreio "dappco.re/go/io"
 )
 
@@ -36,7 +37,7 @@ func withTempMetricsHome(t *testing.T) string {
 	tempHome := t.TempDir()
 	t.Setenv("CORE_HOME", "")
 	t.Setenv("DIR_HOME", "")
-	t.Setenv("HOME", tempHome)
+	testenv.SetHome(t, tempHome)
 
 	metricsPath := core.PathJoin(tempHome, "Lethean", "lem", "ai", "metrics")
 	if err := coreio.Local.EnsureDir(metricsPath); err != nil {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 	coreprocess "dappco.re/go/process"
 )
 
@@ -37,7 +38,7 @@ func TestAdmin_CanonicalRepoDir_Ugly(t *testing.T) {
 }
 
 func TestAdmin_AllowRepo_Good(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 
 	if r := AllowRepo("mlx-community/gemma-3-1b-it-4bit"); !r.OK {
 		t.Fatalf("AllowRepo(first) failed: %v", r.Value)
@@ -67,7 +68,7 @@ func TestAdmin_AllowRepo_Good(t *testing.T) {
 }
 
 func TestAdmin_AllowRepo_PreservesExistingEngineFile_Good(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	path := allowedModelsPath()
 	if r := core.MkdirAll(core.PathDir(path), 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)
@@ -88,14 +89,14 @@ func TestAdmin_AllowRepo_PreservesExistingEngineFile_Good(t *testing.T) {
 }
 
 func TestAdmin_AllowRepo_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	if r := AllowRepo("  "); r.OK {
 		t.Fatal("AllowRepo(blank) succeeded, want refusal")
 	}
 }
 
 func TestAdmin_AllowRepo_Ugly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	path := allowedModelsPath()
 	if r := core.MkdirAll(core.PathDir(path), 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)
@@ -122,7 +123,7 @@ func TestAdmin_Service_DownloadModel_Bad(t *testing.T) {
 // TestAdmin_Service_DownloadModel_Ugly covers the environmental edge: a
 // well-formed request against a runtime with no running engine tracked.
 func TestAdmin_Service_DownloadModel_Ugly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	svc := &Service{}
 	if r := svc.DownloadModel(RuntimeMLX, "org/repo", "main"); r.OK {
 		t.Fatal("DownloadModel with no running engine succeeded, want refusal")
@@ -141,7 +142,7 @@ func TestAdmin_Service_DownloadJobStatus_Bad(t *testing.T) {
 // TestAdmin_Service_DownloadJobStatus_Ugly covers the environmental edge: a
 // well-formed poll against a runtime with no running engine tracked.
 func TestAdmin_Service_DownloadJobStatus_Ugly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	svc := &Service{}
 	if r := svc.DownloadJobStatus(RuntimeMLX, "job-1"); r.OK {
 		t.Fatal("DownloadJobStatus with no running engine succeeded, want refusal")
@@ -162,7 +163,7 @@ func seedAdminToken(t *testing.T, token string) {
 }
 
 func TestAdmin_ReadAdminToken_Good(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	seedAdminToken(t, "secret-token\n")
 
 	token, err := readAdminToken()
@@ -175,14 +176,14 @@ func TestAdmin_ReadAdminToken_Good(t *testing.T) {
 }
 
 func TestAdmin_ReadAdminToken_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // resolves fine, but the engine never wrote a token
+	testenv.SetHome(t, t.TempDir()) // resolves fine, but the engine never wrote a token
 	if _, err := readAdminToken(); err == nil {
 		t.Fatal("readAdminToken succeeded with no token file, want failure")
 	}
 }
 
 func TestAdmin_ReadAdminToken_Ugly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	seedAdminToken(t, "   \n")
 	if _, err := readAdminToken(); err == nil {
 		t.Fatal("readAdminToken succeeded over a whitespace-only token file, want failure")
@@ -226,7 +227,7 @@ func TestAdmin_AdminAddr_Bad(t *testing.T) {
 }
 
 func TestAdmin_AdminRoundTrip_Good(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	seedAdminToken(t, "tok")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer tok" {
@@ -250,7 +251,7 @@ func TestAdmin_AdminRoundTrip_Good(t *testing.T) {
 }
 
 func TestAdmin_AdminRoundTrip_Bad(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	seedAdminToken(t, "tok")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -268,7 +269,7 @@ func TestAdmin_AdminRoundTrip_Bad(t *testing.T) {
 }
 
 func TestAdmin_AdminRoundTrip_Ugly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	seedAdminToken(t, "tok")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -290,7 +291,7 @@ func TestAdmin_AdminRoundTrip_Ugly(t *testing.T) {
 // driver-side plumbing — resolve the running engine's address, default the
 // revision, authenticate, decode the reply — all has to line up.
 func TestAdmin_Service_DownloadModel_Good(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	seedAdminToken(t, "tok")
 
 	var gotBody []byte
@@ -324,7 +325,7 @@ func TestAdmin_Service_DownloadModel_Good(t *testing.T) {
 // TestAdmin_Service_DownloadJobStatus_Good polls a job by id against a fake
 // engine and confirms the decoded status snapshot comes back intact.
 func TestAdmin_Service_DownloadJobStatus_Good(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 	seedAdminToken(t, "tok")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

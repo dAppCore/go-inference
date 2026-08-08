@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 	coreio "dappco.re/go/io"
 )
 
@@ -83,7 +84,7 @@ func TestWorker_ReadKeyFile_Good(t *core.T) {
 	home := t.TempDir()
 	core.RequireNoError(t, coreio.Local.EnsureDir(core.Path(home, ".config", "lem")))
 	core.RequireNoError(t, coreio.Local.Write(core.Path(home, ".config", "lem", "api_key"), "  secret-key-123  \n"))
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 
 	got := ReadKeyFile()
 	core.AssertEqual(t, "secret-key-123", got)
@@ -92,7 +93,7 @@ func TestWorker_ReadKeyFile_Good(t *core.T) {
 func TestWorker_ReadKeyFile_Bad(t *core.T) {
 	// An empty HOME makes core.UserHomeDir() itself fail, short-circuiting
 	// before the key file is ever looked up.
-	t.Setenv("HOME", "")
+	testenv.SetHome(t, "")
 
 	got := ReadKeyFile()
 	core.AssertEqual(t, "", got)
@@ -100,7 +101,7 @@ func TestWorker_ReadKeyFile_Bad(t *core.T) {
 
 func TestWorker_ReadKeyFile_Ugly(t *core.T) {
 	// HOME resolves fine, but ~/.config/lem/api_key does not exist there.
-	t.Setenv("HOME", t.TempDir())
+	testenv.SetHome(t, t.TempDir())
 
 	got := ReadKeyFile()
 	core.AssertEqual(t, "", got)

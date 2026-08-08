@@ -11,6 +11,7 @@ import (
 
 	core "dappco.re/go"
 	coreprovider "dappco.re/go/api/pkg/provider"
+	"dappco.re/go/inference/internal/testenv"
 	"github.com/gin-gonic/gin"
 )
 
@@ -158,7 +159,7 @@ func TestProvider_RegisterRoutes_Ugly(t *testing.T) {
 
 func TestProvider_Models_Good(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	modelsDir := core.PathJoin(home, "Lethean", "lem", "models")
 	if r := core.MkdirAll(modelsDir, 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)
@@ -183,7 +184,7 @@ func TestProvider_Models_Good(t *testing.T) {
 }
 
 func TestProvider_Models_Bad(t *testing.T) {
-	t.Setenv("HOME", "")
+	testenv.SetHome(t, "")
 	p := NewProvider(&Service{})
 	engine := gin.New()
 	w := httptest.NewRecorder()
