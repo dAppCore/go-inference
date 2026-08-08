@@ -288,10 +288,7 @@ func TestDriver_Service_Stop_Bad(t *testing.T) {
 // treated as a successful stop, not surfaced as an error.
 func TestDriver_Service_Stop_Ugly(t *testing.T) {
 	dir := t.TempDir()
-	quick := core.PathJoin(dir, "quick")
-	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
-		t.Fatalf("write quick-exit script: %v", r.Value)
-	}
+	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
 	if !sr.OK {
@@ -333,10 +330,7 @@ func TestDriver_Service_Status_Good(t *testing.T) {
 // the last-known snapshot.
 func TestDriver_Service_Status_Bad(t *testing.T) {
 	dir := t.TempDir()
-	quick := core.PathJoin(dir, "quick")
-	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
-		t.Fatalf("write quick-exit script: %v", r.Value)
-	}
+	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
 	if !sr.OK {
@@ -366,10 +360,7 @@ func TestDriver_Service_Status_Bad(t *testing.T) {
 // stale one, and vice versa.
 func TestDriver_Service_Status_Ugly(t *testing.T) {
 	dir := t.TempDir()
-	quick := core.PathJoin(dir, "quick")
-	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
-		t.Fatalf("write quick-exit script: %v", r.Value)
-	}
+	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
 	if !sr.OK {
@@ -661,10 +652,7 @@ func TestDriver_Running_Bad(t *testing.T) {
 
 func TestDriver_Running_Ugly(t *testing.T) {
 	dir := t.TempDir()
-	quick := core.PathJoin(dir, "quick")
-	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
-		t.Fatalf("write quick-exit script: %v", r.Value)
-	}
+	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
 	if !sr.OK {

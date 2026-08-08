@@ -542,9 +542,16 @@ func resolveDriverBinary(name string) string {
 		dirs = append(dirs, core.PathJoin(home.Value.(string), "Lethean", "bin"))
 	}
 	for _, d := range dirs {
-		cand := core.PathJoin(d, name)
-		if core.Stat(cand).OK {
-			return cand
+		// Probe through Program.Find rather than Stat-ing the bare candidate.
+		// A driver binary is named without its extension — "lthn-mlx", not
+		// "lthn-mlx.exe" — and on Windows the extensionless path never exists,
+		// so a plain Stat could not find a real install sitting in
+		// CORE_AI_DRIVER_DIR and every lookup fell through to PATH. Find
+		// applies %PATHEXT% and reports the resolved path, and it requires the
+		// candidate to be genuinely executable rather than merely present.
+		probe := &coreprocess.Program{Path: core.PathJoin(d, name)}
+		if probe.Find().OK {
+			return probe.Path
 		}
 	}
 	return name // let go-process resolve via PATH
