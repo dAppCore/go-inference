@@ -288,7 +288,7 @@ func TestDriver_Service_Stop_Bad(t *testing.T) {
 // already exited on its own — Kill on an already-dead process must still be
 // treated as a successful stop, not surfaced as an error.
 func TestDriver_Service_Stop_Ugly(t *testing.T) {
-	dir := t.TempDir()
+	dir := driverBinaryDir(t)
 	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
@@ -330,7 +330,7 @@ func TestDriver_Service_Status_Good(t *testing.T) {
 // its own — Status must correct both Running and Ready rather than trusting
 // the last-known snapshot.
 func TestDriver_Service_Status_Bad(t *testing.T) {
-	dir := t.TempDir()
+	dir := driverBinaryDir(t)
 	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
@@ -360,7 +360,7 @@ func TestDriver_Service_Status_Bad(t *testing.T) {
 // corrected on their own — the live entry must not be dragged down by the
 // stale one, and vice versa.
 func TestDriver_Service_Status_Ugly(t *testing.T) {
-	dir := t.TempDir()
+	dir := driverBinaryDir(t)
 	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
@@ -652,7 +652,7 @@ func TestDriver_Running_Bad(t *testing.T) {
 }
 
 func TestDriver_Running_Ugly(t *testing.T) {
-	dir := t.TempDir()
+	dir := driverBinaryDir(t)
 	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})

@@ -208,7 +208,7 @@ func TestAdmin_AdminAddr_Good(t *testing.T) {
 // TestAdmin_AdminAddr_Bad covers a tracked runtime whose process has already
 // exited — adminAddr must refuse rather than hand back a dead address.
 func TestAdmin_AdminAddr_Bad(t *testing.T) {
-	dir := t.TempDir()
+	dir := driverBinaryDir(t)
 	quick := writeQuickExit(t, dir, "quick")
 	proc := benchProcSvc(t)
 	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
