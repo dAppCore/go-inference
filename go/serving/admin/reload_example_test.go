@@ -4,6 +4,7 @@ package admin
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 )
 
 // ExampleListKnownModels demonstrates the verified-models set: only a subdir
@@ -16,9 +17,7 @@ func ExampleListKnownModels() {
 	home := baseResult.Value.(string)
 	defer core.RemoveAll(home)
 
-	prevHome := core.Env("HOME")
-	core.Setenv("HOME", home)
-	defer core.Setenv("HOME", prevHome)
+	defer testenv.SetHomeDir(home)()
 
 	dir := core.PathJoin(home, "Lethean", "lem", "models", "verified")
 	if r := core.MkdirAll(dir, 0o755); !r.OK {

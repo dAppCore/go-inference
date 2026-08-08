@@ -6,6 +6,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 	coreprocess "dappco.re/go/process"
 )
 
@@ -33,15 +34,13 @@ func ExampleService_Serve() {
 // ExampleService_LastServed shows the nothing-persisted shape: with no prior
 // serve recorded, ok is false.
 func ExampleService_LastServed() {
-	prevHome := core.Getenv("HOME")
 	tmp := core.MkdirTemp("", "driver-example-*")
 	if !tmp.OK {
 		core.Println(false)
 		return
 	}
 	defer core.RemoveAll(tmp.Value.(string))
-	defer core.Setenv("HOME", prevHome)
-	core.Setenv("HOME", tmp.Value.(string))
+	defer testenv.SetHomeDir(tmp.Value.(string))()
 
 	svc := &Service{}
 	_, ok := svc.LastServed()
@@ -73,15 +72,13 @@ func ExampleService_Status() {
 // ExampleService_Models shows the empty-catalogue shape: a resolvable HOME
 // with no models or profiles directory yet is a valid, non-error answer.
 func ExampleService_Models() {
-	prevHome := core.Getenv("HOME")
 	tmp := core.MkdirTemp("", "driver-example-*")
 	if !tmp.OK {
 		core.Println(false)
 		return
 	}
 	defer core.RemoveAll(tmp.Value.(string))
-	defer core.Setenv("HOME", prevHome)
-	core.Setenv("HOME", tmp.Value.(string))
+	defer testenv.SetHomeDir(tmp.Value.(string))()
 
 	svc := &Service{}
 	r := svc.Models()

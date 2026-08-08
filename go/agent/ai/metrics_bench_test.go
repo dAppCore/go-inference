@@ -3,6 +3,7 @@
 package ai
 
 import (
+	"dappco.re/go/inference/internal/testenv"
 	"testing"
 	"time"
 
@@ -157,7 +158,7 @@ func benchSetupMetricsHome(tb testing.TB) {
 	tempHome := tb.TempDir()
 	tb.Setenv("CORE_HOME", "")
 	tb.Setenv("DIR_HOME", "")
-	tb.Setenv("HOME", tempHome)
+	testenv.SetHome(tb, tempHome)
 }
 
 // --- AX-11 alloc-budget gates ---

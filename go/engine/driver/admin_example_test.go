@@ -4,6 +4,7 @@ package driver
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/internal/testenv"
 )
 
 func ExampleCanonicalRepoDir() {
@@ -16,7 +17,6 @@ func ExampleCanonicalRepoDir() {
 // write lands somewhere throwaway rather than a developer's real
 // ~/Lethean/lem/allowed-models.json.
 func ExampleAllowRepo() {
-	prevHome := core.Getenv("HOME")
 	tmp := core.MkdirTemp("", "driver-admin-example-*")
 	if !tmp.OK {
 		core.Println(false)
@@ -24,8 +24,7 @@ func ExampleAllowRepo() {
 	}
 	home := tmp.Value.(string)
 	defer core.RemoveAll(home)
-	defer core.Setenv("HOME", prevHome)
-	core.Setenv("HOME", home)
+	defer testenv.SetHomeDir(home)()
 
 	r := AllowRepo("mlx-community/gemma-3-1b-it-4bit")
 

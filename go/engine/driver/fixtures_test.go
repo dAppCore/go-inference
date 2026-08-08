@@ -167,11 +167,49 @@ func writeFakeDriver(t *testing.T, dir, name string) string {
 // machine). Returns the CORE_AI_DRIVER_DIR path for the caller to populate.
 func isolateDriverLookup(t *testing.T) string {
 	t.Helper()
-	driverDir := t.TempDir()
+	driverDir := driverBinaryDir(t)
 	t.Setenv("CORE_AI_DRIVER_DIR", driverDir)
 	testenv.SetHome(t, t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	return driverDir
+}
+
+// driverBinaryDir returns a directory for driver executables, removed on
+// cleanup with a brief retry.
+//
+// It is deliberately NOT t.TempDir. Windows refuses to unlink a RUNNING
+// executable, and releases the image a moment after the process exits rather
+// than at exit — so a single RemoveAll racing a just-stopped driver fails with
+// "Access is denied", which t.TempDir reports as a test failure with no way to
+// retry. That surfaced the moment the fakes became real binaries; the shell
+// scripts they replaced never executed on Windows, so nothing ever held them.
+//
+// Registered before any per-test cleanup, so it runs LAST: whatever stops the
+// driver has already run by the time this tries to remove its image.
+//
+// A directory that survives the retry is logged, not failed. The assertions
+// have passed by then, and turning an OS timing quirk into a red test is how a
+// gate starts inventing failures.
+func driverBinaryDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "driver-bin")
+	if err != nil {
+		t.Fatalf("driver binary dir: %v", err)
+	}
+	t.Cleanup(func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if err := os.RemoveAll(dir); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Logf("driver binary dir %s outlived the test: an executable image was still held", dir)
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	return dir
 }
 
 // newHealthyDriver isolates driver lookup and writes a fake sleeper binary

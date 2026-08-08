@@ -9,6 +9,7 @@
 package testenv
 
 import (
+	"os"
 	"runtime"
 	"testing"
 )
@@ -25,12 +26,48 @@ import (
 //
 // Pass "" to make the home directory unresolvable, which is how the
 // no-home-directory failure paths are exercised.
-func SetHome(t *testing.T, dir string) {
-	t.Helper()
-	t.Setenv("HOME", dir)
+// It takes a testing.TB so benchmarks get the same isolation as tests; a
+// benchmark reading the real home directory is as wrong as a test doing it.
+func SetHome(tb testing.TB, dir string) {
+	tb.Helper()
+	tb.Setenv("HOME", dir)
 	if runtime.GOOS == "windows" {
 		// USERPROFILE is what os.UserHomeDir consults; HOME is set alongside
 		// it because code reading the variable directly still expects it.
-		t.Setenv("USERPROFILE", dir)
+		tb.Setenv("USERPROFILE", dir)
 	}
+}
+
+// SetHomeDir is SetHome for callers with no testing.TB — Example functions,
+// which the testing package runs without one.
+//
+// Examples were the gap in the first sweep of this: it replaced every
+// t.Setenv("HOME", …) and left the core.Setenv form untouched, so the
+// isolation stayed broken in exactly the files that double as documentation.
+//
+// Returns a function restoring the previous values, for defer.
+func SetHomeDir(dir string) func() {
+	previousHome, hadHome := os.LookupEnv("HOME")
+	previousProfile, hadProfile := os.LookupEnv("USERPROFILE")
+	setOrUnset("HOME", dir, true)
+	if runtime.GOOS == "windows" {
+		setOrUnset("USERPROFILE", dir, true)
+	}
+	return func() {
+		setOrUnset("HOME", previousHome, hadHome)
+		if runtime.GOOS == "windows" {
+			setOrUnset("USERPROFILE", previousProfile, hadProfile)
+		}
+	}
+}
+
+// setOrUnset restores a variable to exactly its previous state, including
+// having been absent — setting it to "" instead would leave a home directory
+// that resolves to the empty string rather than one that does not resolve.
+func setOrUnset(name, value string, present bool) {
+	if !present {
+		_ = os.Unsetenv(name)
+		return
+	}
+	_ = os.Setenv(name, value)
 }
