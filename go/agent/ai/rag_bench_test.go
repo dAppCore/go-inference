@@ -1,5 +1,9 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
+// RAG disabled (2026-11-18): go-rag is retired and temporal Markov graphs replace
+// it. Kept for reference. Delete this constraint to re-enable.
+//go:build ignore
+
 package ai
 
 import (

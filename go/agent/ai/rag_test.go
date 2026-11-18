@@ -1,3 +1,7 @@
+// RAG disabled (2026-11-18): go-rag is retired and temporal Markov graphs replace
+// it. Kept for reference. Delete this constraint to re-enable.
+//go:build ignore
+
 package ai
 
 import (
@@ -8,13 +12,7 @@ import (
 	rag "dappco.re/go/rag"
 )
 
-func repeatString(value string, count int) string {
-	parts := make([]string, count)
-	for i := range parts {
-		parts[i] = value
-	}
-	return core.Join("", parts...)
-}
+// repeatString lives in helpers_test.go (shared with metrics_test.go).
 
 func TestBuildTaskQuery_Good_CombinesAndTruncates(t *testing.T) {
 	got := buildTaskQuery(TaskInfo{
