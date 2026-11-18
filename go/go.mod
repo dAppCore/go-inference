@@ -14,7 +14,6 @@ require (
 	dappco.re/go/log v0.13.1
 	dappco.re/go/mcp v0.19.1
 	dappco.re/go/process v0.16.3
-	dappco.re/go/rag v0.15.1
 	dappco.re/go/ratelimit v0.12.1
 	dappco.re/go/store v0.14.1
 	github.com/Snider/Enchantrix v0.1.0
@@ -35,6 +34,7 @@ require (
 	charm.land/glamour/v2 v2.0.0 // indirect
 	charm.land/lipgloss/v2 v2.0.5 // indirect
 	charm.land/wish/v2 v2.0.1 // indirect
+	dappco.re/go/rag v0.15.1 // indirect
 	dappco.re/go/ws v0.7.1 // indirect
 	github.com/99designs/gqlgen v0.17.88 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect
